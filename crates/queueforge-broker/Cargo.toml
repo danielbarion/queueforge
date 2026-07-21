@@ -1,0 +1,47 @@
+[package]
+name = "queueforge-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "QueueForge message broker binary"
+rust-version.workspace = true
+
+[lib]
+name = "queueforge_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "queueforge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+compact_str = { workspace = true }
+metrics = { workspace = true }
+queueforge-amqp = { workspace = true }
+queueforge-auth = { workspace = true }
+queueforge-core = { workspace = true }
+queueforge-metrics = { workspace = true }
+queueforge-mgmt = { workspace = true }
+queueforge-store = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+futures-lite = "2.6"
+lapin = "2.5"
+metrics-exporter-prometheus = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "json", "cookies"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
+tokio-executor-trait = "2.1"
+tokio-reactor-trait = "1.1"

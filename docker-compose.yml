@@ -1,0 +1,30 @@
+services:
+  queueforge:
+    build: .
+    image: queueforge:local
+    container_name: queueforge
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management HTTP / SPA (+ healthz/readyz)
+      # Metrics (15692) intentionally not published — unauthenticated scrape endpoint.
+    environment:
+      QUEUEFORGE_CONFIG: /etc/queueforge/queueforge.toml
+      # Local compose only — set real admin credentials for anything non-dev.
+      QUEUEFORGE_ADMIN_USER: admin
+      QUEUEFORGE_ADMIN_PASSWORD: devpassword12
+      RUST_LOG: info
+    volumes:
+      - queueforge-data:/var/lib/queueforge
+      - ./configs/queueforge.docker.toml:/etc/queueforge/queueforge.toml:ro
+    command: ["queueforge", "--config", "/etc/queueforge/queueforge.toml"]
+    healthcheck:
+      # Health lives on the management listener (not metrics). curl is installed in the image.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:15672/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  queueforge-data:

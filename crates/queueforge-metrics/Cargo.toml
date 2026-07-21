@@ -1,0 +1,22 @@
+[package]
+name = "queueforge-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Prometheus metrics registry and health HTTP endpoints for QueueForge"
+rust-version.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+metrics-process = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls"] }
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "net"] }

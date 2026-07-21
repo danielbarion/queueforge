@@ -1,0 +1,23 @@
+[package]
+name = "queueforge-amqp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+queueforge-amqp = { path = ".." }
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+doc = false
+test = false
+bench = false
+
+# This package is intentionally outside the workspace (cargo-fuzz convention).
+# Requires nightly + `cargo install cargo-fuzz`, then:
+#   cd crates/queueforge-amqp && cargo +nightly fuzz run frame_decode

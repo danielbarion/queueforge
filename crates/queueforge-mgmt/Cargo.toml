@@ -1,0 +1,36 @@
+[package]
+name = "queueforge-mgmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Management HTTP API and embedded SPA for QueueForge (session auth, CRUD, definitions)"
+rust-version.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+axum-server = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+cookie = { workspace = true }
+hex = { workspace = true }
+mime_guess = { workspace = true }
+queueforge-auth = { workspace = true }
+queueforge-core = { workspace = true }
+queueforge-metrics = { workspace = true }
+queueforge-store = { workspace = true }
+rand_core = { workspace = true }
+rust-embed = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }

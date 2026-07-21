@@ -1,0 +1,15 @@
+# QueueForge configuration for docker-compose / container runs.
+
+[listeners]
+amqp = "0.0.0.0:5672"
+management = "0.0.0.0:15672"
+metrics = "0.0.0.0:15692"
+
+[data]
+dir = "/var/lib/queueforge"
+wal_segment_max_bytes = 67108864
+fsync_policy = "every_n_ms"
+fsync_interval_ms = 10
+
+[logging]
+level = "info"

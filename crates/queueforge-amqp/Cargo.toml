@@ -1,0 +1,11 @@
+[package]
+name = "queueforge-amqp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AMQP 0-9-1 framing and method codec for QueueForge"
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
