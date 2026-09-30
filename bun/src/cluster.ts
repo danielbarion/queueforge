@@ -247,7 +247,7 @@ export class Cluster {
     }
     if (op === "get") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
-      const m = await this.broker.get(String(p.vhost), String(p.queue), !!p.noAck);
+      const m = await this.broker.get(String(p.vhost), String(p.queue), !!(p.noAck ?? p.no_ack));
       if (!m) return { empty: true };
       return {
         msg: { ...m, body: Buffer.from(m.body).toString("base64"), propRaw: Buffer.from(m.propRaw).toString("base64") },

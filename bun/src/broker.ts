@@ -583,7 +583,12 @@ export class Broker {
       home,
     };
     if (!this.isLocalHome(home)) {
-      await this.cluster!.call(home!, "declare_queue", row);
+      try {
+        await this.cluster!.call(home!, "declare_queue", row);
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        if (!text.includes("exists")) throw new ChanError(541, `INTERNAL_ERROR - declare ${home}: ${text}`);
+      }
     }
     const live = this.makeQueue(row, !this.isLocalHome(home));
     live.declaredArgs = { ...opts.args };
@@ -1228,16 +1233,34 @@ export class Broker {
     if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
     if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
       try {
-        const raw = (await this.cluster!.call(this.quorumLeader(), "get", { vhost, queue, noAck })) as {
+        const raw = (await this.cluster!.call(this.quorumLeader(), "get", { vhost, queue, noAck, no_ack: noAck })) as {
           empty?: boolean;
-          msg?: LiveMsg & { body: string; propRaw: string };
-        };
-        if (!raw || raw.empty || !raw.msg) return null;
-        const m = raw.msg;
+          msg?: { id?: string; body?: string; propRaw?: string; exchange?: string; routingKey?: string; persistent?: boolean; priority?: number; redelivered?: boolean };
+          message?: { message_id?: string; body_b64?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
+        } | null;
+        if (!raw || raw.empty) return null;
+        const bunMsg = raw.msg;
+        const rustMsg = raw.message;
+        const bodyB64 = bunMsg?.body ?? rustMsg?.body_b64;
+        if (!bodyB64) return null;
+        const id = String(bunMsg?.id ?? rustMsg?.message_id ?? "");
+        this.dropLocal(vhost, queue, id);
+        const leader = this.quorumLeader();
+        const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId && peer !== leader) ?? [];
+        await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost, queue, id }).catch(() => null)));
+        const propRawB64 = bunMsg?.propRaw ?? "";
         return {
-          ...m,
-          body: new Uint8Array(Buffer.from(m.body, "base64")),
-          propRaw: new Uint8Array(Buffer.from(m.propRaw, "base64")),
+          id,
+          rowId: null,
+          body: new Uint8Array(Buffer.from(bodyB64, "base64")),
+          exchange: String(bunMsg?.exchange ?? rustMsg?.exchange ?? ""),
+          routingKey: String(bunMsg?.routingKey ?? rustMsg?.routing_key ?? ""),
+          headers: [],
+          propRaw: propRawB64 ? new Uint8Array(Buffer.from(propRawB64, "base64")) : new Uint8Array(),
+          persistent: (bunMsg?.persistent ?? rustMsg?.persistent) !== false,
+          priority: Number(bunMsg?.priority ?? 0),
+          expiresAt: null,
+          redelivered: !!(bunMsg?.redelivered ?? rustMsg?.redelivered),
         };
       } catch {
         throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
@@ -1308,7 +1331,7 @@ export class Broker {
       if (row.durable) this.store.putQueue(row);
     } else if (kind === "delete_queue") {
       const vhost = String(payload.vhost);
-      const name = String(payload.name);
+      const name = String(payload.name ?? payload.queue);
       this.queues.delete(this.key(vhost, name));
       this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.queue === name));
       this.store.deleteQueue(vhost, name);

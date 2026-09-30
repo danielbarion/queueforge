@@ -530,6 +530,9 @@ impl Cluster {
     pub async fn claim_for_handoff(&self, key: &QueueKey, message_id: &str, drop_local: bool) {
         if drop_local {
             self.inner.replicas.lock().await.remove(&replica_key(key, message_id));
+            // The follower append is in the ready queue. Drop it here so this
+            // node does not deliver the body again after the leader is gone.
+            self.forget_local(key, message_id).await;
         }
         self.quorum_forget(key, message_id).await;
     }
@@ -1420,29 +1423,48 @@ async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Receiver<Queu
                     "no_ack": no_ack,
                 })).await;
                 let mapped = match result {
-                    Ok(msg) if msg.ok && msg.payload.is_null() => Ok(None),
+                    Ok(msg) if msg.ok && (msg.payload.is_null() || msg.payload.get("empty").and_then(|v| v.as_bool()) == Some(true)) => Ok(None),
                     Ok(msg) if msg.ok => {
                         let id = ConsumerDeliveryId(msg.payload["delivery_id"].as_u64().unwrap_or(0));
-                        let message = wire_to_message(serde_json::from_value(msg.payload["message"].clone()).unwrap_or(WireMessage {
-                            exchange: String::new(),
-                            routing_key: String::new(),
-                            body_b64: String::new(),
-                            persistent: false,
-                            redelivered: false,
-                            content_type: None,
-                            content_encoding: None,
-                            correlation_id: None,
-                            message_id: None,
-                            reply_to: None,
-                            expiration: None,
-                            app_id: None,
-                            user_id: None,
-                            type_: None,
-                            priority: None,
-                            timestamp: None,
-                            expires_unix_ms: None,
-                            headers: Default::default(),
-                        }));
+                        let message = if let Some(nested) = msg.payload.get("message") {
+                            wire_to_message(serde_json::from_value(nested.clone()).unwrap_or(WireMessage {
+                                exchange: String::new(),
+                                routing_key: String::new(),
+                                body_b64: String::new(),
+                                persistent: false,
+                                redelivered: false,
+                                content_type: None,
+                                content_encoding: None,
+                                correlation_id: None,
+                                message_id: None,
+                                reply_to: None,
+                                expiration: None,
+                                app_id: None,
+                                user_id: None,
+                                type_: None,
+                                priority: None,
+                                timestamp: None,
+                                expires_unix_ms: None,
+                                headers: Default::default(),
+                            }))
+                        } else if let Some(body_b64) = msg.payload.pointer("/msg/body").and_then(|v| v.as_str()) {
+                            let mut message = Message::blank();
+                            if let Ok(body) = BASE64.decode(body_b64.as_bytes()) {
+                                message.body = Bytes::from(body);
+                            }
+                            if let Some(message_id) = msg.payload.pointer("/msg/id").and_then(|v| v.as_str()) {
+                                if !message_id.is_empty() {
+                                    message.message_id = Some(CompactString::from(message_id));
+                                }
+                            }
+                            message.persistent = msg.payload.pointer("/msg/persistent").and_then(|v| v.as_bool()).unwrap_or(true);
+                            message.routing_key = CompactString::from(msg.payload.pointer("/msg/routingKey").and_then(|v| v.as_str()).unwrap_or(""));
+                            message.exchange = CompactString::from(msg.payload.pointer("/msg/exchange").and_then(|v| v.as_str()).unwrap_or(""));
+                            message
+                        } else {
+                            let _ = reply.send(None);
+                            continue;
+                        };
                         let ready = msg.payload["ready"].as_u64().unwrap_or(0) as u32;
                         Ok(Some((id, queueforge_core::QueueMessage::new(queueforge_core::QueueOffset(0), Arc::new(message)), ready)))
                     }

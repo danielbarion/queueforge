@@ -126,6 +126,18 @@ async fn get_body(port: u16, queue: &str) -> Option<Vec<u8>> {
     ch.basic_get(queue, BasicGetOptions { no_ack: true }).await.ok()?.map(|msg| msg.data.to_vec())
 }
 
+async fn get_body_strict(port: u16, queue: &str) -> Result<Option<Vec<u8>>, String> {
+    let conn = Connection::connect(
+        &format!("amqp://admin:devpassword12@127.0.0.1:{port}/%2f"),
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let ch = conn.create_channel().await.map_err(|err| err.to_string())?;
+    let got = ch.basic_get(queue, BasicGetOptions { no_ack: true }).await.map_err(|err| err.to_string())?;
+    Ok(got.map(|msg| msg.data.to_vec()))
+}
+
 fn dir_contains(dir: &std::path::Path, needle: &[u8]) -> bool {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(path) = stack.pop() {
@@ -268,4 +280,87 @@ async fn mixed_two_rust_one_bun() {
 async fn mixed_two_bun_one_rust() {
     let base = 53000 + (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u16 % 300);
     mixed("bun-majority", ["bun", "rust", "bun"], base).await;
+}
+
+/// basic.get on the next leader consumes the current leader's copy. After that
+/// leader is killed, the same node must not deliver the body a second time.
+async fn claim_once(label: &str, kinds: [&str; 3], base: u16) {
+    let ports: [(u16, u16, u16, u16); 3] = [
+        (base, base + 100, base + 200, base + 300),
+        (base + 2, base + 102, base + 202, base + 302),
+        (base + 4, base + 104, base + 204, base + 304),
+    ];
+    let cluster = format!(
+        r#"[cluster]
+node_id = "NODE"
+listen = "127.0.0.1:PORT"
+members = [
+  {{ id = "a", addr = "127.0.0.1:{}" }},
+  {{ id = "b", addr = "127.0.0.1:{}" }},
+  {{ id = "c", addr = "127.0.0.1:{}" }},
+]
+"#,
+        ports[0].3, ports[1].3, ports[2].3
+    );
+    let ids = ["a", "b", "c"];
+    let mut kids = Kids(Vec::new());
+    let mut dirs = Vec::new();
+    for (i, (amqp, mgmt, metrics, cluster_port)) in ports.iter().copied().enumerate() {
+        let dir = std::env::temp_dir().join(format!("qf-claim-{label}-{base}-{i}"));
+        let _ = fs::remove_dir_all(&dir);
+        let cfg = cluster.replace("NODE", ids[i]).replace("PORT", &cluster_port.to_string());
+        kids.0.push(spawn(kinds[i], amqp, mgmt, metrics, &dir, &cfg));
+        dirs.push(dir);
+    }
+    for (_, mgmt, _, _) in ports {
+        wait_ready(mgmt).await;
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut args = FieldTable::default();
+    args.insert("x-queue-type".into(), lapin::types::AMQPValue::LongString(LongString::from("quorum")));
+    let decl = QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() };
+    for (amqp, _, _, _) in ports {
+        let conn = Connection::connect(
+            &format!("amqp://admin:devpassword12@127.0.0.1:{amqp}/%2f"),
+            ConnectionProperties::default(),
+        )
+        .await
+        .unwrap();
+        let declared = conn.create_channel().await.unwrap().queue_declare("qq-claim", decl, args.clone()).await;
+        if let Err(err) = &declared {
+            let text = err.to_string();
+            assert!(text.contains("exists"), "{label} declare on {amqp} failed: {text}");
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    publish(ports[0].0, "qq-claim", b"body-one").await;
+    let first = get_body_strict(ports[1].0, "qq-claim").await;
+    assert_eq!(first.as_ref().map(|body| body.as_deref()), Ok(Some(b"body-one".as_slice())), "{label} non-leader get: {first:?}");
+    println!("{label} claimed body-one from the other implementation");
+    kids.0[0].kill().unwrap();
+    let _ = kids.0[0].wait();
+    publish(ports[1].0, "qq-claim", b"body-two").await;
+    let mut seen = None;
+    for _ in 0..50 {
+        if let Some(body) = get_body(ports[1].0, "qq-claim").await {
+            seen = Some(body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(seen.as_deref(), Some(b"body-two".as_slice()), "{label} delivered {seen:?} after the leader was killed");
+    println!("{label} next get after leader kill was body-two");
+    let _ = dirs;
+}
+
+#[tokio::test]
+async fn claim_once_rust_majority() {
+    let base = 55000 + (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u16 % 300);
+    claim_once("rust-majority", ["rust", "bun", "rust"], base).await;
+}
+
+#[tokio::test]
+async fn claim_once_bun_majority() {
+    let base = 57000 + (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u16 % 300);
+    claim_once("bun-majority", ["bun", "rust", "bun"], base).await;
 }
