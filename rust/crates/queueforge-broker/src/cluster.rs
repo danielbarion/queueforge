@@ -983,19 +983,8 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
         "enqueue" | "quorum_append" => {
             let (key, message) = decode_quorum_append(&msg.payload).map_err(|err| Error::Unavailable(err))?;
             let handle = inner.queues.get(&key).ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
-            let quorum = handle
-                .info
-                .args
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .queue_type
-                == Some(queueforge_core::QueueType::Quorum);
-            if quorum && !node_is_quorum_leader(inner) {
-                if let Some(id) = message.message_id.clone() {
-                    inner.replicas.lock().await.insert(replica_key(&key, id.as_str()), Arc::new(message));
-                }
-                return Ok(serde_json::json!({"offset": 0}));
-            }
+            // Leader and follower both append before the peer is acked. every_n_ms
+            // completes durable_done after that write; the fsync stays on the timer.
             let (reply_tx, reply_rx) = oneshot::channel();
             handle.tx.send(QueueCmd::Enqueue { msg: Arc::new(message), reply: reply_tx }).await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
             let completion = reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;

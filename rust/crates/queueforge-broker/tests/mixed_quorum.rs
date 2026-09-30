@@ -126,6 +126,24 @@ async fn get_body(port: u16, queue: &str) -> Option<Vec<u8>> {
     ch.basic_get(queue, BasicGetOptions { no_ack: true }).await.ok()?.map(|msg| msg.data.to_vec())
 }
 
+fn dir_contains(dir: &std::path::Path, needle: &[u8]) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&path) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if fs::read(&path).ok().is_some_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn mixed(label: &str, kinds: [&str; 3], base: u16) {
     let ports: [(u16, u16, u16, u16); 3] = [
         (base, base + 100, base + 200, base + 300),
@@ -182,6 +200,14 @@ members = [
     let after = metric(ports[0].2, "queueforge_confirm_before_fsync_total").await;
     assert!(after > early, "{label} confirm waited for the interval fsync ({early} -> {after})");
     println!("{label} confirm before fsync {early} -> {after}");
+    for (i, kind) in kinds.iter().enumerate() {
+        if *kind != "rust" || i == 0 {
+            continue;
+        }
+        let persisted = dir_contains(&dirs[i], b"body-one");
+        assert!(persisted, "{label} rust follower {i} did not append body-one to its log");
+        println!("{label} rust follower {i} appended body-one before fsync");
+    }
 
     kids.0[0].kill().unwrap();
     let _ = kids.0[0].wait();
