@@ -1716,6 +1716,10 @@ pub async fn run(
             QueueCmd::TestPanic => {
                 panic!("queue actor test panic: {}/{}", key.vhost, key.name);
             }
+            #[cfg(test)]
+            QueueCmd::TestDeferredAppends { reply } => {
+                let _ = reply.send(state.deferred_appends.len());
+            }
         }
         if state.pending_fsync {
             let _ = state.fsync_now().await;
@@ -1775,7 +1779,7 @@ pub async fn run(
             | QueueCmd::SetArgs { .. }
             | QueueCmd::DlxResolved { .. } => {}
             #[cfg(test)]
-            QueueCmd::TestPanic => {}
+            QueueCmd::TestPanic | QueueCmd::TestDeferredAppends { .. } => {}
         }
     }
 
@@ -2120,8 +2124,8 @@ mod tests {
             "the second durable enqueue was written before the blocked fsync returned"
         );
 
-        // Fill the mailbox and keep it full. A command-first select would never
-        // take the fsync join, so the deferred append would stay unwritten.
+        // Keep a command queued for the whole fsync. The join has to flush the
+        // deferred append anyway, and the following command must observe that.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flood_tx = tx.clone();
         loop {
@@ -2161,6 +2165,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let (snap_tx, snap_rx) = oneshot::channel();
+        tx.send(QueueCmd::TestDeferredAppends { reply: snap_tx })
+            .await
+            .unwrap();
+        let still_deferred = snap_rx.await.unwrap();
+        assert_eq!(
+            still_deferred, 0,
+            "following command ran while the deferred append was still unflushed"
+        );
         shutdown(tx, actor).await;
     }
 

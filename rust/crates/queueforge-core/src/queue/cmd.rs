@@ -432,6 +432,12 @@ pub enum QueueCmd {
     /// Test-only: panic the actor to exercise supervision.
     #[cfg(test)]
     TestPanic,
+    /// Test-only: how many durable appends are still waiting for the parked log.
+    #[cfg(test)]
+    TestDeferredAppends {
+        /// Count observed inside the command, before the handler returns.
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// Policy applied when an async DLX attempt fails completely.
