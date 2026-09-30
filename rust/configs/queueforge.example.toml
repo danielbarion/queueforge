@@ -53,8 +53,11 @@ soft_watermark_relative = 0.5
 level = "info"
 
 # Optional static cluster. Leave members empty for a single node.
-# Every node lists the same members, including itself. Queue actors live on
-# one home node (a stable hash of the queue name); peers forward operations.
+# Every node lists the same members, including itself, and keeps its own data
+# directory. Classic queues live on one home node (a stable hash of the vhost
+# and name); peers forward operations there. A durable quorum queue
+# (x-queue-type = quorum) confirms after a majority hold the body in memory.
+# Rust and Bun processes can share this list. Cluster protocol version is 1.
 # [cluster]
 # node_id = "a"
 # listen = "127.0.0.1:25672"

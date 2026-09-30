@@ -1,6 +1,6 @@
 # QueueForge operations
 
-Operator notes for QueueForge. One process is a complete broker. Set `[cluster]` when several processes should share topology and forward each queue to the node that owns it.
+Operator notes for QueueForge. One process is a complete broker. Set `[cluster]` when several processes share a static member list. Classic queues still have one home node. A durable quorum queue confirms after a majority hold the body in memory, and each member stores that body in its own data directory. Rust and Bun processes can share the list.
 
 ## Ports (defaults)
 

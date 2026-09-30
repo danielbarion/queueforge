@@ -8,7 +8,11 @@ Single-node message queue broker written in Rust, inspired by RabbitMQ’s conce
 
 **Single-node v0.1 feature set is implemented** in this monorepo: full AMQP 0-9-1 pub/sub (direct / fanout / topic / headers + default exchange), routing and bindings, durable queues with WAL recovery, publisher confirms, priority queues, TTL/DLX and length policies, management HTTP CRUD + embedded React SPA, rustls TLS (AMQPS/HTTPS), Prometheus metrics, and `queueforge-bench`. See [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) for the integrated milestone summary.
 
-A config with `[cluster].members` set runs as several processes. Each queue has one home node (its actor and write-ahead log). Other nodes replicate topology and credentials and forward queue operations to that home. A config with no members stays a single node. This is not quorum replication: a queue is unavailable while its home is down, and the messages stay on that node's disk.
+A config with no `[cluster].members` stays a single node. With members set, every process lists the same static membership and keeps its own data directory (redb metadata plus the write-ahead log). Classic queues have one home node, a stable hash of the vhost and name. Peers replicate topology and credentials and forward queue operations to that home, so a classic queue is available while its home is up.
+
+A durable quorum queue (`x-queue-type` = `quorum`) confirms a persistent publish after a majority of the members hold the body in memory. Each member appends that body to its own write-ahead log before it acks the peer. The client can publish to any member. Bun nodes can sit in the same member list: both sides speak cluster protocol version 1, and each stores the body in its own engine. Once a majority is reachable, the live leader is the lowest member id among the reachable members. See the [repository README](../README.md) for a member-list example.
+
+`fsync_policy = "every_n_ms"` completes a durable confirm after the buffered write. The group-commit fsync runs on `fsync_interval_ms` (100 in the example config). `always` and `every_n_messages` wait for the fsync before the confirm. A crash before the interval fsync can drop a confirm that already returned.
 
 For local development and PR workflow, see [`CONTRIBUTING.md`](CONTRIBUTING.md). For backup, restore, sessions, and production hardening, see [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Historical architecture notes live in [`DESIGN-queueforge.md`](DESIGN-queueforge.md).
 
