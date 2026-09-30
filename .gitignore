@@ -1,25 +1,5 @@
-/target
-**/*.rs.bk
 .DS_Store
-**/last-copy.txt
-last-copy.txt
-/data
-
-# cargo-fuzz / local fuzz artifacts
-**/fuzz/artifacts/
-**/fuzz/corpus/
-**/fuzz/target/
-
-# UI (keep ui/dist committed for rust-embed / CI without Node)
-ui/node_modules/
-ui/*.local
-ui/*.tsbuildinfo
-
-# Local smoke helper venv
-.venv-pika-smoke/
-
-# Optional local bench output dumps (committed summaries go under docs/bench-results/)
-docs/bench-results/*.raw
-
-__pycache__/
-*.pyc
+rust/target
+bun/node_modules
+bun/data
+*.tsbuildinfo

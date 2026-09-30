@@ -1,0 +1,21 @@
+[package]
+name = "queueforge-compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AMQP comparison client. The only per-broker input is AMQP_URL."
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "queueforge-compare"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+futures-lite = "2.6"
+lapin = "2.5"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+tokio-executor-trait = "2.1"
+tokio-reactor-trait = "1.1"

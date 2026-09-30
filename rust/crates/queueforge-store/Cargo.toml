@@ -1,0 +1,25 @@
+[package]
+name = "queueforge-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "redb-backed metadata and message store for QueueForge"
+rust-version.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+compact_str = { workspace = true }
+crc32fast = { workspace = true }
+metrics = { workspace = true }
+queueforge-core = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

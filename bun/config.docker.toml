@@ -1,0 +1,17 @@
+# Baked into the bench image. Same disk flush as rust/configs/queueforge.docker.toml.
+
+[listeners]
+amqp = "0.0.0.0:5672"
+management = "0.0.0.0:15672"
+metrics = "0.0.0.0:15692"
+
+[data]
+dir = "/var/lib/queueforge"
+fsync_policy = "every_n_ms"
+fsync_interval_ms = 10
+
+[logging]
+level = "warn"
+
+[tls]
+enabled = false

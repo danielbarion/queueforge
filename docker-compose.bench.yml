@@ -1,0 +1,45 @@
+# Three brokers, one CPU and 512 MiB each, distinct host AMQP ports.
+# RabbitMQ 35672, Rust QueueForge 35673, Bun QueueForge 35674.
+
+name: queueforge-bench
+
+services:
+  rabbit:
+    image: rabbitmq:4.3-management
+    container_name: qf-bench-rabbit
+    cpus: 1.0
+    mem_limit: 512m
+    ports:
+      - "35672:5672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: devpassword12
+    volumes:
+      - ./bench/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+
+  rust:
+    build:
+      context: ./rust
+      dockerfile: Dockerfile
+    image: queueforge-rust:bench
+    container_name: qf-bench-rust
+    cpus: 1.0
+    mem_limit: 512m
+    ports:
+      - "35673:5672"
+    environment:
+      QUEUEFORGE_CONFIG: /etc/queueforge/queueforge.toml
+      QUEUEFORGE_ADMIN_USER: admin
+      QUEUEFORGE_ADMIN_PASSWORD: devpassword12
+      RUST_LOG: warn
+
+  bun:
+    build:
+      context: ./bun
+      dockerfile: Dockerfile
+    image: queueforge-bun:bench
+    container_name: qf-bench-bun
+    cpus: 1.0
+    mem_limit: 512m
+    ports:
+      - "35674:5672"

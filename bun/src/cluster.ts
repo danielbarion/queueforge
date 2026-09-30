@@ -1,0 +1,270 @@
+import { connect, type Socket } from "node:net";
+import type { Broker, LiveMsg } from "./broker.ts";
+import { ChanError } from "./errors.ts";
+import { splitHost } from "./config.ts";
+
+type Waiter = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+
+type Peer = { id: string; write: (line: object) => void; pending: Map<number, Waiter> };
+
+export class Cluster {
+  peers = new Map<string, Peer>();
+  private seq = 1;
+  private subs = new Map<number, (msg: LiveMsg) => void>();
+  private server: ReturnType<typeof Bun.listen> | null = null;
+
+  constructor(private broker: Broker) {}
+
+  start() {
+    const listen = this.broker.cfg.clusterListen;
+    if (!listen || this.broker.cfg.members.length === 0) return;
+    const { host, port } = splitHost(listen);
+    this.server = Bun.listen({
+      hostname: host,
+      port,
+      socket: {
+        data: (socket, data) => this.onData(socket, data),
+        open: (socket) => {
+          socket.data = { buf: "" };
+        },
+        close: () => {},
+        error: () => {},
+      },
+    });
+    setInterval(() => this.dial(), 200);
+    this.dial();
+  }
+
+  private dial() {
+    const self = this.broker.cfg.nodeId;
+    for (const member of this.broker.cfg.members) {
+      if (member.id <= self) continue;
+      if (this.peers.has(member.id)) continue;
+      const { host, port } = splitHost(member.addr);
+      const sock = connect({ host, port });
+      const peerBuf = { buf: "" };
+      sock.on("data", (chunk) =>
+        this.readLines(peerBuf, chunk.toString(), (line) =>
+          this.dispatch(member.id, line, (obj) => {
+            sock.write(`${JSON.stringify(obj)}\n`);
+          }),
+        ),
+      );
+      sock.on("connect", () => {
+        const write = (line: object) => sock.write(`${JSON.stringify(line)}\n`);
+        const peer: Peer = { id: member.id, write, pending: new Map() };
+        this.peers.set(member.id, peer);
+        write({ op: "hello", nodeId: self, snapshot: this.broker.snapshot() });
+      });
+      sock.on("close", () => this.peers.delete(member.id));
+      sock.on("error", () => this.peers.delete(member.id));
+    }
+  }
+
+  private onData(socket: { data: { buf?: string }; write: (s: string) => number }, data: Buffer | string) {
+    const st = socket.data as { buf?: string };
+    if (st.buf == null) st.buf = "";
+    const text = typeof data === "string" ? data : data.toString();
+    this.readLines(st as { buf: string }, text, (line) => this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`)));
+  }
+
+  private readLines(st: { buf: string }, text: string, onLine: (line: Record<string, unknown>) => void) {
+    st.buf += text;
+    let idx: number;
+    while ((idx = st.buf.indexOf("\n")) >= 0) {
+      const line = st.buf.slice(0, idx);
+      st.buf = st.buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      try {
+        onLine(JSON.parse(line));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private dispatch(fallbackId: string, msg: Record<string, unknown>, write: (obj: object) => void) {
+    const op = String(msg.op ?? "");
+    if (op === "hello") {
+      const id = String(msg.nodeId ?? fallbackId);
+      if (id) {
+        this.peers.set(id, { id, write: (line) => write(line), pending: new Map() });
+      }
+      this.broker.applySnapshot(msg.snapshot as ReturnType<Broker["snapshot"]>);
+      write({ op: "reply", id: msg.id ?? 0, ok: true, snapshot: this.broker.snapshot() });
+      return;
+    }
+    if (op === "reply") {
+      const id = String(msg.from ?? msg.nodeId ?? "");
+      const peer = id ? this.peers.get(id) : [...this.peers.values()][0];
+      const waiter = peer?.pending.get(Number(msg.id));
+      if (waiter) {
+        peer!.pending.delete(Number(msg.id));
+        if (msg.ok === false) waiter.reject(new Error(String(msg.error ?? "cluster error")));
+        else waiter.resolve(msg.payload);
+      }
+      if (msg.snapshot) this.broker.applySnapshot(msg.snapshot as ReturnType<Broker["snapshot"]>);
+      return;
+    }
+    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare_queue" || op === "delete_queue" || op === "unsub") {
+      void this.handle(op, msg).then(
+        (payload) => write({ op: "reply", id: msg.id, ok: true, payload, from: this.broker.cfg.nodeId }),
+        (err) => write({ op: "reply", id: msg.id, ok: false, error: String(err), from: this.broker.cfg.nodeId }),
+      );
+      return;
+    }
+    if (op === "sub") {
+      const body = (msg.payload ?? msg) as Record<string, unknown>;
+      const session = Number(body.session);
+      const vhost = String(body.vhost);
+      const queue = String(body.queue);
+      const q = this.broker.queues.get(this.broker.key(vhost, queue));
+      if (!q) {
+        write({ op: "reply", id: msg.id, ok: false, error: "NOT_FOUND", from: this.broker.cfg.nodeId });
+        return;
+      }
+      q.consumers.push({
+        tag: `remote-${session}`,
+        session,
+        noAck: !!body.noAck,
+        exclusive: !!body.exclusive,
+        want: () => true,
+        deliver: (m) => {
+          write({
+            op: "deliver",
+            session,
+            msg: {
+              ...m,
+              body: Buffer.from(m.body).toString("base64"),
+              propRaw: Buffer.from(m.propRaw).toString("base64"),
+            },
+          });
+        },
+      });
+      write({ op: "reply", id: msg.id, ok: true, from: this.broker.cfg.nodeId });
+      this.broker.pump(q);
+      return;
+    }
+    if (op === "deliver") {
+      const session = Number(msg.session);
+      const fn = this.subs.get(session);
+      const raw = msg.msg as LiveMsg & { body: string; propRaw: string };
+      if (fn && raw) {
+        fn({
+          ...raw,
+          body: new Uint8Array(Buffer.from(raw.body, "base64")),
+          propRaw: new Uint8Array(Buffer.from(raw.propRaw, "base64")),
+        });
+      }
+    }
+  }
+
+  private async handle(op: string, msg: Record<string, unknown>): Promise<unknown> {
+    if (op === "apply") {
+      this.broker.applyRemote(String(msg.kind), (msg.payload ?? {}) as Record<string, unknown>);
+      return true;
+    }
+    if (op === "unsub") {
+      const body = (msg.payload ?? msg) as Record<string, unknown>;
+      const q = this.broker.queues.get(this.broker.key(String(body.vhost), String(body.queue)));
+      if (q) q.consumers = q.consumers.filter((c) => c.session !== Number(body.session));
+      return true;
+    }
+    if (op === "declare_queue" || op === "delete_queue") {
+      this.broker.applyRemote(op === "declare_queue" ? "queue" : "delete_queue", (msg.payload ?? msg) as Record<string, unknown>);
+      return true;
+    }
+    if (op === "quorum_drop") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      this.broker.dropLocal(String(p.vhost), String(p.queue), String(p.id ?? p.qid ?? ""));
+      return true;
+    }
+    if (op === "quorum_append" || op === "enqueue") {
+      const p = msg.payload as Record<string, unknown> ?? msg;
+      const q = this.broker.queues.get(this.broker.key(String(p.vhost), String(p.queue)));
+      if (!q) throw new Error("NOT_FOUND");
+      const ok = this.broker.enqueueLocal(q, {
+        body: new Uint8Array(Buffer.from(String(p.body), "base64")),
+        exchange: String(p.exchange ?? ""),
+        routingKey: String(p.routingKey ?? ""),
+        headers: (p.headers as LiveMsg["headers"]) ?? [],
+        propRaw: new Uint8Array(Buffer.from(String(p.propRaw ?? ""), "base64")),
+        persistent: !!p.persistent,
+        priority: Number(p.priority ?? 0),
+        expiration: String(p.expiration ?? ""),
+        id: p.qid ? String(p.qid) : undefined,
+      }, 0);
+      return ok;
+    }
+    if (op === "ack") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      await this.broker.ack(String(p.vhost), String(p.queue), String(p.id));
+      return true;
+    }
+    if (op === "nack") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      await this.broker.nack(String(p.vhost), String(p.queue), String(p.id), !!p.requeue);
+      return true;
+    }
+    if (op === "purge") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      return this.broker.purge(String(p.vhost), String(p.queue));
+    }
+    if (op === "get") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const m = await this.broker.get(String(p.vhost), String(p.queue), !!p.noAck);
+      if (!m) return { empty: true };
+      return {
+        msg: { ...m, body: Buffer.from(m.body).toString("base64"), propRaw: Buffer.from(m.propRaw).toString("base64") },
+      };
+    }
+    return true;
+  }
+
+  peerIds(): string[] {
+    return [...this.peers.keys()];
+  }
+
+  async call(home: string, op: string, payload: unknown): Promise<unknown> {
+    const peer = this.peers.get(home);
+    if (!peer) throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
+    const id = this.seq++;
+    const result = new Promise((resolve, reject) => {
+      peer.pending.set(id, { resolve, reject });
+      setTimeout(() => {
+        if (peer.pending.has(id)) {
+          peer.pending.delete(id);
+          if (this.peers.get(home) === peer) this.peers.delete(home);
+          reject(new ChanError(541, "INTERNAL_ERROR - queue home is unavailable"));
+        }
+      }, 3000);
+    });
+    peer.write({ op, id, payload, from: this.broker.cfg.nodeId });
+    return result;
+  }
+
+  async replicate(kind: string, payload: unknown) {
+    await Promise.all(
+      [...this.peers.values()].filter((p) => p.id !== this.broker.cfg.nodeId).map((peer) => {
+        const id = this.seq++;
+        return new Promise((resolve) => {
+          peer.pending.set(id, { resolve, reject: () => resolve(null) });
+          setTimeout(() => resolve(null), 3000);
+          peer.write({ op: "apply", id, kind, payload, from: this.broker.cfg.nodeId });
+        });
+      }),
+    );
+  }
+
+  async subscribe(home: string, payload: { vhost: string; queue: string; session: number; noAck: boolean; exclusive: boolean }, onDeliver: (msg: LiveMsg) => void) {
+    this.subs.set(payload.session, onDeliver);
+    await this.call(home, "sub", payload);
+    return payload.session;
+  }
+
+  stop() {
+    this.server?.stop(true);
+  }
+}
+
+void (null as unknown as Socket);

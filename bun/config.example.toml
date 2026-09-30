@@ -1,0 +1,30 @@
+# QueueForge Bun broker. Same keys as the Rust example config.
+# Run from this directory:
+#   bun run start -- --config config.example.toml --dev-bootstrap
+
+[listeners]
+amqp = "0.0.0.0:5672"
+management = "0.0.0.0:15672"
+metrics = "127.0.0.1:15692"
+
+[data]
+dir = "./data"
+fsync_policy = "every_n_ms"
+fsync_interval_ms = 100
+
+[limits]
+# basic.qos prefetch_count 0 is unlimited.
+
+[logging]
+level = "info"
+
+# [cluster]
+# node_id = "a"
+# listen = "127.0.0.1:25672"
+# members = [
+#   { id = "a", addr = "127.0.0.1:25672" },
+#   { id = "b", addr = "127.0.0.1:25673" },
+# ]
+
+[tls]
+enabled = false
