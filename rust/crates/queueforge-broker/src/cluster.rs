@@ -73,6 +73,16 @@ struct Msg {
     error: String,
     #[serde(default)]
     payload: Value,
+    /// Protocol version. `1` is the shared Rust/Bun quorum body.
+    #[serde(default)]
+    v: u32,
+    #[serde(default, rename = "nodeId")]
+    node_id: String,
+    #[serde(default)]
+    from: String,
+    /// Top-level apply kind. Bun sends this beside `payload`; Rust nests it.
+    #[serde(default)]
+    kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -439,6 +449,10 @@ impl Cluster {
             ok: false,
             error: String::new(),
             payload,
+            v: 1,
+            node_id: self.inner.node_id.clone(),
+            from: self.inner.node_id.clone(),
+            kind: String::new(),
         })
         .map_err(|err| Error::Unavailable(err.to_string()))?;
         if peer.tx.send(line).await.is_err() {
@@ -473,16 +487,11 @@ impl Cluster {
         }
         let message = Arc::new(owned);
         let message_id = message.message_id.clone().unwrap_or_default();
-        let wire = serde_json::json!({
-            "vhost": key.vhost.as_str(),
-            "queue": key.name.as_str(),
-            "message": message_to_wire(&message),
-        });
         // Peers store the body before this node can deliver it. A delivery claims
         // those copies, and that claim must not race ahead of the replicate.
         let mut stored_on = Vec::new();
         for peer in &peers {
-            if self.call(peer, "enqueue", wire.clone()).await.is_ok() {
+            if self.call(peer, "quorum_append", encode_quorum_append(key, &message)).await.is_ok() {
                 stored_on.push(peer.clone());
             }
         }
@@ -643,7 +652,11 @@ async fn attach_peer(
                 op: "hello".into(),
                 ok: false,
                 error: String::new(),
-                payload: serde_json::json!({"node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                v: 1,
+                node_id: inner.node_id.clone(),
+                from: inner.node_id.clone(),
+                kind: String::new(),
             })
             .unwrap_or_default(),
         )
@@ -664,7 +677,14 @@ async fn attach_peer(
             continue;
         }
         if msg.op == "hello" {
-            if let Some(node) = msg.payload.get("node").and_then(|v| v.as_str()) {
+            let node_name = msg
+                .payload
+                .get("node")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .or_else(|| if msg.node_id.is_empty() { None } else { Some(msg.node_id.clone()) });
+            if let Some(node) = node_name.as_deref() {
                 inner.peers.lock().await.insert(node.to_string(), Arc::clone(&peer));
                 refresh_leader(&inner).await;
                 if let Some(snap) = msg.payload.get("snapshot") {
@@ -676,7 +696,11 @@ async fn attach_peer(
                         op: "reply".into(),
                         ok: true,
                         error: String::new(),
-                        payload: serde_json::json!({"node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                        v: 1,
+                        node_id: inner.node_id.clone(),
+                        from: inner.node_id.clone(),
+                kind: String::new(),
                     })
                     .unwrap_or_default(),
                 )
@@ -871,12 +895,20 @@ async fn dispatch(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String>) 
             ok: true,
             error: String::new(),
             payload,
+            v: 1,
+            node_id: inner.node_id.clone(),
+            from: inner.node_id.clone(),
+                kind: String::new(),
         },
         Err(err) => Msg {
             id: msg.id,
             op: "reply".into(),
             ok: false,
             error: err.to_string(),
+            v: 1,
+            node_id: inner.node_id.clone(),
+            from: inner.node_id.clone(),
+                kind: String::new(),
             payload: Value::Null,
         },
     }
@@ -885,14 +917,16 @@ async fn dispatch(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String>) 
 async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String>) -> Result<Value, Error> {
     match msg.op.as_str() {
         "apply" => {
-            let kind = msg.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            let body = msg.payload.get("body").cloned().unwrap_or(Value::Null);
+            let nested = msg.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = if msg.kind.is_empty() { nested } else { msg.kind.as_str() };
+            let body = msg.payload.get("body").cloned().filter(|value| !value.is_null()).unwrap_or_else(|| msg.payload.clone());
             apply_one(&Arc::clone(inner), kind, &body).await;
             Ok(Value::Null)
         }
-        "declare" => {
+        "declare" | "declare_queue" => {
             let vhost = json_str(&msg.payload, "vhost");
-            let name = json_str(&msg.payload, "queue");
+            let queued = json_str(&msg.payload, "queue");
+            let name = if queued.is_empty() { json_str(&msg.payload, "name") } else { queued };
             let mut opts = QueueDeclareOpts {
                 durable: msg.payload.get("durable").and_then(|v| v.as_bool()).unwrap_or(false),
                 exclusive: msg.payload.get("exclusive").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -906,6 +940,15 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
             };
             if let Some(home) = msg.payload.get("home").and_then(|v| v.as_str()) {
                 opts.home = Some(CompactString::from(home));
+            }
+            if msg
+                .payload
+                .get("args")
+                .and_then(|args| args.get("x-queue-type"))
+                .and_then(|kind| kind.as_str())
+                == Some("quorum")
+            {
+                opts.args.queue_type = Some(queueforge_core::QueueType::Quorum);
             }
             let result = inner.queues.declare(&vhost, &name, opts).await?;
             let mut queue = result.handle.info.to_domain();
@@ -923,9 +966,12 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
             }
             Ok(serde_json::json!({"queue": queue}))
         }
-        "forget" => {
+        "forget" | "quorum_drop" => {
             let key = QueueKey::new(json_str(&msg.payload, "vhost"), json_str(&msg.payload, "queue"));
-            let message_id = CompactString::from(json_str(&msg.payload, "message_id"));
+            let message_id = {
+                let id = json_str(&msg.payload, "message_id");
+                CompactString::from(if id.is_empty() { json_str(&msg.payload, "id") } else { id })
+            };
             inner.replicas.lock().await.remove(&replica_key(&key, message_id.as_str()));
             let handle = inner.queues.get(&key).ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
             handle.tx.send(QueueCmd::Forget { message_id }).await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
@@ -934,10 +980,9 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
             let _ = rx.await;
             Ok(Value::Null)
         }
-        "enqueue" => {
-            let key = QueueKey::new(json_str(&msg.payload, "vhost"), json_str(&msg.payload, "queue"));
+        "enqueue" | "quorum_append" => {
+            let (key, message) = decode_quorum_append(&msg.payload).map_err(|err| Error::Unavailable(err))?;
             let handle = inner.queues.get(&key).ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
-            let message = wire_to_message(serde_json::from_value(msg.payload["message"].clone()).map_err(|e| Error::Unavailable(e.to_string()))?);
             let quorum = handle
                 .info
                 .args
@@ -1045,6 +1090,10 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
                         op: "deliver".into(),
                         ok: true,
                         error: String::new(),
+                        v: 1,
+                        node_id: cluster.inner.node_id.clone(),
+                        from: cluster.inner.node_id.clone(),
+                        kind: String::new(),
                         payload: serde_json::json!({
                             "session": delivery.session.0,
                             "delivery_id": delivery.delivery_id.0,
@@ -1533,6 +1582,10 @@ async fn open_subscription(cluster: &Cluster, open: SubOpen) -> Result<(), Error
         op: "sub".into(),
         ok: false,
         error: String::new(),
+        v: 1,
+        node_id: cluster.inner.node_id.clone(),
+        from: cluster.inner.node_id.clone(),
+                        kind: String::new(),
         payload: serde_json::json!({
             "vhost": queue.vhost.as_str(),
             "queue": queue.name.as_str(),
@@ -1627,6 +1680,71 @@ fn json_str(payload: &Value, field: &str) -> String {
     payload.get(field).and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
+/// Version 1 quorum body. Both apps encode this and accept it without reading the sender's files.
+pub fn encode_quorum_append(key: &QueueKey, message: &Message) -> Value {
+    serde_json::json!({
+        "v": 1,
+        "vhost": key.vhost.as_str(),
+        "queue": key.name.as_str(),
+        "message_id": message.message_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        "body_b64": BASE64.encode(&message.body),
+        "persistent": message.persistent,
+        "routing_key": message.routing_key.as_str(),
+        "exchange": message.exchange.as_str(),
+    })
+}
+
+/// Decode a version-1 quorum append, or the older nested `message` / raw-body shapes.
+pub fn decode_quorum_append(payload: &Value) -> Result<(QueueKey, Message), String> {
+    let vhost = json_str(payload, "vhost");
+    let queue = json_str(payload, "queue");
+    if payload.get("body_b64").is_some() || payload.get("v").and_then(|v| v.as_u64()) == Some(1) {
+        let body = BASE64
+            .decode(json_str(payload, "body_b64").as_bytes())
+            .map_err(|err| err.to_string())?;
+        let mut message = Message::blank();
+        message.body = Bytes::from(body);
+        message.persistent = payload.get("persistent").and_then(|v| v.as_bool()).unwrap_or(true);
+        message.routing_key = CompactString::from(json_str(payload, "routing_key"));
+        message.exchange = CompactString::from(json_str(payload, "exchange"));
+        let id = json_str(payload, "message_id");
+        if !id.is_empty() {
+            message.message_id = Some(CompactString::from(id));
+        }
+        return Ok((QueueKey::new(vhost, queue), message));
+    }
+    if let Some(nested) = payload.get("message") {
+        let wire: WireMessage = serde_json::from_value(nested.clone()).map_err(|err| err.to_string())?;
+        return Ok((QueueKey::new(vhost, queue), wire_to_message(wire)));
+    }
+    if payload.get("body").is_some() {
+        let body = BASE64.decode(json_str(payload, "body").as_bytes()).map_err(|err| err.to_string())?;
+        let mut message = Message::blank();
+        message.body = Bytes::from(body);
+        message.persistent = payload.get("persistent").and_then(|v| v.as_bool()).unwrap_or(true);
+        let key_name = {
+            let routing = json_str(payload, "routing_key");
+            if routing.is_empty() { json_str(payload, "routingKey") } else { routing }
+        };
+        message.routing_key = CompactString::from(key_name);
+        message.exchange = CompactString::from(json_str(payload, "exchange"));
+        let id = {
+            let message_id = json_str(payload, "message_id");
+            if !message_id.is_empty() {
+                message_id
+            } else {
+                let qid = json_str(payload, "qid");
+                if qid.is_empty() { json_str(payload, "id") } else { qid }
+            }
+        };
+        if !id.is_empty() {
+            message.message_id = Some(CompactString::from(id));
+        }
+        return Ok((QueueKey::new(vhost, queue), message));
+    }
+    Err("quorum append has no body".into())
+}
+
 fn message_to_wire(message: &Message) -> WireMessage {
     WireMessage {
         exchange: message.exchange.to_string(),
@@ -1699,5 +1817,30 @@ mod tests {
             seen.insert(queue_home(&members, "/", &format!("q{i}")));
         }
         assert!(seen.len() > 1, "both nodes should home some queues");
+    }
+
+    #[test]
+    fn quorum_append_v1_round_trip_keeps_the_body() {
+        let mut message = Message::blank();
+        message.body = Bytes::from_static(b"mixed-body");
+        message.persistent = true;
+        message.message_id = Some(CompactString::from("m1"));
+        message.routing_key = CompactString::from("orders");
+        let encoded = encode_quorum_append(&QueueKey::new("/", "orders"), &message);
+        assert_eq!(encoded["v"], 1);
+        let (key, decoded) = decode_quorum_append(&encoded).expect("decode v1");
+        assert_eq!(key.name.as_str(), "orders");
+        assert_eq!(decoded.body.as_ref(), b"mixed-body");
+        assert_eq!(decoded.message_id.as_deref(), Some("m1"));
+        let bun_shape = serde_json::json!({
+            "vhost": "/",
+            "queue": "orders",
+            "qid": "m1",
+            "body": BASE64.encode(b"mixed-body"),
+            "persistent": true,
+            "routingKey": "orders"
+        });
+        let (_, from_bun) = decode_quorum_append(&bun_shape).expect("decode bun shape");
+        assert_eq!(from_bun.body.as_ref(), b"mixed-body");
     }
 }

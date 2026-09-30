@@ -1,5 +1,6 @@
 import { connect, type Socket } from "node:net";
 import type { Broker, LiveMsg } from "./broker.ts";
+import { decodeQuorumAppend } from "./wire.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";
 
@@ -58,7 +59,7 @@ export class Cluster {
         const write = (line: object) => sock.write(`${JSON.stringify(line)}\n`);
         const peer: Peer = { id: member.id, write, pending: new Map() };
         this.peers.set(member.id, peer);
-        write({ op: "hello", nodeId: self, snapshot: this.broker.snapshot() });
+        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot() } });
       });
       sock.on("close", () => {
         this.peers.delete(member.id);
@@ -103,14 +104,28 @@ export class Cluster {
   ) {
     const op = String(msg.op ?? "");
     if (op === "hello") {
-      const id = String(msg.nodeId ?? fallbackId);
+      const payload = (msg.payload ?? {}) as Record<string, unknown>;
+      const id = String(msg.nodeId ?? payload.node ?? fallbackId);
       if (id) {
         this.peers.set(id, { id, write: (line) => write(line), pending: new Map() });
         if (socket?.data) socket.data.peerId = id;
         this.broker.promoteIfLeader();
       }
-      this.broker.applySnapshot(msg.snapshot as ReturnType<Broker["snapshot"]>);
-      write({ op: "reply", id: msg.id ?? 0, ok: true, snapshot: this.broker.snapshot() });
+      const snap = (payload.snapshot ?? msg.snapshot) as ReturnType<Broker["snapshot"]> | undefined;
+      try {
+        this.broker.applySnapshot(snap);
+      } catch {
+        /* a peer of the other implementation keeps its own files */
+      }
+      write({
+        v: 1,
+        op: "reply",
+        id: msg.id ?? 0,
+        ok: true,
+        from: this.broker.cfg.nodeId,
+        nodeId: this.broker.cfg.nodeId,
+        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot() },
+      });
       return;
     }
     if (op === "reply") {
@@ -199,19 +214,20 @@ export class Cluster {
       return true;
     }
     if (op === "quorum_append" || op === "enqueue") {
-      const p = msg.payload as Record<string, unknown> ?? msg;
-      const q = this.broker.queues.get(this.broker.key(String(p.vhost), String(p.queue)));
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const decoded = decodeQuorumAppend(p);
+      const q = this.broker.queues.get(this.broker.key(decoded.vhost, decoded.queue));
       if (!q) throw new Error("NOT_FOUND");
       const ok = this.broker.enqueueLocal(q, {
-        body: new Uint8Array(Buffer.from(String(p.body), "base64")),
-        exchange: String(p.exchange ?? ""),
-        routingKey: String(p.routingKey ?? ""),
-        headers: (p.headers as LiveMsg["headers"]) ?? [],
-        propRaw: new Uint8Array(Buffer.from(String(p.propRaw ?? ""), "base64")),
-        persistent: !!p.persistent,
-        priority: Number(p.priority ?? 0),
-        expiration: String(p.expiration ?? ""),
-        id: p.qid ? String(p.qid) : undefined,
+        body: decoded.body,
+        exchange: decoded.exchange,
+        routingKey: decoded.routingKey,
+        headers: decoded.headers,
+        propRaw: decoded.propRaw,
+        persistent: decoded.persistent,
+        priority: decoded.priority,
+        expiration: decoded.expiration,
+        id: decoded.messageId,
       }, 0);
       return ok;
     }

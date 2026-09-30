@@ -3,6 +3,7 @@ import { fieldEq, fieldStr, replaceHeaderTable, writeTable, W, type Field } from
 import type { Config } from "./config.ts";
 import { ChanError } from "./errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "./store.ts";
+import { encodeQuorumAppend } from "./wire.ts";
 
 /** RabbitMQ `password_hash`: base64(salt[4] || SHA-256 or SHA-512 of salt || password). */
 function rabbitPasswordHashMatches(password: string, encoded: string): boolean {
@@ -817,19 +818,15 @@ export class Broker {
     const peers = this.cluster ? this.cluster.peerIds().filter((id) => id !== this.cfg.nodeId) : [];
     if (peers.length + 1 < majority) return false;
     const qid = `q-${this.cfg.nodeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const payload = {
+    const payload = encodeQuorumAppend({
       vhost: q.vhost,
       queue: q.name,
-      qid,
-      body: Buffer.from(src.body).toString("base64"),
+      messageId: qid,
+      body: src.body,
       exchange: src.exchange,
       routingKey: src.routingKey,
-      headers: src.headers,
-      propRaw: Buffer.from(src.propRaw).toString("base64"),
       persistent: src.persistent,
-      priority: src.priority,
-      expiration: src.expiration,
-    };
+    });
     const acked: string[] = [];
     if (this.cluster) {
       for (const id of peers) {
