@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import amqp from "amqplib";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,8 +46,9 @@ function cookiePair(setCookie: string | null): string {
 }
 
 test("admin pages, exchange bind flow, and port-scoped sessions", async () => {
+  const portA = 46781;
   const portM = 56781;
-  const child = await boot(46781, portM);
+  const child = await boot(portA, portM);
   const base = `http://127.0.0.1:${portM}`;
   try {
     async function login(host: string) {
@@ -120,7 +122,43 @@ test("admin pages, exchange bind flow, and port-scoped sessions", async () => {
     expect(exAfter.items.some((e) => e.name === "dash.ex")).toBe(true);
     expect(bindAfter.items.some((b) => b.source === "dash.ex" && b.destination === "dash.q" && b.routing_key === "rk")).toBe(true);
 
-    expect((await fetch(`${base}/api/connections`, { headers: { host, cookie } })).status).toBe(200);
+    const idle = (await (await fetch(`${base}/api/connections`, { headers: { host, cookie } })).json()) as {
+      items: { name: string }[];
+      total_count: number;
+    };
+    expect(idle.items).toEqual([]);
+    expect(idle.total_count).toBe(0);
+    const amqpConn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${portA}/%2f`);
+    const channel = await amqpConn.createChannel();
+    await channel.assertQueue("dash.q", { durable: true });
+    let live: { items: { name: string; user: string; vhost: string; channels: number; peer_port: number }[]; total_count: number } = {
+      items: [],
+      total_count: 0,
+    };
+    for (let i = 0; i < 20; i++) {
+      live = (await (await fetch(`${base}/api/connections`, { headers: { host, cookie } })).json()) as typeof live;
+      if (live.items.length === 1) break;
+      await Bun.sleep(50);
+    }
+    expect(live.total_count).toBe(1);
+    expect(live.items).toHaveLength(1);
+    expect(live.items[0]?.user).toBe("admin");
+    expect(live.items[0]?.vhost).toBe("/");
+    expect(live.items[0]?.channels).toBeGreaterThan(0);
+    expect(live.items[0]?.peer_port).toBeGreaterThan(0);
+    const overviewLive = (await (await fetch(`${base}/api/overview`, { headers: { host, cookie } })).json()) as {
+      object_totals: { connections: number };
+    };
+    expect(overviewLive.object_totals.connections).toBe(live.total_count);
+    await amqpConn.close();
+    let gone = live;
+    for (let i = 0; i < 20; i++) {
+      gone = (await (await fetch(`${base}/api/connections`, { headers: { host, cookie } })).json()) as typeof live;
+      if (gone.items.length === 0) break;
+      await Bun.sleep(50);
+    }
+    expect(gone.items).toEqual([]);
+    expect(gone.total_count).toBe(0);
     const users = await (await fetch(`${base}/api/users`, { headers: { host, cookie } })).json();
     expect(Array.isArray(users)).toBe(true);
     expect((await fetch(`${base}/api/definitions`, { headers: { host, cookie } })).status).toBe(200);

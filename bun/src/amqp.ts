@@ -109,10 +109,17 @@ class Conn {
   connClosed = false;
   metricsOpened = false;
   private metricsClosed = false;
+  private mgmtName = "";
   private outbound: Uint8Array[] = [];
 
   constructor(
-    private socket: { write: (b: Uint8Array) => number; end: () => void; flush?: () => void },
+    private socket: {
+      write: (b: Uint8Array) => number;
+      end: () => void;
+      flush?: () => void;
+      remoteAddress?: string;
+      remotePort?: number;
+    },
     private broker: Broker,
   ) {}
 
@@ -289,6 +296,15 @@ class Conn {
         this.metricsOpened = true;
         this.broker.prom.connections++;
         this.broker.prom.connectionsOpened++;
+        this.mgmtName = this.broker.openMgmtConnection({
+          user: this.user,
+          vhost,
+          peerHost: this.socket.remoteAddress ?? "",
+          peerPort: this.socket.remotePort ?? 0,
+          close: () => {
+            void this.connClose(320, "CONNECTION_FORCED - closed by management");
+          },
+        });
       }
       await this.send(methodFrame(0, method(10, 41, (w) => w.shortstr(""))));
       return;
@@ -305,6 +321,7 @@ class Conn {
       if (fresh) {
         this.broker.prom.channels++;
         this.broker.prom.channelsOpened++;
+        this.broker.setMgmtChannels(this.mgmtName, this.channels.size);
       }
       await this.send(methodFrame(channel, method(20, 11, (w) => w.u32(0))));
       return;
@@ -317,6 +334,7 @@ class Conn {
       if (open) {
         this.broker.prom.channels = Math.max(0, this.broker.prom.channels - 1);
         this.broker.prom.channelsClosed++;
+        this.broker.setMgmtChannels(this.mgmtName, this.channels.size);
       }
       return;
     }
@@ -804,6 +822,10 @@ class Conn {
   noteMetricsClosed() {
     if (this.metricsClosed || !this.metricsOpened) return;
     this.metricsClosed = true;
+    if (this.mgmtName) {
+      this.broker.forgetMgmtConnection(this.mgmtName);
+      this.mgmtName = "";
+    }
     this.broker.prom.connections = Math.max(0, this.broker.prom.connections - 1);
     this.broker.prom.connectionsClosed++;
     this.broker.prom.channels = Math.max(0, this.broker.prom.channels - this.channels.size);

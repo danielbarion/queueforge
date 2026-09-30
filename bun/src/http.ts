@@ -289,7 +289,20 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return { items: [], total_count: broker.prom.connections };
+      const items = broker.listMgmtConnections();
+      return { items, total_count: items.length };
+    })
+    .delete("/api/connections/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      if (!broker.closeMgmtConnection(params.name)) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      set.status = 204;
+      return "";
     })
     .post("/api/exchanges/:vhost/:name/publish", async ({ params, body, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {

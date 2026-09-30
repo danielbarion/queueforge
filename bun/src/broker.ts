@@ -327,6 +327,17 @@ function emptyProm(): Prom {
   };
 }
 
+export type MgmtConnection = {
+  name: string;
+  user: string;
+  vhost: string;
+  peer_host: string;
+  peer_port: number;
+  channels: number;
+  connected_at: number;
+  close: () => void;
+};
+
 export class Broker {
   ready = false;
   prom = emptyProm();
@@ -347,6 +358,8 @@ export class Broker {
   private perms: Array<{ user: string; vhost: string; configure: string; write: string; read: string }> = [];
   private vhosts = new Set<string>();
   private sessionsNext = 1;
+  private connSeq = 0;
+  private mgmtConnections = new Map<string, MgmtConnection>();
 
   constructor(
     public cfg: Config,
@@ -355,6 +368,50 @@ export class Broker {
 
   key(vhost: string, name: string) {
     return `${vhost}\0${name}`;
+  }
+
+  /** Register a connection that finished connection.open. Returns its management id. */
+  openMgmtConnection(input: {
+    user: string;
+    vhost: string;
+    peerHost: string;
+    peerPort: number;
+    close: () => void;
+  }): string {
+    const name = `conn-${++this.connSeq}`;
+    this.mgmtConnections.set(name, {
+      name,
+      user: input.user,
+      vhost: input.vhost,
+      peer_host: input.peerHost,
+      peer_port: input.peerPort,
+      channels: 0,
+      connected_at: Math.floor(Date.now() / 1000),
+      close: input.close,
+    });
+    return name;
+  }
+
+  setMgmtChannels(name: string, channels: number) {
+    const row = this.mgmtConnections.get(name);
+    if (row) row.channels = channels;
+  }
+
+  forgetMgmtConnection(name: string) {
+    this.mgmtConnections.delete(name);
+  }
+
+  listMgmtConnections() {
+    return [...this.mgmtConnections.values()]
+      .map(({ close: _close, ...row }) => row)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  closeMgmtConnection(name: string): boolean {
+    const row = this.mgmtConnections.get(name);
+    if (!row) return false;
+    row.close();
+    return true;
   }
 
   matchPolicy(vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
