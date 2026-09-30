@@ -17,6 +17,24 @@ test("every_n_ms durable wait lasts one group-commit interval", async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("every_n_ms batches durable writes before the interval fsync", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-store-batch-"));
+  const store = new Store(join(dir, "queueforge.db"), "every_n_ms", 80);
+  const started = performance.now();
+  for (let i = 0; i < 20; i++) {
+    store.insertMessage("/", "q", new Uint8Array([i]), "{}");
+  }
+  expect(performance.now() - started).toBeLessThan(40);
+  expect(store.fullFlushCount).toBe(0);
+  expect(store.listMessages()).toHaveLength(0);
+  await store.whenDurable();
+  expect(performance.now() - started).toBeGreaterThan(50);
+  expect(store.fullFlushCount).toBe(1);
+  expect(store.listMessages()).toHaveLength(20);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("always durable wait does not wait for the interval", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-"));
   const store = new Store(join(dir, "t.sqlite"), "always", 200);

@@ -31,12 +31,13 @@ struct Scenario {
 }
 
 const RATES_FAST: [f64; 2] = [200.0, 1000.0];
+const RATES_DURABLE: [f64; 6] = [200.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 const RATES_BIG: [f64; 2] = [100.0, 400.0];
 const RATES_TRANSIENT: [f64; 2] = [500.0, 2000.0];
-const RATES_FAN: [f64; 2] = [200.0, 800.0];
+const RATES_FAN: [f64; 6] = [200.0, 800.0, 1600.0, 3200.0, 6400.0, 12800.0];
 
 const SCENARIOS: &[Scenario] = &[
-    Scenario { name: "durable-256", body: 256, persistent: true, prefetch: 32, producers: 1, consumers: 1, rates: &RATES_FAST, step_secs: 2.0 },
+    Scenario { name: "durable-256", body: 256, persistent: true, prefetch: 32, producers: 1, consumers: 1, rates: &RATES_DURABLE, step_secs: 2.0 },
     Scenario { name: "size-64", body: 64, persistent: true, prefetch: 32, producers: 1, consumers: 1, rates: &RATES_FAST, step_secs: 2.0 },
     Scenario { name: "size-4096", body: 4096, persistent: true, prefetch: 32, producers: 1, consumers: 1, rates: &RATES_BIG, step_secs: 2.0 },
     Scenario { name: "transient-256", body: 256, persistent: false, prefetch: 32, producers: 1, consumers: 1, rates: &RATES_TRANSIENT, step_secs: 1.5 },

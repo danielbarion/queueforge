@@ -47,6 +47,10 @@ export class Store {
   private dirty = false;
   private waiters: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  private nextId = 1;
+  private pending: Array<{ id: number; vhost: string; queue: string; body: Uint8Array; meta: string }> = [];
+  /** How many times the interval path raised synchronous=FULL. */
+  fullFlushCount = 0;
   constructor(path: string, mode: FsyncMode | boolean = "every_n_ms", intervalMs = 100) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path, { create: true });
@@ -81,6 +85,8 @@ export class Store {
         vhost TEXT, queue TEXT, body BLOB, meta TEXT
       );
     `);
+    const max = this.db.query("SELECT COALESCE(MAX(id), 0) AS m FROM messages").get() as { m: number };
+    this.nextId = Number(max.m) + 1;
   }
 
   putPolicy(p: unknown) {
@@ -230,6 +236,13 @@ export class Store {
       }));
   }
   insertMessage(vhost: string, queue: string, body: Uint8Array, meta: string): number {
+    if (this.mode === "every_n_ms") {
+      const id = this.nextId++;
+      this.pending.push({ id, vhost, queue, body, meta });
+      this.dirty = true;
+      this.arm();
+      return id;
+    }
     let id = 0;
     this.durableWrite(() => {
       const res = this.db
@@ -237,6 +250,7 @@ export class Store {
         .run(vhost, queue, body, meta);
       id = Number(res.lastInsertRowid);
     });
+    if (id >= this.nextId) this.nextId = id + 1;
     return id;
   }
 
@@ -264,10 +278,14 @@ export class Store {
   }
 
   private flushGroup() {
+    this.flushPending();
     if (!this.dirty && this.waiters.length === 0) return;
-    this.db.exec("PRAGMA synchronous=FULL");
-    this.db.exec("PRAGMA wal_checkpoint(FULL)");
-    this.db.exec("PRAGMA synchronous=OFF");
+    if (this.mode === "every_n_ms") {
+      this.fullFlushCount++;
+      this.db.exec("PRAGMA synchronous=FULL");
+      this.db.exec("PRAGMA wal_checkpoint(FULL)");
+      this.db.exec("PRAGMA synchronous=OFF");
+    }
     this.dirty = false;
     const pending = this.waiters;
     this.waiters = [];
@@ -285,7 +303,25 @@ export class Store {
       this.arm();
     }
   }
+  private flushPending() {
+    if (this.pending.length === 0) return;
+    const rows = this.pending;
+    this.pending = [];
+    const insert = this.db.query(
+      "INSERT INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
+    );
+    const write = this.db.transaction((batch: typeof rows) => {
+      for (const row of batch) insert.run(row.id, row.vhost, row.queue, row.body, row.meta);
+    });
+    write(rows);
+  }
+
   deleteMessage(id: number) {
+    const idx = this.pending.findIndex((row) => row.id === id);
+    if (idx >= 0) {
+      this.pending.splice(idx, 1);
+      return;
+    }
     this.db.query("DELETE FROM messages WHERE id=?").run(id);
   }
   listMessages(): MsgRow[] {

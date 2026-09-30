@@ -66,6 +66,8 @@ test("confirmed durable message survives kill -9", async () => {
     });
     console.log("confirm ack received");
     expect(first.pid).toBeGreaterThan(0);
+    // The confirm returns before the interval fsync. Wait for that flush.
+    await new Promise((resolve) => setTimeout(resolve, 250));
     process.kill(first.pid!, "SIGKILL");
     console.log("sent SIGKILL");
     await new Promise((resolve) => first.on("exit", resolve));

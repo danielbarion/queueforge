@@ -95,6 +95,12 @@ struct QueueState {
     durable: bool,
     /// Optional segmented WAL for durable+persistent messages.
     wal: Option<Box<dyn DurableQueueLog>>,
+    /// True while an interval fsync owns the log outside this command loop.
+    wal_parked: bool,
+    /// Appends accepted while the interval fsync holds the log.
+    deferred_appends: Vec<(QueueOffset, Arc<Message>)>,
+    /// Acks accepted while the interval fsync holds the log.
+    deferred_acks: Vec<QueueOffset>,
     durability_policy: DurabilityPolicy,
     /// Waiters for `durable_done` pending group commit.
     fsync_waiters: Vec<FsyncWaiter>,
@@ -147,6 +153,9 @@ impl QueueState {
             exclusive_consumer: None,
             durable: boot.durable,
             wal: boot.durable_log,
+            wal_parked: false,
+            deferred_appends: Vec::new(),
+            deferred_acks: Vec::new(),
             durability_policy: boot.durability_policy,
             fsync_waiters: Vec::new(),
             unsynced_appends: 0,
@@ -242,13 +251,13 @@ impl QueueState {
 
     /// Whether this enqueue must go through the WAL.
     fn needs_wal(&self, msg: &Message) -> bool {
-        self.durable && msg.persistent && self.wal.is_some()
+        self.durable && msg.persistent && (self.wal.is_some() || self.wal_parked)
     }
 
     /// Assign an offset for enqueue; WAL append happens before the counter advances.
     fn assign_offset_for_enqueue(
         &mut self,
-        msg: &Message,
+        msg: &Arc<Message>,
         needs_wal: bool,
     ) -> Result<QueueOffset, Error> {
         if needs_wal {
@@ -264,6 +273,9 @@ impl QueueState {
                     e
                 })?;
                 self.unsynced_appends = self.unsynced_appends.saturating_add(1);
+            } else {
+                // The interval fsync holds the log. The confirm does not wait for it.
+                self.deferred_appends.push((offset, Arc::clone(msg)));
             }
             self.next_offset = self.next_offset.saturating_add(1);
             return Ok(offset);
@@ -869,6 +881,8 @@ impl QueueState {
                     "WAL acknowledge failed"
                 );
             }
+        } else if self.wal_parked {
+            self.deferred_acks.push(offset);
         }
         self.maybe_flush_after_ack();
     }
@@ -888,10 +902,136 @@ impl QueueState {
     }
 
     fn needs_group_commit_flush(&self) -> bool {
-        if !self.fsync_waiters.is_empty() || self.unsynced_appends > 0 {
+        if !self.fsync_waiters.is_empty()
+            || self.unsynced_appends > 0
+            || !self.deferred_appends.is_empty()
+            || !self.deferred_acks.is_empty()
+        {
             return true;
         }
         self.wal.as_ref().map(|w| w.meta_dirty()).unwrap_or(false)
+    }
+
+    /// Start the interval fsync on the blocking pool and return the actor to commands.
+    fn begin_interval_fsync(
+        &mut self,
+    ) -> Option<
+        tokio::task::JoinHandle<(
+            Box<dyn DurableQueueLog>,
+            Result<QueueOffset, String>,
+            Option<String>,
+        )>,
+    > {
+        let mut wal = self.wal.take()?;
+        self.wal_parked = true;
+        Some(tokio::task::spawn_blocking(move || {
+            let result = wal.fsync().map(|offset| offset).map_err(|e| e.to_string());
+            let compact_err = if result.is_ok() {
+                wal.compact().err().map(|e| e.to_string())
+            } else {
+                None
+            };
+            (wal, result, compact_err)
+        }))
+    }
+
+    fn finish_interval_fsync(
+        &mut self,
+        joined: Result<
+            (
+                Box<dyn DurableQueueLog>,
+                Result<QueueOffset, String>,
+                Option<String>,
+            ),
+            tokio::task::JoinError,
+        >,
+        started: std::time::Instant,
+    ) {
+        let (wal, result, compact_err) = match joined {
+            Ok(parts) => parts,
+            Err(e) => {
+                self.wal_parked = false;
+                error!(
+                    vhost = %self.key.vhost,
+                    queue = %self.key.name,
+                    error = %e,
+                    "WAL fsync task panicked"
+                );
+                self.complete_waiters_up_to(
+                    QueueOffset(u64::MAX),
+                    Err(Error::Store(format!("wal fsync task panicked: {e}"))),
+                );
+                return;
+            }
+        };
+        self.wal = Some(wal);
+        self.wal_parked = false;
+        metrics::histogram!("queueforge_wal_fsync_seconds").record(started.elapsed().as_secs_f64());
+        if let Some(err) = compact_err {
+            warn!(
+                vhost = %self.key.vhost,
+                queue = %self.key.name,
+                error = %err,
+                "WAL compact failed"
+            );
+        }
+        match result {
+            Ok(synced) => {
+                self.unsynced_appends = 0;
+                self.complete_waiters_up_to(synced, Ok(()));
+            }
+            Err(e) => {
+                error!(
+                    vhost = %self.key.vhost,
+                    queue = %self.key.name,
+                    error = %e,
+                    "WAL fsync failed"
+                );
+                self.complete_waiters_up_to(
+                    QueueOffset(u64::MAX),
+                    Err(Error::Store(e.clone())),
+                );
+            }
+        }
+        self.flush_deferred_wal();
+    }
+
+    fn flush_deferred_wal(&mut self) {
+        let acks = std::mem::take(&mut self.deferred_acks);
+        let appends = std::mem::take(&mut self.deferred_appends);
+        let added = {
+            let Some(wal) = self.wal.as_mut() else {
+                self.deferred_acks = acks;
+                self.deferred_appends = appends;
+                return;
+            };
+            for offset in acks {
+                if let Err(e) = wal.acknowledge(offset) {
+                    warn!(
+                        vhost = %self.key.vhost,
+                        queue = %self.key.name,
+                        offset = offset.0,
+                        error = %e,
+                        "deferred WAL acknowledge failed"
+                    );
+                }
+            }
+            let mut added = 0u64;
+            for (offset, msg) in appends {
+                if let Err(e) = wal.append_enqueue(offset, msg.as_ref()) {
+                    error!(
+                        vhost = %self.key.vhost,
+                        queue = %self.key.name,
+                        error = %e,
+                        "deferred WAL append failed"
+                    );
+                } else {
+                    added = added.saturating_add(1);
+                }
+            }
+            added
+        };
+        self.unsynced_appends = self.unsynced_appends.saturating_add(added);
     }
 
     fn deliver_pull(
@@ -1389,6 +1529,14 @@ pub async fn run(
     } else {
         None
     };
+    let mut interval_fsync: Option<(
+        std::time::Instant,
+        tokio::task::JoinHandle<(
+            Box<dyn DurableQueueLog>,
+            Result<QueueOffset, String>,
+            Option<String>,
+        )>,
+    )> = None;
 
     loop {
         // Expire any already-due messages before sleeping.
@@ -1427,9 +1575,23 @@ pub async fn run(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            }, if use_timer => {
+            }, if use_timer && interval_fsync.is_none() => {
                 if state.needs_group_commit_flush() {
-                    let _ = state.fsync_now().await;
+                    if let Some(handle) = state.begin_interval_fsync() {
+                        interval_fsync = Some((std::time::Instant::now(), handle));
+                    }
+                }
+                continue;
+            }
+            joined = async {
+                if let Some((_, handle)) = interval_fsync.as_mut() {
+                    (&mut *handle).await
+                } else {
+                    std::future::pending().await
+                }
+            }, if interval_fsync.is_some() => {
+                if let Some((started, _)) = interval_fsync.take() {
+                    state.finish_interval_fsync(joined, started);
                 }
                 continue;
             }
@@ -1531,6 +1693,10 @@ pub async fn run(
             }
             QueueCmd::Shutdown { reply } => {
                 debug!(vhost = %key.vhost, queue = %key.name, "queue actor shutting down");
+                if let Some((started, handle)) = interval_fsync.take() {
+                    let joined = handle.await;
+                    state.finish_interval_fsync(joined, started);
+                }
                 let res = state.shutdown_flush().await;
                 if let Err(ref e) = res {
                     error!(
@@ -1740,6 +1906,7 @@ mod tests {
     struct SlowLog {
         delay: Duration,
         entered: Arc<std::sync::atomic::AtomicBool>,
+        released: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl DurableQueueLog for SlowLog {
@@ -1757,7 +1924,9 @@ mod tests {
             self.entered
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(self.delay);
-            Ok(QueueOffset(1))
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(QueueOffset(u64::MAX))
         }
         fn durable_offset(&self) -> QueueOffset {
             QueueOffset(0)
@@ -1789,6 +1958,7 @@ mod tests {
             Box::new(SlowLog {
                 delay: Duration::from_millis(300),
                 entered: Arc::clone(&entered),
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
             DurabilityPolicy {
                 policy: FsyncPolicy::Always,
@@ -1840,6 +2010,7 @@ mod tests {
             Box::new(SlowLog {
                 delay: Duration::from_millis(80),
                 entered: Arc::clone(&entered),
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
             DurabilityPolicy {
                 policy: FsyncPolicy::EveryNMs,
@@ -1872,6 +2043,68 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        shutdown(tx, actor).await;
+    }
+
+    /// A confirm issued while the interval fsync is blocked does not wait for it.
+    #[tokio::test]
+    async fn interval_fsync_does_not_queue_the_next_confirm() {
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let key = QueueKey::new("/", "inflight");
+        let memory = MemoryTracker::shared();
+        let info = Arc::new(QueueInfo::new(
+            key.clone(),
+            &crate::queue::QueueDeclareOpts {
+                durable: true,
+                ..crate::queue::QueueDeclareOpts::default()
+            },
+        ));
+        let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+            Box::new(SlowLog {
+                delay: Duration::from_millis(400),
+                entered: Arc::clone(&entered),
+                released: Arc::clone(&released),
+            }),
+            DurabilityPolicy {
+                policy: FsyncPolicy::EveryNMs,
+                interval: Duration::from_millis(30),
+                every_n_messages: 1,
+            },
+        );
+        boot.durable = true;
+        let (tx, rx) = mpsc::channel(8);
+        let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+        let mut first = (*sample_msg(b"first")).clone();
+        first.persistent = true;
+        let first_done = enqueue(&tx, Arc::new(first)).await;
+        first_done.durable_done.await.unwrap().unwrap();
+        let wait = std::time::Instant::now();
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            if wait.elapsed() > Duration::from_secs(2) {
+                panic!("interval fsync did not start");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "fsync returned before the second publish"
+        );
+
+        let mut second = (*sample_msg(b"second")).clone();
+        second.persistent = true;
+        let started = std::time::Instant::now();
+        let second_done = enqueue(&tx, Arc::new(second)).await;
+        second_done.durable_done.await.unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(80),
+            "confirm waited for the in-flight interval fsync"
+        );
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "interval fsync returned before the confirm"
+        );
         shutdown(tx, actor).await;
     }
 
