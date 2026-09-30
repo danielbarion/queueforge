@@ -6,51 +6,51 @@ Each publisher sends message k at `k / rate` for its share of the labeled rate, 
 
 ## What changed before this run
 
-Both QueueForge brokers still fsync on `fsync_interval_ms=10`. A durable publisher confirm completes after the buffered write, before that fsync. On Rust the interval fsync runs outside the queue-actor command loop, and the actor takes that finished fsync before the next mailbox command, so a full mailbox cannot leave the log parked. A confirm issued while the fsync is still blocked returns without waiting for it. On Bun, `every_n_ms` stages durable rows and writes them in one transaction on the group-commit timer, so the confirm is not one synchronous insert and does not wait for `synchronous=FULL`. A crash before the interval fsync can drop an acknowledged message. A durable publish, confirm, and consume of the same body passed on RabbitMQ 4, Rust, and Bun (`durable_group_commit_matches_rabbitmq`).
+Both QueueForge brokers still fsync on `fsync_interval_ms=10`. A durable publisher confirm completes after the buffered write, before that fsync. On Rust the interval fsync runs outside the queue-actor command loop, and the actor takes that finished fsync before the next mailbox command, so a full mailbox cannot leave the log parked. A confirm issued while the fsync is still blocked returns without waiting for it. On Bun, `every_n_ms` stages durable rows and writes them in one transaction on the group-commit timer, so the confirm is not one synchronous insert and does not wait for `synchronous=FULL`. A crash before the interval fsync can drop an acknowledged message. This run measured that committed path. Both brokers already cleared 30% higher `messages_per_sec` and at most 70% of the RabbitMQ `confirm_latency_ms` on `durable-256` and `fan-2x2`, so the confirm path stayed as committed.
 
 ## Results
 
 | Scenario | RabbitMQ messages/s | Rust messages/s | Bun messages/s | RabbitMQ confirm ms | Rust confirm ms | Bun confirm ms | RabbitMQ saturation | Rust saturation | Bun saturation |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
-| durable-256 | 1368.69 | 2807.78 | 3634.62 | 0.53 | 0.20 | 0.13 | `saturation_load=2000 kept_up=false` | `saturation_load=8000 kept_up=false` | `saturation_load=8000 kept_up=false` |
-| size-64 | 600.38 | 596.67 | 596.44 | 0.55 | 0.28 | 0.30 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| size-4096 | 247.57 | 247.67 | 249.09 | 0.85 | 0.70 | 0.61 | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` |
-| transient-256 | 1231.78 | 1231.68 | 1232.37 | 0.23 | 0.27 | 0.20 | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` |
-| prefetch-1 | 600.63 | 596.60 | 600.07 | 0.54 | 0.28 | 0.30 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| prefetch-128 | 599.95 | 593.66 | 592.67 | 0.55 | 0.29 | 0.33 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| fan-2x2 | 2099.18 | 3193.44 | 3843.89 | 0.56 | 0.27 | 0.18 | `saturation_load=6400 kept_up=false` | `saturation_load=12800 kept_up=false` | `saturation_load=12800 kept_up=false` |
+| durable-256 | 1430.87 | 2768.62 | 3627.59 | 0.53 | 0.21 | 0.13 | `saturation_load=2000 kept_up=false` | `saturation_load=8000 kept_up=false` | `saturation_load=8000 kept_up=false` |
+| size-64 | 589.43 | 596.64 | 596.66 | 0.54 | 0.27 | 0.35 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
+| size-4096 | 244.88 | 247.47 | 247.84 | 0.82 | 0.68 | 0.60 | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` |
+| transient-256 | 1233.16 | 1240.46 | 1239.90 | 0.23 | 0.28 | 0.20 | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` |
+| prefetch-1 | 600.25 | 593.19 | 593.91 | 0.55 | 0.29 | 0.31 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
+| prefetch-128 | 599.96 | 596.46 | 593.87 | 0.54 | 0.28 | 0.32 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
+| fan-2x2 | 2105.03 | 3169.15 | 3829.11 | 0.57 | 0.27 | 0.18 | `saturation_load=6400 kept_up=false` | `saturation_load=12800 kept_up=false` | `saturation_load=12800 kept_up=false` |
 
 Exact lines from the logs:
 
 ### RabbitMQ
 
-- `scenario=durable-256` `messages_per_sec=1368.69` `confirm_latency_ms=0.53 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=2000 kept_up=false` `wall_secs=12.05`
-- `scenario=size-64` `messages_per_sec=600.38` `confirm_latency_ms=0.55 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=size-4096` `messages_per_sec=247.57` `confirm_latency_ms=0.85 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
-- `scenario=transient-256` `messages_per_sec=1231.78` `confirm_latency_ms=0.23 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.08`
-- `scenario=prefetch-1` `messages_per_sec=600.63` `confirm_latency_ms=0.54 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=prefetch-128` `messages_per_sec=599.95` `confirm_latency_ms=0.55 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=fan-2x2` `messages_per_sec=2099.18` `confirm_latency_ms=0.56 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=6400 kept_up=false` `wall_secs=12.05`
+- `scenario=durable-256` `messages_per_sec=1430.87` `confirm_latency_ms=0.53 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=2000 kept_up=false` `wall_secs=12.05`
+- `scenario=size-64` `messages_per_sec=589.43` `confirm_latency_ms=0.54 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
+- `scenario=size-4096` `messages_per_sec=244.88` `confirm_latency_ms=0.82 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.09`
+- `scenario=transient-256` `messages_per_sec=1233.16` `confirm_latency_ms=0.23 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
+- `scenario=prefetch-1` `messages_per_sec=600.25` `confirm_latency_ms=0.55 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
+- `scenario=prefetch-128` `messages_per_sec=599.96` `confirm_latency_ms=0.54 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
+- `scenario=fan-2x2` `messages_per_sec=2105.03` `confirm_latency_ms=0.57 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=6400 kept_up=false` `wall_secs=12.05`
 
 ### Rust
 
-- `scenario=durable-256` `messages_per_sec=2807.78` `confirm_latency_ms=0.20 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.14`
-- `scenario=size-64` `messages_per_sec=596.67` `confirm_latency_ms=0.28 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=size-4096` `messages_per_sec=247.67` `confirm_latency_ms=0.70 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
-- `scenario=transient-256` `messages_per_sec=1231.68` `confirm_latency_ms=0.27 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.08`
-- `scenario=prefetch-1` `messages_per_sec=596.60` `confirm_latency_ms=0.28 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=prefetch-128` `messages_per_sec=593.66` `confirm_latency_ms=0.29 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=fan-2x2` `messages_per_sec=3193.44` `confirm_latency_ms=0.27 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.14`
+- `scenario=durable-256` `messages_per_sec=2768.62` `confirm_latency_ms=0.21 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.12`
+- `scenario=size-64` `messages_per_sec=596.64` `confirm_latency_ms=0.27 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
+- `scenario=size-4096` `messages_per_sec=247.47` `confirm_latency_ms=0.68 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
+- `scenario=transient-256` `messages_per_sec=1240.46` `confirm_latency_ms=0.28 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
+- `scenario=prefetch-1` `messages_per_sec=593.19` `confirm_latency_ms=0.29 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.08`
+- `scenario=prefetch-128` `messages_per_sec=596.46` `confirm_latency_ms=0.28 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
+- `scenario=fan-2x2` `messages_per_sec=3169.15` `confirm_latency_ms=0.27 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.16`
 
 ### Bun
 
-- `scenario=durable-256` `messages_per_sec=3634.62` `confirm_latency_ms=0.13 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.14`
-- `scenario=size-64` `messages_per_sec=596.44` `confirm_latency_ms=0.30 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=size-4096` `messages_per_sec=249.09` `confirm_latency_ms=0.61 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.05`
-- `scenario=transient-256` `messages_per_sec=1232.37` `confirm_latency_ms=0.20 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
-- `scenario=prefetch-1` `messages_per_sec=600.07` `confirm_latency_ms=0.30 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=prefetch-128` `messages_per_sec=592.67` `confirm_latency_ms=0.33 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.08`
-- `scenario=fan-2x2` `messages_per_sec=3843.89` `confirm_latency_ms=0.18 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.14`
+- `scenario=durable-256` `messages_per_sec=3627.59` `confirm_latency_ms=0.13 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.12`
+- `scenario=size-64` `messages_per_sec=596.66` `confirm_latency_ms=0.35 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
+- `scenario=size-4096` `messages_per_sec=247.84` `confirm_latency_ms=0.60 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
+- `scenario=transient-256` `messages_per_sec=1239.90` `confirm_latency_ms=0.20 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
+- `scenario=prefetch-1` `messages_per_sec=593.91` `confirm_latency_ms=0.31 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
+- `scenario=prefetch-128` `messages_per_sec=593.87` `confirm_latency_ms=0.32 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
+- `scenario=fan-2x2` `messages_per_sec=3829.11` `confirm_latency_ms=0.18 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.14`
 
 ## Disk flush beside durable latency
 
@@ -60,17 +60,21 @@ Exact lines from the logs:
 | Rust | `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` |
 | Bun | `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` |
 
-Transient scenarios print `disk_flush=not-durable`. RabbitMQ classic queue v2 flushes its write buffer at least every 200 ms and sends the confirm before that fsync. On `durable-256` that confirm is `confirm_latency_ms=0.53`. Rust and Bun also confirm before the interval fsync: `confirm_latency_ms=0.20` and `confirm_latency_ms=0.13`. The 10 ms timer still fsyncs. A process crash inside that window can drop a message whose confirm already returned.
+Transient scenarios print `disk_flush=not-durable`. RabbitMQ classic queue v2 flushes its write buffer at least every 200 ms and sends the confirm before that fsync. On `durable-256` that confirm is `confirm_latency_ms=0.53`. Rust and Bun also confirm before the interval fsync: `confirm_latency_ms=0.21` and `confirm_latency_ms=0.13`. The 10 ms timer still fsyncs. A process crash inside that window can drop a message whose confirm already returned.
 
 ## Recommendation
 
-On this shared-disk run, `saturation_load` is the ceiling. RabbitMQ `durable-256` is `messages_per_sec=1368.69`, `confirm_latency_ms=0.53`, `saturation_load=2000 kept_up=false`. Rust is `messages_per_sec=2807.78`, `confirm_latency_ms=0.20`, `saturation_load=8000 kept_up=false`. Bun is `messages_per_sec=3634.62`, `confirm_latency_ms=0.13`, `saturation_load=8000 kept_up=false`. Both QueueForge brokers kept the 2000 messages/s step that RabbitMQ missed, and both missed at 8000. `fan-2x2` is RabbitMQ `messages_per_sec=2099.18`, `confirm_latency_ms=0.56`, `saturation_load=6400 kept_up=false`; Rust `messages_per_sec=3193.44`, `confirm_latency_ms=0.27`, `saturation_load=12800 kept_up=false`; Bun `messages_per_sec=3843.89`, `confirm_latency_ms=0.18`, `saturation_load=12800 kept_up=false`.
+On this shared-disk run, both QueueForge brokers are at least 30% higher in `messages_per_sec` than RabbitMQ and at most 70% of RabbitMQ in `confirm_latency_ms` on `durable-256` and on `fan-2x2`.
 
-`transient-256` kept up at 2000/s on every broker: RabbitMQ `messages_per_sec=1231.78`, Rust `messages_per_sec=1231.68`, Bun `messages_per_sec=1232.37`, each `saturation_load=2000 kept_up=true`. Confirm latency is `confirm_latency_ms=0.23`, `confirm_latency_ms=0.27`, and `confirm_latency_ms=0.20`.
+`durable-256`: RabbitMQ `messages_per_sec=1430.87`, `confirm_latency_ms=0.53`, `saturation_load=2000 kept_up=false`. Rust `messages_per_sec=2768.62` is at least 30% higher than that rate, and Rust `confirm_latency_ms=0.21` is at most 70% of RabbitMQ `confirm_latency_ms=0.53`, with `saturation_load=8000 kept_up=false`. Bun `messages_per_sec=3627.59` is at least 30% higher than RabbitMQ `messages_per_sec=1430.87`, and Bun `confirm_latency_ms=0.13` is at most 70% of RabbitMQ `confirm_latency_ms=0.53`, with `saturation_load=8000 kept_up=false`.
 
-`size-4096` kept up at `saturation_load=400 kept_up=true` on all three: RabbitMQ `messages_per_sec=247.57`, Rust `messages_per_sec=247.67`, Bun `messages_per_sec=249.09`. The 1000 messages/s durable steps that were not raised (`size-64`, `prefetch-1`, `prefetch-128`) still kept up on all three.
+`fan-2x2`: RabbitMQ `messages_per_sec=2105.03`, `confirm_latency_ms=0.57`, `saturation_load=6400 kept_up=false`. Rust `messages_per_sec=3169.15` is at least 30% higher than that rate, and Rust `confirm_latency_ms=0.27` is at most 70% of RabbitMQ `confirm_latency_ms=0.57`, with `saturation_load=12800 kept_up=false`. Bun `messages_per_sec=3829.11` is at least 30% higher than RabbitMQ `messages_per_sec=2105.03`, and Bun `confirm_latency_ms=0.18` is at most 70% of RabbitMQ `confirm_latency_ms=0.57`, with `saturation_load=12800 kept_up=false`.
 
-For a new single-node classic-queue deployment that can accept a confirm before the interval fsync, either QueueForge broker carried a higher durable ceiling than RabbitMQ in this run. Bun had the higher `durable-256` rate (`messages_per_sec=3634.62`) and the higher `fan-2x2` rate (`messages_per_sec=3843.89`). Rust cleared the same 8000 and 12800 saturation steps (`confirm_latency_ms=0.20` on `durable-256`). Stay on RabbitMQ 4 when the deployment needs any blocker below.
+`transient-256` kept up at 2000/s on every broker: RabbitMQ `messages_per_sec=1233.16`, Rust `messages_per_sec=1240.46`, Bun `messages_per_sec=1239.90`, each `saturation_load=2000 kept_up=true`. Confirm latency is `confirm_latency_ms=0.23`, `confirm_latency_ms=0.28`, and `confirm_latency_ms=0.20`.
+
+`size-4096` kept up at `saturation_load=400 kept_up=true` on all three: RabbitMQ `messages_per_sec=244.88`, Rust `messages_per_sec=247.47`, Bun `messages_per_sec=247.84`. The 1000 messages/s durable steps (`size-64`, `prefetch-1`, `prefetch-128`) kept up on all three, so `messages_per_sec` there is the paced rate.
+
+For a new single-node classic-queue deployment that can accept a confirm before the interval fsync, either QueueForge broker is at least 30% higher in `messages_per_sec` and at most 70% of RabbitMQ in `confirm_latency_ms` on both `durable-256` and `fan-2x2` in this run. Bun had the higher `durable-256` rate (`messages_per_sec=3627.59`) and the higher `fan-2x2` rate (`messages_per_sec=3829.11`). Rust cleared the same 8000 and 12800 saturation steps (`confirm_latency_ms=0.21` on `durable-256`). Stay on RabbitMQ 4 when the deployment needs any blocker below.
 
 ## Production blockers
 
@@ -85,8 +89,6 @@ These are outside this classic-queue comparison. A production move off RabbitMQ 
 | Kubernetes operator and management-compatible automation | QueueForge management uses the `queueforge_session` cookie. RabbitMQ uses HTTP basic auth. Permission URLs are not the same shape. |
 | Crash before the interval fsync | A publisher confirm can return before the 10 ms fsync. A crash in that window can drop an acknowledged message. RabbitMQ classic queues have the same window, with a 200 ms flush. |
 
-MQTT, STOMP, AMQP 1.0, streams, federation, and shovel are implemented on both brokers and were not part of this classic-queue run.
-
 ## Decision
 
-For this classic-queue run, both QueueForge brokers printed a higher `saturation_load` than RabbitMQ on `durable-256` (`saturation_load=8000 kept_up=false` beside RabbitMQ `saturation_load=2000 kept_up=false`) and on `fan-2x2` (`saturation_load=12800 kept_up=false` beside RabbitMQ `saturation_load=6400 kept_up=false`). `transient-256` kept up at `saturation_load=2000 kept_up=true` on Rust and Bun. Treat a confirm as “buffered, fsync still pending” on every broker here. Move off RabbitMQ only when the deployment does not join an Erlang RabbitMQ cluster, mix Rust with Bun, use classic mirroring, LDAP, OAuth, x509, or the Kubernetes operator.
+For this classic-queue run, both QueueForge brokers are at least 30% higher in `messages_per_sec` and at most 70% of RabbitMQ in `confirm_latency_ms` on `durable-256` (Rust `messages_per_sec=2768.62` `confirm_latency_ms=0.21`, Bun `messages_per_sec=3627.59` `confirm_latency_ms=0.13`, beside RabbitMQ `messages_per_sec=1430.87` `confirm_latency_ms=0.53`) and on `fan-2x2` (Rust `messages_per_sec=3169.15` `confirm_latency_ms=0.27`, Bun `messages_per_sec=3829.11` `confirm_latency_ms=0.18`, beside RabbitMQ `messages_per_sec=2105.03` `confirm_latency_ms=0.57`). `transient-256` kept up at `saturation_load=2000 kept_up=true` on Rust and Bun. Treat a confirm as “buffered, fsync still pending” on every broker here. Move off RabbitMQ only when the deployment does not join an Erlang RabbitMQ cluster, mix Rust with Bun, use classic mirroring, LDAP, OAuth, x509, or the Kubernetes operator.
