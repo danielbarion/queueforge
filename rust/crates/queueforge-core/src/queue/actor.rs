@@ -1557,6 +1557,20 @@ pub async fn run(
 
         let cmd = tokio::select! {
             biased;
+            // The in-flight fsync join is first. A ready mailbox must not park
+            // the log forever; a confirm still returns while the sync blocks.
+            joined = async {
+                if let Some((_, handle)) = interval_fsync.as_mut() {
+                    (&mut *handle).await
+                } else {
+                    std::future::pending().await
+                }
+            }, if interval_fsync.is_some() => {
+                if let Some((started, _)) = interval_fsync.take() {
+                    state.finish_interval_fsync(joined, started);
+                }
+                continue;
+            }
             // Prefer external cmds, but always drain internal DLX completions.
             cmd = rx.recv() => cmd,
             cmd = internal_rx.recv() => cmd,
@@ -1580,18 +1594,6 @@ pub async fn run(
                     if let Some(handle) = state.begin_interval_fsync() {
                         interval_fsync = Some((std::time::Instant::now(), handle));
                     }
-                }
-                continue;
-            }
-            joined = async {
-                if let Some((_, handle)) = interval_fsync.as_mut() {
-                    (&mut *handle).await
-                } else {
-                    std::future::pending().await
-                }
-            }, if interval_fsync.is_some() => {
-                if let Some((started, _)) = interval_fsync.take() {
-                    state.finish_interval_fsync(joined, started);
                 }
                 continue;
             }
@@ -1907,6 +1909,7 @@ mod tests {
         delay: Duration,
         entered: Arc<std::sync::atomic::AtomicBool>,
         released: Arc<std::sync::atomic::AtomicBool>,
+        appends: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl DurableQueueLog for SlowLog {
@@ -1915,6 +1918,8 @@ mod tests {
             _offset: QueueOffset,
             _msg: &Message,
         ) -> crate::error::Result<()> {
+            self.appends
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         fn acknowledge(&mut self, _offset: QueueOffset) -> crate::error::Result<()> {
@@ -1959,6 +1964,7 @@ mod tests {
                 delay: Duration::from_millis(300),
                 entered: Arc::clone(&entered),
                 released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             }),
             DurabilityPolicy {
                 policy: FsyncPolicy::Always,
@@ -2011,6 +2017,7 @@ mod tests {
                 delay: Duration::from_millis(80),
                 entered: Arc::clone(&entered),
                 released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             }),
             DurabilityPolicy {
                 policy: FsyncPolicy::EveryNMs,
@@ -2051,6 +2058,7 @@ mod tests {
     async fn interval_fsync_does_not_queue_the_next_confirm() {
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let appends = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let key = QueueKey::new("/", "inflight");
         let memory = MemoryTracker::shared();
         let info = Arc::new(QueueInfo::new(
@@ -2065,6 +2073,7 @@ mod tests {
                 delay: Duration::from_millis(400),
                 entered: Arc::clone(&entered),
                 released: Arc::clone(&released),
+                appends: Arc::clone(&appends),
             }),
             DurabilityPolicy {
                 policy: FsyncPolicy::EveryNMs,
@@ -2105,6 +2114,53 @@ mod tests {
             !released.load(std::sync::atomic::Ordering::SeqCst),
             "interval fsync returned before the confirm"
         );
+        assert_eq!(
+            appends.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second durable enqueue was written before the blocked fsync returned"
+        );
+
+        // Fill the mailbox and keep it full. A command-first select would never
+        // take the fsync join, so the deferred append would stay unwritten.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flood_tx = tx.clone();
+        loop {
+            let (reply_tx, _reply_rx) = oneshot::channel();
+            if flood_tx
+                .try_send(QueueCmd::Stats { reply: reply_tx })
+                .is_err()
+            {
+                break;
+            }
+        }
+        let flood_stop = Arc::clone(&stop);
+        let flood = std::thread::spawn(move || {
+            while !flood_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let (reply_tx, _reply_rx) = oneshot::channel();
+                if flood_tx
+                    .blocking_send(QueueCmd::Stats { reply: reply_tx })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let flushed = std::time::Instant::now();
+        while appends.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            if flushed.elapsed() > Duration::from_secs(2) {
+                panic!("commands in the mailbox prevented the deferred append from flushing");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            "deferred append flushed before the interval fsync returned"
+        );
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::spawn_blocking(move || flood.join())
+            .await
+            .unwrap()
+            .unwrap();
         shutdown(tx, actor).await;
     }
 
