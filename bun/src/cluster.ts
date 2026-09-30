@@ -27,7 +27,11 @@ export class Cluster {
         open: (socket) => {
           socket.data = { buf: "" };
         },
-        close: () => {},
+        close: (socket) => {
+          const id = (socket.data as { peerId?: string } | undefined)?.peerId;
+          if (id) this.peers.delete(id);
+          this.broker.promoteIfLeader();
+        },
         error: () => {},
       },
     });
@@ -56,8 +60,14 @@ export class Cluster {
         this.peers.set(member.id, peer);
         write({ op: "hello", nodeId: self, snapshot: this.broker.snapshot() });
       });
-      sock.on("close", () => this.peers.delete(member.id));
-      sock.on("error", () => this.peers.delete(member.id));
+      sock.on("close", () => {
+        this.peers.delete(member.id);
+        this.broker.promoteIfLeader();
+      });
+      sock.on("error", () => {
+        this.peers.delete(member.id);
+        this.broker.promoteIfLeader();
+      });
     }
   }
 
@@ -65,7 +75,9 @@ export class Cluster {
     const st = socket.data as { buf?: string };
     if (st.buf == null) st.buf = "";
     const text = typeof data === "string" ? data : data.toString();
-    this.readLines(st as { buf: string }, text, (line) => this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`)));
+    this.readLines(st as { buf: string }, text, (line) =>
+      this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`), socket),
+    );
   }
 
   private readLines(st: { buf: string }, text: string, onLine: (line: Record<string, unknown>) => void) {
@@ -83,12 +95,19 @@ export class Cluster {
     }
   }
 
-  private dispatch(fallbackId: string, msg: Record<string, unknown>, write: (obj: object) => void) {
+  private dispatch(
+    fallbackId: string,
+    msg: Record<string, unknown>,
+    write: (obj: object) => void,
+    socket?: { data?: { peerId?: string } },
+  ) {
     const op = String(msg.op ?? "");
     if (op === "hello") {
       const id = String(msg.nodeId ?? fallbackId);
       if (id) {
         this.peers.set(id, { id, write: (line) => write(line), pending: new Map() });
+        if (socket?.data) socket.data.peerId = id;
+        this.broker.promoteIfLeader();
       }
       this.broker.applySnapshot(msg.snapshot as ReturnType<Broker["snapshot"]>);
       write({ op: "reply", id: msg.id ?? 0, ok: true, snapshot: this.broker.snapshot() });

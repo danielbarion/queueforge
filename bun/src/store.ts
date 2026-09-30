@@ -51,6 +51,8 @@ export class Store {
   private pending: Array<{ id: number; vhost: string; queue: string; body: Uint8Array; meta: string }> = [];
   /** How many times the interval path raised synchronous=FULL. */
   fullFlushCount = 0;
+  confirmsBeforeFsync = 0;
+  stagedWithoutFlush = false;
   constructor(path: string, mode: FsyncMode | boolean = "every_n_ms", intervalMs = 100) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path, { create: true });
@@ -240,6 +242,7 @@ export class Store {
       const id = this.nextId++;
       this.pending.push({ id, vhost, queue, body, meta });
       this.dirty = true;
+      this.stagedWithoutFlush = true;
       this.arm();
       return id;
     }
@@ -252,6 +255,11 @@ export class Store {
     });
     if (id >= this.nextId) this.nextId = id + 1;
     return id;
+  }
+
+  /** Count a quorum confirm that returned while the group commit is still staged. */
+  noteQuorumConfirm() {
+    if (this.mode === "every_n_ms" && this.stagedWithoutFlush) this.confirmsBeforeFsync++;
   }
 
   /** Resolves after the durable write is covered by an fsync. */
@@ -282,6 +290,7 @@ export class Store {
     if (!this.dirty && this.waiters.length === 0) return;
     if (this.mode === "every_n_ms") {
       this.fullFlushCount++;
+      this.stagedWithoutFlush = false;
       this.db.exec("PRAGMA synchronous=FULL");
       this.db.exec("PRAGMA wal_checkpoint(FULL)");
       this.db.exec("PRAGMA synchronous=OFF");

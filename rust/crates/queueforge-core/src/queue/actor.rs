@@ -574,6 +574,7 @@ impl QueueState {
                 }
                 FsyncPolicy::EveryNMs => {
                     // The interval timer still fsyncs. The confirm does not wait for it.
+                    metrics::counter!("queueforge_confirm_before_fsync_total").increment(1);
                     let _ = tx.send(Ok(()));
                 }
                 FsyncPolicy::EveryNMessages => {

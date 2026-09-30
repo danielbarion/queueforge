@@ -52,6 +52,8 @@ struct Inner {
     router: Arc<ExchangeRouter>,
     peers: Mutex<HashMap<String, Arc<Peer>>>,
     next_id: AtomicU64,
+    /// Lowest reachable member id once a majority is visible. Empty until then.
+    leader: std::sync::Mutex<String>,
     /// Quorum bodies on a follower. `basic.get` and `basic.consume` do not pop this.
     replicas: Mutex<HashMap<String, Arc<Message>>>,
 }
@@ -133,6 +135,7 @@ impl Cluster {
             router,
             peers: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            leader: std::sync::Mutex::new(String::new()),
             replicas: Mutex::new(HashMap::new()),
         });
         let cluster = Arc::new(Self { inner: Arc::clone(&inner) });
@@ -381,6 +384,8 @@ impl Cluster {
             for id in stale {
                 peers.remove(&id);
             }
+            drop(peers);
+            refresh_leader(&self.inner).await;
         }
         for member in &self.inner.members {
             if member.id == self.inner.node_id || member.id.as_str() < self.inner.node_id.as_str() {
@@ -520,8 +525,12 @@ impl Cluster {
         self.quorum_forget(key, message_id).await;
     }
 
-    /// Lowest configured member. That node is the only one that pushes quorum deliveries.
+    /// Lowest reachable member once a majority is up. That node pushes quorum deliveries.
     pub fn quorum_leader(&self) -> String {
+        let slot = self.inner.leader.lock().unwrap_or_else(|err| err.into_inner());
+        if !slot.is_empty() {
+            return slot.clone();
+        }
         let mut ids: Vec<&str> = self.inner.members.iter().map(|member| member.id.as_str()).collect();
         if ids.is_empty() {
             return self.inner.node_id.clone();
@@ -619,6 +628,7 @@ async fn attach_peer(
     });
     let _ = addr;
     inner.peers.lock().await.insert(node_id.clone(), Arc::clone(&peer));
+    refresh_leader(&inner).await;
     tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
             if write.write_all(line.as_bytes()).await.is_err() || write.write_all(b"\n").await.is_err() {
@@ -656,6 +666,7 @@ async fn attach_peer(
         if msg.op == "hello" {
             if let Some(node) = msg.payload.get("node").and_then(|v| v.as_str()) {
                 inner.peers.lock().await.insert(node.to_string(), Arc::clone(&peer));
+                refresh_leader(&inner).await;
                 if let Some(snap) = msg.payload.get("snapshot") {
                     apply_snapshot(&inner, snap).await;
                 }
@@ -683,7 +694,48 @@ async fn attach_peer(
     }
     let mut peers = inner.peers.lock().await;
     peers.retain(|_, existing| !Arc::ptr_eq(existing, &peer));
+    drop(peers);
+    refresh_leader(&inner).await;
     Ok(())
+}
+
+async fn refresh_leader(inner: &Arc<Inner>) {
+    let mut ids = vec![inner.node_id.clone()];
+    {
+        let peers = inner.peers.lock().await;
+        for id in peers.keys() {
+            if inner.members.iter().any(|member| member.id == *id) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    let majority = inner.members.len().max(1) / 2 + 1;
+    if ids.len() < majority {
+        return;
+    }
+    let elected = ids[0].clone();
+    let became = {
+        let mut slot = inner.leader.lock().unwrap_or_else(|err| err.into_inner());
+        let became = elected == inner.node_id && *slot != inner.node_id;
+        *slot = elected;
+        became
+    };
+    if became {
+        promote_replicas(inner).await;
+    }
+}
+
+async fn promote_replicas(inner: &Arc<Inner>) {
+    let replicas: Vec<(String, Arc<Message>)> = inner.replicas.lock().await.drain().collect();
+    for (key, message) in replicas {
+        let mut parts = key.split('\0');
+        let Some(vhost) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        let queue = QueueKey::new(vhost, name);
+        let _ = local_enqueue(inner, &queue, message).await;
+    }
 }
 
 async fn local_enqueue(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> Result<(), Error> {
@@ -1548,12 +1600,11 @@ async fn open_subscription(cluster: &Cluster, open: SubOpen) -> Result<(), Error
 }
 
 fn node_is_quorum_leader(inner: &Inner) -> bool {
-    let mut ids: Vec<&str> = inner.members.iter().map(|member| member.id.as_str()).collect();
-    if ids.is_empty() {
+    if inner.members.is_empty() {
         return true;
     }
-    ids.sort_unstable();
-    ids[0] == inner.node_id
+    let slot = inner.leader.lock().unwrap_or_else(|err| err.into_inner());
+    !slot.is_empty() && *slot == inner.node_id
 }
 
 fn replica_key(key: &QueueKey, message_id: &str) -> String {

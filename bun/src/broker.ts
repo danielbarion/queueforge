@@ -846,6 +846,7 @@ export class Broker {
       return false;
     }
     const ok = this.enqueueLocal(q, { ...src, id: qid }, 0);
+    if (ok) this.store.noteQuorumConfirm();
     if (!ok) {
       await Promise.all(acked.map((id) => this.cluster!.call(id, "quorum_drop", { vhost: q.vhost, queue: q.name, id: qid }).catch(() => null)));
     }
@@ -952,11 +953,27 @@ export class Broker {
     const ids = this.cfg.members.map((member) => member.id);
     if (!ids.length) return this.cfg.nodeId;
     ids.sort();
-    return ids[0]!;
+    const up = new Set<string>([this.cfg.nodeId]);
+    for (const id of this.cluster?.peerIds() ?? []) up.add(id);
+    const live = ids.filter((id) => up.has(id));
+    const majority = Math.floor(ids.length / 2) + 1;
+    if (live.length < majority) return ids[0]!;
+    return live[0]!;
   }
 
   isQuorumLeader(): boolean {
     return !this.cfg.members.length || this.quorumLeader() === this.cfg.nodeId;
+  }
+
+  /** Move follower copies into the ready queue once this process is the live leader. */
+  promoteIfLeader() {
+    if (!this.isQuorumLeader()) return;
+    for (const q of this.queues.values()) {
+      if (q.argsParsed.queueType !== "quorum" || q.replicas.length === 0) continue;
+      q.ready.push(...q.replicas);
+      q.replicas = [];
+      this.pump(q);
+    }
   }
 
   private expire(q: QueueLive) {

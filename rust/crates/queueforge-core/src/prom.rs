@@ -39,6 +39,7 @@ pub fn prime() {
     gauge("rabbitmq_alarms_free_disk_space_watermark", 0.0);
     gauge("rabbitmq_disk_space_available_bytes", 0.0);
     gauge("rabbitmq_unreachable_cluster_peers_count", 0.0);
+    metrics::counter!("queueforge_confirm_before_fsync_total").absolute(0);
     metrics::gauge!("rabbitmq_identity_info", "rabbitmq_node" => "queueforge", "rabbitmq_cluster" => "queueforge").set(1.0);
     metrics::gauge!("rabbitmq_build_info", "rabbitmq_version" => env!("CARGO_PKG_VERSION")).set(1.0);
 }
