@@ -1,5 +1,6 @@
 # Three brokers, one CPU and 512 MiB each, distinct host AMQP ports.
 # RabbitMQ 35672, Rust QueueForge 35673, Bun QueueForge 35674.
+# Management UIs on localhost: RabbitMQ 36672, Rust 36673, Bun 36674.
 
 name: queueforge-bench
 
@@ -11,6 +12,7 @@ services:
     mem_limit: 512m
     ports:
       - "35672:5672"
+      - "127.0.0.1:36672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: devpassword12
@@ -27,6 +29,7 @@ services:
     mem_limit: 512m
     ports:
       - "35673:5672"
+      - "127.0.0.1:36673:15672"
     environment:
       QUEUEFORGE_CONFIG: /etc/queueforge/queueforge.toml
       QUEUEFORGE_ADMIN_USER: admin
@@ -43,3 +46,6 @@ services:
     mem_limit: 512m
     ports:
       - "35674:5672"
+      - "127.0.0.1:36674:15672"
+    volumes:
+      - ./rust/ui/dist:/rust/ui/dist:ro
