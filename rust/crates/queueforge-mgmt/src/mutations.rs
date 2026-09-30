@@ -22,6 +22,7 @@ use crate::authz::{
     require_administrator, require_management_tag, require_session,
 };
 use crate::error::MgmtError;
+use crate::pagination::Page;
 use crate::routes::decode_vhost;
 use crate::state::{MgmtState, ReplicateReq};
 
@@ -860,7 +861,7 @@ pub async fn list_bindings(
     State(state): State<MgmtState>,
     headers: HeaderMap,
     Path(raw_vhost): Path<String>,
-) -> Result<Json<Vec<BindingItem>>, MgmtError> {
+) -> Result<Json<Page<BindingItem>>, MgmtError> {
     let _session = require_session(&state, &headers).await?;
     let vhost = decode_vhost(&raw_vhost)?;
     ensure_vhost(&state, &vhost).await?;
@@ -885,7 +886,12 @@ pub async fn list_bindings(
             .then_with(|| a.destination.cmp(&b.destination))
             .then_with(|| a.routing_key.cmp(&b.routing_key))
     });
-    Ok(Json(items))
+    let total = items.len() as u64;
+    Ok(Json(Page {
+        items,
+        next_cursor: None,
+        total_count: Some(total),
+    }))
 }
 
 /// GET /api/exchanges/{vhost}/{name}/bindings

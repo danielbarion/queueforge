@@ -8,6 +8,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static QUEUES: AtomicU64 = AtomicU64::new(0);
 static CONSUMERS: AtomicU64 = AtomicU64::new(0);
+static PUBLISHED: AtomicU64 = AtomicU64::new(0);
+static DELIVERED: AtomicU64 = AtomicU64::new(0);
+static ACKED: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative publish, deliver, and ack counts for the management overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrafficTotals {
+    /// `rabbitmq_global_messages_received_total`.
+    pub publish: u64,
+    /// `rabbitmq_global_messages_delivered_total`.
+    pub deliver: u64,
+    /// `rabbitmq_global_messages_acknowledged_total`.
+    pub ack: u64,
+}
+
+/// Latest cumulative traffic counters.
+pub fn traffic_totals() -> TrafficTotals {
+    TrafficTotals {
+        publish: PUBLISHED.load(Ordering::Relaxed),
+        deliver: DELIVERED.load(Ordering::Relaxed),
+        ack: ACKED.load(Ordering::Relaxed),
+    }
+}
 
 fn counter(name: &'static str) {
     metrics::counter!(name).increment(1);
@@ -130,6 +153,7 @@ pub fn consumer_closed() {
 
 /// A publish body was accepted. `confirm` is publisher-confirm mode.
 pub fn message_received(confirm: bool) {
+    PUBLISHED.fetch_add(1, Ordering::Relaxed);
     counter("rabbitmq_global_messages_received_total");
     if confirm {
         counter("rabbitmq_global_messages_received_confirm_total");
@@ -159,6 +183,7 @@ pub fn message_unroutable(returned: bool) {
 
 /// A message was pushed to a consumer.
 pub fn message_delivered_consume(auto_ack: bool) {
+    DELIVERED.fetch_add(1, Ordering::Relaxed);
     counter("rabbitmq_global_messages_delivered_total");
     if auto_ack {
         counter("rabbitmq_global_messages_delivered_consume_auto_ack_total");
@@ -169,6 +194,7 @@ pub fn message_delivered_consume(auto_ack: bool) {
 
 /// `basic.get` returned a message.
 pub fn message_delivered_get(auto_ack: bool) {
+    DELIVERED.fetch_add(1, Ordering::Relaxed);
     counter("rabbitmq_global_messages_delivered_total");
     if auto_ack {
         counter("rabbitmq_global_messages_delivered_get_auto_ack_total");
@@ -184,6 +210,7 @@ pub fn message_get_empty() {
 
 /// A delivered message was acknowledged.
 pub fn message_acked() {
+    ACKED.fetch_add(1, Ordering::Relaxed);
     counter("rabbitmq_global_messages_acknowledged_total");
 }
 

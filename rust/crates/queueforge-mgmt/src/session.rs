@@ -250,8 +250,31 @@ fn random_token() -> String {
 ///
 /// Dev defaults: `HttpOnly; SameSite=Lax; Path=/`. `Secure` only when
 /// `secure` is true (TLS enabled).
+/// Cookie name for this request. A non-default port is part of the name so
+/// two admins on the same host do not share one `queueforge_session` cookie.
+pub fn cookie_name_from_host(host: Option<&str>) -> String {
+    let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+        return SESSION_COOKIE_NAME.to_string();
+    };
+    let host = host.split(',').next().unwrap_or(host).trim();
+    let port = if let Some(rest) = host.strip_prefix('[') {
+        rest.split_once(']')
+            .and_then(|(_, after)| after.strip_prefix(':'))
+    } else {
+        host.rsplit_once(':').map(|(_, port)| port)
+    };
+    match port.and_then(|p| p.parse::<u16>().ok()) {
+        Some(port) if port != 80 && port != 443 => format!("{SESSION_COOKIE_NAME}_{port}"),
+        _ => SESSION_COOKIE_NAME.to_string(),
+    }
+}
+
 pub fn build_session_cookie(token: &str, secure: bool) -> String {
-    let mut builder = Cookie::build((SESSION_COOKIE_NAME, token))
+    build_session_cookie_named(SESSION_COOKIE_NAME, token, secure)
+}
+
+pub fn build_session_cookie_named(name: &str, token: &str, secure: bool) -> String {
+    let mut builder = Cookie::build((name.to_string(), token))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -266,7 +289,11 @@ pub fn build_session_cookie(token: &str, secure: bool) -> String {
 
 /// Build a `Set-Cookie` that clears the session cookie.
 pub fn clear_session_cookie(secure: bool) -> String {
-    let mut builder = Cookie::build((SESSION_COOKIE_NAME, ""))
+    clear_session_cookie_named(SESSION_COOKIE_NAME, secure)
+}
+
+pub fn clear_session_cookie_named(name: &str, secure: bool) -> String {
+    let mut builder = Cookie::build((name.to_string(), ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -279,15 +306,21 @@ pub fn clear_session_cookie(secure: bool) -> String {
 
 /// Extract the session token from a raw `Cookie` header value.
 pub fn extract_token_from_cookie_header(header: &str) -> Option<String> {
+    extract_named_token(header, SESSION_COOKIE_NAME)
+}
+
+pub fn extract_named_token(header: &str, name: &str) -> Option<String> {
     for part in header.split(';') {
         let part = part.trim();
-        if let Some(rest) = part.strip_prefix(SESSION_COOKIE_NAME) {
-            let rest = rest.trim_start();
-            if let Some(value) = rest.strip_prefix('=') {
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
+        let Some(rest) = part.strip_prefix(name) else {
+            continue;
+        };
+        if !rest.starts_with('=') {
+            continue;
+        }
+        let value = &rest[1..];
+        if !value.is_empty() {
+            return Some(value.to_string());
         }
     }
     None
@@ -373,5 +406,28 @@ mod tests {
             extract_token_from_cookie_header(&h).as_deref(),
             Some("deadbeef")
         );
+    }
+
+    #[test]
+    fn port_in_the_host_changes_the_cookie_name() {
+        assert_eq!(
+            cookie_name_from_host(Some("127.0.0.1:36673")),
+            "queueforge_session_36673"
+        );
+        assert_eq!(
+            cookie_name_from_host(Some("127.0.0.1:36674")),
+            "queueforge_session_36674"
+        );
+        assert_eq!(cookie_name_from_host(None), SESSION_COOKIE_NAME);
+        let header = "queueforge_session_36673=rust-token; queueforge_session_36674=bun-token";
+        assert_eq!(
+            extract_named_token(header, "queueforge_session_36673").as_deref(),
+            Some("rust-token")
+        );
+        assert_eq!(
+            extract_named_token(header, "queueforge_session_36674").as_deref(),
+            Some("bun-token")
+        );
+        assert_eq!(extract_token_from_cookie_header(header), None);
     }
 }

@@ -65,6 +65,8 @@ pub struct MgmtState {
     pub config: MgmtConfig,
     /// When set, user/vhost/permission writes are pushed to cluster peers.
     pub replicate_tx: Option<mpsc::UnboundedSender<ReplicateReq>>,
+    /// Prometheus text for `GET /metrics` on the management listener.
+    pub metrics_text: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
 
 impl MgmtState {
@@ -86,7 +88,14 @@ impl MgmtState {
             ready,
             config,
             replicate_tx: None,
+            metrics_text: None,
         }
+    }
+
+    /// Serve this scrape body at `GET /metrics` on the management listener.
+    pub fn with_metrics_text(mut self, render: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
+        self.metrics_text = Some(render);
+        self
     }
 
     /// Attach the cluster fan-out used after user, permission, and vhost writes.

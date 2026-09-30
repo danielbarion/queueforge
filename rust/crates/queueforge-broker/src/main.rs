@@ -230,6 +230,7 @@ async fn run() -> Result<()> {
         &config.cluster.local_node_id().unwrap_or_else(|| "queueforge".into()),
         "queueforge",
     );
+    let metrics_render = metrics_handle.clone();
     let metrics_server = start_server(config.listeners.metrics, metrics_handle, ready.clone())
         .await
         .context("starting metrics/health listener")?;
@@ -296,6 +297,7 @@ async fn run() -> Result<()> {
     if let Some(tx) = replicate_tx {
         mgmt_state = mgmt_state.with_replicator(tx);
     }
+    mgmt_state = mgmt_state.with_metrics_text(Arc::new(move || metrics_render.render()));
     let mgmt_tls = tls_config
         .as_ref()
         .map(|c| with_https_alpn(std::sync::Arc::clone(c)));

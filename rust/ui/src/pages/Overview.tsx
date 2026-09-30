@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getOverview, type Overview, type Whoami } from "../api";
 import Layout from "../components/Layout";
+import { trafficRates, type TrafficSample } from "../rates";
 
 type Props = {
   user: Whoami;
@@ -11,12 +12,32 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [rates, setRates] = useState({ publish: 0, deliver: 0, ack: 0 });
+  const previous = useRef<{ at: number; sample: TrafficSample } | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
       const ov = await getOverview();
       setData(ov);
+      const sample: TrafficSample = {
+        publish: ov.message_stats?.publish ?? 0,
+        deliver: ov.message_stats?.deliver ?? 0,
+        ack: ov.message_stats?.ack ?? 0,
+        confirmed: 0,
+        ready: ov.queue_totals.messages_ready,
+        unacked: ov.queue_totals.messages_unacknowledged,
+        consumers: ov.object_totals.consumers,
+        confirmBeforeFsync: 0,
+        fsync: 0,
+      };
+      const prior = previous.current;
+      const now = Date.now();
+      if (prior) {
+        const live = trafficRates(prior.sample, sample, (now - prior.at) / 1000);
+        setRates({ publish: live.publishPerSec, deliver: live.deliverPerSec, ack: live.ackPerSec });
+      }
+      previous.current = { at: now, sample };
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onLoggedOut();
@@ -30,7 +51,7 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
 
   useEffect(() => {
     void load();
-    const id = window.setInterval(() => void load(), 10_000);
+    const id = window.setInterval(() => void load(), 1000);
     return () => window.clearInterval(id);
   }, [load]);
 
@@ -77,6 +98,13 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
             <Stat label="Vhosts" value={data.object_totals.vhosts} />
           </div>
 
+          <h2>Message rates</h2>
+          <div className="stat-grid">
+            <Stat label="Publish /s" value={rates.publish} />
+            <Stat label="Deliver /s" value={rates.deliver} />
+            <Stat label="Ack /s" value={rates.ack} />
+          </div>
+
           <h2>Queue totals</h2>
           <div className="stat-grid">
             <Stat label="Messages" value={data.queue_totals.messages} />
@@ -93,10 +121,11 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
+  const shown = Number.isInteger(value) ? value.toLocaleString() : value.toFixed(1);
   return (
     <div className="stat card">
       <span className="label">{label}</span>
-      <span className="stat-value">{value.toLocaleString()}</span>
+      <span className="stat-value">{shown}</span>
     </div>
   );
 }

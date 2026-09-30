@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   createQueue,
   deleteQueue,
   listQueues,
+  getOverview,
   listVhosts,
   purgeQueue,
   type QueueArguments,
@@ -11,6 +12,7 @@ import {
   type Whoami,
 } from "../api";
 import Layout from "../components/Layout";
+import { trafficRates, type TrafficSample } from "../rates";
 
 type Props = { user: Whoami; onLoggedOut: () => void };
 
@@ -30,6 +32,8 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
     "drop-head",
   );
   const [showArgs, setShowArgs] = useState(false);
+  const [rates, setRates] = useState({ publish: 0, deliver: 0, ack: 0, ready: 0, unacked: 0 });
+  const previous = useRef<{ at: number; sample: TrafficSample } | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -38,6 +42,33 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
       setVhosts(vh.items.map((v) => v.name));
       const page = await listQueues(vhost);
       setItems(page.items);
+      const ov = await getOverview();
+      const sample: TrafficSample = {
+        publish: ov.message_stats?.publish ?? 0,
+        deliver: ov.message_stats?.deliver ?? 0,
+        ack: ov.message_stats?.ack ?? 0,
+        confirmed: 0,
+        ready: page.items.reduce((sum, q) => sum + q.messages_ready, 0),
+        unacked: page.items.reduce((sum, q) => sum + q.messages_unacknowledged, 0),
+        consumers: page.items.reduce((sum, q) => sum + q.consumers, 0),
+        confirmBeforeFsync: 0,
+        fsync: 0,
+      };
+      const prior = previous.current;
+      const now = Date.now();
+      if (prior) {
+        const live = trafficRates(prior.sample, sample, (now - prior.at) / 1000);
+        setRates({
+          publish: live.publishPerSec,
+          deliver: live.deliverPerSec,
+          ack: live.ackPerSec,
+          ready: live.ready,
+          unacked: live.unacked,
+        });
+      } else {
+        setRates((current) => ({ ...current, ready: sample.ready, unacked: sample.unacked }));
+      }
+      previous.current = { at: now, sample };
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onLoggedOut();
@@ -49,7 +80,7 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
 
   useEffect(() => {
     void load();
-    const id = window.setInterval(() => void load(), 8_000);
+    const id = window.setInterval(() => void load(), 1000);
     return () => window.clearInterval(id);
   }, [load]);
 
@@ -105,6 +136,13 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
       }
     >
       {error && <div className="error">{error}</div>}
+      <div className="stat-grid">
+        <div className="stat card"><span className="label">Publish /s</span><span className="stat-value">{rates.publish.toFixed(1)}</span></div>
+        <div className="stat card"><span className="label">Deliver /s</span><span className="stat-value">{rates.deliver.toFixed(1)}</span></div>
+        <div className="stat card"><span className="label">Ack /s</span><span className="stat-value">{rates.ack.toFixed(1)}</span></div>
+        <div className="stat card"><span className="label">Ready</span><span className="stat-value">{rates.ready}</span></div>
+        <div className="stat card"><span className="label">Unacked</span><span className="stat-value">{rates.unacked}</span></div>
+      </div>
 
       <div className="toolbar">
         <label>

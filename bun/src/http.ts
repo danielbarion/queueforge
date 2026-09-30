@@ -5,17 +5,27 @@ import { addFederationPolicy, addFederationUpstream, type Broker } from "./broke
 const COOKIE = "queueforge_session";
 const sessions = new Map<string, { user: string; tags: string[] }>();
 
-function tokenOf(header: string | null): string | null {
+export function cookieNameFromHost(host: string | null): string {
+  const raw = (host ?? "").split(",")[0]?.trim() ?? "";
+  const port = raw.startsWith("[")
+    ? raw.slice(raw.indexOf("]") + 1).replace(/^:/, "")
+    : (raw.split(":").length > 1 ? raw.slice(raw.lastIndexOf(":") + 1) : "");
+  const n = Number(port);
+  if (Number.isInteger(n) && n > 0 && n !== 80 && n !== 443) return `${COOKIE}_${n}`;
+  return COOKIE;
+}
+
+function tokenOf(header: string | null, name: string): string | null {
   if (!header) return null;
   for (const part of header.split(";")) {
     const t = part.trim();
-    if (t.startsWith(`${COOKIE}=`)) return t.slice(COOKIE.length + 1);
+    if (t.startsWith(`${name}=`)) return t.slice(name.length + 1);
   }
   return null;
 }
 
-function requireUser(header: string | null) {
-  const token = tokenOf(header);
+function requireUser(header: string | null, host: string | null) {
+  const token = tokenOf(header, cookieNameFromHost(host));
   if (!token) return null;
   return sessions.get(token) ?? null;
 }
@@ -30,7 +40,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return "ready\n";
     })
-    .post("/api/login", async ({ body, set }) => {
+    .post("/api/login", async ({ body, request, set }) => {
       const b = body as { username?: string; password?: string };
       const username = b.username ?? "";
       const password = b.password ?? "";
@@ -45,18 +55,20 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const token = crypto.randomUUID().replaceAll("-", "");
       sessions.set(token, { user: username, tags });
-      set.headers["set-cookie"] = `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/`;
+      const name = cookieNameFromHost(request.headers.get("host"));
+      set.headers["set-cookie"] = `${name}=${token}; HttpOnly; SameSite=Lax; Path=/`;
       return { name: username, tags };
     })
     .post("/api/logout", ({ request, set }) => {
-      const token = tokenOf(request.headers.get("cookie"));
+      const name = cookieNameFromHost(request.headers.get("host"));
+      const token = tokenOf(request.headers.get("cookie"), name);
       if (token) sessions.delete(token);
       set.status = 204;
-      set.headers["set-cookie"] = `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+      set.headers["set-cookie"] = `${name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
       return "";
     })
     .get("/api/whoami", ({ request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s) {
         set.status = 401;
         return { error: "unauthorized" };
@@ -64,21 +76,52 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name: s.user, tags: s.tags };
     })
     .get("/api/overview", ({ request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return { product: "queueforge-bun", queue_count: broker.queues.size, exchange_count: broker.exchanges.size };
+      let messages_ready = 0;
+      let messages_unacked = 0;
+      let consumers = 0;
+      for (const q of broker.queues.values()) {
+        messages_ready += q.ready.length;
+        messages_unacked += q.unacked.size;
+        consumers += q.consumers.length;
+      }
+      return {
+        product_name: "QueueForge",
+        product_version: "0.1.0",
+        management_version: "0.1.0",
+        rabbitmq_version_compat: "0.9.1",
+        object_totals: {
+          connections: broker.prom.connections,
+          channels: broker.prom.channels,
+          queues: broker.queues.size,
+          exchanges: broker.exchanges.size,
+          consumers,
+          vhosts: broker["vhosts"].size,
+        },
+        queue_totals: {
+          messages: messages_ready + messages_unacked,
+          messages_ready,
+          messages_unacknowledged: messages_unacked,
+        },
+        message_stats: {
+          publish: broker.prom.received,
+          deliver: broker.prom.delivered,
+          ack: broker.prom.acknowledged,
+        },
+      };
     })
     .get("/api/vhosts", ({ request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
       return { items: [...broker["vhosts"]].map((name) => ({ name })) };
     })
     .put("/api/vhosts/:vhost", async ({ params, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -90,7 +133,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name };
     })
     .delete("/api/vhosts/:vhost", async ({ params, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -103,7 +146,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .get("/api/users", ({ request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -111,7 +154,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return broker.listUsers();
     })
     .put("/api/users/:name", async ({ params, body, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -123,7 +166,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return existing.length ? "" : { name: params.name, tags: b.tags ?? [] };
     })
     .delete("/api/users/:name", async ({ params, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -133,7 +176,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .put("/api/permissions/:user/:vhost", async ({ params, body, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -145,7 +188,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { user: params.user, vhost, ...b };
     })
     .delete("/api/permissions/:user/:vhost", async ({ params, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -155,7 +198,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .get("/api/queues/:vhost", ({ params, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -164,14 +207,20 @@ export function managementApp(broker: Broker, spaDir: string) {
         name: q.name,
         vhost,
         durable: q.durable,
+        exclusive: q.exclusive,
         auto_delete: q.autoDelete,
+        state: "running",
+        messages: q.ready.length + q.unacked.size,
+        messages_ready: q.ready.length,
+        messages_unacknowledged: q.unacked.size,
+        consumers: q.consumers.length,
         arguments: q.args,
         type: q.argsParsed.queueType,
       }));
-      return { items };
+      return { items, total_count: items.length };
     })
     .put("/api/queues/:vhost/:name", async ({ params, body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -194,7 +243,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name: res.name };
     })
     .delete("/api/queues/:vhost/:name", async ({ params, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -202,8 +251,97 @@ export function managementApp(broker: Broker, spaDir: string) {
       set.status = 204;
       return "";
     })
+    .get("/api/exchanges/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const items = [...broker.exchanges.values()].filter((e) => e.vhost === vhost).map((e) => ({
+        name: e.name,
+        vhost,
+        type: e.kind,
+        durable: e.durable,
+        auto_delete: e.autoDelete,
+        internal: e.internal,
+      }));
+      items.sort((a, b) => a.name.localeCompare(b.name));
+      return { items, total_count: items.length };
+    })
+    .get("/api/bindings/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const items = broker.bindings.filter((b) => b.vhost === vhost).map((b) => ({
+        source: b.exchange,
+        destination: b.queue,
+        destination_type: "queue",
+        routing_key: b.routingKey,
+        vhost,
+        properties_key: b.routingKey,
+      }));
+      return { items, total_count: items.length };
+    })
+    .get("/api/connections", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return { items: [], total_count: broker.prom.connections };
+    })
+    .post("/api/exchanges/:vhost/:name/publish", async ({ params, body, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const b = (body ?? {}) as { routing_key?: string; payload?: string; payload_encoding?: string };
+      const vhost = decodeURIComponent(params.vhost);
+      const payload = b.payload ?? "";
+      const bytes = b.payload_encoding === "base64" ? Buffer.from(payload, "base64") : Buffer.from(payload);
+      const result = await broker.publish({
+        vhost,
+        exchange: params.name,
+        routingKey: b.routing_key ?? "",
+        body: new Uint8Array(bytes),
+        headers: [],
+        propRaw: new Uint8Array(),
+        persistent: false,
+        priority: 0,
+        expiration: "",
+        confirm: true,
+      });
+      return { routed: result !== "return" && result !== "nack" };
+    })
+    .post("/api/queues/:vhost/:name/get", async ({ params, body, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const b = (body ?? {}) as { count?: number; ackmode?: string };
+      const vhost = decodeURIComponent(params.vhost);
+      const count = Math.max(1, Math.min(b.count ?? 1, 20));
+      const noAck = b.ackmode === "ack_requeue_false" || b.ackmode === "reject_requeue_false";
+      const out = [];
+      for (let i = 0; i < count; i++) {
+        const msg = await broker.get(vhost, params.name, noAck || b.ackmode !== "ack_requeue_true");
+        if (!msg) break;
+        const payload = Buffer.from(msg.body).toString("utf8");
+        out.push({
+          payload,
+          payload_encoding: "string",
+          payload_bytes: msg.body.byteLength,
+          redelivered: msg.redelivered,
+          exchange: msg.exchange,
+          routing_key: msg.routingKey,
+          properties: {},
+        });
+      }
+      return out;
+    })
     .put("/api/exchanges/:vhost/:name", async ({ params, body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -214,7 +352,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name: params.name, type: b.type ?? "direct" };
     })
     .delete("/api/exchanges/:vhost/:name", async ({ params, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -223,7 +361,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .delete("/api/bindings/:vhost/:exchange/:queue/:key", async ({ params, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -233,7 +371,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .post("/api/bindings/:vhost", async ({ params, body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -245,14 +383,14 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { source: b.source, destination: b.destination };
     })
     .get("/api/definitions", ({ request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
       return broker.exportDefinitions();
     })
     .post("/api/definitions", async ({ body, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -262,7 +400,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .put("/api/policies/:vhost/:name", ({ params, body, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"));
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
@@ -338,7 +476,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name: params.name };
     })
     .put("/api/parameters/shovel/:vhost/:name", async ({ body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -372,7 +510,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { name: src };
     })
     .put("/api/parameters/federation-upstream/:vhost/:name", ({ params, body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -385,7 +523,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       return { uri };
     })
     .get("/api/policies/:vhost", ({ params, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -415,7 +553,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       };
     })
     .get("/api/policies", ({ request, set }) => {
-      if (!requireUser(request.headers.get("cookie"))) {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
@@ -440,15 +578,27 @@ export function managementApp(broker: Broker, spaDir: string) {
         })),
       };
     })
+    .get("/metrics", () => new Response(metricsText(broker), { headers: { "content-type": "text/plain; version=0.0.4" } }))
     .get("/*", async ({ request, set }) => {
       const url = new URL(request.url);
       const rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\//, "");
-      const file = Bun.file(join(spaDir, rel));
-      if (!(await file.exists())) {
+      if (rel === "api" || rel.startsWith("api/") || rel === "healthz" || rel === "readyz" || rel === "metrics") {
         set.status = 404;
         return "not found\n";
       }
-      return file;
+      const file = Bun.file(join(spaDir, rel));
+      if (await file.exists()) return file;
+      const segment = rel.split("/").pop() ?? "";
+      if (segment.includes(".")) {
+        set.status = 404;
+        return "not found\n";
+      }
+      const index = Bun.file(join(spaDir, "index.html"));
+      if (!(await index.exists())) {
+        set.status = 404;
+        return "not found\n";
+      }
+      return index;
     });
 }
 
@@ -536,6 +686,22 @@ export function metricsText(broker: Broker): string {
     "rabbitmq_disk_space_available_bytes 0",
     "# TYPE rabbitmq_unreachable_cluster_peers_count gauge",
     "rabbitmq_unreachable_cluster_peers_count 0",
+    ...[...broker.queues.values()].flatMap((q) => {
+      const labels = `vhost="${promLabel(q.vhost)}",queue="${promLabel(q.name)}"`;
+      return [
+        "# TYPE rabbitmq_queue_messages_ready gauge",
+        `rabbitmq_queue_messages_ready{${labels}} ${q.ready.length}`,
+        "# TYPE rabbitmq_queue_messages_unacked gauge",
+        `rabbitmq_queue_messages_unacked{${labels}} ${q.unacked.size}`,
+        "# TYPE rabbitmq_queue_messages gauge",
+        `rabbitmq_queue_messages{${labels}} ${q.ready.length + q.unacked.size}`,
+        "# TYPE rabbitmq_queue_consumers gauge",
+        `rabbitmq_queue_consumers{${labels}} ${q.consumers.length}`,
+      ];
+    }),
+    "# TYPE queueforge_wal_fsync_seconds histogram",
+    `queueforge_wal_fsync_seconds_count ${broker.store.fullFlushCount}`,
+    `queueforge_wal_fsync_seconds_sum 0`,
     "# TYPE queueforge_confirm_before_fsync_total counter",
     `queueforge_confirm_before_fsync_total ${broker.store.confirmsBeforeFsync}`,
     "# TYPE queueforge_full_flush_total counter",
@@ -544,14 +710,7 @@ export function metricsText(broker: Broker): string {
     `rabbitmq_identity_info{rabbitmq_node="${node}",rabbitmq_cluster="queueforge"} 1`,
     "# TYPE rabbitmq_build_info gauge",
     'rabbitmq_build_info{rabbitmq_version="0.1.0"} 1',
+    "",
   ];
-  for (const q of broker.queues.values()) {
-    const labels = `vhost="${promLabel(q.vhost)}",queue="${promLabel(q.name)}"`;
-    lines.push(`rabbitmq_queue_messages_ready{${labels}} ${q.ready.length}`);
-    lines.push(`rabbitmq_queue_messages_unacked{${labels}} ${q.unacked.size}`);
-    lines.push(`rabbitmq_queue_messages{${labels}} ${q.ready.length + q.unacked.size}`);
-    lines.push(`rabbitmq_queue_consumers{${labels}} ${q.consumers.length}`);
-  }
-  lines.push("");
   return lines.join("\n");
 }

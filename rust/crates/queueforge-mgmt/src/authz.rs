@@ -5,13 +5,16 @@ use queueforge_auth::{AuthService, PermissionKind, ResourceKind, DEFAULT_EXCHANG
 use queueforge_core::UserTag;
 
 use crate::error::MgmtError;
-use crate::session::{extract_token_from_cookie_header, Session};
+use crate::session::{cookie_name_from_host, extract_named_token, Session};
 use crate::state::MgmtState;
 
 /// Extract session cookie token from request headers.
 pub fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    extract_token_from_cookie_header(raw)
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    extract_named_token(raw, &cookie_name_from_host(host))
 }
 
 /// Require a valid management session.

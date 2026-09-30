@@ -25,7 +25,8 @@ use crate::mutations::{
 };
 use crate::pagination::{paginate_by_name, ListQuery, Page};
 use crate::session::{
-    build_session_cookie, clear_session_cookie, extract_token_from_cookie_header,
+    build_session_cookie_named, clear_session_cookie_named, cookie_name_from_host,
+    extract_named_token,
 };
 use crate::state::MgmtState;
 
@@ -44,6 +45,7 @@ pub fn router(state: MgmtState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_scrape))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/whoami", get(whoami))
@@ -240,7 +242,8 @@ async fn login(
     state.sessions.clear_login_failures(&ip);
     let token = state.sessions.create(user.name.as_str(), user.tags.clone());
 
-    let cookie = build_session_cookie(&token, state.config.cookie_secure);
+    let cookie_name = cookie_name_from_host(headers.get(header::HOST).and_then(|v| v.to_str().ok()));
+    let cookie = build_session_cookie_named(&cookie_name, &token, state.config.cookie_secure);
     let body = WhoamiResponse {
         name: user.name.to_string(),
         tags: tags_as_str(&user.tags),
@@ -260,7 +263,8 @@ async fn logout(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Re
     if let Some(token) = session_token_from_headers(&headers) {
         state.sessions.remove(&token);
     }
-    let cookie = clear_session_cookie(state.config.cookie_secure);
+    let cookie_name = cookie_name_from_host(headers.get(header::HOST).and_then(|v| v.to_str().ok()));
+    let cookie = clear_session_cookie_named(&cookie_name, state.config.cookie_secure);
     let mut res = StatusCode::NO_CONTENT.into_response();
     res.headers_mut().insert(
         header::SET_COOKIE,
@@ -292,6 +296,14 @@ struct OverviewResponse {
     rabbitmq_version_compat: &'static str,
     object_totals: ObjectTotals,
     queue_totals: QueueTotals,
+    message_stats: MessageStats,
+}
+
+#[derive(Debug, Serialize)]
+struct MessageStats {
+    publish: u64,
+    deliver: u64,
+    ack: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +355,7 @@ async fn overview(
         }
     }
 
+    let traffic = queueforge_core::prom::traffic_totals();
     Ok(Json(OverviewResponse {
         product_name: "QueueForge",
         product_version: state.config.product_version.clone(),
@@ -361,7 +374,23 @@ async fn overview(
             messages_ready,
             messages_unacknowledged: messages_unacked,
         },
+        message_stats: MessageStats {
+            publish: traffic.publish,
+            deliver: traffic.deliver,
+            ack: traffic.ack,
+        },
     }))
+}
+
+async fn metrics_scrape(State(state): State<MgmtState>) -> Response {
+    let Some(render) = state.metrics_text else {
+        return (StatusCode::NOT_FOUND, "metrics are not installed\n").into_response();
+    };
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        render(),
+    )
+        .into_response()
 }
 
 // ── Vhosts ──────────────────────────────────────────────────────────────
@@ -510,6 +539,17 @@ struct ExchangeItem {
     internal: bool,
 }
 
+fn exchange_list_item(ex: queueforge_core::Exchange) -> ExchangeItem {
+    ExchangeItem {
+        name: ex.name.to_string(),
+        vhost: ex.vhost.to_string(),
+        kind: ex.kind.as_str().to_string(),
+        durable: ex.durable,
+        auto_delete: ex.auto_delete,
+        internal: ex.internal,
+    }
+}
+
 async fn list_exchanges(
     State(state): State<MgmtState>,
     headers: HeaderMap,
@@ -527,19 +567,18 @@ async fn list_exchanges(
         return Err(MgmtError::NotFound(format!("vhost {vhost}")));
     }
 
-    let vhost_ex = vhost.clone();
-    let mut items: Vec<ExchangeItem> = db(&state, move |s| s.list_exchanges(&vhost_ex))
-        .await?
+    let mut items: Vec<ExchangeItem> = state
+        .router
+        .list_exchanges(&vhost)
         .into_iter()
-        .map(|ex| ExchangeItem {
-            name: ex.name.to_string(),
-            vhost: ex.vhost.to_string(),
-            kind: ex.kind.as_str().to_string(),
-            durable: ex.durable,
-            auto_delete: ex.auto_delete,
-            internal: ex.internal,
-        })
+        .map(exchange_list_item)
         .collect();
+    let vhost_ex = vhost.clone();
+    for ex in db(&state, move |s| s.list_exchanges(&vhost_ex)).await? {
+        if !items.iter().any(|item| item.name == ex.name.as_str()) {
+            items.push(exchange_list_item(ex));
+        }
+    }
     items.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(paginate_by_name(items, &query, |e| e.name.as_str())))
 }
@@ -609,7 +648,8 @@ fn tags_as_str(tags: &[UserTag]) -> Vec<&'static str> {
 
 fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    extract_token_from_cookie_header(raw)
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    extract_named_token(raw, &cookie_name_from_host(host))
 }
 
 /// Decode a path-captured vhost. Axum percent-decodes path params, so `%2F`
@@ -788,6 +828,91 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let json = body_json(res).await;
         assert_eq!(json["name"], "admin");
+    }
+
+    #[tokio::test]
+    async fn session_cookie_from_one_host_port_is_rejected_by_the_other() {
+        let (_dir, state) = test_state().await;
+        let app = test_app(state, peer([127, 0, 0, 1], 10001));
+
+        async fn login_as(app: &Router, host: &str) -> String {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/login")
+                        .header(header::HOST, host)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(login_body("admin", "devpassword12"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{host} login");
+            cookie_from(&res).expect("Set-Cookie")
+        }
+
+        async fn whoami(app: &Router, host: &str, cookie: &str) -> StatusCode {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/whoami")
+                        .header(header::HOST, host)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        let rust_host = "127.0.0.1:36673";
+        let bun_host = "127.0.0.1:36674";
+        let rust_cookie = login_as(&app, rust_host).await;
+        assert!(rust_cookie.starts_with("queueforge_session_36673="));
+        assert_eq!(whoami(&app, rust_host, &rust_cookie).await, StatusCode::OK);
+        assert_eq!(
+            whoami(&app, bun_host, &rust_cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let bun_cookie = login_as(&app, bun_host).await;
+        assert!(bun_cookie.starts_with("queueforge_session_36674="));
+        assert_ne!(rust_cookie, bun_cookie);
+        assert_eq!(
+            whoami(&app, rust_host, &bun_cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(whoami(&app, bun_host, &bun_cookie).await, StatusCode::OK);
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/logout")
+                    .header(header::HOST, bun_host)
+                    .header(header::COOKIE, &bun_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let cleared = logout
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cleared.starts_with("queueforge_session_36674="));
+        assert!(!cleared.contains("queueforge_session_36673"));
+        assert_eq!(
+            whoami(&app, bun_host, &bun_cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// When TLS is enabled, `MgmtConfig.cookie_secure=true` must mark Set-Cookie Secure.
@@ -1095,7 +1220,7 @@ mod tests {
                     .uri("/api/queues/%2F/mgmt.q")
                     .header(header::COOKIE, &cookie)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"durable":false}"#))
+                    .body(Body::from(r#"{"durable":true}"#))
                     .unwrap(),
             )
             .await
@@ -1119,6 +1244,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED, "bind");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/exchanges/%2F")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "list exchanges");
+        let json = body_json(res).await;
+        assert!(
+            json["items"]
+                .as_array()
+                .expect("exchange items")
+                .iter()
+                .any(|ex| ex["name"] == "mgmt.ex"),
+            "created exchange missing from list: {json}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/bindings/%2F")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "list bindings");
+        let json = body_json(res).await;
+        assert!(
+            json["items"].as_array().expect("binding items").iter().any(|b| {
+                b["source"] == "mgmt.ex" && b["destination"] == "mgmt.q" && b["routing_key"] == "rk1"
+            }),
+            "created binding missing from list: {json}"
+        );
 
         // Publish
         let res = app
@@ -1620,7 +1787,7 @@ mod tests {
             .await
             .unwrap();
         let json = body_json(res).await;
-        let left: Vec<_> = json
+        let left: Vec<_> = json["items"]
             .as_array()
             .unwrap()
             .iter()

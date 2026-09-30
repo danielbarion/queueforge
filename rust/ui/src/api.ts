@@ -23,6 +23,11 @@ export type Overview = {
     messages_ready: number;
     messages_unacknowledged: number;
   };
+  message_stats?: {
+    publish: number;
+    deliver: number;
+    ack: number;
+  };
 };
 
 export type Page<T> = {
