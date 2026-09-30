@@ -179,6 +179,7 @@ pub enum FsyncPolicy {
     /// Never fsync (dev only; durable_done completes after buffered write).
     Never,
     /// Group-commit fsync every `fsync_interval_ms` (production default).
+    /// Publisher confirms complete after the buffered write, before this fsync.
     #[default]
     EveryNMs,
     /// Fsync after every `fsync_every_n_messages` durable appends.

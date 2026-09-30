@@ -755,7 +755,7 @@ export class Broker {
         if (!ok) rejected = true;
       }
     }
-    if (!rejected && input.persistent) await this.store.whenDurable();
+    // The interval timer still fsyncs. A publisher confirm does not wait for it.
     if (!rejected && input.confirm) this.prom.confirmed++;
     return rejected ? "nack" : "ack";
   }

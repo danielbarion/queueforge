@@ -101,13 +101,13 @@ pub fn format_report(summary: &Summary, disk_flush: &str) -> String {
 /// Disk flush the bench process actually runs for this AMQP URL.
 ///
 /// RabbitMQ 4 (`:35672`) confirms before fsync and flushes the classic queue v2
-/// write buffer at least every 200ms. Rust (`:35673`) and Bun (`:35674`) both
-/// group-commit on `fsync_interval_ms` and complete the publisher confirm after that fsync.
+/// write buffer at least every 200ms. Rust (`:35673`) and Bun (`:35674`) fsync
+/// on `fsync_interval_ms` and also complete the publisher confirm before that fsync.
 pub fn disk_flush_for_url(amqp_url: &str) -> &'static str {
     if amqp_url.contains(":35672") {
         "classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync"
     } else {
-        "fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, confirm after fsync"
+        "fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync"
     }
 }
 
@@ -182,7 +182,7 @@ mod tests {
         assert!(text.contains("classic_queue.default_version=2"));
         let bun = disk_flush_for_url("amqp://admin:devpassword12@127.0.0.1:35674/%2f");
         assert!(bun.contains("fsync_interval_ms=10"));
-        assert!(bun.contains("group-commit timer, confirm after fsync"));
+        assert!(bun.contains("publisher confirm before fsync"));
         assert!(!bun.contains("PRAGMA synchronous=FULL"));
     }
 

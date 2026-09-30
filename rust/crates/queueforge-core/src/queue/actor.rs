@@ -560,11 +560,13 @@ impl QueueState {
                     self.fsync_waiters.push(FsyncWaiter { offset, tx });
                     self.pending_fsync = true;
                 }
-                FsyncPolicy::EveryNMs | FsyncPolicy::EveryNMessages => {
+                FsyncPolicy::EveryNMs => {
+                    // The interval timer still fsyncs. The confirm does not wait for it.
+                    let _ = tx.send(Ok(()));
+                }
+                FsyncPolicy::EveryNMessages => {
                     self.fsync_waiters.push(FsyncWaiter { offset, tx });
-                    if self.durability_policy.policy == FsyncPolicy::EveryNMessages
-                        && self.unsynced_appends >= self.durability_policy.every_n_messages
-                    {
+                    if self.unsynced_appends >= self.durability_policy.every_n_messages {
                         self.pending_fsync = true;
                     }
                 }
@@ -1819,6 +1821,58 @@ mod tests {
         slow_done.durable_done.await.unwrap().unwrap();
         shutdown(tx_slow, slow).await;
         shutdown(tx_fast, fast_actor).await;
+    }
+
+    /// Interval fsync still runs. The confirm returns after the buffered append.
+    #[tokio::test]
+    async fn every_n_ms_confirm_returns_before_the_interval_fsync() {
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let key = QueueKey::new("/", "group");
+        let memory = MemoryTracker::shared();
+        let info = Arc::new(QueueInfo::new(
+            key.clone(),
+            &crate::queue::QueueDeclareOpts {
+                durable: true,
+                ..crate::queue::QueueDeclareOpts::default()
+            },
+        ));
+        let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+            Box::new(SlowLog {
+                delay: Duration::from_millis(80),
+                entered: Arc::clone(&entered),
+            }),
+            DurabilityPolicy {
+                policy: FsyncPolicy::EveryNMs,
+                interval: Duration::from_millis(40),
+                every_n_messages: 1,
+            },
+        );
+        boot.durable = true;
+        let (tx, rx) = mpsc::channel(8);
+        let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+        let mut msg = (*sample_msg(b"durable")).clone();
+        msg.persistent = true;
+        let done = enqueue(&tx, Arc::new(msg)).await;
+        let started = std::time::Instant::now();
+        done.durable_done.await.unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(30),
+            "publisher confirm waited for the group-commit fsync"
+        );
+        assert!(
+            !entered.load(std::sync::atomic::Ordering::SeqCst),
+            "interval fsync ran before the confirm returned"
+        );
+
+        let wait = std::time::Instant::now();
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            if wait.elapsed() > Duration::from_secs(2) {
+                panic!("group-commit timer did not fsync");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        shutdown(tx, actor).await;
     }
 
     #[tokio::test]
