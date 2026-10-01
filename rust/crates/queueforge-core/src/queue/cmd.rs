@@ -282,9 +282,11 @@ pub enum QueueCmd {
         /// Completion reply.
         reply: oneshot::Sender<Result<EnqueueCompletion>>,
     },
-    /// Fsync the queue log, then reply. Classic confirms do not send this.
+    /// Fsync the queue log through `offset`, then reply. Classic confirms do not send this.
     FlushDurable {
-        /// Completes after the write-ahead log fsync, or immediately when there is no log.
+        /// Enqueue offset that must be inside the fsynced log before the reply.
+        offset: QueueOffset,
+        /// Completes after that offset is in the fsynced log, or immediately when there is no log.
         reply: oneshot::Sender<Result<()>>,
     },
     /// Pull one ready message into unacked for a consumer (legacy / get-style).

@@ -15,7 +15,7 @@ use compact_str::CompactString;
 use queueforge_core::{
     Binding, ClusterMember, ConsumerDeliveryId, ConsumerSessionId, EnqueueCompletion, Error,
     Exchange, ExchangeRouter, Message, Permission, Policy, Queue, QueueCmd, QueueDeclareOpts, QueueHandle,
-    QueueKey, QueueRegistry, User, Vhost,
+    QueueKey, QueueOffset, QueueRegistry, User, Vhost,
 };
 use queueforge_store::MetadataStore;
 
@@ -497,16 +497,26 @@ impl Cluster {
         let mut stored_on = Vec::new();
         let mut copies = Vec::new();
         for peer in &peers {
-            if self.call(peer, "quorum_append", encode_quorum_append(key, &message)).await.is_ok() {
+            let reply = self.call(peer, "quorum_append", encode_quorum_append(key, &message)).await;
+            if peer_append_durable(&reply) {
                 stored_on.push(peer.clone());
                 copies.push(MemberCopy::Durable);
             } else {
                 copies.push(MemberCopy::MemoryOnly);
             }
         }
-        if local_enqueue(&self.inner, key, Arc::clone(&message)).await.is_err()
-            || flush_queue(&self.inner, key).await.is_err()
-        {
+        let local_offset = match local_enqueue(&self.inner, key, Arc::clone(&message)).await {
+            Ok(offset) => offset,
+            Err(_) => {
+                copies.push(MemberCopy::MemoryOnly);
+                for peer in &stored_on {
+                    let _ = self.call(peer, "forget", wire_forget(key, message_id.as_str())).await;
+                }
+                let _ = local_forget(&self.inner, key, message_id.as_str()).await;
+                return Err(Error::Unavailable("quorum has no majority".into()));
+            }
+        };
+        if flush_queue(&self.inner, key, local_offset).await.is_err() {
             copies.push(MemberCopy::MemoryOnly);
             for peer in &stored_on {
                 let _ = self.call(peer, "forget", wire_forget(key, message_id.as_str())).await;
@@ -796,7 +806,7 @@ async fn promote_replicas(inner: &Arc<Inner>) {
     }
 }
 
-async fn local_enqueue(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> Result<(), Error> {
+async fn local_enqueue(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> Result<QueueOffset, Error> {
     let handle = inner
         .queues
         .get(key)
@@ -809,11 +819,19 @@ async fn local_enqueue(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> 
         .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
     let completion = reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
     let _ = completion.durable_done.await;
-    Ok(())
+    Ok(completion.offset)
 }
 
-/// Fsync this node's queue log. Quorum confirms call this. Classic confirms do not.
-async fn flush_queue(inner: &Inner, key: &QueueKey) -> Result<(), Error> {
+/// A peer is a durable copy only when the append reply has `ok: true`.
+///
+/// [`Cluster::call`] returns `Ok` for any reply that arrived, including a
+/// handler failure (`ok: false`). A timeout or a down peer is `Err`.
+fn peer_append_durable(reply: &Result<Msg, Error>) -> bool {
+    matches!(reply, Ok(msg) if msg.ok)
+}
+
+/// Fsync this node's queue log through `offset`. Quorum confirms call this. Classic confirms do not.
+async fn flush_queue(inner: &Inner, key: &QueueKey, offset: QueueOffset) -> Result<(), Error> {
     let handle = inner
         .queues
         .get(key)
@@ -821,7 +839,7 @@ async fn flush_queue(inner: &Inner, key: &QueueKey) -> Result<(), Error> {
     let (reply_tx, reply_rx) = oneshot::channel();
     handle
         .tx
-        .send(QueueCmd::FlushDurable { reply: reply_tx })
+        .send(QueueCmd::FlushDurable { offset, reply: reply_tx })
         .await
         .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
     reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?
@@ -1085,7 +1103,7 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
             handle.tx.send(QueueCmd::Enqueue { msg: Arc::new(message), reply: reply_tx }).await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
             let completion = reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
             let _ = completion.durable_done.await;
-            flush_queue(&inner, &key).await?;
+            flush_queue(&inner, &key, completion.offset).await?;
             Ok(serde_json::json!({"offset": completion.offset.0}))
         }
         "ack" => {
@@ -1646,7 +1664,7 @@ async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Receiver<Queu
                     "args": args,
                 })).await;
             }
-            QueueCmd::FlushDurable { reply } => { let _ = reply.send(Ok(())); }
+            QueueCmd::FlushDurable { reply, .. } => { let _ = reply.send(Ok(())); }
             QueueCmd::Touch { reply } => { let _ = reply.send(()); }
             QueueCmd::Shutdown { reply } => { let _ = reply.send(Ok(())); }
             QueueCmd::Deliver { reply, .. } => {
@@ -1948,5 +1966,38 @@ mod tests {
         });
         let (_, from_bun) = decode_quorum_append(&bun_shape).expect("decode bun shape");
         assert_eq!(from_bun.body.as_ref(), b"mixed-body");
+    }
+
+    fn sample_reply(ok: bool) -> Msg {
+        Msg {
+            id: 1,
+            op: "quorum_append".into(),
+            ok,
+            error: if ok { String::new() } else { "append failed".into() },
+            payload: Value::Null,
+            v: 1,
+            node_id: "peer".into(),
+            from: "peer".into(),
+            kind: String::new(),
+        }
+    }
+
+    #[test]
+    fn failed_peer_reply_is_not_a_durable_copy() {
+        let failed = Ok(sample_reply(false));
+        let accepted = Ok(sample_reply(true));
+        let down = Err(Error::Unavailable("cluster peer is down".into()));
+        assert!(!peer_append_durable(&failed));
+        assert!(!peer_append_durable(&down));
+        assert!(peer_append_durable(&accepted));
+        let copies = [
+            if peer_append_durable(&failed) { MemberCopy::Durable } else { MemberCopy::MemoryOnly },
+            if peer_append_durable(&down) { MemberCopy::Durable } else { MemberCopy::MemoryOnly },
+            MemberCopy::Durable,
+        ];
+        assert!(
+            !durable_majority(3, &copies),
+            "an ok:false reply must not satisfy a durable majority"
+        );
     }
 }

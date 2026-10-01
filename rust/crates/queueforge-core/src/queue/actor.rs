@@ -605,7 +605,7 @@ impl QueueState {
     async fn fsync_now(&mut self) -> Result<(), Error> {
         self.pending_fsync = false;
         let Some(mut wal) = self.wal.take() else {
-            self.complete_waiters_up_to(QueueOffset(u64::MAX), Ok(()));
+            self.complete_waiters_up_to(QueueOffset(u64::MAX), Ok(()), false);
             return Ok(());
         };
         let start = std::time::Instant::now();
@@ -641,7 +641,7 @@ impl QueueState {
         match result {
             Ok(synced) => {
                 self.unsynced_appends = 0;
-                self.complete_waiters_up_to(synced, Ok(()));
+                self.complete_waiters_up_to(synced, Ok(()), false);
                 Ok(())
             }
             Err(e) => {
@@ -654,15 +654,34 @@ impl QueueState {
                 self.complete_waiters_up_to(
                     QueueOffset(u64::MAX),
                     Err(Error::Store(e.to_string())),
+                    false,
                 );
                 Err(e)
             }
         }
     }
 
-    fn complete_waiters_up_to(&mut self, synced: QueueOffset, result: Result<(), Error>) {
+    /// Complete waiters covered by `synced`.
+    ///
+    /// When `hold_deferred` is set, an offset still sitting in `deferred_appends`
+    /// stays waiting: that body was not in the log this fsync wrote.
+    fn complete_waiters_up_to(
+        &mut self,
+        synced: QueueOffset,
+        result: Result<(), Error>,
+        hold_deferred: bool,
+    ) {
         let mut remaining = Vec::new();
         for w in self.fsync_waiters.drain(..) {
+            let still_deferred = hold_deferred
+                && self
+                    .deferred_appends
+                    .iter()
+                    .any(|(offset, _)| offset.0 == w.offset.0);
+            if still_deferred {
+                remaining.push(w);
+                continue;
+            }
             if w.offset.0 <= synced.0 {
                 let send_val = match &result {
                     Ok(()) => Ok(()),
@@ -961,6 +980,7 @@ impl QueueState {
                 self.complete_waiters_up_to(
                     QueueOffset(u64::MAX),
                     Err(Error::Store(format!("wal fsync task panicked: {e}"))),
+                    false,
                 );
                 return;
             }
@@ -979,7 +999,8 @@ impl QueueState {
         match result {
             Ok(synced) => {
                 self.unsynced_appends = 0;
-                self.complete_waiters_up_to(synced, Ok(()));
+                // Bodies still in `deferred_appends` were not in this fsync.
+                self.complete_waiters_up_to(synced, Ok(()), true);
             }
             Err(e) => {
                 error!(
@@ -991,10 +1012,14 @@ impl QueueState {
                 self.complete_waiters_up_to(
                     QueueOffset(u64::MAX),
                     Err(Error::Store(e.clone())),
+                    false,
                 );
             }
         }
         self.flush_deferred_wal();
+        if !self.fsync_waiters.is_empty() || self.unsynced_appends > 0 {
+            self.pending_fsync = true;
+        }
     }
 
     fn flush_deferred_wal(&mut self) {
@@ -1570,6 +1595,11 @@ pub async fn run(
                 if let Some((started, _)) = interval_fsync.take() {
                     state.finish_interval_fsync(joined, started);
                 }
+                // Deferred appends landed after the interval fsync. Sync them
+                // before the next command, so a quorum flush cannot confirm early.
+                if state.pending_fsync {
+                    let _ = state.fsync_now().await;
+                }
                 continue;
             }
             // Prefer external cmds, but always drain internal DLX completions.
@@ -1609,11 +1639,11 @@ pub async fn run(
                 let res = state.enqueue(msg);
                 let _ = reply.send(res);
             }
-            QueueCmd::FlushDurable { reply } => {
+            QueueCmd::FlushDurable { offset, reply } => {
                 if state.wal.is_none() && !state.wal_parked {
                     let _ = reply.send(Ok(()));
                 } else {
-                    state.fsync_waiters.push(FsyncWaiter { offset: QueueOffset(0), tx: reply });
+                    state.fsync_waiters.push(FsyncWaiter { offset, tx: reply });
                     if !state.wal_parked {
                         state.pending_fsync = true;
                     }
@@ -1748,7 +1778,7 @@ pub async fn run(
                     key.vhost, key.name
                 ))));
             }
-            QueueCmd::FlushDurable { reply } => {
+            QueueCmd::FlushDurable { reply, .. } => {
                 let _ = reply.send(Err(Error::Unavailable(format!(
                     "queue {}/{} shutting down",
                     key.vhost, key.name
@@ -2192,6 +2222,171 @@ mod tests {
             "following command ran while the deferred append was still unflushed"
         );
         shutdown(tx, actor).await;
+    }
+
+    /// Quorum flush must not complete while the body is only in `deferred_appends`.
+    #[tokio::test]
+    async fn flush_durable_waits_for_the_deferred_append_to_be_fsynced() {
+        let release_first = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let appends = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let fsyncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let max_appended = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let synced = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let key = QueueKey::new("/", "quorum-flush");
+        let memory = MemoryTracker::shared();
+        let info = Arc::new(QueueInfo::new(
+            key.clone(),
+            &crate::queue::QueueDeclareOpts {
+                durable: true,
+                ..crate::queue::QueueDeclareOpts::default()
+            },
+        ));
+        let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+            Box::new(GateLog {
+                release_first: Arc::clone(&release_first),
+                release_second: Arc::clone(&release_second),
+                appends: Arc::clone(&appends),
+                fsyncs: Arc::clone(&fsyncs),
+                max_appended: Arc::clone(&max_appended),
+                synced: Arc::clone(&synced),
+            }),
+            DurabilityPolicy {
+                policy: FsyncPolicy::EveryNMs,
+                interval: Duration::from_millis(20),
+                every_n_messages: 1,
+            },
+        );
+        boot.durable = true;
+        let (tx, rx) = mpsc::channel(8);
+        let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+        let mut first = (*sample_msg(b"first")).clone();
+        first.persistent = true;
+        let first_done = enqueue(&tx, Arc::new(first)).await;
+        first_done.durable_done.await.unwrap().unwrap();
+        let wait = std::time::Instant::now();
+        while fsyncs.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            if wait.elapsed() > Duration::from_secs(2) {
+                panic!("interval fsync did not start");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let mut second = (*sample_msg(b"kept")).clone();
+        second.persistent = true;
+        let started = std::time::Instant::now();
+        let second_done = enqueue(&tx, Arc::new(second)).await;
+        second_done.durable_done.await.unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(80),
+            "classic every_n_ms confirm waited for the interval fsync"
+        );
+        let offset = second_done.offset;
+
+        let (flush_tx, mut flush_rx) = oneshot::channel();
+        tx.send(QueueCmd::FlushDurable {
+            offset,
+            reply: flush_tx,
+        })
+        .await
+        .unwrap();
+        let (stats_tx, stats_rx) = oneshot::channel();
+        tx.send(QueueCmd::Stats { reply: stats_tx }).await.unwrap();
+        stats_rx.await.unwrap();
+        assert!(
+            flush_rx.try_recv().is_err(),
+            "quorum flush completed while the interval fsync still held the log"
+        );
+        assert_eq!(
+            appends.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second body was appended before the parked log returned"
+        );
+
+        release_first.store(true, std::sync::atomic::Ordering::SeqCst);
+        let parked = std::time::Instant::now();
+        while fsyncs.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            if parked.elapsed() > Duration::from_secs(2) {
+                panic!("deferred append was not fsynced");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            flush_rx.try_recv().is_err(),
+            "quorum flush completed before the deferred append was fsynced"
+        );
+        assert!(
+            appends.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the body was not in the log when the second fsync started"
+        );
+
+        release_second.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), flush_rx)
+            .await
+            .expect("quorum flush timed out")
+            .unwrap()
+            .unwrap();
+        assert!(
+            synced.load(std::sync::atomic::Ordering::SeqCst) >= offset.0,
+            "confirm returned before a fsync covered the enqueue offset"
+        );
+        shutdown(tx, actor).await;
+    }
+
+    struct GateLog {
+        release_first: Arc<std::sync::atomic::AtomicBool>,
+        release_second: Arc<std::sync::atomic::AtomicBool>,
+        appends: Arc<std::sync::atomic::AtomicU64>,
+        fsyncs: Arc<std::sync::atomic::AtomicU64>,
+        max_appended: Arc<std::sync::atomic::AtomicU64>,
+        synced: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl DurableQueueLog for GateLog {
+        fn append_enqueue(
+            &mut self,
+            offset: QueueOffset,
+            _msg: &Message,
+        ) -> crate::error::Result<()> {
+            self.appends
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.max_appended
+                .fetch_max(offset.0, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn acknowledge(&mut self, _offset: QueueOffset) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn fsync(&mut self) -> crate::error::Result<QueueOffset> {
+            let seen = self.max_appended.load(std::sync::atomic::Ordering::SeqCst);
+            let n = self.fsyncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 2 {
+                let gate = if n == 0 {
+                    &self.release_first
+                } else {
+                    &self.release_second
+                };
+                while !gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            self.synced
+                .store(seen, std::sync::atomic::Ordering::SeqCst);
+            Ok(QueueOffset(seen))
+        }
+        fn durable_offset(&self) -> QueueOffset {
+            QueueOffset(self.synced.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn ack_watermark(&self) -> QueueOffset {
+            QueueOffset(0)
+        }
+        fn meta_dirty(&self) -> bool {
+            false
+        }
+        fn compact(&mut self) -> crate::error::Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
