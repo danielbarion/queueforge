@@ -16,35 +16,6 @@ use super::state::remember_consumed;
 use super::wire::{decode_quorum_append, json_str, key_from, message_to_wire, replica_key};
 use super::{Cluster, Inner, Msg};
 
-/// Handle one inbound `msg` for `inner`, using `peer_tx` to answer on the socket. Returns the response message. Handler failures come back as `ok: false`, not as a dropped socket.
-pub(super) async fn dispatch(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String>) -> Msg {
-    let result = dispatch_op(inner, msg, peer_tx).await;
-    match result {
-        Ok(payload) => Msg {
-            id: msg.id,
-            op: "reply".into(),
-            ok: true,
-            error: String::new(),
-            payload,
-            v: 1,
-            node_id: inner.node_id.clone(),
-            from: inner.node_id.clone(),
-            kind: String::new(),
-        },
-        Err(err) => Msg {
-            id: msg.id,
-            op: "reply".into(),
-            ok: false,
-            error: err.to_string(),
-            v: 1,
-            node_id: inner.node_id.clone(),
-            from: inner.node_id.clone(),
-            kind: String::new(),
-            payload: Value::Null,
-        },
-    }
-}
-
 /// Run the operation inside `msg`. `inner` is this node and `peer_tx` can push a follow-up frame. Returns the JSON result or the handler error.
 pub(super) async fn dispatch_op(
     inner: &Arc<Inner>,

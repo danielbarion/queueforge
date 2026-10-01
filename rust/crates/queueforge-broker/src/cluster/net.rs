@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
-use super::dispatch::dispatch;
+use super::ingress::dispatch;
 use super::quorum::local_enqueue;
 use super::state::{apply_consumed, apply_snapshot, snapshot};
 use super::{Inner, Msg, Peer};

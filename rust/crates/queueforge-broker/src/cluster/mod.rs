@@ -135,11 +135,13 @@ struct SubOpen {
 
 mod dispatch;
 mod forward;
+mod ingress;
 mod lifecycle;
 mod net;
 mod proxy;
 mod quorum;
 mod state;
+mod subscribe;
 mod wire;
 
 pub use wire::{decode_quorum_append, encode_quorum_append};
