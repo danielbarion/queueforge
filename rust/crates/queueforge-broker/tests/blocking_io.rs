@@ -157,6 +157,118 @@ async fn permission_and_overview_use_blocking_pool() {
     listener.abort();
 }
 
+#[tokio::test]
+async fn amqp_transient_nonexclusive_declare_follows_feature_flag() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = MetadataStore::open(dir.path()).expect("open store");
+    let auth = AuthService::new(&store);
+    assert!(auth
+        .bootstrap_admin_if_empty(BootstrapMode::DevFallback)
+        .expect("bootstrap"));
+    let store = Arc::new(store);
+    let queues = QueueRegistry::shared(
+        Arc::clone(&store) as Arc<dyn QueueMetaStore>,
+        MemoryTracker::shared(),
+    );
+    let router = Arc::new(store.bootstrap_router().expect("router"));
+    let connections = ConnectionTracker::shared();
+    let listener = start_amqp_listener(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::clone(&store),
+        Arc::clone(&queues),
+        Arc::clone(&router),
+        Arc::clone(&connections),
+        ConnectionParams::default(),
+    )
+    .await
+    .expect("amqp");
+    let amqp_port = listener.local_addr.port();
+    let ready = queueforge_metrics::ReadyFlag::new();
+    ready.set_ready(true);
+    let mgmt = MgmtState::new(
+        store,
+        queues,
+        router,
+        connections,
+        ready,
+        MgmtConfig::default(),
+    );
+    let http = queueforge_mgmt::start_server("127.0.0.1:0".parse().unwrap(), mgmt, None)
+        .await
+        .expect("http");
+    let base = format!("http://{}", http.local_addr);
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("http client");
+    let login = client
+        .post(format!("{base}/api/login"))
+        .json(&serde_json::json!({
+            "username": DEV_BOOTSTRAP_USER,
+            "password": DEV_BOOTSTRAP_PASSWORD,
+        }))
+        .send()
+        .await
+        .expect("login");
+    assert!(login.status().is_success(), "{}", login.status());
+
+    let transient = QueueDeclareOptions {
+        passive: false,
+        durable: false,
+        exclusive: false,
+        auto_delete: false,
+        nowait: false,
+    };
+    let refused = amqp_connect(amqp_port, DEV_BOOTSTRAP_USER, DEV_BOOTSTRAP_PASSWORD).await;
+    let refused_ch = refused.create_channel().await.expect("channel");
+    let denied = refused_ch
+        .queue_declare("transient.q", transient, FieldTable::default())
+        .await;
+    assert!(denied.is_err(), "transient declare must fail before the flag is enabled");
+
+    let enabled = client
+        .post(format!("{base}/api/feature-flags/transient_nonexcl_queues/enable"))
+        .send()
+        .await
+        .expect("enable");
+    assert!(enabled.status().is_success(), "{}", enabled.status());
+
+    let allowed = amqp_connect(amqp_port, DEV_BOOTSTRAP_USER, DEV_BOOTSTRAP_PASSWORD).await;
+    let allowed_ch = allowed.create_channel().await.expect("channel");
+    allowed_ch
+        .queue_declare("transient.q", transient, FieldTable::default())
+        .await
+        .expect("transient declare succeeds after enable");
+
+    let disabled = client
+        .post(format!("{base}/api/feature-flags/transient_nonexcl_queues/disable"))
+        .send()
+        .await
+        .expect("disable");
+    assert!(disabled.status().is_success(), "{}", disabled.status());
+    let refused_again = amqp_connect(amqp_port, DEV_BOOTSTRAP_USER, DEV_BOOTSTRAP_PASSWORD).await;
+    let refused_again_ch = refused_again.create_channel().await.expect("channel");
+    let denied_again = refused_again_ch
+        .queue_declare("transient.again", transient, FieldTable::default())
+        .await;
+    assert!(denied_again.is_err(), "disabling the flag refuses the next declare");
+
+    let acked = client
+        .delete(format!("{base}/api/deprecated-features/transient_nonexcl_queues"))
+        .send()
+        .await
+        .expect("acknowledge");
+    assert!(acked.status().is_success(), "{}", acked.status());
+    let after_ack = amqp_connect(amqp_port, DEV_BOOTSTRAP_USER, DEV_BOOTSTRAP_PASSWORD).await;
+    let after_ack_ch = after_ack.create_channel().await.expect("channel");
+    after_ack_ch
+        .queue_declare("transient.acked", transient, FieldTable::default())
+        .await
+        .expect("acknowledge permits the next transient declare");
+
+    listener.abort();
+}
+
 async fn amqp_connect(port: u16, user: &str, pass: &str) -> Connection {
     let uri = format!("amqp://{user}:{pass}@127.0.0.1:{port}/%2f");
     let options = ConnectionProperties::default()

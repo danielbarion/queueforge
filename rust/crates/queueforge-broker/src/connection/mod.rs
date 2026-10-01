@@ -2476,6 +2476,7 @@ where
             && !declare.durable
             && !declare.exclusive
             && queue_args.queue_type != Some(queueforge_core::QueueType::Quorum)
+            && !self.connections.transient_nonexcl_permitted()
         {
             let _ = self
                 .send_connection_close(
