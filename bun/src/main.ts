@@ -3,7 +3,7 @@ import { startMqtt, startStomp, startStream } from "./protocols.ts";
 import { Broker } from "./broker.ts";
 import { Cluster } from "./cluster.ts";
 import { parseConfig, splitHost } from "./config.ts";
-import { managementApp, metricsText } from "./http.ts";
+import { managementApp, metricsText } from "./http/index.ts";
 import { Store } from "./store.ts";
 import { join } from "node:path";
 
