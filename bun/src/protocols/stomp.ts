@@ -29,6 +29,7 @@ function stompFanout(dest: string, body: string) {
  * @param port TCP port from config.
  * @param broker Broker that stores SEND bodies. A publish error is logged
  * and does not close the socket.
+ * @returns Nothing. The listener stays open until the process exits.
  */
 export function startStomp(host: string, port: number, broker: Broker) {
   Bun.listen({

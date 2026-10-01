@@ -26,7 +26,12 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
-/// Choose the home node for a non-exclusive queue. `members` must be non-empty.
+/// Choose the home node for a non-exclusive queue.
+///
+/// `members` is the static membership and must be non-empty; an empty slice panics on the modulo.
+/// `vhost` and `queue` are the queue key hashed as bytes with a `0xff` separator.
+/// Returns the home member id borrowed from `members` after sorting ids.
+/// Exclusive queues stay on the connection's node and do not call this.
 pub fn queue_home<'a>(members: &'a [ClusterMember], vhost: &str, queue: &str) -> &'a str {
     let mut ordered: Vec<&ClusterMember> = members.iter().collect();
     ordered.sort_by(|a, b| a.id.cmp(&b.id));

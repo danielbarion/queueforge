@@ -3,6 +3,15 @@
  */
 import type { Policy } from "./model.ts";
 
+/**
+ * Pick the highest-priority policy whose pattern matches.
+ *
+ * @param rows Policies to scan. An invalid pattern is skipped, not thrown.
+ * @param vhost Vhost the policy must belong to.
+ * @param name Queue or exchange name tested against each pattern.
+ * @param entity `queues` or `exchanges`. A policy that applies to `all` still matches.
+ * @returns The winner, or null when none match. Equal priority keeps the name that sorts first.
+ */
 export function matchOne(rows: Policy[], vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
   let best: Policy | null = null;
   for (const p of rows) {
@@ -20,6 +29,12 @@ export function matchOne(rows: Policy[], vhost: string, name: string, entity: "q
   return best;
 }
 
+/**
+ * Shape one policy as a management list item.
+ *
+ * @param p Policy to render. Null definition fields are omitted.
+ * @returns The management object. `apply-to` is the stored `applyTo`. Classic mirroring keys are not added.
+ */
 export function policyItem(p: Policy) {
   return {
     vhost: p.vhost,
@@ -42,6 +57,14 @@ export function policyItem(p: Policy) {
   };
 }
 
+/**
+ * Build a policy from a management request body.
+ *
+ * @param vhost Vhost stored on the policy. The body does not override it.
+ * @param name Policy name stored as given.
+ * @param body Pattern, apply-to, priority, and definition. A missing pattern throws. `apply-to` must be `queues`, `exchanges`, or `all`.
+ * @returns The policy. Unknown definition keys throw. Non-positive numbers are stored as null. Ha-mode and other mirror keys are not accepted.
+ */
 export function policyFromBody(vhost: string, name: string, body: {
   pattern?: string;
   "apply-to"?: string;
@@ -89,6 +112,14 @@ export function policyFromBody(vhost: string, name: string, body: {
   };
 }
 
+/**
+ * Fill empty queue arguments from a matched policy.
+ *
+ * @param declared Arguments the client sent. A key that is present and not `""` is left alone.
+ * @param pol Matched policy, or null when there is nothing to apply.
+ * @param base Starting map. When omitted, `declared` is copied. The caller's objects are not mutated.
+ * @returns The merged map. A null `pol` returns `base` or a copy of `declared`.
+ */
 export function fillPolicyArgs(
   declared: Record<string, string | number>,
   pol: Policy | null,

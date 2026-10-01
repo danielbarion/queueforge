@@ -56,6 +56,7 @@ function readStr(buf: Uint8Array, at: number): { text: string; next: number } | 
  * @param port TCP port from config.
  * @param broker Broker that receives each published payload. The in-memory
  * chunk list is what a subscribe on this process replays.
+ * @returns Nothing. The listener stays open until the process exits.
  */
 export function startStream(host: string, port: number, broker: Broker) {
   Bun.listen({

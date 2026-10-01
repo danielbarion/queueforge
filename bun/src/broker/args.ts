@@ -5,6 +5,12 @@ import { replaceHeaderTable, writeTable, W, type Field } from "../codec.ts";
 import type { LiveMsg, QArgs, QueueLive } from "./model.ts";
 import { headerList, overflowOf } from "./routing.ts";
 
+/**
+ * Parse queue arguments into the live argument record.
+ *
+ * @param raw Declare arguments. Missing keys become null. Unknown keys are ignored.
+ * @returns The parsed arguments. An absent or unknown `x-overflow` becomes `drop-head`. Only `quorum` selects a quorum queue; every other type is classic.
+ */
 export function parseArgs(raw: Record<string, string | number>): QArgs {
   const num = (k: string) => (raw[k] == null ? null : Number(raw[k]));
   const str = (k: string) => (raw[k] == null ? null : String(raw[k]));
@@ -30,6 +36,16 @@ export function parseArgs(raw: Record<string, string | number>): QArgs {
   };
 }
 
+/**
+ * Prepend one `x-death` entry and the first-death headers.
+ *
+ * @param queue Queue the message died from.
+ * @param reason Death reason stored on the new entry and on `x-first-death-reason`.
+ * @param exchange Exchange the message was last published to.
+ * @param routingKey Routing key stored as the only item of `routing-keys`.
+ * @param prev Previous headers. Existing `x-death` and first-death keys are dropped, so earlier deaths are not kept.
+ * @returns A new header list. The caller attaches it; this function does not publish.
+ */
 export function deathHeaders(
   queue: string,
   reason: string,
@@ -53,6 +69,12 @@ export function deathHeaders(
   ];
 }
 
+/**
+ * Encode basic properties that carry only a headers table.
+ *
+ * @param headers Header table written after the headers flag. Other property flags stay clear.
+ * @returns Property bytes a publish can store as `propRaw`.
+ */
 export function propsWithDeath(headers: Array<[string, Field]>): Uint8Array {
   const w = new W();
   w.u16(0x2000);
@@ -60,6 +82,12 @@ export function propsWithDeath(headers: Array<[string, Field]>): Uint8Array {
   return w.concat();
 }
 
+/**
+ * Copy numeric, boolean, and string fields into a plain argument map.
+ *
+ * @param fields AMQP field table. Arrays, tables, and other types are skipped.
+ * @returns A map whose booleans are `1` or `0`. Keys that were skipped are absent, not null.
+ */
 export function argsFromFields(fields: Array<[string, Field]>): Record<string, string | number> {
   const out: Record<string, string | number> = {};
   for (const [k, v] of fields) {

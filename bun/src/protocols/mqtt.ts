@@ -83,6 +83,7 @@ function stompFanout(dest: string, body: string) {
  * @param port TCP port. The caller chooses it from config; this function does not retry.
  * @param broker Broker that stores a copy of each publish. A publish error is logged
  * and does not close the socket.
+ * @returns Nothing. The listener stays open until the process exits.
  */
 export function startMqtt(host: string, port: number, broker: Broker) {
   Bun.listen({

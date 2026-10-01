@@ -83,6 +83,10 @@ static NEXT_CONSUMER_SESSION: AtomicU64 = AtomicU64::new(1);
 static SESSION_NAMESPACE: AtomicU64 = AtomicU64::new(0);
 
 /// Give this process a non-zero slot so its session ids cannot collide with a peer.
+///
+/// `slot` is stored in the high 32 bits of session ids minted after this call.
+/// A slot of `0` leaves later ids as the raw counter.
+/// Returns nothing. Call it once before the first consumer session; a later call does not rewrite ids already issued.
 pub fn install_session_namespace(slot: u64) {
     SESSION_NAMESPACE.store(slot, Ordering::Relaxed);
 }
