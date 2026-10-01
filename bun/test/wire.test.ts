@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { decodeQuorumAppend, encodeQuorumAppend } from "./wire.ts";
+import { decodeQuorumAppend, encodeQuorumAppend } from "../src/wire.ts";
 
 describe("quorum wire v1", () => {
   test("round trip keeps the body without a data directory", () => {

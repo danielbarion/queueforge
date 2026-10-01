@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Broker } from "./broker/index.ts";
-import { Cluster } from "./cluster.ts";
-import type { Config } from "./config.ts";
-import { Store } from "./store.ts";
-import { encodeQuorumAppend } from "./wire.ts";
+import { Broker } from "../src/broker/index.ts";
+import { Cluster } from "../src/cluster.ts";
+import type { Config } from "../src/config.ts";
+import { Store } from "../src/store.ts";
+import { encodeQuorumAppend } from "../src/wire.ts";
 
 /**
  * Drive Cluster.dispatch through its listen socket.

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { durableMajority } from "./quorum-confirm.ts";
+import { durableMajority } from "../src/quorum-confirm.ts";
 
 // The live AMQP path calls durableMajority from Broker.enqueueQuorum.
 // quorum-failover.test.ts drives that path with a real client: confirm, kill -9, deliver once.

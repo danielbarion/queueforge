@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "./store.ts";
+import { Store } from "../src/store.ts";
 
 test("every_n_ms durable wait lasts one group-commit interval", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-"));

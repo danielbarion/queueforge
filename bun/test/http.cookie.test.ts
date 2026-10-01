@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cookieNameFromHost } from "./http/index.ts";
+import { cookieNameFromHost } from "../src/http/index.ts";
 
 describe("cookieNameFromHost", () => {
   test("different management ports get different cookie names", () => {
