@@ -6,7 +6,7 @@
  */
 import type { Broker, LiveMsg } from "../broker.ts";
 import { ChanError } from "../broker.ts";
-import type { Amqp10State } from "../protocols.ts";
+import type { Amqp10State } from "../protocols/index.ts";
 import { emptyProps, R } from "../codec.ts";
 
 /** One basic.publish waiting for its header and body. */

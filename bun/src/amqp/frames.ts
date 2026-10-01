@@ -4,7 +4,7 @@
  * Owns the outbound queue and the inbound byte buffer. Method bodies live
  * in the sibling files; this file only frames them.
  */
-import { driveAmqp10 } from "../protocols.ts";
+import { driveAmqp10 } from "../protocols/index.ts";
 import { method, methodFrame, R, writeTable } from "../codec.ts";
 import { ChanError } from "../broker.ts";
 import { Conn } from "./listen.ts";
