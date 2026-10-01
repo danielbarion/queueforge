@@ -17,7 +17,13 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.key. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Build the in-memory map key for a vhost resource.
+ *
+ * @param vhost Vhost name. A slash is a normal character, not a separator.
+ * @param name Queue or exchange name.
+ * @returns `vhost`, a NUL, then `name`. Two resources that differ only by that NUL would collide. Callers must use this helper for every map lookup.
+ */
 export function key(this: Broker, vhost: string, name: string) {
   return `${vhost}\0${name}`;
 }

@@ -17,12 +17,26 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.matchPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Find the user policy for one queue or exchange.
+ *
+ * @param vhost Vhost the policy must belong to.
+ * @param name Resource name tested against each pattern.
+ * @param entity `queues` or `exchanges`. A policy for `all` still matches.
+ * @returns The highest-priority match, or null. Operator policies are not included.
+ */
 export function matchPolicy(this: Broker, vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
   return matchOne(this.policies, vhost, name, entity);
 }
 
-/** Broker.argsWithPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Merge user and operator policies into queue arguments.
+ *
+ * @param vhost Vhost of the queue.
+ * @param name Queue name used to match policies.
+ * @param args Arguments the client declared. A present non-empty key is kept.
+ * @returns The merged map. The operator policy is applied after the user policy. Neither map is stored here.
+ */
 export function argsWithPolicy(this: Broker, vhost: string, name: string, args: Record<string, string | number>): Record<string, string | number> {
   const user = this.matchPolicy(vhost, name, "queues");
   const operator = this.matchOperatorPolicy(vhost, name, "queues");
@@ -31,12 +45,25 @@ export function argsWithPolicy(this: Broker, vhost: string, name: string, args: 
   return out;
 }
 
-/** Broker.matchOperatorPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Find the operator policy for one queue or exchange.
+ *
+ * @param vhost Vhost the policy must belong to.
+ * @param name Resource name tested against each pattern.
+ * @param entity `queues` or `exchanges`.
+ * @returns The highest-priority operator match, or null.
+ */
 export function matchOperatorPolicy(this: Broker, vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
   return matchOne(this.operatorPolicies, vhost, name, entity);
 }
 
-/** Broker.policyNames. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Name the user and operator policies that match a queue.
+ *
+ * @param vhost Vhost of the queue.
+ * @param name Queue name.
+ * @returns The two policy names. Either is null when nothing matches. Exchange policies are not considered.
+ */
 export function policyNames(this: Broker, vhost: string, name: string): { policy: string | null; operator_policy: string | null } {
   return {
     policy: this.matchPolicy(vhost, name, "queues")?.name ?? null,
@@ -44,7 +71,12 @@ export function policyNames(this: Broker, vhost: string, name: string): { policy
   };
 }
 
-/** Broker.upsertOperatorPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Replace one operator policy and apply it.
+ *
+ * @param p Policy to store. An invalid pattern throws. The row is not written to the store.
+ * @returns Nothing. A policy with the same vhost and name is replaced, then every queue is updated.
+ */
 export function upsertOperatorPolicy(this: Broker, p: Policy) {
   try {
     new RegExp(p.pattern);
@@ -56,7 +88,13 @@ export function upsertOperatorPolicy(this: Broker, p: Policy) {
   this.applyPolicies();
 }
 
-/** Broker.deleteOperatorPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remove one operator policy.
+ *
+ * @param vhost Vhost of the policy.
+ * @param name Policy name.
+ * @returns True when a row was removed. False leaves the queues unchanged.
+ */
 export function deleteOperatorPolicy(this: Broker, vhost: string, name: string): boolean {
   const before = this.operatorPolicies.length;
   this.operatorPolicies = this.operatorPolicies.filter((p) => !(p.vhost === vhost && p.name === name));
@@ -65,7 +103,13 @@ export function deleteOperatorPolicy(this: Broker, vhost: string, name: string):
   return true;
 }
 
-/** Broker.deletePolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remove one user policy from memory and the store.
+ *
+ * @param vhost Vhost of the policy.
+ * @param name Policy name.
+ * @returns True when a row was removed and the queues were updated. False means the name was absent.
+ */
 export function deletePolicy(this: Broker, vhost: string, name: string): boolean {
   const before = this.policies.length;
   this.policies = this.policies.filter((p) => !(p.vhost === vhost && p.name === name));
@@ -75,12 +119,21 @@ export function deletePolicy(this: Broker, vhost: string, name: string): boolean
   return true;
 }
 
-/** Broker.listPerms. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Copy the permission table.
+ *
+ * @returns A new array of the current permission rows. Mutating the returned array does not change the broker. Mutating a row object does.
+ */
 export function listPerms(this: Broker) {
   return [...this.perms];
 }
 
-/** Broker.upsertPolicy. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Replace one user policy, store it, and apply it.
+ *
+ * @param p Policy to store. An invalid pattern throws before the table changes.
+ * @returns Nothing. A policy with the same vhost and name is replaced.
+ */
 export function upsertPolicy(this: Broker, p: Policy) {
   try {
     new RegExp(p.pattern);
@@ -93,7 +146,11 @@ export function upsertPolicy(this: Broker, p: Policy) {
   this.applyPolicies();
 }
 
-/** Broker.applyPolicies. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Recompute every queue's arguments from the current policies.
+ *
+ * @returns Nothing. A queue that was declared quorum stays quorum when the merged arguments omit `x-queue-type`. A durable queue is written back to the store.
+ */
 export function applyPolicies(this: Broker) {
   for (const q of this.queues.values()) {
     const merged = this.argsWithPolicy(q.vhost, q.name, q.declaredArgs);

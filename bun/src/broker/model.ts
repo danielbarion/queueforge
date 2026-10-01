@@ -112,6 +112,11 @@ export type Prom = {
   dlxDeliveryLimit: number;
 };
 
+/**
+ * Zero every management counter.
+ *
+ * @returns A new counter object with every field set to 0. The caller owns it. Reusing the same object for a second broker mixes the two processes' counts.
+ */
 export function emptyProm(): Prom {
   return {
     connections: 0,

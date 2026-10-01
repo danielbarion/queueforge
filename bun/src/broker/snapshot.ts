@@ -17,7 +17,13 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.applyRemote. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Apply one replicated topology record.
+ *
+ * @param kind Record kind, such as `exchange`, `queue`, `binding`, `user`, or `vhost`. An unknown kind is ignored.
+ * @param payload Fields for that kind. A queue or exchange that is already present is not replaced, except a durable row is still stored.
+ * @returns Nothing. The caller must not apply a message body with this method.
+ */
 export function applyRemote(this: Broker, kind: string, payload: Record<string, unknown>) {
   if (kind === "exchange") {
     const e = payload as ExRow;
@@ -84,7 +90,11 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
   }
 }
 
-/** Broker.snapshot. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Copy the topology a peer can import.
+ *
+ * @returns Users, vhosts, permissions, exchanges, queue rows, bindings, and consumed ids. Ready message bodies are not included. Exclusive queues are included.
+ */
 export function snapshot(this: Broker) {
   return {
     users: [...this.users.entries()].map(([name, u]) => ({ name, hash: u.hash, tags: u.tags })),
@@ -105,7 +115,12 @@ export function snapshot(this: Broker) {
   };
 }
 
-/** Broker.applySnapshot. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Import topology this process does not already have.
+ *
+ * @param snap Snapshot from `snapshot`, or null. Null returns immediately.
+ * @returns Nothing. An existing user, exchange, or queue is left as it is. Bindings are appended even when the same binding is already present. Consumed ids are dropped locally.
+ */
 export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]> | null | undefined) {
   if (!snap) return;
   for (const u of snap.users ?? []) if (!this.users.has(u.name)) {

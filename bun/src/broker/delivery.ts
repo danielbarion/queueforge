@@ -17,7 +17,12 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.expire. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Dead-letter ready messages whose expiry has passed.
+ *
+ * @param q Queue whose ready list is filtered.
+ * @returns Nothing. At-least-once that cannot dead-letter keeps the message and clears its expiry so it is not retried forever.
+ */
 export function expire(this: Broker, q: QueueLive) {
   const now = Date.now();
   const keep: LiveMsg[] = [];
@@ -36,7 +41,15 @@ export function expire(this: Broker, q: QueueLive) {
   q.ready = keep;
 }
 
-/** Broker.deadLetter. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Publish one message to the queue's dead-letter exchange.
+ *
+ * @param q Queue that owns the dead-letter arguments.
+ * @param msg Message to forward.
+ * @param depth Current nesting. A depth above 8 does not publish.
+ * @param reason `expired`, `rejected`, or `maxlen`, stored on `x-death`.
+ * @returns True when the message was accepted or there is nothing to do. False only for at-least-once when no destination accepted it. The caller then keeps the original message.
+ */
 export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: number, reason: "expired" | "rejected" | "maxlen"): boolean {
   if (!q.argsParsed.dlx || depth > 8) return true;
   const headers = deathHeaders(q.name, reason, msg.exchange, msg.routingKey, msg.headers);
@@ -86,7 +99,12 @@ export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: numb
   return accepted || q.argsParsed.dlxStrategy !== "at-least-once";
 }
 
-/** Broker.pump. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Deliver ready messages to consumers that still want one.
+ *
+ * @param q Queue to deliver from. Expired messages are removed first.
+ * @returns Nothing. A quorum queue delivers one message, then waits for the claim. A classic queue delivers until no consumer wants a message, and stops after 100000 deliveries.
+ */
 export function pump(this: Broker, q: QueueLive) {
   this.expire(q);
   let guard = 0;
@@ -106,7 +124,13 @@ export function pump(this: Broker, q: QueueLive) {
   }
 }
 
-/** Broker.noteDeliver. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Count one consumer delivery.
+ *
+ * @param autoAck True when the consumer used no-ack.
+ * @param redelivered True when the message was delivered before.
+ * @returns Nothing. Both the manual and the auto-ack counters move with `delivered`.
+ */
 export function noteDeliver(this: Broker, autoAck: boolean, redelivered: boolean) {
   this.prom.delivered++;
   if (autoAck) this.prom.deliveredConsumeAuto++;
@@ -114,7 +138,14 @@ export function noteDeliver(this: Broker, autoAck: boolean, redelivered: boolean
   if (redelivered) this.prom.redelivered++;
 }
 
-/** Broker.claimThenDeliver. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Drop a quorum message on the peers, then deliver it.
+ *
+ * @param q Queue the message came from.
+ * @param chosen Consumer that receives it.
+ * @param msg Message already removed from ready.
+ * @returns Nothing. The next pump runs only after the peer drop finishes.
+ */
 export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consumer, msg: LiveMsg) {
   await this.quorumDrop(q, msg.id);
   this.noteDeliver(chosen.noAck, msg.redelivered);
@@ -122,7 +153,11 @@ export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consu
   this.pump(q);
 }
 
-/** Broker.nextSession. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Allocate the next consumer session id.
+ *
+ * @returns The next counter, or that counter in the low 32 bits with this node's slot above them. A slot of 0 returns the raw counter. Ids already returned do not change when the membership changes.
+ */
 export function nextSession(this: Broker): number {
   const n = this.sessionsNext++;
   const slot = this.slot();
@@ -130,7 +165,11 @@ export function nextSession(this: Broker): number {
   return slot * 0x100000000 + (n & 0xffffffff);
 }
 
-/** Broker.slot. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Find this node's session-id slot.
+ *
+ * @returns 0 when there is no membership or no node id. Otherwise the 1-based index of this node in the sorted member list, or 1 when this node is missing from that list.
+ */
 export function slot(this: Broker): number {
   if (!this.cfg.members.length || !this.cfg.nodeId) return 0;
   const sorted = [...this.cfg.members].sort((a, b) => (a.id < b.id ? -1 : 1));
@@ -138,7 +177,14 @@ export function slot(this: Broker): number {
   return i < 0 ? 1 : i + 1;
 }
 
-/** Broker.consume. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Register a consumer on a queue.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue throws 404.
+ * @param consumer Consumer to add. A second exclusive consumer, or an exclusive consumer beside any other, throws 403.
+ * @returns Nothing. The session is recorded so a later delivery can find the queue. This method does not deliver.
+ */
 export async function consume(this: Broker, vhost: string, queue: string, consumer: Consumer): Promise<void> {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
@@ -151,7 +197,14 @@ export async function consume(this: Broker, vhost: string, queue: string, consum
   this.sessions.set(consumer.session, { vhost, queue });
 }
 
-/** Broker.kick. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Start delivery for one consumer session.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue returns.
+ * @param session Consumer session. A missing consumer on a remote quorum or classic home returns.
+ * @returns Nothing. A follower quorum consumer subscribes to the leader. A classic remote home subscribes to that home. The local home pumps the queue.
+ */
 export async function kick(this: Broker, vhost: string, queue: string, session: number) {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
@@ -179,7 +232,14 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
   this.pump(q);
 }
 
-/** Broker.cancel. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remove a consumer by tag.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue returns.
+ * @param tag Consumer tag. An unknown tag leaves the consumer list unchanged.
+ * @returns Nothing. A follower quorum consumer also tells the leader to unsubscribe.
+ */
 export async function cancel(this: Broker, vhost: string, queue: string, tag: string) {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
@@ -193,7 +253,14 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
   }
 }
 
-/** Broker.ack. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Settle one delivered message.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue returns.
+ * @param id Message id. An id that is not unacked returns, or is forwarded to the leader for a follower quorum queue.
+ * @returns Nothing. A remote classic home is acked there. A quorum ack also drops the id on the peers.
+ */
 export async function ack(this: Broker, vhost: string, queue: string, id: string) {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
@@ -217,7 +284,15 @@ export async function ack(this: Broker, vhost: string, queue: string, id: string
   this.pump(q);
 }
 
-/** Broker.nack. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Reject one delivered message.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue returns.
+ * @param id Message id. An unknown local id returns.
+ * @param requeue True puts the message back at the head until the delivery limit. False dead-letters it.
+ * @returns Nothing. At-least-once that cannot dead-letter keeps the message. A remote home receives the same flag.
+ */
 export async function nack(this: Broker, vhost: string, queue: string, id: string, requeue: boolean) {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
@@ -262,7 +337,14 @@ export async function nack(this: Broker, vhost: string, queue: string, id: strin
   }
 }
 
-/** Broker.get. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Take one ready message.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue throws 404.
+ * @param noAck True deletes a stored row immediately. False leaves the message unacked.
+ * @returns The message, or null when the queue is empty. A follower asks the leader. A failed remote call throws 541.
+ */
 export async function get(this: Broker, vhost: string, queue: string, noAck: boolean): Promise<LiveMsg | null> {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
@@ -334,7 +416,13 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   return msg;
 }
 
-/** Broker.purge. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Drop every ready message on a queue.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue throws 404.
+ * @returns How many ready messages were removed. Unacked messages stay. A remote home is purged there, and a non-numeric reply becomes 0.
+ */
 export async function purge(this: Broker, vhost: string, queue: string): Promise<number> {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);

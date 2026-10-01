@@ -17,7 +17,15 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.putUser. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Create or update a user.
+ *
+ * @param name User name.
+ * @param password New password, or null to keep the current hash. A new user without a password throws.
+ * @param tags Replacement tags. An empty list keeps the current tags.
+ * @param create Returned as-is so the caller can tell a create from an update.
+ * @returns The `create` flag. The password is stored as an argon2id hash and replicated.
+ */
 export async function putUser(this: Broker, name: string, password: string | null, tags: string[], create: boolean) {
   const existing = this.users.get(name);
   if (!existing && !password) throw new Error("password required");
@@ -28,7 +36,12 @@ export async function putUser(this: Broker, name: string, password: string | nul
   return create;
 }
 
-/** Broker.deleteUser. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Delete a user and that user's permissions.
+ *
+ * @param name User name. An unknown name still deletes matching permission rows.
+ * @returns Nothing. The deletion is replicated.
+ */
 export async function deleteUser(this: Broker, name: string) {
   this.users.delete(name);
   this.perms = this.perms.filter((p) => p.user !== name);
@@ -36,7 +49,12 @@ export async function deleteUser(this: Broker, name: string) {
   await this.cluster?.replicate("delete_user", { name });
 }
 
-/** Broker.putPerm. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Replace one user's permission on a vhost.
+ *
+ * @param p User, vhost, and the configure, write, and read patterns. An earlier row for that pair is removed first.
+ * @returns Nothing. The row is stored and replicated.
+ */
 export async function putPerm(this: Broker, p: { user: string; vhost: string; configure: string; write: string; read: string }) {
   this.perms = this.perms.filter((x) => !(x.user === p.user && x.vhost === p.vhost));
   this.perms.push(p);
@@ -44,14 +62,24 @@ export async function putPerm(this: Broker, p: { user: string; vhost: string; co
   await this.cluster?.replicate("permission", p);
 }
 
-/** Broker.deletePerm. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remove one user's permission on a vhost.
+ *
+ * @param user User name.
+ * @param vhost Vhost name. A missing row is not an error.
+ * @returns Nothing. The deletion is replicated.
+ */
 export async function deletePerm(this: Broker, user: string, vhost: string) {
   this.perms = this.perms.filter((p) => !(p.user === user && p.vhost === vhost));
   this.store.deletePerm(user, vhost);
   await this.cluster?.replicate("delete_permission", { user, vhost });
 }
 
-/** Broker.exportDefinitions. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Export users, topology, and policies as a definitions document.
+ *
+ * @returns The document. The default exchange is omitted. Exclusive queues are omitted. User hashes are exported as `password_hash`.
+ */
 export function exportDefinitions(this: Broker) {
   const argMap = (args: Array<[string, Field]>) => {
     const out: Record<string, string | number> = {};
@@ -122,7 +150,12 @@ export function exportDefinitions(this: Broker) {
   };
 }
 
-/** Broker.importDefinitions. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Import a definitions document.
+ *
+ * @param body Users, vhosts, permissions, exchanges, queues, bindings, and policies. Missing arrays are skipped.
+ * @returns Nothing. An `amq.` exchange is skipped. An exclusive queue is skipped. A binding whose destination is not a queue is skipped. A user with only a password hash is stored without verification.
+ */
 export async function importDefinitions(this: Broker, body: {
   users?: Array<{ name: string; password?: string; password_hash?: string; tags?: string | string[] }>;
   vhosts?: Array<{ name: string }>;
@@ -203,17 +236,30 @@ export async function importDefinitions(this: Broker, body: {
   }
 }
 
-/** Broker.listUsers. The parameters and return value are unchanged from the previous class method. */
+/**
+ * List user names and tags.
+ *
+ * @returns One object per user. Password hashes are not included.
+ */
 export function listUsers(this: Broker) {
   return [...this.users.entries()].map(([name, u]) => ({ name, tags: u.tags }));
 }
 
-/** Broker.userTags. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Read one user's tags.
+ *
+ * @param name User name.
+ * @returns The tag list. An unknown user returns an empty list, not null.
+ */
 export function userTags(this: Broker, name: string) {
   return this.users.get(name)?.tags ?? [];
 }
 
-/** Broker.sweep. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Pump local queues and delete unused ones past their expires argument.
+ *
+ * @returns Nothing. A queue whose home is another node is skipped. A delete error is ignored.
+ */
 export function sweep(this: Broker) {
   const now = Date.now();
   for (const q of [...this.queues.values()]) {

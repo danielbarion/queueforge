@@ -17,7 +17,13 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.enqueueQuorum. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Confirm a quorum publish only after a durable majority.
+ *
+ * @param q Quorum queue that receives the local copy.
+ * @param src Body and routing fields. This method assigns the message id.
+ * @returns True only when the local enqueue succeeded and `durableMajority` accepts the peer copies. Otherwise the local copy and the peer copies are dropped and the return is false. Fewer reachable peers than a majority returns false before the append.
+ */
 export async function enqueueQuorum(this: Broker,
   q: QueueLive,
   src: {
@@ -70,7 +76,11 @@ export async function enqueueQuorum(this: Broker,
   return true;
 }
 
-/** Broker.quorumLeader. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Name the current quorum leader.
+ *
+ * @returns The lowest sorted member id that is up when a majority of members are up. With no members, returns this node's id. Without a live majority, returns the lowest configured id even if that node is down.
+ */
 export function quorumLeader(this: Broker): string {
   const ids = this.cfg.members.map((member) => member.id);
   if (!ids.length) return this.cfg.nodeId;
@@ -83,14 +93,22 @@ export function quorumLeader(this: Broker): string {
   return live[0]!;
 }
 
-/** Broker.isQuorumLeader. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Report whether this process may confirm quorum publishes.
+ *
+ * @returns True when the cluster has no members, or when `quorumLeader` is this node. A follower must not serve the ready queue.
+ */
 export function isQuorumLeader(this: Broker): boolean {
   return !this.cfg.members.length || this.quorumLeader() === this.cfg.nodeId;
 }
 
 /** Move follower copies into the ready queue once this process is the live leader. */
 
-/** Broker.promoteIfLeader. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Move follower copies into the ready queue once this process is leader.
+ *
+ * @returns Nothing. A follower returns immediately and leaves `replicas` in place. Each promoted queue is pumped.
+ */
 export function promoteIfLeader(this: Broker) {
   if (!this.isQuorumLeader()) return;
   for (const q of this.queues.values()) {
@@ -101,13 +119,26 @@ export function promoteIfLeader(this: Broker) {
   }
 }
 
-/** Broker.quorumDrop. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Ask other members to drop one quorum message.
+ *
+ * @param q Queue whose vhost and name identify the message.
+ * @param id Message id to drop. This process is not dropped here.
+ * @returns Nothing. A peer error is ignored. The caller drops the local copy separately.
+ */
 export async function quorumDrop(this: Broker, q: QueueLive, id: string) {
   const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId) ?? [];
   await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost: q.vhost, queue: q.name, id }).catch(() => null)));
 }
 
-/** Broker.dropLocal. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remove one message from this process.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name. A missing queue still records the id as consumed.
+ * @param id Message id removed from ready, replicas, and unacked.
+ * @returns Nothing. A stored row for that id is deleted.
+ */
 export function dropLocal(this: Broker, vhost: string, queue: string, id: string) {
   this.noteConsumed(vhost, queue, id);
   const q = this.queues.get(this.key(vhost, queue));
@@ -124,13 +155,25 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
   }
 }
 
-/** Broker.noteConsumed. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Remember a message id that must not be delivered again.
+ *
+ * @param vhost Vhost of the queue.
+ * @param queue Queue name.
+ * @param id Message id. An empty id is ignored. A duplicate triple is ignored.
+ * @returns Nothing. The list is what a later snapshot asks peers to drop.
+ */
 export function noteConsumed(this: Broker, vhost: string, queue: string, id: string) {
   if (!id || this.consumed.some((item) => item.vhost === vhost && item.queue === queue && item.id === id)) return;
   this.consumed.push({ vhost, queue, id });
 }
 
-/** Broker.applyConsumed. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Drop messages a peer already consumed.
+ *
+ * @param items Records with `vhost`, `queue`, and `id`. Undefined is an empty list. A record missing any of the three is skipped.
+ * @returns Nothing. Each complete record is noted and removed locally.
+ */
 export function applyConsumed(this: Broker, items: Array<{ vhost?: string; queue?: string; id?: string }> | undefined) {
   for (const item of items ?? []) {
     const vhost = String(item.vhost ?? "");

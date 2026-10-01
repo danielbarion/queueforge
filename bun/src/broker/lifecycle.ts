@@ -17,7 +17,11 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.load. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Load vhosts, users, topology, and stored messages into memory.
+ *
+ * @returns Nothing. Exclusive queues are skipped. A classic queue whose home is another node is kept as a proxy and its messages are not loaded. `ready` is true only after this returns.
+ */
 export function load(this: Broker) {
   this.store.ensureVhost("/");
   for (const name of this.store.listVhosts()) this.vhosts.add(name);
@@ -69,7 +73,13 @@ export function load(this: Broker) {
   this.ready = true;
 }
 
-/** Broker.makeQueue. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Build the live queue record for a stored row.
+ *
+ * @param q Stored queue row, including arguments and home.
+ * @param proxy Passed through. The home on the row is kept either way.
+ * @returns A live queue with empty ready, replica, unacked, and consumer lists. Arguments are parsed once here.
+ */
 export function makeQueue(this: Broker, q: QueueRow, proxy: boolean): QueueLive {
   return {
     ...q,
@@ -85,7 +95,12 @@ export function makeQueue(this: Broker, q: QueueRow, proxy: boolean): QueueLive 
   };
 }
 
-/** Broker.ensureBuiltins. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Create the built-in exchanges for one vhost.
+ *
+ * @param vhost Vhost to add. It is inserted even when it already exists.
+ * @returns Nothing. An exchange that is already present is not replaced.
+ */
 export function ensureBuiltins(this: Broker, vhost: string) {
   this.vhosts.add(vhost);
   this.store.ensureVhost(vhost);
@@ -99,7 +114,13 @@ export function ensureBuiltins(this: Broker, vhost: string) {
   }
 }
 
-/** Broker.verify. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Check a management or AMQP password.
+ *
+ * @param user User name. An unknown user returns false.
+ * @param password Plain password. A hash that starts with `$` uses Bun's verifier. Any other hash uses the RabbitMQ password-hash check.
+ * @returns True when the password matches. A mismatch returns false and does not throw.
+ */
 export async function verify(this: Broker, user: string, password: string): Promise<boolean> {
   const row = this.users.get(user);
   if (!row) return false;
@@ -107,7 +128,15 @@ export async function verify(this: Broker, user: string, password: string): Prom
   return rabbitPasswordHashMatches(password, row.hash);
 }
 
-/** Broker.can. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Test one configure, write, or read permission.
+ *
+ * @param user User name.
+ * @param vhost Vhost the permission must name.
+ * @param kind Which permission pattern to test.
+ * @param resource Resource name. The default `.*` matches a pattern that is `.*`.
+ * @returns True when the user's pattern matches `resource`. No permission, or a pattern that is not a valid regular expression, returns false.
+ */
 export function can(this: Broker, user: string, vhost: string, kind: "configure" | "write" | "read", resource = ".*"): boolean {
   const perm = this.perms.find((p) => p.user === user && p.vhost === vhost);
   if (!perm) return false;
@@ -118,19 +147,37 @@ export function can(this: Broker, user: string, vhost: string, kind: "configure"
   }
 }
 
-/** Broker.hasVhostAccess. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Report whether a user has any permission row on a vhost.
+ *
+ * @param user User name.
+ * @param vhost Vhost name.
+ * @returns True when a permission row exists. The configure, write, and read patterns are not tested.
+ */
 export function hasVhostAccess(this: Broker, user: string, vhost: string): boolean {
   return this.perms.some((p) => p.user === user && p.vhost === vhost);
 }
 
-/** Broker.homeOf. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Choose the node that owns a queue.
+ *
+ * @param vhost Vhost joined into the home hash.
+ * @param name Queue name.
+ * @param exclusive True keeps the queue on this node.
+ * @returns Null when the broker has no cluster members. Otherwise the member id, or this node's id for an exclusive queue.
+ */
 export function homeOf(this: Broker, vhost: string, name: string, exclusive: boolean): string | null {
   if (this.cfg.members.length === 0) return null;
   if (exclusive) return this.cfg.nodeId || null;
   return queueHome(vhost, name, this.cfg.members);
 }
 
-/** Broker.isLocalHome. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Report whether this process should serve a queue.
+ *
+ * @param home Home node id, or null when the queue is local.
+ * @returns True when `home` is null, this node has no id, or `home` is this node. A follower must forward instead.
+ */
 export function isLocalHome(this: Broker, home: string | null): boolean {
   return !home || !this.cfg.nodeId || home === this.cfg.nodeId;
 }

@@ -18,7 +18,12 @@ import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-d
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
-/** Broker.publish. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Route one publish and enqueue a copy on each destination.
+ *
+ * @param input Vhost, exchange, routing key, body, headers, raw properties, persistence, priority, and expiration. `confirm` counts a publisher confirm. `mandatory` counts an unroutable publish as returned instead of dropped.
+ * @returns `ack` when every destination accepted the body, `nack` when one rejected it, or `return` when nothing was routed. A missing default-exchange queue throws 404. BCC is stripped from the stored headers.
+ */
 export async function publish(this: Broker, input: {
   vhost: string;
   exchange: string;
@@ -91,7 +96,14 @@ export async function publish(this: Broker, input: {
   return rejected ? "nack" : "ack";
 }
 
-/** Broker.enqueue. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Enqueue one message on a named queue.
+ *
+ * @param vhost Vhost that owns the queue.
+ * @param name Queue name. A missing queue throws 404.
+ * @param src Body and routing fields. `expiration` is milliseconds as text.
+ * @returns True when the queue accepted the message. A quorum queue uses `enqueueQuorum`. A classic queue whose home is another node is forwarded, and a failed forward throws 541.
+ */
 export async function enqueue(this: Broker,
   vhost: string,
   name: string,
@@ -131,7 +143,14 @@ export async function enqueue(this: Broker,
   return this.enqueueLocal(q, src, 0);
 }
 
-/** Broker.enqueueLocal. The parameters and return value are unchanged from the previous class method. */
+/**
+ * Place one message on a queue owned by this process.
+ *
+ * @param q Live queue. Ready messages and the store are updated.
+ * @param src Body and routing fields. `id` is kept when the caller already chose one.
+ * @param depth Dead-letter nesting. Callers start at 0.
+ * @returns False when overflow rejects the publish. A durable persistent message is inserted before it becomes ready. A follower quorum copy stays in `replicas`.
+ */
 export function enqueueLocal(this: Broker,
   q: QueueLive,
   src: {
