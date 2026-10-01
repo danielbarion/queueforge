@@ -4,6 +4,7 @@
  * Methods live in the sibling files and are installed on this prototype.
  * enqueueQuorum still calls durableMajority from quorum-confirm.ts.
  */
+import type { Cluster } from "../cluster.ts";
 import type { Config } from "../config.ts";
 import { Store, type BindRow, type ExRow } from "../store.ts";
 import type { LiveMsg, MgmtChannel, MgmtConnection, MgmtConsumer, Policy, QueueLive, TopicPerm } from "./model.ts";
@@ -24,12 +25,7 @@ export class Broker {
   e2e: Array<{ vhost: string; source: string; destination: string; routingKey: string }> = [];
   sessions = new Map<number, { vhost: string; queue: string }>();
   remoteQuorum = new Map<string, number>();
-  cluster: {
-    replicate: (kind: string, payload: unknown) => Promise<void>;
-    call: (home: string, op: string, payload: unknown) => Promise<unknown>;
-    subscribe: (home: string, payload: unknown, onDeliver: (msg: LiveMsg) => void) => Promise<number>;
-    peerIds: () => string[];
-  } | null = null;
+  cluster: Cluster | null = null;
   users = new Map<string, { hash: string; tags: string[] }>();
   perms: Array<{ user: string; vhost: string; configure: string; write: string; read: string }> = [];
   vhosts = new Set<string>();

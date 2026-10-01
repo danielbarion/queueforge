@@ -152,3 +152,11 @@ export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]>
 Broker.prototype.applyRemote = applyRemote;
 Broker.prototype.snapshot = snapshot;
 Broker.prototype.applySnapshot = applySnapshot;
+
+declare module "./class.ts" {
+  interface Broker {
+    applyRemote: typeof applyRemote;
+    snapshot: typeof snapshot;
+    applySnapshot: typeof applySnapshot;
+  }
+}

@@ -81,10 +81,10 @@ test("confirmed durable message survives kill -9", async () => {
     const conn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${amqpPort}/%2f`);
     const ch = await conn.createChannel();
     const msg = await ch.get("keep", { noAck: false });
-    expect(msg).toBeTruthy();
-    expect(msg!.content.toString()).toBe("kill9-body");
+    if (!msg) throw new Error("expected kill9-body");
+    expect(msg.content.toString()).toBe("kill9-body");
     console.log("consumed body=kill9-body");
-    ch.ack(msg!);
+    ch.ack(msg);
     const again = await ch.get("keep", { noAck: false });
     expect(again).toBe(false);
     await conn.close();
@@ -215,7 +215,7 @@ members = [
     console.log(`broker pid before fault=${pid}`);
     process.kill(nodeB.pid!, "SIGKILL");
     await new Promise((resolve) => nodeB.on("exit", resolve));
-    conn.connection.stream.destroy();
+    (conn.connection as unknown as { stream: { destroy(): void } }).stream.destroy();
     await Bun.sleep(300);
     expect(nodeA.exitCode).toBeNull();
     const health = await fetch("http://127.0.0.1:36230/healthz");

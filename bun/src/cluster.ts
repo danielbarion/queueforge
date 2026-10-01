@@ -1,4 +1,4 @@
-import { connect, type Socket } from "node:net";
+import { connect } from "node:net";
 import type { Broker, LiveMsg } from "./broker/index.ts";
 import { decodeQuorumAppend } from "./wire.ts";
 import { ChanError } from "./errors.ts";
@@ -8,11 +8,14 @@ type Waiter = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 type Peer = { id: string; write: (line: object) => void; pending: Map<number, Waiter> };
 
+/** Per-connection state stored on the cluster listen socket. */
+type ClusterSock = { buf?: string; peerId?: string };
+
 export class Cluster {
   peers = new Map<string, Peer>();
   private seq = 1;
   private subs = new Map<number, (msg: LiveMsg) => void>();
-  private server: ReturnType<typeof Bun.listen> | null = null;
+  private server: { stop(closeActiveConnections?: boolean): void } | null = null;
   private dialTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private broker: Broker) {}
@@ -21,7 +24,7 @@ export class Cluster {
     const listen = this.broker.cfg.clusterListen;
     if (!listen || this.broker.cfg.members.length === 0) return;
     const { host, port } = splitHost(listen);
-    this.server = Bun.listen({
+    this.server = Bun.listen<ClusterSock>({
       hostname: host,
       port,
       socket: {
@@ -30,7 +33,7 @@ export class Cluster {
           socket.data = { buf: "" };
         },
         close: (socket) => {
-          const id = (socket.data as { peerId?: string } | undefined)?.peerId;
+          const id = socket.data?.peerId;
           if (id) this.peers.delete(id);
           this.broker.promoteIfLeader();
         },
@@ -81,8 +84,8 @@ export class Cluster {
     }
   }
 
-  private onData(socket: { data: { buf?: string }; write: (s: string) => number }, data: Buffer | string) {
-    const st = socket.data as { buf?: string };
+  private onData(socket: { data: ClusterSock; write: (s: string) => number }, data: Buffer | string) {
+    const st = socket.data;
     if (st.buf == null) st.buf = "";
     const text = typeof data === "string" ? data : data.toString();
     this.readLines(st as { buf: string }, text, (line) =>
@@ -313,10 +316,4 @@ export class Cluster {
     await this.call(home, "sub", payload);
     return payload.session;
   }
-
-  stop() {
-    this.server?.stop(true);
-  }
 }
-
-void (null as unknown as Socket);

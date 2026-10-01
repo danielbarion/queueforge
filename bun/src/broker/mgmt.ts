@@ -400,3 +400,33 @@ Broker.prototype.deleteTopicPerm = deleteTopicPerm;
 Broker.prototype.listTopicPerms = listTopicPerms;
 Broker.prototype.topicWriteAllowed = topicWriteAllowed;
 Broker.prototype.topicReadAllowed = topicReadAllowed;
+
+declare module "./class.ts" {
+  interface Broker {
+    openMgmtConnection: typeof openMgmtConnection;
+    setMgmtChannels: typeof setMgmtChannels;
+    listMgmtConnections: typeof listMgmtConnections;
+    closeMgmtConnection: typeof closeMgmtConnection;
+    forgetMgmtConnection: typeof forgetMgmtConnection;
+    syncMgmtChannels: typeof syncMgmtChannels;
+    clearMgmtChildren: typeof clearMgmtChildren;
+    noteMgmtConsumer: typeof noteMgmtConsumer;
+    forgetMgmtConsumer: typeof forgetMgmtConsumer;
+    forgetMgmtChannelConsumers: typeof forgetMgmtChannelConsumers;
+    listMgmtChannels: typeof listMgmtChannels;
+    getMgmtChannel: typeof getMgmtChannel;
+    listMgmtConsumers: typeof listMgmtConsumers;
+    connectionAllowed: typeof connectionAllowed;
+    channelAllowed: typeof channelAllowed;
+    queueAllowed: typeof queueAllowed;
+    setUserLimit: typeof setUserLimit;
+    setVhostLimit: typeof setVhostLimit;
+    listUserLimits: typeof listUserLimits;
+    listVhostLimits: typeof listVhostLimits;
+    putTopicPerm: typeof putTopicPerm;
+    deleteTopicPerm: typeof deleteTopicPerm;
+    listTopicPerms: typeof listTopicPerms;
+    topicWriteAllowed: typeof topicWriteAllowed;
+    topicReadAllowed: typeof topicReadAllowed;
+  }
+}

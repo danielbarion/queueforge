@@ -251,3 +251,11 @@ export function enqueueLocal(this: Broker,
 Broker.prototype.publish = publish;
 Broker.prototype.enqueue = enqueue;
 Broker.prototype.enqueueLocal = enqueueLocal;
+
+declare module "./class.ts" {
+  interface Broker {
+    publish: typeof publish;
+    enqueue: typeof enqueue;
+    enqueueLocal: typeof enqueueLocal;
+  }
+}

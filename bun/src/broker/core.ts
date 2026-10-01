@@ -31,3 +31,9 @@ export function key(this: Broker, vhost: string, name: string) {
 /** Register a connection that finished connection.open. Returns its management id. */
 
 Broker.prototype.key = key;
+
+declare module "./class.ts" {
+  interface Broker {
+    key: typeof key;
+  }
+}

@@ -281,3 +281,17 @@ Broker.prototype.importDefinitions = importDefinitions;
 Broker.prototype.listUsers = listUsers;
 Broker.prototype.userTags = userTags;
 Broker.prototype.sweep = sweep;
+
+declare module "./class.ts" {
+  interface Broker {
+    putUser: typeof putUser;
+    deleteUser: typeof deleteUser;
+    putPerm: typeof putPerm;
+    deletePerm: typeof deletePerm;
+    exportDefinitions: typeof exportDefinitions;
+    importDefinitions: typeof importDefinitions;
+    listUsers: typeof listUsers;
+    userTags: typeof userTags;
+    sweep: typeof sweep;
+  }
+}

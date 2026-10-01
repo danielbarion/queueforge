@@ -190,3 +190,16 @@ Broker.prototype.can = can;
 Broker.prototype.hasVhostAccess = hasVhostAccess;
 Broker.prototype.homeOf = homeOf;
 Broker.prototype.isLocalHome = isLocalHome;
+
+declare module "./class.ts" {
+  interface Broker {
+    load: typeof load;
+    makeQueue: typeof makeQueue;
+    ensureBuiltins: typeof ensureBuiltins;
+    verify: typeof verify;
+    can: typeof can;
+    hasVhostAccess: typeof hasVhostAccess;
+    homeOf: typeof homeOf;
+    isLocalHome: typeof isLocalHome;
+  }
+}

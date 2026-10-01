@@ -111,10 +111,16 @@ export class Store {
     this.db.query("DELETE FROM policies WHERE vhost=? AND name=?").run(vhost, name);
   }
   listUsers(): UserRow[] {
-    return this.db
-      .query("SELECT name, hash, tags FROM users")
-      .all()
-      .map((r) => ({ name: String(r.name), hash: String(r.hash), tags: JSON.parse(String(r.tags)) }));
+    const rows = this.db.query("SELECT name, hash, tags FROM users").all() as Array<{
+      name: string;
+      hash: string;
+      tags: string;
+    }>;
+    return rows.map((r) => ({
+      name: String(r.name),
+      hash: String(r.hash),
+      tags: JSON.parse(String(r.tags)) as string[],
+    }));
   }
   getUser(name: string): UserRow | null {
     const r = this.db.query("SELECT name, hash, tags FROM users WHERE name=?").get(name) as
@@ -132,7 +138,7 @@ export class Store {
     this.db.query("DELETE FROM users WHERE name=?").run(name);
   }
   listVhosts(): string[] {
-    return this.db.query("SELECT name FROM vhosts").all().map((r) => String(r.name));
+    return (this.db.query("SELECT name FROM vhosts").all() as Array<{ name: string }>).map((r) => String(r.name));
   }
   ensureVhost(name: string) {
     this.db.query("INSERT OR IGNORE INTO vhosts (name) VALUES (?)").run(name);
@@ -168,18 +174,26 @@ export class Store {
     this.db.query("DELETE FROM bindings WHERE vhost=? AND exchange=?").run(vhost, name);
   }
   listExchanges(): ExRow[] {
-    return this.db
+    const rows = this.db
       .query("SELECT vhost, name, kind, durable, auto_delete, internal, alternate FROM exchanges")
-      .all()
-      .map((r) => ({
-        vhost: String(r.vhost),
-        name: String(r.name),
-        kind: String(r.kind),
-        durable: !!r.durable,
-        autoDelete: !!r.auto_delete,
-        internal: !!r.internal,
-        alternate: r.alternate == null ? null : String(r.alternate),
-      }));
+      .all() as Array<{
+      vhost: string;
+      name: string;
+      kind: string;
+      durable: number;
+      auto_delete: number;
+      internal: number;
+      alternate: string | null;
+    }>;
+    return rows.map((r) => ({
+      vhost: String(r.vhost),
+      name: String(r.name),
+      kind: String(r.kind),
+      durable: !!r.durable,
+      autoDelete: !!r.auto_delete,
+      internal: !!r.internal,
+      alternate: r.alternate == null ? null : String(r.alternate),
+    }));
   }
   putQueue(q: QueueRow) {
     const write = () => {
@@ -200,18 +214,26 @@ export class Store {
     this.db.query("DELETE FROM messages WHERE vhost=? AND queue=?").run(vhost, name);
   }
   listQueues(): QueueRow[] {
-    return this.db
+    const rows = this.db
       .query("SELECT vhost, name, durable, exclusive, auto_delete, args, home FROM queues")
-      .all()
-      .map((r) => ({
-        vhost: String(r.vhost),
-        name: String(r.name),
-        durable: !!r.durable,
-        exclusive: !!r.exclusive,
-        autoDelete: !!r.auto_delete,
-        args: JSON.parse(String(r.args || "{}")),
-        home: r.home == null ? null : String(r.home),
-      }));
+      .all() as Array<{
+      vhost: string;
+      name: string;
+      durable: number;
+      exclusive: number;
+      auto_delete: number;
+      args: string;
+      home: string | null;
+    }>;
+    return rows.map((r) => ({
+      vhost: String(r.vhost),
+      name: String(r.name),
+      durable: !!r.durable,
+      exclusive: !!r.exclusive,
+      autoDelete: !!r.auto_delete,
+      args: JSON.parse(String(r.args || "{}")) as QueueRow["args"],
+      home: r.home == null ? null : String(r.home),
+    }));
   }
   putBinding(b: BindRow) {
     this.db
@@ -230,16 +252,20 @@ export class Store {
     }
   }
   listBindings(): BindRow[] {
-    return this.db
-      .query("SELECT vhost, exchange, queue, routing_key, args FROM bindings")
-      .all()
-      .map((r) => ({
-        vhost: String(r.vhost),
-        exchange: String(r.exchange),
-        queue: String(r.queue),
-        routingKey: String(r.routing_key),
-        args: JSON.parse(String(r.args || "[]")),
-      }));
+    const rows = this.db.query("SELECT vhost, exchange, queue, routing_key, args FROM bindings").all() as Array<{
+      vhost: string;
+      exchange: string;
+      queue: string;
+      routing_key: string;
+      args: string;
+    }>;
+    return rows.map((r) => ({
+      vhost: String(r.vhost),
+      exchange: String(r.exchange),
+      queue: String(r.queue),
+      routingKey: String(r.routing_key),
+      args: JSON.parse(String(r.args || "[]")) as BindRow["args"],
+    }));
   }
   insertMessage(vhost: string, queue: string, body: Uint8Array, meta: string): number {
     if (this.mode === "every_n_ms" || this.mode === "every_n_messages") {

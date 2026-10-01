@@ -294,3 +294,18 @@ Broker.prototype.route = route;
 Broker.prototype.bindExchange = bindExchange;
 Broker.prototype.unbindExchange = unbindExchange;
 Broker.prototype.routeOne = routeOne;
+
+declare module "./class.ts" {
+  interface Broker {
+    declareExchange: typeof declareExchange;
+    deleteExchange: typeof deleteExchange;
+    declareQueue: typeof declareQueue;
+    deleteQueue: typeof deleteQueue;
+    bind: typeof bind;
+    unbind: typeof unbind;
+    route: typeof route;
+    bindExchange: typeof bindExchange;
+    unbindExchange: typeof unbindExchange;
+    routeOne: typeof routeOne;
+  }
+}

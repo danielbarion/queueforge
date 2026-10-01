@@ -450,3 +450,22 @@ Broker.prototype.ack = ack;
 Broker.prototype.nack = nack;
 Broker.prototype.get = get;
 Broker.prototype.purge = purge;
+
+declare module "./class.ts" {
+  interface Broker {
+    expire: typeof expire;
+    deadLetter: typeof deadLetter;
+    pump: typeof pump;
+    noteDeliver: typeof noteDeliver;
+    claimThenDeliver: typeof claimThenDeliver;
+    nextSession: typeof nextSession;
+    slot: typeof slot;
+    consume: typeof consume;
+    kick: typeof kick;
+    cancel: typeof cancel;
+    ack: typeof ack;
+    nack: typeof nack;
+    get: typeof get;
+    purge: typeof purge;
+  }
+}

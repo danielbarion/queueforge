@@ -63,19 +63,6 @@ function mqttFanout(topic: string, payload: Uint8Array) {
   }
 }
 
-function stompQueue(dest: string): string {
-  return dest.replace(/^\/queue\//, "").replace(/^\/topic\//, "");
-}
-
-function stompFanout(dest: string, body: string) {
-  const queue = stompQueue(dest);
-  for (const sub of stompHub) {
-    if (sub.destination === dest || stompQueue(sub.destination) === queue) {
-      sub.write(`MESSAGE\nsubscription:${sub.id}\ndestination:${dest}\ncontent-length:${body.length}\n\n${body}\0`);
-    }
-  }
-}
-
 /**
  * Listen for MQTT on `host`:`port` and bridge publishes through `broker`.
  *
@@ -86,7 +73,7 @@ function stompFanout(dest: string, body: string) {
  * @returns Nothing. The listener stays open until the process exits.
  */
 export function startMqtt(host: string, port: number, broker: Broker) {
-  Bun.listen({
+  Bun.listen<{ buf: Uint8Array }>({
     hostname: host,
     port,
     socket: {

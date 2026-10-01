@@ -172,3 +172,18 @@ Broker.prototype.deletePolicy = deletePolicy;
 Broker.prototype.listPerms = listPerms;
 Broker.prototype.upsertPolicy = upsertPolicy;
 Broker.prototype.applyPolicies = applyPolicies;
+
+declare module "./class.ts" {
+  interface Broker {
+    matchPolicy: typeof matchPolicy;
+    argsWithPolicy: typeof argsWithPolicy;
+    matchOperatorPolicy: typeof matchOperatorPolicy;
+    policyNames: typeof policyNames;
+    upsertOperatorPolicy: typeof upsertOperatorPolicy;
+    deleteOperatorPolicy: typeof deleteOperatorPolicy;
+    deletePolicy: typeof deletePolicy;
+    listPerms: typeof listPerms;
+    upsertPolicy: typeof upsertPolicy;
+    applyPolicies: typeof applyPolicies;
+  }
+}

@@ -53,7 +53,7 @@ export type AmqpSocket = {
  * Callers outside this folder use {@link startAmqp} only.
  */
 export class Conn {
-  buf = new Uint8Array(0);
+  buf: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   stage: "header" | "frames" | "amqp10" = "header";
   amqp10: Amqp10State = { phase: "header", sender: null, receiver: null };
   user = "";
@@ -136,7 +136,7 @@ export interface Conn {
  * @returns The Bun listen server. Stop it by calling `server.stop()`.
  */
 export function startAmqp(host: string, port: number, broker: Broker) {
-  return Bun.listen({
+  return Bun.listen<Conn>({
     hostname: host,
     port,
     socket: {

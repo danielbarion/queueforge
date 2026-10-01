@@ -59,7 +59,7 @@ function readStr(buf: Uint8Array, at: number): { text: string; next: number } | 
  * @returns Nothing. The listener stays open until the process exits.
  */
 export function startStream(host: string, port: number, broker: Broker) {
-  Bun.listen({
+  Bun.listen<{ buf: Uint8Array; publishers: Map<number, string> }>({
     hostname: host,
     port,
     socket: {

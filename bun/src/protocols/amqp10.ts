@@ -15,6 +15,17 @@ import { pull, push } from "./queue.ts";
  */
 export type Amqp10State = { phase: "header" | "sasl" | "open"; sender: string | null; receiver: string | null };
 
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const n = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
 function amqpFrame(ftype: number, body: Uint8Array): Uint8Array {
   const out = new Uint8Array(8 + body.length);
   const view = new DataView(out.buffer);

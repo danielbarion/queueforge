@@ -193,3 +193,16 @@ Broker.prototype.quorumDrop = quorumDrop;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
 Broker.prototype.applyConsumed = applyConsumed;
+
+declare module "./class.ts" {
+  interface Broker {
+    enqueueQuorum: typeof enqueueQuorum;
+    quorumLeader: typeof quorumLeader;
+    isQuorumLeader: typeof isQuorumLeader;
+    promoteIfLeader: typeof promoteIfLeader;
+    quorumDrop: typeof quorumDrop;
+    dropLocal: typeof dropLocal;
+    noteConsumed: typeof noteConsumed;
+    applyConsumed: typeof applyConsumed;
+  }
+}

@@ -32,7 +32,7 @@ function stompFanout(dest: string, body: string) {
  * @returns Nothing. The listener stays open until the process exits.
  */
 export function startStomp(host: string, port: number, broker: Broker) {
-  Bun.listen({
+  Bun.listen<{ buf: Uint8Array }>({
     hostname: host,
     port,
     socket: {
