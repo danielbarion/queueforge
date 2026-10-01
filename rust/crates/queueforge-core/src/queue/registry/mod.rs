@@ -342,6 +342,7 @@ impl QueueRegistry {
 }
 
 mod declare;
+mod declare_sync;
 mod delete;
 mod lookup;
 mod shutdown;
