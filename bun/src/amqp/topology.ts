@@ -4,7 +4,7 @@
  * Each method reads its frame, calls the broker, and sends the matching
  * ok unless the client set nowait.
  */
-import { argsFromFields } from "../broker.ts";
+import { argsFromFields } from "../broker/index.ts";
 import { fieldStr, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
 

@@ -5,7 +5,7 @@
  * kept in memory for a later subscribe on the same process and also pushed
  * to the broker under the stream name.
  */
-import type { Broker } from "../broker.ts";
+import type { Broker } from "../broker/index.ts";
 import { push } from "./queue.ts";
 
 const streams = new Map<string, Uint8Array[]>();

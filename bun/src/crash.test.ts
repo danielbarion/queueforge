@@ -5,7 +5,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import amqp from "amqplib";
-import { queueHome } from "./broker.ts";
+import { queueHome } from "./broker/index.ts";
 
 const root = join(import.meta.dir, "..");
 

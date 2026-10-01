@@ -1,5 +1,5 @@
 import { connect, type Socket } from "node:net";
-import type { Broker, LiveMsg } from "./broker.ts";
+import type { Broker, LiveMsg } from "./broker/index.ts";
 import { decodeQuorumAppend } from "./wire.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";

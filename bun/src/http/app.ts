@@ -7,7 +7,7 @@
 import { Elysia } from "elysia";
 import { join } from "node:path";
 import { statfsSync } from "node:fs";
-import { addFederationPolicy, addFederationUpstream, policyFromBody, policyItem, type Broker } from "../broker.ts";
+import { addFederationPolicy, addFederationUpstream, policyFromBody, policyItem, type Broker } from "../broker/index.ts";
 import { metricsText } from "./metrics.ts";
 import { cookieNameFromHost, requireUser, sessions, tokenOf } from "./session.ts";
 

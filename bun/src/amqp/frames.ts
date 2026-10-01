@@ -6,7 +6,7 @@
  */
 import { driveAmqp10 } from "../protocols/index.ts";
 import { method, methodFrame, R, writeTable } from "../codec.ts";
-import { ChanError } from "../broker.ts";
+import { ChanError } from "../broker/index.ts";
 import { Conn } from "./listen.ts";
 
 /** Every AMQP frame ends with this octet. A mismatch closes the connection. */

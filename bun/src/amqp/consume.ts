@@ -5,7 +5,7 @@
  * inside a transaction wait for tx.commit.
  */
 import { bodyFrame, contentHeaderFrame, emptyProps, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
-import type { LiveMsg } from "../broker.ts";
+import type { LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
 
 /**

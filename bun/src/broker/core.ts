@@ -1,0 +1,27 @@
+/**
+ * Queue map key.
+ *
+ * These functions are the Broker methods. Loading this file installs them.
+ */
+import { Broker } from "./class.ts";
+import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
+import type { Config } from "../config.ts";
+import { ChanError } from "../errors.ts";
+import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
+import { encodeQuorumAppend } from "../wire.ts";
+import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
+import { rabbitPasswordHashMatches } from "./auth.ts";
+import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
+import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
+import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
+import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
+
+
+/** Broker.key. The parameters and return value are unchanged from the previous class method. */
+export function key(this: Broker, vhost: string, name: string) {
+  return `${vhost}\0${name}`;
+}
+
+/** Register a connection that finished connection.open. Returns its management id. */
+
+Broker.prototype.key = key;

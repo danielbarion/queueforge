@@ -4,7 +4,7 @@
  * SEND stores the body on a queue derived from the destination and fans it out
  * to subscribers of that destination.
  */
-import type { Broker } from "../broker.ts";
+import type { Broker } from "../broker/index.ts";
 import { pull, push } from "./queue.ts";
 
 type StompSub = { destination: string; id: string; write: (frame: string) => void };

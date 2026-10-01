@@ -4,7 +4,7 @@
  * The 0-9-1 listener calls {@link driveAmqp10} after it sees an AMQP 1.0 protocol header.
  * This is not a second broker: transfers are stored with the same default-exchange push.
  */
-import type { Broker } from "../broker.ts";
+import type { Broker } from "../broker/index.ts";
 import { pull, push } from "./queue.ts";
 
 /**

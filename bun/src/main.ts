@@ -1,6 +1,6 @@
 import { startAmqp } from "./amqp/index.ts";
 import { startMqtt, startStomp, startStream } from "./protocols/index.ts";
-import { Broker } from "./broker.ts";
+import { Broker } from "./broker/index.ts";
 import { Cluster } from "./cluster.ts";
 import { parseConfig, splitHost } from "./config.ts";
 import { managementApp, metricsText } from "./http/index.ts";

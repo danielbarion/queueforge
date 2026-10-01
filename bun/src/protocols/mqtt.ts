@@ -4,7 +4,7 @@
  * Publishes are fanned out to live subscribers and also stored on a classic queue
  * named after the topic. Subscriptions replay one queued payload when one exists.
  */
-import type { Broker } from "../broker.ts";
+import type { Broker } from "../broker/index.ts";
 import { pull, push } from "./queue.ts";
 
 function mqttMatch(filter: string, topic: string): boolean {

@@ -3,7 +3,7 @@
  *
  * Each protocol stores payloads on the `/` vhost under the topic or queue name.
  */
-import { Broker } from "../broker.ts";
+import { Broker } from "../broker/index.ts";
 import { emptyProps } from "../codec.ts";
 
 /**

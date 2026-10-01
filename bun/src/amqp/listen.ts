@@ -4,8 +4,8 @@
  * Owns the per-connection state and routes each decoded method to the
  * sibling that implements that class. Frame bytes live in `frames.ts`.
  */
-import type { Broker, LiveMsg } from "../broker.ts";
-import { ChanError } from "../broker.ts";
+import type { Broker, LiveMsg } from "../broker/index.ts";
+import { ChanError } from "../broker/index.ts";
 import type { Amqp10State } from "../protocols/index.ts";
 import { emptyProps, R } from "../codec.ts";
 

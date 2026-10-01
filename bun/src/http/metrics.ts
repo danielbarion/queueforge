@@ -4,7 +4,7 @@
  * Names follow the rabbitmq_* series the dashboard already graphs, plus the
  * QueueForge fsync counters. Label values are escaped by {@link promLabel}.
  */
-import type { Broker } from "../broker.ts";
+import type { Broker } from "../broker/index.ts";
 
 /**
  * Escape a Prometheus label value.

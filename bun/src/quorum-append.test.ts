@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Broker } from "./broker.ts";
+import { Broker } from "./broker/index.ts";
 import { Cluster } from "./cluster.ts";
 import type { Config } from "./config.ts";
 import { Store } from "./store.ts";
