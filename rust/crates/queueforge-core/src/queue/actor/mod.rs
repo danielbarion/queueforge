@@ -1,0 +1,511 @@
+//! Per-queue actor loop: owns ready/unacked state, consumer credit, TTL heap,
+//! overflow policies, optional WAL, and dead-letter routing.
+//! The select loop stays here. Enqueue, fsync, dead-letter, recovery, delivery, and settle live in sibling modules.
+
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
+use tokio::time::Instant;
+
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, trace, warn};
+
+use super::args::QueueArgs;
+use super::cmd::{
+    ConsumerDeliveryId, ConsumerSessionId, Message, QueueCmd, QueueDelivery, QueueMessage,
+    QueueOffset,
+};
+use super::dlx::DlxRouter;
+use super::durable::{DurabilityPolicy, DurableQueueLog, QueueActorBootstrap};
+use super::ready::Ready;
+use super::{QueueInfo, QueueKey};
+use crate::config::FsyncPolicy;
+use crate::disk::DiskBudget;
+use crate::error::Error;
+use crate::memory::MemoryTracker;
+
+/// Default bounded mailbox capacity (connection → queue actor).
+pub const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
+
+/// Min-heap key for ready-message TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TtlKey {
+    at: Instant,
+    offset: QueueOffset,
+}
+
+impl PartialOrd for TtlKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TtlKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering via BinaryHeap<Reverse<_>>: Ord on TtlKey is natural
+        // (earlier Instant is smaller).
+        match self.at.cmp(&other.at) {
+            std::cmp::Ordering::Equal => self.offset.cmp(&other.offset),
+            o => o,
+        }
+    }
+}
+
+struct UnackedEntry {
+    message: QueueMessage,
+    session: Option<ConsumerSessionId>,
+}
+
+struct ConsumerState {
+    no_ack: bool,
+    /// Remaining credit. `None` means unlimited.
+    credit: Option<u32>,
+    /// `x-priority`. Higher values are served first.
+    priority: i32,
+    deliver_tx: mpsc::Sender<QueueDelivery>,
+}
+
+struct FsyncWaiter {
+    offset: QueueOffset,
+    tx: oneshot::Sender<Result<(), Error>>,
+}
+
+struct QueueState {
+    key: QueueKey,
+    /// Ready set: FIFO or multi-lane priority (`Ready::Fifo` vs `Ready::Priority`).
+    ready: Ready,
+    /// Approximate ready payload bytes (body only).
+    ready_bytes: u64,
+    /// Min-heap of ready TTL deadlines (lazy deletion of stale offsets).
+    ttl_heap: BinaryHeap<Reverse<TtlKey>>,
+    unacked: HashMap<ConsumerDeliveryId, UnackedEntry>,
+    consumers: HashMap<ConsumerSessionId, ConsumerState>,
+    /// Round-robin cursor over consumer session ids.
+    rr_order: Vec<ConsumerSessionId>,
+    rr_idx: usize,
+    next_offset: u64,
+    next_delivery_id: u64,
+    memory: Arc<MemoryTracker>,
+    /// Per-queue reserved bytes (shared with registry / panic release).
+    info: Arc<QueueInfo>,
+    /// Optional free-space budget (durable WAL publishes).
+    disk: Option<Arc<DiskBudget>>,
+    exclusive_consumer: Option<ConsumerSessionId>,
+    /// Queue is durable (definitions survive restart).
+    durable: bool,
+    /// Optional segmented WAL for durable+persistent messages.
+    wal: Option<Box<dyn DurableQueueLog>>,
+    /// True while an interval fsync owns the log outside this command loop.
+    wal_parked: bool,
+    /// Appends accepted while the interval fsync holds the log.
+    deferred_appends: Vec<(QueueOffset, Arc<Message>)>,
+    /// Acks accepted while the interval fsync holds the log.
+    deferred_acks: Vec<QueueOffset>,
+    durability_policy: DurabilityPolicy,
+    /// Waiters for `durable_done` pending group commit.
+    fsync_waiters: Vec<FsyncWaiter>,
+    /// Appends since last fsync (for EveryNMessages).
+    unsynced_appends: u64,
+    /// Offsets enqueued to WAL that are not yet acked (for watermark continuity).
+    outstanding_offsets: HashSet<u64>,
+    /// Declared queue arguments (TTL / DLX / max-length).
+    args: QueueArgs,
+    /// Times each offset has been requeued. Used by `x-delivery-limit`.
+    redeliveries: HashMap<u64, u32>,
+    /// Dead-letter router (shared; weak registry inside).
+    dlx: Option<Arc<DlxRouter>>,
+    /// Last time the queue was "used" for `x-expires` (consumer/get/redeclare).
+    last_used: Instant,
+    /// Ack or enqueue needs fsync before the next command is fully durable.
+    /// The actor loop runs the syscall off the runtime.
+    pending_fsync: bool,
+    /// Notify registry when `x-expires` fires.
+    expired_tx: Option<mpsc::UnboundedSender<QueueKey>>,
+    /// Self-command channel for async DLX completions (unbounded; avoids mailbox deadlock).
+    internal_tx: mpsc::UnboundedSender<QueueCmd>,
+}
+
+mod dead_letter;
+mod deliver;
+mod enqueue;
+mod expiry;
+mod fsync;
+mod recovery;
+mod settle;
+
+/// RAII guard: on drop, release any remaining per-queue reservation to the
+/// global [`MemoryTracker`]. Normal lifecycle paths zero the counter first so
+/// this is a no-op; panic / abrupt exit reclaims the watermark contribution.
+struct MemoryGuard {
+    memory: Arc<MemoryTracker>,
+    reserved: Arc<QueueInfo>,
+}
+
+impl Drop for MemoryGuard {
+    fn drop(&mut self) {
+        let residual = self
+            .reserved
+            .reserved_bytes
+            .swap(0, std::sync::atomic::Ordering::AcqRel);
+        if residual > 0 {
+            self.memory.sub(residual);
+        }
+    }
+}
+
+/// Run the queue actor until [`QueueCmd::Shutdown`] or the mailbox closes.
+pub async fn run(
+    key: QueueKey,
+    mut rx: mpsc::Receiver<QueueCmd>,
+    memory: Arc<MemoryTracker>,
+    disk: Option<Arc<DiskBudget>>,
+    info: Arc<QueueInfo>,
+    bootstrap: QueueActorBootstrap,
+) {
+    debug!(
+        vhost = %key.vhost,
+        queue = %key.name,
+        durable = bootstrap.durable,
+        ready = bootstrap.ready.len(),
+        next_offset = bootstrap.next_offset,
+        "queue actor started"
+    );
+    let policy = bootstrap.durability_policy;
+    // Releases any residual reservation if the actor panics or exits without
+    // ordered Shutdown (individual mem_release zeros the counter first).
+    let _memory_guard = MemoryGuard {
+        memory: Arc::clone(&memory),
+        reserved: Arc::clone(&info),
+    };
+    // Unbounded self-channel so async DLX tasks can post completions without
+    // contending on the bounded external mailbox (deadlock-safe).
+    let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+    let mut state =
+        QueueState::from_bootstrap(key.clone(), memory, disk, info, bootstrap, internal_tx);
+
+    // Group-commit timer only when durable WAL + every_n_ms.
+    let use_timer = state.wal.is_some() && policy.policy == FsyncPolicy::EveryNMs;
+    let mut interval = if use_timer {
+        let mut i = tokio::time::interval(policy.interval);
+        i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the immediate first tick.
+        i.tick().await;
+        Some(i)
+    } else {
+        None
+    };
+    let mut interval_fsync: Option<(
+        std::time::Instant,
+        tokio::task::JoinHandle<(
+            Box<dyn DurableQueueLog>,
+            Result<QueueOffset, String>,
+            Option<String>,
+        )>,
+    )> = None;
+
+    loop {
+        // Expire any already-due messages before sleeping.
+        state.expire_due_messages();
+        if state.check_queue_expired() {
+            debug!(
+                vhost = %key.vhost,
+                queue = %key.name,
+                "queue x-expires elapsed; notifying registry"
+            );
+            state.notify_queue_expired();
+            // Soft-stop: still process cmds until registry Shutdown, but stop
+            // arming further expires sleeps by clearing the arg.
+            state.args.expires_ms = None;
+        }
+
+        let deadline = state.next_deadline();
+
+        let cmd = tokio::select! {
+            biased;
+            // The in-flight fsync join is first. A ready mailbox must not park
+            // the log forever; a confirm still returns while the sync blocks.
+            joined = async {
+                if let Some((_, handle)) = interval_fsync.as_mut() {
+                    (&mut *handle).await
+                } else {
+                    std::future::pending().await
+                }
+            }, if interval_fsync.is_some() => {
+                if let Some((started, _)) = interval_fsync.take() {
+                    state.finish_interval_fsync(joined, started);
+                }
+                // Deferred appends landed after the interval fsync. Sync them
+                // before the next command, so a quorum flush cannot confirm early.
+                if state.pending_fsync {
+                    let _ = state.fsync_now().await;
+                }
+                continue;
+            }
+            // Prefer external cmds, but always drain internal DLX completions.
+            cmd = rx.recv() => cmd,
+            cmd = internal_rx.recv() => cmd,
+            _ = async {
+                if let Some(d) = deadline {
+                    tokio::time::sleep_until(d).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if deadline.is_some() => {
+                continue;
+            }
+            _ = async {
+                if let Some(interval) = interval.as_mut() {
+                    interval.tick().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if use_timer && interval_fsync.is_none() => {
+                if state.needs_group_commit_flush() {
+                    if let Some(handle) = state.begin_interval_fsync() {
+                        interval_fsync = Some((std::time::Instant::now(), handle));
+                    }
+                }
+                continue;
+            }
+        };
+
+        let Some(cmd) = cmd else {
+            break;
+        };
+
+        match cmd {
+            QueueCmd::Enqueue { msg, reply } => {
+                let res = state.enqueue(msg);
+                let _ = reply.send(res);
+            }
+            QueueCmd::FlushDurable { offset, reply } => {
+                if state.wal.is_none() && !state.wal_parked {
+                    let _ = reply.send(Ok(()));
+                } else {
+                    state.fsync_waiters.push(FsyncWaiter { offset, tx: reply });
+                    if !state.wal_parked {
+                        state.pending_fsync = true;
+                    }
+                }
+            }
+            QueueCmd::Deliver { consumer, reply } => {
+                let _ = reply.send(state.deliver_pull(consumer));
+            }
+            QueueCmd::Get { no_ack, reply } => {
+                let _ = reply.send(state.get(no_ack));
+            }
+            QueueCmd::Ack { id, .. } => {
+                state.ack(id);
+            }
+            QueueCmd::AckReport { id, reply } => {
+                let _ = reply.send(state.ack_report(id));
+            }
+            QueueCmd::SettleDelivered { id } => {
+                state.ack(id);
+            }
+            QueueCmd::Nack { id, requeue } => {
+                state.nack(id, requeue);
+            }
+            QueueCmd::NackReport { id, requeue, reply } => {
+                let _ = reply.send(state.nack_report(id, requeue));
+            }
+            QueueCmd::Forget { message_id } => {
+                state.forget_message(message_id.as_str());
+            }
+            QueueCmd::SetArgs { args } => {
+                state.args = args;
+            }
+            QueueCmd::DlxResolved {
+                qm,
+                outcome,
+                on_fail,
+            } => {
+                state.apply_dlx_resolved(qm, outcome, on_fail);
+            }
+            QueueCmd::RegisterConsumer {
+                session,
+                no_ack,
+                exclusive,
+                initial_credit,
+                deliver_tx,
+                priority,
+                reply,
+            } => {
+                let res = state.register_consumer(
+                    session,
+                    no_ack,
+                    exclusive,
+                    initial_credit,
+                    deliver_tx,
+                    priority,
+                );
+                let _ = reply.send(res);
+            }
+            QueueCmd::AddCredit { session, credit } => {
+                state.add_credit(session, credit);
+            }
+            QueueCmd::SetCredit { session, credit } => {
+                state.set_credit(session, credit);
+            }
+            QueueCmd::UnregisterConsumer {
+                session,
+                requeue,
+                reply,
+            } => {
+                state.remove_consumer(session, requeue);
+                let _ = reply.send(());
+            }
+            QueueCmd::RequeueUnacked { sessions, reply } => {
+                if sessions.is_empty() {
+                    state.requeue_all_unacked();
+                } else {
+                    state.requeue_sessions(&sessions);
+                }
+                let _ = reply.send(());
+            }
+            QueueCmd::Purge { reply } => {
+                let _ = reply.send(state.purge());
+            }
+            QueueCmd::Stats { reply } => {
+                let _ = reply.send(state.stats());
+            }
+            QueueCmd::Touch { reply } => {
+                state.touch_used();
+                let _ = reply.send(());
+            }
+            QueueCmd::Shutdown { reply } => {
+                debug!(vhost = %key.vhost, queue = %key.name, "queue actor shutting down");
+                if let Some((started, handle)) = interval_fsync.take() {
+                    let joined = handle.await;
+                    state.finish_interval_fsync(joined, started);
+                }
+                let res = state.shutdown_flush().await;
+                if let Err(ref e) = res {
+                    error!(
+                        vhost = %key.vhost,
+                        queue = %key.name,
+                        error = %e,
+                        "queue shutdown fsync failed"
+                    );
+                    metrics::counter!("queueforge_shutdown_fsync_errors_total").increment(1);
+                }
+                let _ = reply.send(res);
+                break;
+            }
+            #[cfg(test)]
+            QueueCmd::TestPanic => {
+                panic!("queue actor test panic: {}/{}", key.vhost, key.name);
+            }
+            #[cfg(test)]
+            QueueCmd::TestDeferredAppends { reply } => {
+                let _ = reply.send(state.deferred_appends.len());
+            }
+        }
+        if state.pending_fsync {
+            let _ = state.fsync_now().await;
+        }
+        trace!(vhost = %key.vhost, queue = %key.name, "queue actor handled command");
+    }
+
+    // Drain remaining commands so waiters are not stuck.
+    rx.close();
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            QueueCmd::Enqueue { reply, .. } => {
+                let _ = reply.send(Err(Error::Unavailable(format!(
+                    "queue {}/{} shutting down",
+                    key.vhost, key.name
+                ))));
+            }
+            QueueCmd::FlushDurable { reply, .. } => {
+                let _ = reply.send(Err(Error::Unavailable(format!(
+                    "queue {}/{} shutting down",
+                    key.vhost, key.name
+                ))));
+            }
+            QueueCmd::Deliver { reply, .. } => {
+                let _ = reply.send(None);
+            }
+            QueueCmd::Get { reply, .. } => {
+                let _ = reply.send(None);
+            }
+            QueueCmd::RegisterConsumer { reply, .. } => {
+                let _ = reply.send(Err(Error::Unavailable(format!(
+                    "queue {}/{} shutting down",
+                    key.vhost, key.name
+                ))));
+            }
+            QueueCmd::UnregisterConsumer { reply, .. } => {
+                let _ = reply.send(());
+            }
+            QueueCmd::RequeueUnacked { reply, .. } => {
+                let _ = reply.send(());
+            }
+            QueueCmd::Purge { reply } => {
+                let _ = reply.send(0);
+            }
+            QueueCmd::Stats { reply } => {
+                let _ = reply.send(state.stats());
+            }
+            QueueCmd::Touch { reply } => {
+                let _ = reply.send(());
+            }
+            QueueCmd::Shutdown { reply } => {
+                // Actor already flushed; late Shutdown is success.
+                let _ = reply.send(Ok(()));
+            }
+            QueueCmd::Ack { .. }
+            | QueueCmd::AckReport { .. }
+            | QueueCmd::Nack { .. }
+            | QueueCmd::NackReport { .. }
+            | QueueCmd::Forget { .. }
+            | QueueCmd::SettleDelivered { .. }
+            | QueueCmd::AddCredit { .. }
+            | QueueCmd::SetCredit { .. }
+            | QueueCmd::SetArgs { .. }
+            | QueueCmd::DlxResolved { .. } => {}
+            #[cfg(test)]
+            QueueCmd::TestPanic | QueueCmd::TestDeferredAppends { .. } => {}
+        }
+    }
+
+    warn!(vhost = %key.vhost, queue = %key.name, "queue actor stopped");
+}
+
+/// Convenience: run with empty bootstrap (tests / transient).
+#[cfg(test)]
+async fn run_simple(key: QueueKey, rx: mpsc::Receiver<QueueCmd>, memory: Arc<MemoryTracker>) {
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts::default(),
+    ));
+    run(
+        key,
+        rx,
+        memory,
+        None,
+        info,
+        QueueActorBootstrap::new_empty(false),
+    )
+    .await;
+}
+
+/// Run with custom args (unit tests for TTL / overflow).
+#[cfg(test)]
+async fn run_with_args(
+    key: QueueKey,
+    rx: mpsc::Receiver<QueueCmd>,
+    memory: Arc<MemoryTracker>,
+    args: QueueArgs,
+) {
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts::default(),
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(false);
+    boot.args = args;
+    run(key, rx, memory, None, info, boot).await;
+}
+
+#[cfg(test)]
+mod tests;
