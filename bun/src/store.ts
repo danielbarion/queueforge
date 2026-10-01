@@ -38,7 +38,7 @@ export type MsgRow = {
   meta: string;
 };
 
-export type FsyncMode = "never" | "every_n_ms" | "always";
+export type FsyncMode = "never" | "every_n_ms" | "always" | "every_n_messages";
 
 export class Store {
   db: Database;
@@ -53,11 +53,15 @@ export class Store {
   fullFlushCount = 0;
   confirmsBeforeFsync = 0;
   stagedWithoutFlush = false;
-  constructor(path: string, mode: FsyncMode | boolean = "every_n_ms", intervalMs = 100) {
+  /** Flushes that finished before the caller returned, for always and every_n_messages. */
+  syncFlushCount = 0;
+  private readonly everyN: number;
+  constructor(path: string, mode: FsyncMode | boolean = "every_n_ms", intervalMs = 100, everyN = 1) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path, { create: true });
     this.mode = mode === true ? "always" : mode === false ? "never" : mode;
     this.intervalMs = Math.max(1, intervalMs);
+    this.everyN = Math.max(1, everyN);
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(this.mode === "always" ? "PRAGMA synchronous=FULL" : "PRAGMA synchronous=OFF");
     this.db.exec(`
@@ -238,12 +242,16 @@ export class Store {
       }));
   }
   insertMessage(vhost: string, queue: string, body: Uint8Array, meta: string): number {
-    if (this.mode === "every_n_ms") {
+    if (this.mode === "every_n_ms" || this.mode === "every_n_messages") {
       const id = this.nextId++;
       this.pending.push({ id, vhost, queue, body, meta });
       this.dirty = true;
       this.stagedWithoutFlush = true;
-      this.arm();
+      if (this.mode === "every_n_messages" && this.pending.length >= this.everyN) {
+        this.flushGroup();
+      } else {
+        this.arm();
+      }
       return id;
     }
     let id = 0;
@@ -264,6 +272,10 @@ export class Store {
 
   /** Resolves after the durable write is covered by an fsync. */
   whenDurable(): Promise<void> {
+    if (this.mode === "every_n_messages") {
+      if (this.pending.length > 0) this.flushGroup();
+      return Promise.resolve();
+    }
     if (this.mode !== "every_n_ms") return Promise.resolve();
     if (!this.dirty && this.waiters.length === 0) return Promise.resolve();
     return new Promise((resolve) => {
@@ -288,8 +300,9 @@ export class Store {
   private flushGroup() {
     this.flushPending();
     if (!this.dirty && this.waiters.length === 0) return;
-    if (this.mode === "every_n_ms") {
+    if (this.mode === "every_n_ms" || this.mode === "every_n_messages") {
       this.fullFlushCount++;
+      this.syncFlushCount++;
       this.stagedWithoutFlush = false;
       this.db.exec("PRAGMA synchronous=FULL");
       this.db.exec("PRAGMA wal_checkpoint(FULL)");

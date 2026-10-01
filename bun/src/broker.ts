@@ -4,6 +4,7 @@ import type { Config } from "./config.ts";
 import { ChanError } from "./errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "./store.ts";
 import { encodeQuorumAppend } from "./wire.ts";
+import { durableMajority, type MemberCopy } from "./quorum-confirm.ts";
 
 /** RabbitMQ `password_hash`: base64(salt[4] || SHA-256 or SHA-512 of salt || password). */
 function rabbitPasswordHashMatches(password: string, encoded: string): boolean {
@@ -803,6 +804,7 @@ export class Broker {
       const q = this.queues.get(this.key(row.vhost, row.queue));
       if (!q || (q.argsParsed.queueType !== "quorum" && q.home && this.cfg.nodeId && q.home !== this.cfg.nodeId)) continue;
       const meta = JSON.parse(row.meta) as {
+        id?: string;
         exchange: string;
         routingKey: string;
         headers: Array<[string, Field]>;
@@ -813,7 +815,7 @@ export class Broker {
         redelivered: boolean;
       };
       q.ready.push({
-        id: `d-${row.id}`,
+        id: meta.id || `d-${row.id}`,
         rowId: row.id,
         body: row.body instanceof Uint8Array ? row.body : new Uint8Array(row.body as ArrayBuffer),
         exchange: meta.exchange,
@@ -1206,26 +1208,28 @@ export class Broker {
       persistent: src.persistent,
     });
     const acked: string[] = [];
+    const copies: MemberCopy[] = [];
     if (this.cluster) {
       for (const id of peers) {
         try {
           await this.cluster.call(id, "quorum_append", payload);
           acked.push(id);
+          copies.push("durable");
         } catch {
-          /* a down peer does not count toward the majority */
+          copies.push("memory");
         }
       }
     }
-    if (acked.length + 1 < majority) {
-      await Promise.all(acked.map((id) => this.cluster!.call(id, "quorum_drop", { vhost: q.vhost, queue: q.name, id: qid }).catch(() => null)));
-      return false;
-    }
     const ok = this.enqueueLocal(q, { ...src, id: qid }, 0);
     if (ok) this.store.noteQuorumConfirm();
-    if (!ok) {
+    if (ok) await this.store.whenDurable();
+    copies.push(ok ? "durable" : "memory");
+    if (!ok || !durableMajority(members, copies)) {
       await Promise.all(acked.map((id) => this.cluster!.call(id, "quorum_drop", { vhost: q.vhost, queue: q.name, id: qid }).catch(() => null)));
+      if (ok) this.dropLocal(q.vhost, q.name, qid);
+      return false;
     }
-    return ok;
+    return true;
   }
 
   enqueueLocal(
@@ -1282,6 +1286,7 @@ export class Broker {
     }
     let rowId: number | null = null;
     const meta = {
+      id: src.id,
       exchange: src.exchange,
       routingKey: src.routingKey,
       headers: src.headers,
@@ -1533,7 +1538,10 @@ export class Broker {
     q.unacked.delete(id);
     if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
     this.prom.acknowledged++;
-    if (q.argsParsed.queueType === "quorum") await this.quorumDrop(q, id);
+    if (q.argsParsed.queueType === "quorum") {
+      this.noteConsumed(q.vhost, q.name, id);
+      await this.quorumDrop(q, id);
+    }
     this.pump(q);
   }
 
@@ -1543,6 +1551,7 @@ export class Broker {
   }
 
   dropLocal(vhost: string, queue: string, id: string) {
+    this.noteConsumed(vhost, queue, id);
     const q = this.queues.get(this.key(vhost, queue));
     if (!q) return;
     const ready = q.ready.filter((m) => m.id === id);
@@ -1751,6 +1760,24 @@ export class Broker {
     }
   }
 
+  consumed: Array<{ vhost: string; queue: string; id: string }> = [];
+
+  noteConsumed(vhost: string, queue: string, id: string) {
+    if (!id || this.consumed.some((item) => item.vhost === vhost && item.queue === queue && item.id === id)) return;
+    this.consumed.push({ vhost, queue, id });
+  }
+
+  applyConsumed(items: Array<{ vhost?: string; queue?: string; id?: string }> | undefined) {
+    for (const item of items ?? []) {
+      const vhost = String(item.vhost ?? "");
+      const queue = String(item.queue ?? "");
+      const id = String(item.id ?? "");
+      if (!vhost || !queue || !id) continue;
+      this.noteConsumed(vhost, queue, id);
+      this.dropLocal(vhost, queue, id);
+    }
+  }
+
   snapshot() {
     return {
       users: [...this.users.entries()].map(([name, u]) => ({ name, hash: u.hash, tags: u.tags })),
@@ -1767,6 +1794,7 @@ export class Broker {
         home: q.home,
       })),
       bindings: this.bindings,
+      consumed: this.consumed,
     };
   }
 
@@ -1791,6 +1819,7 @@ export class Broker {
       this.queues.set(this.key(q.vhost, q.name), this.makeQueue(q, !this.isLocalHome(q.home)));
       if (q.durable) this.store.putQueue(q);
     }
+    this.applyConsumed(snap.consumed);
     for (const b of snap.bindings ?? []) {
       this.bindings.push(b);
       this.store.putBinding(b);

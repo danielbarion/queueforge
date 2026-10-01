@@ -59,7 +59,7 @@ export class Cluster {
         const write = (line: object) => sock.write(`${JSON.stringify(line)}\n`);
         const peer: Peer = { id: member.id, write, pending: new Map() };
         this.peers.set(member.id, peer);
-        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot() } });
+        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed } });
       });
       sock.on("close", () => {
         this.peers.delete(member.id);
@@ -114,6 +114,7 @@ export class Cluster {
       const snap = (payload.snapshot ?? msg.snapshot) as ReturnType<Broker["snapshot"]> | undefined;
       try {
         this.broker.applySnapshot(snap);
+        this.broker.applyConsumed(payload.consumed as Array<{ vhost?: string; queue?: string; id?: string }>);
       } catch {
         /* a peer of the other implementation keeps its own files */
       }
@@ -124,7 +125,7 @@ export class Cluster {
         ok: true,
         from: this.broker.cfg.nodeId,
         nodeId: this.broker.cfg.nodeId,
-        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot() },
+        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot(), consumed: this.broker.consumed },
       });
       return;
     }
@@ -137,7 +138,10 @@ export class Cluster {
         if (msg.ok === false) waiter.reject(new Error(String(msg.error ?? "cluster error")));
         else waiter.resolve(msg.payload);
       }
+      const payload = (msg.payload ?? {}) as { snapshot?: ReturnType<Broker["snapshot"]>; consumed?: Array<{ vhost?: string; queue?: string; id?: string }> };
       if (msg.snapshot) this.broker.applySnapshot(msg.snapshot as ReturnType<Broker["snapshot"]>);
+      if (payload.snapshot) this.broker.applySnapshot(payload.snapshot);
+      this.broker.applyConsumed(payload.consumed);
       return;
     }
     if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare_queue" || op === "delete_queue" || op === "unsub") {
@@ -229,6 +233,7 @@ export class Cluster {
         expiration: decoded.expiration,
         id: decoded.messageId,
       }, 0);
+      if (op === "quorum_append" && ok) await this.broker.store.whenDurable();
       return ok;
     }
     if (op === "ack") {

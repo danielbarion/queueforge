@@ -7,6 +7,8 @@
 
 /// Static cluster membership, topology replication, and queue forwarding.
 pub mod cluster;
+/// Quorum confirm rule: a majority must hold the body in durable storage.
+pub mod quorum_confirm;
 /// Per-connection AMQP 0-9-1 state machine.
 pub mod connection;
 /// Connection and resource limit helpers.

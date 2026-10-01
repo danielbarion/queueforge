@@ -18,6 +18,8 @@ use queueforge_core::{
     QueueKey, QueueRegistry, User, Vhost,
 };
 use queueforge_store::MetadataStore;
+
+use crate::quorum_confirm::{durable_majority, MemberCopy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -56,6 +58,8 @@ struct Inner {
     leader: std::sync::Mutex<String>,
     /// Quorum bodies on a follower. `basic.get` and `basic.consume` do not pop this.
     replicas: Mutex<HashMap<String, Arc<Message>>>,
+    /// Quorum message ids a member has dropped. Sent on hello so a restarted peer does not deliver them again.
+    consumed: Mutex<Vec<Value>>,
 }
 
 struct Peer {
@@ -147,6 +151,7 @@ impl Cluster {
             next_id: AtomicU64::new(1),
             leader: std::sync::Mutex::new(String::new()),
             replicas: Mutex::new(HashMap::new()),
+            consumed: Mutex::new(Vec::new()),
         });
         let cluster = Arc::new(Self { inner: Arc::clone(&inner) });
         let accept_inner = Arc::clone(&inner);
@@ -490,21 +495,31 @@ impl Cluster {
         // Peers store the body before this node can deliver it. A delivery claims
         // those copies, and that claim must not race ahead of the replicate.
         let mut stored_on = Vec::new();
+        let mut copies = Vec::new();
         for peer in &peers {
             if self.call(peer, "quorum_append", encode_quorum_append(key, &message)).await.is_ok() {
                 stored_on.push(peer.clone());
+                copies.push(MemberCopy::Durable);
+            } else {
+                copies.push(MemberCopy::MemoryOnly);
             }
         }
-        if stored_on.len() + 1 < majority {
+        if local_enqueue(&self.inner, key, Arc::clone(&message)).await.is_err()
+            || flush_queue(&self.inner, key).await.is_err()
+        {
+            copies.push(MemberCopy::MemoryOnly);
             for peer in &stored_on {
                 let _ = self.call(peer, "forget", wire_forget(key, message_id.as_str())).await;
             }
+            let _ = local_forget(&self.inner, key, message_id.as_str()).await;
             return Err(Error::Unavailable("quorum has no majority".into()));
         }
-        if local_enqueue(&self.inner, key, Arc::clone(&message)).await.is_err() {
+        copies.push(MemberCopy::Durable);
+        if !durable_majority(members, &copies) {
             for peer in &stored_on {
                 let _ = self.call(peer, "forget", wire_forget(key, message_id.as_str())).await;
             }
+            let _ = local_forget(&self.inner, key, message_id.as_str()).await;
             return Err(Error::Unavailable("quorum has no majority".into()));
         }
         Ok(())
@@ -514,6 +529,7 @@ impl Cluster {
         let Some(handle) = self.inner.queues.get(key) else {
             return;
         };
+        remember_consumed(&self.inner, key, message_id).await;
         let _ = handle.tx.send(QueueCmd::Forget {
             message_id: CompactString::from(message_id),
         }).await;
@@ -521,6 +537,15 @@ impl Cluster {
         if handle.tx.send(QueueCmd::Touch { reply: tx }).await.is_ok() {
             let _ = rx.await;
         }
+    }
+
+    /// Drop follower replica-log entries before the client sees the body.
+    ///
+    /// `drop_local` removes this node's replica log only. The leader's unacked
+    /// entry stays until the client acks or nacks.
+    /// Remember a quorum id that must not be delivered again after a peer restarts.
+    pub async fn note_quorum_consumed(&self, key: &QueueKey, message_id: &str) {
+        remember_consumed(&self.inner, key, message_id).await;
     }
 
     /// Drop follower replica-log entries before the client sees the body.
@@ -655,7 +680,7 @@ async fn attach_peer(
                 op: "hello".into(),
                 ok: false,
                 error: String::new(),
-                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone()}),
                 v: 1,
                 node_id: inner.node_id.clone(),
                 from: inner.node_id.clone(),
@@ -673,6 +698,9 @@ async fn attach_peer(
         if msg.op == "reply" {
             if let Some(snap) = msg.payload.get("snapshot") {
                 apply_snapshot(&inner, snap).await;
+            }
+            if let Some(consumed) = msg.payload.get("consumed") {
+                apply_consumed(&inner, consumed).await;
             }
             if let Some(waiter) = pending.lock().await.remove(&msg.id) {
                 let _ = waiter.send(msg);
@@ -693,13 +721,16 @@ async fn attach_peer(
                 if let Some(snap) = msg.payload.get("snapshot") {
                     apply_snapshot(&inner, snap).await;
                 }
+                if let Some(consumed) = msg.payload.get("consumed") {
+                    apply_consumed(&inner, consumed).await;
+                }
                 let _ = peer.tx.send(
                     serde_json::to_string(&Msg {
                         id: msg.id,
                         op: "reply".into(),
                         ok: true,
                         error: String::new(),
-                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await}),
+                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone()}),
                         v: 1,
                         node_id: inner.node_id.clone(),
                         from: inner.node_id.clone(),
@@ -781,6 +812,37 @@ async fn local_enqueue(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> 
     Ok(())
 }
 
+/// Fsync this node's queue log. Quorum confirms call this. Classic confirms do not.
+async fn flush_queue(inner: &Inner, key: &QueueKey) -> Result<(), Error> {
+    let handle = inner
+        .queues
+        .get(key)
+        .ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    handle
+        .tx
+        .send(QueueCmd::FlushDurable { reply: reply_tx })
+        .await
+        .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
+    reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?
+}
+
+async fn local_forget(inner: &Inner, key: &QueueKey, message_id: &str) -> Result<(), Error> {
+    let Some(handle) = inner.queues.get(key) else {
+        return Ok(());
+    };
+    handle
+        .tx
+        .send(QueueCmd::Forget { message_id: CompactString::from(message_id) })
+        .await
+        .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
+    let (tx, rx) = oneshot::channel();
+    if handle.tx.send(QueueCmd::Touch { reply: tx }).await.is_ok() {
+        let _ = rx.await;
+    }
+    Ok(())
+}
+
 async fn serve_conn(inner: Arc<Inner>, stream: TcpStream) -> std::io::Result<()> {
     let peer = stream.peer_addr().unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
     attach_peer(inner, format!("inbound-{peer}"), peer, stream, false).await
@@ -823,6 +885,36 @@ async fn snapshot(inner: &Inner) -> Value {
         bindings: Vec::new(),
     }))
     .unwrap_or(Value::Null)
+}
+
+async fn remember_consumed(inner: &Inner, key: &QueueKey, message_id: &str) {
+    let entry = serde_json::json!({"vhost": key.vhost.as_str(), "queue": key.name.as_str(), "id": message_id});
+    let mut consumed = inner.consumed.lock().await;
+    if !consumed.iter().any(|item| item == &entry) {
+        consumed.push(entry);
+    }
+}
+
+async fn apply_consumed(inner: &Arc<Inner>, value: &Value) {
+    let Some(items) = value.as_array() else { return };
+    for item in items {
+        let vhost = item.get("vhost").and_then(|v| v.as_str()).unwrap_or("");
+        let queue = item.get("queue").and_then(|v| v.as_str()).unwrap_or("");
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if vhost.is_empty() || queue.is_empty() || id.is_empty() {
+            continue;
+        }
+        let key = QueueKey::new(vhost, queue);
+        remember_consumed(inner, &key, id).await;
+        let inner = Arc::clone(inner);
+        let id = id.to_string();
+        tokio::spawn(async move {
+            for _ in 0..15 {
+                let _ = local_forget(&inner, &key, &id).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
 }
 
 async fn apply_snapshot(inner: &Arc<Inner>, value: &Value) {
@@ -976,6 +1068,7 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
                 CompactString::from(if id.is_empty() { json_str(&msg.payload, "id") } else { id })
             };
             inner.replicas.lock().await.remove(&replica_key(&key, message_id.as_str()));
+            remember_consumed(&inner, &key, message_id.as_str()).await;
             let handle = inner.queues.get(&key).ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
             handle.tx.send(QueueCmd::Forget { message_id }).await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
             let (tx, rx) = oneshot::channel();
@@ -992,6 +1085,7 @@ async fn dispatch_op(inner: &Arc<Inner>, msg: &Msg, peer_tx: mpsc::Sender<String
             handle.tx.send(QueueCmd::Enqueue { msg: Arc::new(message), reply: reply_tx }).await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
             let completion = reply_rx.await.map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
             let _ = completion.durable_done.await;
+            flush_queue(&inner, &key).await?;
             Ok(serde_json::json!({"offset": completion.offset.0}))
         }
         "ack" => {
@@ -1552,6 +1646,7 @@ async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Receiver<Queu
                     "args": args,
                 })).await;
             }
+            QueueCmd::FlushDurable { reply } => { let _ = reply.send(Ok(())); }
             QueueCmd::Touch { reply } => { let _ = reply.send(()); }
             QueueCmd::Shutdown { reply } => { let _ = reply.send(Ok(())); }
             QueueCmd::Deliver { reply, .. } => {

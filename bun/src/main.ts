@@ -19,7 +19,7 @@ if (!configPath) {
   process.exit(2);
 }
 const cfg = parseConfig(await Bun.file(configPath).text());
-const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs);
+const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs, cfg.fsyncEveryN);
 const broker = new Broker(cfg, store);
 if (dev && store.listUsers().length === 0) {
   const hash = await Bun.password.hash("devpassword12", { algorithm: "argon2id" });

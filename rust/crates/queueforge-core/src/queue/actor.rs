@@ -1609,6 +1609,16 @@ pub async fn run(
                 let res = state.enqueue(msg);
                 let _ = reply.send(res);
             }
+            QueueCmd::FlushDurable { reply } => {
+                if state.wal.is_none() && !state.wal_parked {
+                    let _ = reply.send(Ok(()));
+                } else {
+                    state.fsync_waiters.push(FsyncWaiter { offset: QueueOffset(0), tx: reply });
+                    if !state.wal_parked {
+                        state.pending_fsync = true;
+                    }
+                }
+            }
             QueueCmd::Deliver { consumer, reply } => {
                 let _ = reply.send(state.deliver_pull(consumer));
             }
@@ -1733,6 +1743,12 @@ pub async fn run(
     while let Some(cmd) = rx.recv().await {
         match cmd {
             QueueCmd::Enqueue { reply, .. } => {
+                let _ = reply.send(Err(Error::Unavailable(format!(
+                    "queue {}/{} shutting down",
+                    key.vhost, key.name
+                ))));
+            }
+            QueueCmd::FlushDurable { reply } => {
                 let _ = reply.send(Err(Error::Unavailable(format!(
                     "queue {}/{} shutting down",
                     key.vhost, key.name

@@ -8,8 +8,9 @@ export type Config = {
   stomp: string | null;
   stream: string | null;
   dataDir: string;
-  fsync: "never" | "every_n_ms" | "always";
+  fsync: "never" | "every_n_ms" | "always" | "every_n_messages";
   fsyncIntervalMs: number;
+  fsyncEveryN: number;
   tls: boolean;
   nodeId: string;
   clusterListen: string | null;
@@ -37,6 +38,7 @@ export function parseConfig(text: string): Config {
     dataDir: "./data",
     fsync: "every_n_ms",
     fsyncIntervalMs: 100,
+    fsyncEveryN: 1,
     tls: false,
     nodeId: "",
     clusterListen: null,
@@ -80,9 +82,10 @@ export function parseConfig(text: string): Config {
     if (section === "listeners" && key === "stream") cfg.stream = val;
     if (section === "data" && key === "dir") cfg.dataDir = val;
     if (section === "data" && key === "fsync_policy") {
-      if (val === "never" || val === "always" || val === "every_n_ms") cfg.fsync = val;
+      if (val === "never" || val === "always" || val === "every_n_ms" || val === "every_n_messages") cfg.fsync = val;
     }
     if (section === "data" && key === "fsync_interval_ms") cfg.fsyncIntervalMs = Number(val) || 100;
+    if (section === "data" && key === "fsync_every_n_messages") cfg.fsyncEveryN = Number(val) || 1;
     if (section === "tls" && key === "enabled") cfg.tls = val === "true";
     if (section === "cluster" && key === "node_id") cfg.nodeId = val;
     if (section === "cluster" && key === "listen") cfg.clusterListen = val;

@@ -4140,6 +4140,7 @@ where
                 if handle.tx.send(cmd).await.is_ok() {
                     if let Ok(Some(message_id)) = reply_rx.await {
                         if let Some(cluster) = &self.cluster {
+                            cluster.note_quorum_consumed(&queue_key, message_id.as_str()).await;
                             cluster.quorum_forget(&queue_key, message_id.as_str()).await;
                         }
                     }
