@@ -1,181 +1,25 @@
-//! basic.publish, content frames, returns, and publisher confirms.
-//!
-//! These methods belong to [`Connection`]. The frame loop in the parent module calls them.
+//! Finish a basic.publish after the body has been read.
 
 use super::*;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use compact_str::CompactString;
-use queueforge_amqp::channel as chan_method;
-use queueforge_amqp::tx as tx_method;
-use queueforge_amqp::confirm as confirm_method;
-use queueforge_amqp::connection as conn_method;
-use queueforge_amqp::exchange as exchange_method;
-use queueforge_amqp::queue as queue_method;
-use queueforge_amqp::{
-    basic as basic_method, BasicProperties, ContentHeader, FieldTable, FieldValue, Frame, FrameType,
-    Method,
-};
+use queueforge_amqp::{basic as basic_method, BasicProperties, FieldTable};
 use queueforge_auth::{PermissionKind, ResourceKind};
 use queueforge_core::{
-    generate_server_queue_name, Binding, ConsumerDeliveryId, ConsumerSessionId, Error as CoreError,
-    Exchange, ExchangeType, Message, QueueCmd, QueueDeclareOpts, QueueDelivery, QueueHandle,
-    QueueKey, QueueType, DEFAULT_EXCHANGE_NAME,
+    Error as CoreError, ExchangeType, Message, QueueCmd, QueueHandle, QueueType,
+    DEFAULT_EXCHANGE_NAME,
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{debug, info, trace, warn};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::oneshot;
+use tracing::warn;
 
 impl<'a, S> Connection<'a, S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    /// `handle_content_frame` on the open connection.
-    pub(in crate::connection) async fn handle_content_frame(&mut self, frame: Frame) -> Result<Step, ConnError> {
-        let ch = frame.channel;
-        if ch == 0 || !self.channels.contains_key(&ch) {
-            if ch != 0 {
-                self.server_channel_close(ch, REPLY_COMMAND_INVALID, "channel not open", 0, 0)
-                    .await?;
-            }
-            return Ok(Step::Continue);
-        }
-
-        match frame.kind {
-            FrameType::Header => {
-                let header = match ContentHeader::decode(&frame.payload) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        self.server_channel_close(
-                            ch,
-                            REPLY_COMMAND_INVALID,
-                            &format!("invalid content header: {e}"),
-                            60,
-                            0,
-                        )
-                        .await?;
-                        return Ok(Step::Continue);
-                    }
-                };
-                let max_msg = self.params.max_message_bytes;
-                let header_bytes = properties_header_bytes(&header.properties);
-                if header.body_size.saturating_add(header_bytes) > max_msg {
-                    self.server_channel_close(
-                        ch,
-                        REPLY_PRECONDITION_FAILED,
-                        &format!(
-                            "PRECONDITION_FAILED - message size {} exceeds max {}",
-                            header.body_size.saturating_add(header_bytes),
-                            max_msg
-                        ),
-                        60,
-                        0,
-                    )
-                    .await?;
-                    // Drop in-flight publish assembly if any.
-                    if let Some(ch_state) = self.channels.get_mut(&ch) {
-                        ch_state.publish = None;
-                    }
-                    return Ok(Step::Continue);
-                }
-
-                let Some(ch_state) = self.channels.get_mut(&ch) else {
-                    return Ok(Step::Continue);
-                };
-                match ch_state.publish.take() {
-                    Some(PublishAssemble::ExpectHeader { publish }) => {
-                        if header.body_size == 0 {
-                            // Complete publish with empty body.
-                            return self
-                                .finish_publish(ch, publish, header.properties, Bytes::new())
-                                .await;
-                        }
-                        ch_state.publish = Some(PublishAssemble::ExpectBody {
-                            publish,
-                            properties: Box::new(header.properties),
-                            body_size: header.body_size,
-                            body: Vec::with_capacity(header.body_size.min(1024 * 1024) as usize),
-                        });
-                        Ok(Step::Continue)
-                    }
-                    other => {
-                        ch_state.publish = other;
-                        self.server_channel_close(
-                            ch,
-                            REPLY_COMMAND_INVALID,
-                            "unexpected content header",
-                            60,
-                            0,
-                        )
-                        .await?;
-                        Ok(Step::Continue)
-                    }
-                }
-            }
-            FrameType::Body => {
-                let (done_publish, props, body) = {
-                    let Some(ch_state) = self.channels.get_mut(&ch) else {
-                        return Ok(Step::Continue);
-                    };
-                    match ch_state.publish.take() {
-                        Some(PublishAssemble::ExpectBody {
-                            publish,
-                            properties,
-                            body_size,
-                            mut body,
-                        }) => {
-                            body.extend_from_slice(&frame.payload);
-                            if (body.len() as u64) < body_size {
-                                ch_state.publish = Some(PublishAssemble::ExpectBody {
-                                    publish,
-                                    properties,
-                                    body_size,
-                                    body,
-                                });
-                                return Ok(Step::Continue);
-                            }
-                            if (body.len() as u64) > body_size {
-                                self.server_channel_close(
-                                    ch,
-                                    REPLY_COMMAND_INVALID,
-                                    "body larger than content header size",
-                                    60,
-                                    0,
-                                )
-                                .await?;
-                                return Ok(Step::Continue);
-                            }
-                            (publish, *properties, Bytes::from(body))
-                        }
-                        other => {
-                            ch_state.publish = other;
-                            self.server_channel_close(
-                                ch,
-                                REPLY_COMMAND_INVALID,
-                                "unexpected content body",
-                                60,
-                                0,
-                            )
-                            .await?;
-                            return Ok(Step::Continue);
-                        }
-                    }
-                };
-                self.finish_publish(ch, done_publish, props, body).await
-            }
-            _ => Ok(Step::Continue),
-        }
-    }
-
-    /// `in_tx` on the open connection.
-    pub(in crate::connection) fn in_tx(&self, channel: u16) -> bool {
-        !self.tx_applying && self.channels.get(&channel).is_some_and(|ch| ch.tx_mode)
-    }
-
     /// `finish_publish` on the open connection.
     pub(in crate::connection) async fn finish_publish(
         &mut self,
@@ -184,20 +28,15 @@ where
         properties: BasicProperties,
         body: Bytes,
     ) -> Result<Step, ConnError> {
-        if !self.tx_applying
-            && self
-                .channels
-                .get(&channel)
-                .is_some_and(|ch| ch.tx_mode)
-        {
-                if let Some(ch) = self.channels.get_mut(&channel) {
-                    ch.tx_ops.push(TxOp::Publish {
-                        publish,
-                        properties: Box::new(properties),
-                        body,
-                    });
-                }
-                return Ok(Step::Continue);
+        if !self.tx_applying && self.channels.get(&channel).is_some_and(|ch| ch.tx_mode) {
+            if let Some(ch) = self.channels.get_mut(&channel) {
+                ch.tx_ops.push(TxOp::Publish {
+                    publish,
+                    properties: Box::new(properties),
+                    body,
+                });
+            }
+            return Ok(Step::Continue);
         }
         // Publisher-confirm sequence is assigned once content is fully received,
         // for every publish on a confirm-mode channel (success or failure path).
@@ -280,7 +119,12 @@ where
             }
         }
 
-        let header_args = field_table_to_header_args(properties.headers.as_ref().unwrap_or(&FieldTable::default()));
+        let header_args = field_table_to_header_args(
+            properties
+                .headers
+                .as_ref()
+                .unwrap_or(&FieldTable::default()),
+        );
         let mut route = match self.router.route_publish(
             &vhost,
             &exchange_name,
@@ -318,7 +162,10 @@ where
                     if key == publish.routing_key {
                         continue;
                     }
-                    let Ok(more) = self.router.route_publish(&vhost, &exchange_name, &key, &header_args) else {
+                    let Ok(more) =
+                        self.router
+                            .route_publish(&vhost, &exchange_name, &key, &header_args)
+                    else {
                         continue;
                     };
                     for dest in more.destinations {
@@ -331,7 +178,12 @@ where
         }
 
         for downstream in queueforge_core::federation::federation_targets(&vhost, &exchange_name) {
-            let Ok(extra) = self.router.route_publish(&downstream, &exchange_name, publish.routing_key.as_str(), &header_args) else {
+            let Ok(extra) = self.router.route_publish(
+                &downstream,
+                &exchange_name,
+                publish.routing_key.as_str(),
+                &header_args,
+            ) else {
                 continue;
             };
             for dest in extra.destinations {
@@ -465,13 +317,23 @@ where
         });
 
         let all_quorum = destinations.iter().all(|handle| {
-            handle.info.args.lock().unwrap_or_else(|err| err.into_inner()).queue_type == Some(QueueType::Quorum)
+            handle
+                .info
+                .args
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .queue_type
+                == Some(QueueType::Quorum)
         });
         if all_quorum {
             if let Some(cluster) = &self.cluster {
                 let mut failed = false;
                 for handle in &destinations {
-                    if cluster.quorum_enqueue(&handle.info.key, Arc::clone(&msg)).await.is_err() {
+                    if cluster
+                        .quorum_enqueue(&handle.info.key, Arc::clone(&msg))
+                        .await
+                        .is_err()
+                    {
                         failed = true;
                     }
                 }
@@ -622,128 +484,6 @@ where
         if let Some(seq) = confirm_seq {
             self.send_publisher_confirm(channel, seq, true).await?;
         }
-        Ok(Step::Continue)
-    }
-
-    /// Partial multi-destination publish failure.
-    ///
-    /// Confirms on → `basic.nack` for the publish sequence (channel stays open).
-    /// Confirms off → channel exception 541.
-    pub(in crate::connection) async fn publish_partial_failure(
-        &mut self,
-        channel: u16,
-        confirm_seq: Option<u64>,
-    ) -> Result<Step, ConnError> {
-        if let Some(seq) = confirm_seq {
-            self.send_publisher_confirm(channel, seq, false).await?;
-            return Ok(Step::Continue);
-        }
-        self.server_channel_close(
-            channel,
-            REPLY_INTERNAL_ERROR,
-            "INTERNAL_ERROR - partial multi-destination publish failure",
-            basic_method::CLASS_ID,
-            basic_method::Publish::METHOD_ID,
-        )
-        .await?;
-        Ok(Step::Continue)
-    }
-
-    /// Map `EnqueueCompletion` outcome onto publisher `basic.ack` / `basic.nack`.
-    pub(in crate::connection) async fn send_publisher_confirm(
-        &mut self,
-        channel: u16,
-        delivery_tag: u64,
-        ok: bool,
-    ) -> Result<(), ConnError> {
-        if ok {
-            queueforge_core::prom::message_confirmed();
-            self.send_method(
-                channel,
-                &Method::BasicAck(basic_method::Ack {
-                    delivery_tag,
-                    multiple: false,
-                }),
-            )
-            .await
-        } else {
-            self.send_method(
-                channel,
-                &Method::BasicNack(basic_method::Nack {
-                    delivery_tag,
-                    multiple: false,
-                    requeue: false,
-                }),
-            )
-            .await
-        }
-    }
-
-    /// `handle_basic_publish` on the open connection.
-    pub(in crate::connection) async fn handle_basic_publish(
-        &mut self,
-        channel: u16,
-        publish: basic_method::Publish,
-    ) -> Result<Step, ConnError> {
-        let Some(ch_state) = self.channels.get_mut(&channel) else {
-            return Ok(Step::Continue);
-        };
-        if ch_state.publish.is_some() {
-            self.server_channel_close(
-                channel,
-                REPLY_COMMAND_INVALID,
-                "publish already in progress on channel",
-                basic_method::CLASS_ID,
-                basic_method::Publish::METHOD_ID,
-            )
-            .await?;
-            return Ok(Step::Continue);
-        }
-        let user = self.user.clone().unwrap_or_default();
-        let vhost = self.vhost.clone().unwrap_or_default();
-        if !self.connections.topic_write_allowed(&user, &vhost, &publish.exchange, &publish.routing_key) {
-            self.server_channel_close(
-                channel,
-                REPLY_ACCESS_REFUSED,
-                "ACCESS_REFUSED - topic permission write pattern",
-                basic_method::CLASS_ID,
-                basic_method::Publish::METHOD_ID,
-            )
-            .await?;
-            return Ok(Step::Continue);
-        }
-        ch_state.publish = Some(PublishAssemble::ExpectHeader { publish });
-        Ok(Step::Continue)
-    }
-
-    /// `send_basic_return` on the open connection.
-    pub(in crate::connection) async fn send_basic_return(
-        &mut self,
-        channel: u16,
-        reply_code: u16,
-        reply_text: &str,
-        exchange: &str,
-        routing_key: &str,
-        properties: &BasicProperties,
-        body: &Bytes,
-    ) -> Result<Step, ConnError> {
-        self.send_method(
-            channel,
-            &Method::BasicReturn(basic_method::Return {
-                reply_code,
-                reply_text: reply_text.to_string(),
-                exchange: exchange.to_string(),
-                routing_key: routing_key.to_string(),
-            }),
-        )
-        .await?;
-        self.send_content(channel, properties, body).await?;
-        metrics::counter!(
-            "queueforge_publish_unroutable_total",
-            "vhost" => self.vhost.clone().unwrap_or_else(|| "/".into()),
-            "exchange" => exchange.to_string()
-        )
-        .increment(1);
         Ok(Step::Continue)
     }
 }

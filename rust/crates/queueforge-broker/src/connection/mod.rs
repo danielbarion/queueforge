@@ -10,13 +10,25 @@
 //!
 //! Layout: [`reply`] (AMQP codes), [`helpers`] (pure helpers), this module (state machine).
 
+mod bind;
+mod close;
 mod confirm;
 mod consume;
+mod content;
+mod deliver;
+mod exchange;
+mod get;
 mod handshake;
+mod headers;
 mod helpers;
+mod open;
 mod publish;
+mod queue;
 mod reply;
+mod returns;
+mod settle;
 mod topology;
+mod tune;
 
 #[cfg(test)]
 mod tests;
@@ -30,22 +42,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use compact_str::CompactString;
 use queueforge_amqp::channel as chan_method;
-use queueforge_amqp::tx as tx_method;
 use queueforge_amqp::confirm as confirm_method;
 use queueforge_amqp::connection as conn_method;
 use queueforge_amqp::exchange as exchange_method;
 use queueforge_amqp::queue as queue_method;
 use queueforge_amqp::{
-    basic as basic_method, decode_protocol_header, BasicProperties, ContentHeader, FieldTable,
-    FieldValue, Frame, FrameType, Method, FRAME_MIN_LEN, PROTOCOL_HEADER_LEN,
+    basic as basic_method, decode_protocol_header, BasicProperties, Frame, FrameType, Method,
+    FRAME_MIN_LEN, PROTOCOL_HEADER_LEN,
 };
-use queueforge_auth::{AuthService, PermissionKind, ResourceKind};
+use queueforge_auth::AuthService;
 use queueforge_core::{
-    generate_server_queue_name, Binding, ConsumerDeliveryId, ConsumerSessionId, Error as CoreError,
-    Exchange, ExchangeRouter, ExchangeType, Message, QueueCmd, QueueDeclareOpts, QueueDelivery,
-    QueueHandle, QueueKey, QueueRegistry, QueueType, DEFAULT_EXCHANGE_NAME,
+    ConsumerDeliveryId, ConsumerSessionId, ExchangeRouter, QueueCmd, QueueDelivery, QueueHandle,
+    QueueKey, QueueRegistry,
 };
 use queueforge_mgmt::ConnectionTracker;
 use queueforge_store::MetadataStore;
@@ -837,7 +846,6 @@ where
         }
     }
 
-
     async fn on_open(&mut self, channel: u16, method: Method) -> Result<Step, ConnError> {
         // Connection-class methods must be on channel 0.
         if method.class_id() == conn_method::CLASS_ID {
@@ -1257,7 +1265,6 @@ where
             }
         }
     }
-
 
     async fn send_method(&mut self, channel: u16, method: &Method) -> Result<(), ConnError> {
         let frame = method.to_frame(channel)?;
