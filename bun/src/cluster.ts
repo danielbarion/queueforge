@@ -13,6 +13,7 @@ export class Cluster {
   private seq = 1;
   private subs = new Map<number, (msg: LiveMsg) => void>();
   private server: ReturnType<typeof Bun.listen> | null = null;
+  private dialTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private broker: Broker) {}
 
@@ -36,8 +37,16 @@ export class Cluster {
         error: () => {},
       },
     });
-    setInterval(() => this.dial(), 200);
+    this.dialTimer = setInterval(() => this.dial(), 200);
     this.dial();
+  }
+
+  /** Close the listen socket. Tests use this so the process can exit. */
+  stop() {
+    if (this.dialTimer) clearInterval(this.dialTimer);
+    this.dialTimer = null;
+    this.server?.stop(true);
+    this.server = null;
   }
 
   private dial() {
@@ -233,7 +242,10 @@ export class Cluster {
         expiration: decoded.expiration,
         id: decoded.messageId,
       }, 0);
-      if (op === "quorum_append" && ok) await this.broker.store.whenDurable();
+      // A resolved false is "not stored". The reply envelope must be ok:false,
+      // or the caller counts the peer as a durable copy.
+      if (op === "quorum_append" && !ok) throw new Error("NOT_STORED");
+      if (op === "quorum_append") await this.broker.store.whenDurable();
       return ok;
     }
     if (op === "ack") {
