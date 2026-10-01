@@ -3773,6 +3773,7 @@ where
             )
             .await?;
         }
+        self.sync_tracked_channels();
         Ok(Step::Continue)
     }
 
@@ -3802,6 +3803,7 @@ where
             )
             .await?;
         }
+        self.sync_tracked_channels();
         Ok(Step::Continue)
     }
 
@@ -4448,7 +4450,6 @@ where
         };
         metrics::gauge!("queueforge_channels").decrement(1.0);
         queueforge_core::prom::channel_closed();
-        self.sync_tracked_channels();
 
         // Cancel all consumers on this channel.
         let sessions: Vec<ConsumerSessionId> = ch_state.consumers.values().copied().collect();
@@ -4493,6 +4494,8 @@ where
                 }
             }
         }
+
+        self.sync_tracked_channels();
 
         // Remaining ledger entries (e.g. basic.get).
         for (_, entry) in std::mem::take(&mut ch_state.delivery_ledger) {
