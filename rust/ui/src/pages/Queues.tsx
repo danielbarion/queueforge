@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ApiError,
   createQueue,
@@ -23,6 +24,7 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [durable, setDurable] = useState(true);
+  const [queueType, setQueueType] = useState<"classic" | "quorum">("classic");
   const [messageTtl, setMessageTtl] = useState("");
   const [maxLength, setMaxLength] = useState("");
   const [maxPriority, setMaxPriority] = useState("");
@@ -107,6 +109,9 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
       if (overflow !== "drop-head") {
         argumentsPayload["x-overflow"] = overflow;
       }
+      if (queueType === "quorum") {
+        argumentsPayload["x-queue-type"] = "quorum";
+      }
       await createQueue(vhost, name.trim(), {
         durable,
         arguments: argumentsPayload,
@@ -172,6 +177,13 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
               onChange={(e) => setDurable(e.target.checked)}
             />
             durable
+          </label>
+          <label>
+            Type
+            <select value={queueType} onChange={(e) => setQueueType(e.target.value as "classic" | "quorum")}>
+              <option value="classic">classic</option>
+              <option value="quorum">quorum</option>
+            </select>
           </label>
           <button
             type="button"
@@ -266,7 +278,7 @@ export default function QueuesPage({ user, onLoggedOut }: Props) {
             {items.map((q) => (
               <tr key={`${q.vhost}/${q.name}`}>
                 <td>
-                  <code>{q.name}</code>
+                  <Link to={`/queues/${encodeURIComponent(q.vhost)}/${encodeURIComponent(q.name)}`}><code>{q.name}</code></Link>
                 </td>
                 <td>{q.state}</td>
                 <td>{q.messages_ready}</td>

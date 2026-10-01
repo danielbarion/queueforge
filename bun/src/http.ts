@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { join } from "node:path";
-import { addFederationPolicy, addFederationUpstream, type Broker } from "./broker.ts";
+import { statfsSync } from "node:fs";
+import { addFederationPolicy, addFederationUpstream, policyFromBody, policyItem, type Broker } from "./broker.ts";
 
 const COOKIE = "queueforge_session";
 const sessions = new Map<string, { user: string; tags: string[] }>();
@@ -225,7 +226,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "unauthorized" };
       }
       const b = (body ?? {}) as { durable?: boolean; exclusive?: boolean; auto_delete?: boolean; arguments?: Record<string, string | number> };
-      if (!b.durable && !b.exclusive) {
+      if (!b.durable && !b.exclusive && !broker.transientNonexcl) {
         set.status = 400;
         return { error: "bad_request", reason: "Feature `transient_nonexcl_queues` is deprecated. By default, this feature is not permitted anymore." };
       }
@@ -305,12 +306,17 @@ export function managementApp(broker: Broker, spaDir: string) {
       return "";
     })
     .post("/api/exchanges/:vhost/:name/publish", async ({ params, body, request, set }) => {
-      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+      const session = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!session) {
         set.status = 401;
         return { error: "unauthorized" };
       }
       const b = (body ?? {}) as { routing_key?: string; payload?: string; payload_encoding?: string };
       const vhost = decodeURIComponent(params.vhost);
+      if (!broker.topicWriteAllowed(session.user, vhost, params.name, b.routing_key ?? "")) {
+        set.status = 403;
+        return { error: "forbidden", reason: "write access to topic refused" };
+      }
       const payload = b.payload ?? "";
       const bytes = b.payload_encoding === "base64" ? Buffer.from(payload, "base64") : Buffer.from(payload);
       const result = await broker.publish({
@@ -591,6 +597,454 @@ export function managementApp(broker: Broker, spaDir: string) {
         })),
       };
     })
+    .delete("/api/policies/:vhost/:name", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (!broker.deletePolicy(decodeURIComponent(params.vhost), params.name)) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .get("/api/permissions", ({ request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      return broker.listPerms();
+    })
+    .post("/api/queues/:vhost/:name/purge", async ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      try {
+        const n = await broker.purge(decodeURIComponent(params.vhost), params.name);
+        return { message_count: n };
+      } catch (err) {
+        set.status = 404;
+        return { error: err instanceof Error ? err.message : "not found" };
+      }
+    })
+    .get("/api/queues/:vhost/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const q = broker.queues.get(broker.key(vhost, params.name));
+      if (!q) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      const names = broker.policyNames(vhost, q.name);
+      const consumers = broker.listMgmtConsumers(vhost, q.name);
+      return {
+        name: q.name,
+        vhost,
+        durable: q.durable,
+        exclusive: q.exclusive,
+        auto_delete: q.autoDelete,
+        state: "running",
+        messages: q.ready.length + q.unacked.size,
+        messages_ready: q.ready.length,
+        messages_unacknowledged: q.unacked.size,
+        consumers: q.consumers.length,
+        consumer_details: consumers.map((c) => ({
+          consumer_tag: c.consumer_tag,
+          channel_details: { name: `${c.connection}:${c.channel}`, connection_name: c.connection, number: c.channel },
+          queue: { name: c.queue, vhost: c.vhost },
+          ack_required: true,
+        })),
+        arguments: q.args,
+        type: q.argsParsed.queueType,
+        policy: names.policy,
+        operator_policy: names.operator_policy,
+        message_stats: { publish: broker.prom.received, deliver: broker.prom.delivered, ack: broker.prom.acknowledged },
+      };
+    })
+    .get("/api/exchanges/:vhost/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const e = broker.exchanges.get(broker.key(vhost, params.name));
+      if (!e) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      const userPol = broker.matchPolicy(vhost, e.name, "exchanges");
+      const opPol = broker.matchOperatorPolicy(vhost, e.name, "exchanges");
+      return {
+        name: e.name,
+        vhost,
+        type: e.kind,
+        durable: e.durable,
+        auto_delete: e.autoDelete,
+        internal: e.internal,
+        arguments: e.alternate ? { "alternate-exchange": e.alternate } : {},
+        policy: userPol?.name ?? null,
+        operator_policy: opPol?.name ?? null,
+      };
+    })
+    .get("/api/connections/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const row = broker.listMgmtConnections().find((c) => c.name === params.name);
+      if (!row) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      return row;
+    })
+    .get("/api/channels", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const items = broker.listMgmtChannels().map((c) => ({
+        name: c.name,
+        connection_details: { name: c.connection },
+        user: c.user,
+        vhost: c.vhost,
+        number: c.number,
+        peer_host: c.peer_host,
+        peer_port: c.peer_port,
+      }));
+      return { items, total_count: items.length };
+    })
+    .get("/api/channels/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const c = broker.getMgmtChannel(decodeURIComponent(params.name));
+      if (!c) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      return {
+        name: c.name,
+        connection_details: { name: c.connection },
+        user: c.user,
+        vhost: c.vhost,
+        number: c.number,
+        peer_host: c.peer_host,
+        peer_port: c.peer_port,
+      };
+    })
+    .get("/api/consumers/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const items = broker.listMgmtConsumers(vhost).map((c) => ({
+        consumer_tag: c.consumer_tag,
+        channel_details: { name: `${c.connection}:${c.channel}`, connection_name: c.connection, number: c.channel },
+        queue: { name: c.queue, vhost: c.vhost },
+      }));
+      return { items, total_count: items.length };
+    })
+    .get("/api/topic-permissions", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return { items: broker.listTopicPerms() };
+    })
+    .put("/api/topic-permissions/:user/:vhost", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const b = (body ?? {}) as { exchange?: string; write?: string; read?: string };
+      if (!b.exchange) {
+        set.status = 400;
+        return { error: "exchange and valid write/read patterns are required" };
+      }
+      try {
+        broker.putTopicPerm({
+          user: params.user,
+          vhost: decodeURIComponent(params.vhost),
+          exchange: b.exchange,
+          write: b.write ?? "",
+          read: b.read ?? "",
+        });
+      } catch (err) {
+        set.status = 400;
+        return { error: err instanceof Error ? err.message : "bad pattern" };
+      }
+      set.status = 201;
+      return "";
+    })
+    .delete("/api/topic-permissions/:user/:vhost/:exchange", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (!broker.deleteTopicPerm(params.user, decodeURIComponent(params.vhost), decodeURIComponent(params.exchange))) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .get("/api/limits", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return { user_limits: broker.listUserLimits(), vhost_limits: broker.listVhostLimits() };
+    })
+    .put("/api/user-limits/:user/:kind", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const value = Number((body as { value?: number } | null)?.value);
+      if (!Number.isFinite(value) || value < 0) {
+        set.status = 400;
+        return { error: "value is required" };
+      }
+      const current = broker.listUserLimits().find((row) => row.user === params.user);
+      const connections = current?.["max-connections"] ?? null;
+      const channels = current?.["max-channels"] ?? null;
+      if (params.kind === "max-connections") broker.setUserLimit(params.user, value, channels);
+      else if (params.kind === "max-channels") broker.setUserLimit(params.user, connections, value);
+      else {
+        set.status = 400;
+        return { error: "limit must be max-connections or max-channels" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .delete("/api/user-limits/:user/:kind", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const current = broker.listUserLimits().find((row) => row.user === params.user);
+      const connections = current?.["max-connections"] ?? null;
+      const channels = current?.["max-channels"] ?? null;
+      if (params.kind === "max-connections") broker.setUserLimit(params.user, null, channels);
+      else if (params.kind === "max-channels") broker.setUserLimit(params.user, connections, null);
+      else {
+        set.status = 400;
+        return { error: "limit must be max-connections or max-channels" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .put("/api/vhost-limits/:vhost/:kind", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const value = Number((body as { value?: number } | null)?.value);
+      const vhost = decodeURIComponent(params.vhost);
+      const current = broker.listVhostLimits().find((row) => row.vhost === vhost);
+      const connections = current?.["max-connections"] ?? null;
+      const queues = current?.["max-queues"] ?? null;
+      if (params.kind === "max-connections") broker.setVhostLimit(vhost, value, queues);
+      else if (params.kind === "max-queues") broker.setVhostLimit(vhost, connections, value);
+      else {
+        set.status = 400;
+        return { error: "limit must be max-connections or max-queues" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .delete("/api/vhost-limits/:vhost/:kind", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const current = broker.listVhostLimits().find((row) => row.vhost === vhost);
+      const connections = current?.["max-connections"] ?? null;
+      const queues = current?.["max-queues"] ?? null;
+      if (params.kind === "max-connections") broker.setVhostLimit(vhost, null, queues);
+      else if (params.kind === "max-queues") broker.setVhostLimit(vhost, connections, null);
+      else {
+        set.status = 400;
+        return { error: "limit must be max-connections or max-queues" };
+      }
+      set.status = 204;
+      return "";
+    })
+    .get("/api/feature-flags", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return {
+        items: [
+          { name: "quorum_queues", state: "enabled", stability: "stable" },
+          { name: "transient_nonexcl_queues", state: broker.transientNonexcl ? "enabled" : "disabled", stability: "experimental" },
+        ],
+      };
+    })
+    .post("/api/feature-flags/:name/enable", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (params.name === "quorum_queues") {
+        set.status = 204;
+        return "";
+      }
+      if (params.name === "transient_nonexcl_queues") {
+        broker.transientNonexcl = true;
+        set.status = 204;
+        return "";
+      }
+      set.status = 404;
+      return { error: "not found" };
+    })
+    .post("/api/feature-flags/:name/disable", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (params.name === "quorum_queues") {
+        set.status = 400;
+        return { error: "quorum queues stay available" };
+      }
+      if (params.name === "transient_nonexcl_queues") {
+        broker.transientNonexcl = false;
+        set.status = 204;
+        return "";
+      }
+      set.status = 404;
+      return { error: "not found" };
+    })
+    .get("/api/deprecated-features", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return {
+        items: [{
+          name: "transient_nonexcl_queues",
+          deprecation_phase: "denied_by_default",
+          acknowledged: broker.transientNonexcl,
+          description: "Non-exclusive transient queues are refused unless this deprecated behavior is acknowledged.",
+        }],
+      };
+    })
+    .delete("/api/deprecated-features/:name", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (params.name !== "transient_nonexcl_queues") {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      broker.transientNonexcl = true;
+      set.status = 204;
+      return "";
+    })
+    .get("/api/nodes", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const mem = process.memoryUsage().rss;
+      let disk = 0;
+      try {
+        const st = statfsSync(broker.cfg.dataDir || ".");
+        disk = Number(st.bavail) * Number(st.bsize);
+      } catch {
+        disk = 0;
+      }
+      const amqp = broker.cfg.amqp.split(":");
+      const port = Number(amqp.pop());
+      const host = amqp.join(":") || "0.0.0.0";
+      return {
+        items: [{
+          name: broker.cfg.nodeId || "queueforge",
+          running: true,
+          uptime: Date.now() - broker.startedAt,
+          mem_used: mem,
+          disk_free: disk,
+          mem_alarm: false,
+          disk_free_alarm: disk > 0 && disk < 50 * 1024 * 1024,
+          listeners: [{ protocol: "amqp", ip_address: host, port }],
+          peers: broker.cfg.members.map((m) => ({ name: m.id })),
+        }],
+      };
+    })
+    .get("/api/cluster-name", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return { name: broker.cfg.nodeId || "queueforge" };
+    })
+    .get("/api/operator-policies", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return { items: broker.operatorPolicies.map(policyItem) };
+    })
+    .get("/api/operator-policies/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      return { items: broker.operatorPolicies.filter((p) => p.vhost === vhost).map(policyItem) };
+    })
+    .put("/api/operator-policies/:vhost/:name", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const vhost = decodeURIComponent(params.vhost);
+      const existed = broker.operatorPolicies.some((p) => p.vhost === vhost && p.name === params.name);
+      try {
+        broker.upsertOperatorPolicy(policyFromBody(vhost, params.name, (body ?? {}) as Parameters<typeof policyFromBody>[2]));
+      } catch (err) {
+        set.status = 400;
+        return { error: err instanceof Error ? err.message : "bad policy" };
+      }
+      set.status = existed ? 204 : 201;
+      return existed ? "" : { name: params.name };
+    })
+    .delete("/api/operator-policies/:vhost/:name", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      if (!broker.deleteOperatorPolicy(decodeURIComponent(params.vhost), params.name)) {
+        set.status = 404;
+        return { error: "not found" };
+      }
+      set.status = 204;
+      return "";
+    })
     .get("/metrics", () => new Response(metricsText(broker), { headers: { "content-type": "text/plain; version=0.0.4" } }))
     .get("/*", async ({ request, set }) => {
       const url = new URL(request.url);
@@ -602,7 +1056,9 @@ export function managementApp(broker: Broker, spaDir: string) {
       const file = Bun.file(join(spaDir, rel));
       if (await file.exists()) return file;
       const segment = rel.split("/").pop() ?? "";
-      if (segment.includes(".")) {
+      const ext = segment.includes(".") ? segment.slice(segment.lastIndexOf(".") + 1) : "";
+      const staticExt = new Set(["js", "css", "map", "svg", "png", "ico", "woff", "woff2", "json", "txt", "html", "webp", "gif"]);
+      if (staticExt.has(ext)) {
         set.status = 404;
         return "not found\n";
       }

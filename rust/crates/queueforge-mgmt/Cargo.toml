@@ -21,6 +21,7 @@ queueforge-core = { workspace = true }
 queueforge-metrics = { workspace = true }
 queueforge-store = { workspace = true }
 rand_core = { workspace = true }
+regex = { workspace = true }
 rust-embed = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ApiError,
   createExchange,
@@ -120,7 +121,7 @@ export default function ExchangesPage({ user, onLoggedOut }: Props) {
             {items.map((ex) => (
               <tr key={`${ex.vhost}/${ex.name || "(default)"}`}>
                 <td>
-                  <code>{ex.name || "(AMQP default)"}</code>
+                  <Link to={`/exchanges/${encodeURIComponent(ex.vhost)}/${encodeURIComponent(ex.name)}`}><code>{ex.name || "(AMQP default)"}</code></Link>
                 </td>
                 <td>{ex.type}</td>
                 <td>{ex.durable ? "yes" : "no"}</td>

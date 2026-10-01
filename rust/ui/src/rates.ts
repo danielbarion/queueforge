@@ -66,6 +66,34 @@ export function sampleFromMetrics(text: string): TrafficSample {
   };
 }
 
+export type ChartPoint = {
+  t: number;
+  publishPerSec: number;
+  deliverPerSec: number;
+  ackPerSec: number;
+  ready: number;
+  unacked: number;
+};
+
+/** One point per pair of successive samples. Depth comes from the later sample. */
+export function chartSeries(samples: { at: number; sample: TrafficSample }[]): ChartPoint[] {
+  const points: ChartPoint[] = [];
+  for (let i = 1; i < samples.length; i++) {
+    const prev = samples[i - 1]!;
+    const next = samples[i]!;
+    const rates = trafficRates(prev.sample, next.sample, (next.at - prev.at) / 1000);
+    points.push({
+      t: next.at,
+      publishPerSec: rates.publishPerSec,
+      deliverPerSec: rates.deliverPerSec,
+      ackPerSec: rates.ackPerSec,
+      ready: rates.ready,
+      unacked: rates.unacked,
+    });
+  }
+  return points;
+}
+
 export function formatDashboard(url: string, prev: TrafficSample, next: TrafficSample, elapsedSec: number): string {
   const rates = trafficRates(prev, next, elapsedSec);
   const depth = rates.ready + rates.unacked;

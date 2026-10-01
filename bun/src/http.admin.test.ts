@@ -215,3 +215,151 @@ test("admin pages, exchange bind flow, and port-scoped sessions", async () => {
     child.kill();
   }
 });
+
+test("channels, policies, limits, flags, and live connections", async () => {
+  const portA = 46791;
+  const portM = 56791;
+  const child = await boot(portA, portM);
+  const base = `http://127.0.0.1:${portM}`;
+  const host = "127.0.0.1:36674";
+  try {
+    const login = await fetch(`${base}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", host },
+      body: JSON.stringify({ username: "admin", password: "devpassword12" }),
+    });
+    const queuePage = await fetch(`${base}/queues/%2F/rate.q`);
+    expect(queuePage.status).toBe(200);
+    expect(await queuePage.text()).toContain("QueueForge");
+    const exchangePage = await fetch(`${base}/exchanges/%2F/amq.direct`);
+    expect(exchangePage.status).toBe(200);
+    const cookie = cookiePair(login.headers.get("set-cookie"));
+    const headers = { host, cookie, "content-type": "application/json" };
+    async function call(method: string, path: string, body?: unknown) {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await res.text();
+      const json = text ? JSON.parse(text) : null;
+      return { status: res.status, json };
+    }
+
+    expect((await call("PUT", "/api/vhosts/ops", {})).status).toBe(201);
+    const vhosts = await call("GET", "/api/vhosts");
+    expect(vhosts.json.items.some((v: { name: string }) => v.name === "ops")).toBe(true);
+
+    expect((await call("PUT", "/api/permissions/admin/%2F", { configure: ".*", write: ".*", read: ".*" })).status).toBe(201);
+    const perms = await call("GET", "/api/permissions");
+    expect(perms.json.some((p: { user: string; vhost: string }) => p.user === "admin" && p.vhost === "/")).toBe(true);
+
+    expect((await call("PUT", "/api/topic-permissions/admin/%2F", { exchange: "amq.topic", write: "^ok\\..*", read: "^ok\\..*" })).status).toBe(201);
+    const topics = await call("GET", "/api/topic-permissions");
+    expect(topics.json.items[0].exchange).toBe("amq.topic");
+
+    const definition = {
+      pattern: "^pol\\..*",
+      "apply-to": "queues",
+      priority: 5,
+      definition: {
+        "message-ttl": 1000,
+        "dead-letter-exchange": "amq.direct",
+        "dead-letter-routing-key": "dead",
+        "max-length": 9,
+        "max-length-bytes": 99,
+        expires: 60000,
+        overflow: "reject-publish",
+        "delivery-limit": 3,
+        "alternate-exchange": "amq.fanout",
+      },
+    };
+    expect((await call("PUT", "/api/policies/%2F/pol.main", definition)).status).toBe(201);
+    const policies = await call("GET", "/api/policies/%2F");
+    const def = policies.json.items[0].definition;
+    for (const key of ["message-ttl", "dead-letter-exchange", "dead-letter-routing-key", "max-length", "max-length-bytes", "expires", "overflow", "delivery-limit", "alternate-exchange"]) {
+      expect(def[key]).toBeDefined();
+    }
+    expect((await call("PUT", "/api/operator-policies/%2F/pol.op", { ...definition, pattern: "^pol\\.op.*", definition: { ...definition.definition, "message-ttl": 2500 } })).status).toBe(201);
+    expect((await call("PUT", "/api/queues/%2F/pol.op.q", { durable: true })).status).toBe(201);
+    const queues = await call("GET", "/api/queues/%2F");
+    const q = queues.json.items.find((row: { name: string }) => row.name === "pol.op.q");
+    expect(q.arguments["x-message-ttl"]).toBe(2500);
+    expect(q.arguments["x-dead-letter-exchange"]).toBe("amq.direct");
+    expect(q.arguments["x-max-length"]).toBe(9);
+    const detail = await call("GET", "/api/queues/%2F/pol.op.q");
+    expect(detail.json.operator_policy).toBe("pol.op");
+    expect(detail.json.policy).toBe("pol.main");
+    expect(detail.json.type).toBe("classic");
+    expect((await call("PUT", "/api/queues/%2F/pol.quorum.q", { durable: true, arguments: { "x-queue-type": "quorum" } })).status).toBe(201);
+    const quorum = await call("GET", "/api/queues/%2F/pol.quorum.q");
+    expect(quorum.json.type).toBe("quorum");
+
+    expect((await call("PUT", "/api/queues/%2F/transient.q", { durable: false })).status).toBe(400);
+    expect((await call("POST", "/api/feature-flags/transient_nonexcl_queues/enable")).status).toBe(204);
+    expect((await call("PUT", "/api/queues/%2F/transient.q", { durable: false })).status).toBe(201);
+    expect((await call("POST", "/api/feature-flags/quorum_queues/disable")).status).toBe(400);
+    expect((await call("DELETE", "/api/deprecated-features/transient_nonexcl_queues")).status).toBe(204);
+
+    expect((await call("PUT", "/api/user-limits/admin/max-connections", { value: 1 })).status).toBe(204);
+    expect((await call("PUT", "/api/user-limits/admin/max-channels", { value: 4 })).status).toBe(204);
+    expect((await call("PUT", "/api/vhost-limits/%2F/max-connections", { value: 3 })).status).toBe(204);
+    expect((await call("PUT", "/api/vhost-limits/%2F/max-queues", { value: 50 })).status).toBe(204);
+    const limits = await call("GET", "/api/limits");
+    expect(limits.json.user_limits[0]["max-channels"]).toBe(4);
+    expect(limits.json.vhost_limits[0]["max-queues"]).toBe(50);
+
+    const nodes = await call("GET", "/api/nodes");
+    const node = nodes.json.items[0];
+    expect(typeof node.name).toBe("string");
+    expect(node.running).toBe(true);
+    expect(typeof node.uptime).toBe("number");
+    expect(typeof node.mem_used).toBe("number");
+    expect(typeof node.disk_free).toBe("number");
+    expect(typeof node.mem_alarm).toBe("boolean");
+    expect(typeof node.disk_free_alarm).toBe("boolean");
+    expect(Array.isArray(node.listeners)).toBe(true);
+    expect(Array.isArray(node.peers)).toBe(true);
+
+    const conn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${portA}/%2f`);
+    const channel = await conn.createChannel();
+    const blocked = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${portA}/%2f`).then(() => "opened", () => "refused");
+    expect(blocked).toBe("refused");
+    await channel.assertQueue("pol.op.q", { durable: true });
+    await channel.consume("pol.op.q", () => {}, { noAck: true });
+    let channels: { items: { name: string; number: number }[] } = { items: [] };
+    for (let i = 0; i < 20; i++) {
+      channels = (await call("GET", "/api/channels")).json;
+      if (channels.items.length > 0) break;
+      await Bun.sleep(50);
+    }
+    expect(channels.items.length).toBeGreaterThan(0);
+    const chName = encodeURIComponent(channels.items[0]!.name);
+    expect((await call("GET", `/api/channels/${chName}`)).status).toBe(200);
+    const consumers = await call("GET", "/api/consumers/%2F");
+    expect(consumers.json.items.some((c: { queue: { name: string } }) => c.queue.name === "pol.op.q")).toBe(true);
+    await conn.close();
+    let gone = 1;
+    for (let i = 0; i < 20; i++) {
+      gone = (await call("GET", "/api/connections")).json.total_count;
+      if (gone === 0) break;
+      await Bun.sleep(50);
+    }
+    expect(gone).toBe(0);
+
+    expect((await call("POST", "/api/bindings/%2F", { source: "amq.direct", destination: "pol.op.q", routing_key: "pol.op.q", destination_type: "queue" })).status).toBe(201);
+    expect((await call("POST", "/api/exchanges/%2F/amq.direct/publish", { routing_key: "pol.op.q", payload: "n", payload_encoding: "string" })).json.routed).toBe(true);
+    expect((await call("DELETE", "/api/bindings/%2F/amq.direct/pol.op.q/pol.op.q")).status).toBe(204);
+    const got = await call("POST", "/api/queues/%2F/pol.op.q/get", { count: 1, ackmode: "ack_requeue_false" });
+    expect(got.status, JSON.stringify(got.json)).toBe(200);
+    expect(got.json[0].payload).toBe("n");
+    expect((await call("POST", "/api/queues/%2F/pol.op.q/purge")).status).toBe(200);
+    expect((await call("DELETE", "/api/queues/%2F/pol.op.q")).status).toBe(204);
+    expect((await call("DELETE", "/api/operator-policies/%2F/pol.op")).status).toBe(204);
+    expect((await call("DELETE", "/api/policies/%2F/pol.main")).status).toBe(204);
+    expect((await call("DELETE", "/api/topic-permissions/admin/%2F/amq.topic")).status).toBe(204);
+    expect((await call("DELETE", "/api/vhosts/ops")).status).toBe(204);
+  } finally {
+    child.kill();
+  }
+});

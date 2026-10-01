@@ -338,6 +338,138 @@ export type MgmtConnection = {
   close: () => void;
 };
 
+export type MgmtChannel = {
+  name: string;
+  connection: string;
+  user: string;
+  vhost: string;
+  number: number;
+  peer_host: string;
+  peer_port: number;
+};
+
+export type MgmtConsumer = {
+  consumer_tag: string;
+  connection: string;
+  channel: number;
+  queue: string;
+  vhost: string;
+};
+
+export type TopicPerm = {
+  user: string;
+  vhost: string;
+  exchange: string;
+  write: string;
+  read: string;
+};
+
+function matchOne(rows: Policy[], vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
+  let best: Policy | null = null;
+  for (const p of rows) {
+    if (p.vhost !== vhost) continue;
+    if (p.applyTo !== "all" && p.applyTo !== entity) continue;
+    let ok = false;
+    try {
+      ok = new RegExp(p.pattern).test(name);
+    } catch {
+      ok = false;
+    }
+    if (!ok) continue;
+    if (!best || p.priority > best.priority || (p.priority === best.priority && p.name < best.name)) best = p;
+  }
+  return best;
+}
+
+export function policyItem(p: Policy) {
+  return {
+    vhost: p.vhost,
+    name: p.name,
+    pattern: p.pattern,
+    "apply-to": p.applyTo,
+    priority: p.priority,
+    definition: {
+      ...(p.messageTtl != null ? { "message-ttl": p.messageTtl } : {}),
+      ...(p.dlx ? { "dead-letter-exchange": p.dlx } : {}),
+      ...(p.dlxKey ? { "dead-letter-routing-key": p.dlxKey } : {}),
+      ...(p.maxLength != null ? { "max-length": p.maxLength } : {}),
+      ...(p.maxLengthBytes != null ? { "max-length-bytes": p.maxLengthBytes } : {}),
+      ...(p.expiresMs != null ? { expires: p.expiresMs } : {}),
+      ...(p.overflow ? { overflow: p.overflow } : {}),
+      ...(p.dlxStrategy ? { "dead-letter-strategy": p.dlxStrategy } : {}),
+      ...(p.deliveryLimit != null ? { "delivery-limit": p.deliveryLimit } : {}),
+      ...(p.alternate ? { "alternate-exchange": p.alternate } : {}),
+    },
+  };
+}
+
+export function policyFromBody(vhost: string, name: string, body: {
+  pattern?: string;
+  "apply-to"?: string;
+  priority?: number;
+  definition?: Record<string, string | number>;
+}): Policy {
+  const apply = body["apply-to"] ?? "all";
+  if (apply !== "queues" && apply !== "exchanges" && apply !== "all") {
+    throw new Error("apply-to must be queues, exchanges, or all");
+  }
+  const def = body.definition ?? {};
+  const num = (k: string) => {
+    const v = def[k];
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const str = (k: string) => {
+    const v = def[k];
+    return v == null || v === "" ? null : String(v);
+  };
+  if (!body.pattern) throw new Error("pattern is required");
+  const known = new Set([
+    "message-ttl", "dead-letter-exchange", "dead-letter-routing-key", "max-length", "max-length-bytes",
+    "expires", "overflow", "delivery-limit", "alternate-exchange", "dead-letter-strategy", "federation-upstream-set",
+  ]);
+  const unknown = Object.keys(def).filter((k) => !known.has(k));
+  if (unknown.length) throw new Error(`${JSON.stringify(unknown)} are not recognised policy settings`);
+  return {
+    vhost,
+    name,
+    pattern: body.pattern,
+    applyTo: apply,
+    priority: body.priority ?? 0,
+    messageTtl: num("message-ttl"),
+    expiresMs: num("expires"),
+    dlx: str("dead-letter-exchange"),
+    dlxKey: str("dead-letter-routing-key"),
+    maxLength: num("max-length"),
+    maxLengthBytes: num("max-length-bytes"),
+    overflow: (["drop-head", "reject-publish", "reject-publish-dlx"] as const).find((v) => v === str("overflow")) ?? null,
+    dlxStrategy: (["at-most-once", "at-least-once"] as const).find((v) => v === str("dead-letter-strategy")) ?? null,
+    deliveryLimit: num("delivery-limit"),
+    alternate: str("alternate-exchange"),
+  };
+}
+
+function fillPolicyArgs(
+  declared: Record<string, string | number>,
+  pol: Policy | null,
+  base?: Record<string, string | number>,
+): Record<string, string | number> {
+  const out = { ...(base ?? declared) };
+  if (!pol) return out;
+  const empty = (key: string) => declared[key] == null || declared[key] === "";
+  if (empty("x-message-ttl") && pol.messageTtl != null) out["x-message-ttl"] = pol.messageTtl;
+  if (empty("x-dead-letter-exchange") && pol.dlx) out["x-dead-letter-exchange"] = pol.dlx;
+  if (empty("x-dead-letter-routing-key") && pol.dlxKey) out["x-dead-letter-routing-key"] = pol.dlxKey;
+  if (empty("x-max-length") && pol.maxLength != null) out["x-max-length"] = pol.maxLength;
+  if (empty("x-max-length-bytes") && pol.maxLengthBytes != null) out["x-max-length-bytes"] = pol.maxLengthBytes;
+  if (empty("x-expires") && pol.expiresMs != null) out["x-expires"] = pol.expiresMs;
+  if (empty("x-overflow") && pol.overflow) out["x-overflow"] = pol.overflow;
+  if (empty("x-dead-letter-strategy") && pol.dlxStrategy) out["x-dead-letter-strategy"] = pol.dlxStrategy;
+  if (empty("x-delivery-limit") && pol.deliveryLimit != null) out["x-delivery-limit"] = pol.deliveryLimit;
+  return out;
+}
+
 export class Broker {
   ready = false;
   prom = emptyProm();
@@ -360,6 +492,16 @@ export class Broker {
   private sessionsNext = 1;
   private connSeq = 0;
   private mgmtConnections = new Map<string, MgmtConnection>();
+  private mgmtChannels = new Map<string, MgmtChannel>();
+  private mgmtConsumers: MgmtConsumer[] = [];
+  private topicPerms: TopicPerm[] = [];
+  private userConnLimit = new Map<string, number>();
+  private userChanLimit = new Map<string, number>();
+  private vhostConnLimit = new Map<string, number>();
+  private vhostQueueLimit = new Map<string, number>();
+  operatorPolicies: Policy[] = [];
+  transientNonexcl = false;
+  readonly startedAt = Date.now();
 
   constructor(
     public cfg: Config,
@@ -397,10 +539,6 @@ export class Broker {
     if (row) row.channels = channels;
   }
 
-  forgetMgmtConnection(name: string) {
-    this.mgmtConnections.delete(name);
-  }
-
   listMgmtConnections() {
     return [...this.mgmtConnections.values()]
       .map(({ close: _close, ...row }) => row)
@@ -414,37 +552,208 @@ export class Broker {
     return true;
   }
 
-  matchPolicy(vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
-    let best: Policy | null = null;
-    for (const p of this.policies) {
-      if (p.vhost !== vhost) continue;
-      if (p.applyTo !== "all" && p.applyTo !== entity) continue;
-      let ok = false;
-      try {
-        ok = new RegExp(p.pattern).test(name);
-      } catch {
-        ok = false;
-      }
-      if (!ok) continue;
-      if (!best || p.priority > best.priority || (p.priority === best.priority && p.name < best.name)) best = p;
+  forgetMgmtConnection(name: string) {
+    this.mgmtConnections.delete(name);
+    this.clearMgmtChildren(name);
+  }
+
+  syncMgmtChannels(conn: string, user: string, vhost: string, peerHost: string, peerPort: number, numbers: number[]) {
+    for (const [name, row] of this.mgmtChannels) {
+      if (row.connection === conn) this.mgmtChannels.delete(name);
     }
-    return best;
+    for (const number of numbers) {
+      const name = `${conn}:${number}`;
+      this.mgmtChannels.set(name, { name, connection: conn, user, vhost, number, peer_host: peerHost, peer_port: peerPort });
+    }
+    const live = this.mgmtConnections.get(conn);
+    if (live) live.channels = numbers.length;
+  }
+
+  clearMgmtChildren(conn: string) {
+    for (const [name, row] of this.mgmtChannels) {
+      if (row.connection === conn) this.mgmtChannels.delete(name);
+    }
+    this.mgmtConsumers = this.mgmtConsumers.filter((c) => c.connection !== conn);
+  }
+
+  noteMgmtConsumer(row: MgmtConsumer) {
+    this.mgmtConsumers = this.mgmtConsumers.filter(
+      (c) => !(c.connection === row.connection && c.channel === row.channel && c.consumer_tag === row.consumer_tag),
+    );
+    this.mgmtConsumers.push(row);
+  }
+
+  forgetMgmtConsumer(conn: string, channel: number, tag: string) {
+    this.mgmtConsumers = this.mgmtConsumers.filter(
+      (c) => !(c.connection === conn && c.channel === channel && c.consumer_tag === tag),
+    );
+  }
+
+  forgetMgmtChannelConsumers(conn: string, channel: number) {
+    this.mgmtConsumers = this.mgmtConsumers.filter((c) => !(c.connection === conn && c.channel === channel));
+  }
+
+  listMgmtChannels() {
+    return [...this.mgmtChannels.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  getMgmtChannel(name: string) {
+    return this.mgmtChannels.get(name) ?? null;
+  }
+
+  listMgmtConsumers(vhost?: string, queue?: string) {
+    return this.mgmtConsumers.filter((c) => (vhost == null || c.vhost === vhost) && (queue == null || c.queue === queue));
+  }
+
+  connectionAllowed(user: string, vhost: string): boolean {
+    const userMax = this.userConnLimit.get(user);
+    if (userMax != null && [...this.mgmtConnections.values()].filter((c) => c.user === user).length >= userMax) return false;
+    const vhostMax = this.vhostConnLimit.get(vhost);
+    if (vhostMax != null && [...this.mgmtConnections.values()].filter((c) => c.vhost === vhost).length >= vhostMax) return false;
+    return true;
+  }
+
+  channelAllowed(user: string): boolean {
+    const max = this.userChanLimit.get(user);
+    if (max == null) return true;
+    return [...this.mgmtChannels.values()].filter((c) => c.user === user).length < max;
+  }
+
+  queueAllowed(vhost: string, current: number): boolean {
+    const max = this.vhostQueueLimit.get(vhost);
+    return max == null || current < max;
+  }
+
+  setUserLimit(user: string, connections: number | null, channels: number | null) {
+    if (connections == null) this.userConnLimit.delete(user);
+    else this.userConnLimit.set(user, connections);
+    if (channels == null) this.userChanLimit.delete(user);
+    else this.userChanLimit.set(user, channels);
+  }
+
+  setVhostLimit(vhost: string, connections: number | null, queues: number | null) {
+    if (connections == null) this.vhostConnLimit.delete(vhost);
+    else this.vhostConnLimit.set(vhost, connections);
+    if (queues == null) this.vhostQueueLimit.delete(vhost);
+    else this.vhostQueueLimit.set(vhost, queues);
+  }
+
+  listUserLimits() {
+    const users = new Set([...this.userConnLimit.keys(), ...this.userChanLimit.keys()]);
+    return [...users].sort().map((user) => ({
+      user,
+      "max-connections": this.userConnLimit.get(user) ?? null,
+      "max-channels": this.userChanLimit.get(user) ?? null,
+    }));
+  }
+
+  listVhostLimits() {
+    const vhosts = new Set([...this.vhostConnLimit.keys(), ...this.vhostQueueLimit.keys()]);
+    return [...vhosts].sort().map((vhost) => ({
+      vhost,
+      "max-connections": this.vhostConnLimit.get(vhost) ?? null,
+      "max-queues": this.vhostQueueLimit.get(vhost) ?? null,
+    }));
+  }
+
+  putTopicPerm(perm: TopicPerm) {
+    try {
+      new RegExp(perm.write);
+      new RegExp(perm.read);
+    } catch {
+      throw new Error("write and read must be valid patterns");
+    }
+    this.topicPerms = this.topicPerms.filter(
+      (p) => !(p.user === perm.user && p.vhost === perm.vhost && p.exchange === perm.exchange),
+    );
+    this.topicPerms.push(perm);
+  }
+
+  deleteTopicPerm(user: string, vhost: string, exchange: string): boolean {
+    const before = this.topicPerms.length;
+    this.topicPerms = this.topicPerms.filter((p) => !(p.user === user && p.vhost === vhost && p.exchange === exchange));
+    return this.topicPerms.length !== before;
+  }
+
+  listTopicPerms(user?: string) {
+    return this.topicPerms
+      .filter((p) => user == null || p.user === user)
+      .sort((a, b) => a.user.localeCompare(b.user) || a.vhost.localeCompare(b.vhost) || a.exchange.localeCompare(b.exchange));
+  }
+
+  topicWriteAllowed(user: string, vhost: string, exchange: string, routingKey: string): boolean {
+    const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
+    if (!perm) return true;
+    try {
+      return new RegExp(perm.write).test(routingKey);
+    } catch {
+      return false;
+    }
+  }
+
+  topicReadAllowed(user: string, vhost: string, exchange: string, routingKey: string): boolean {
+    const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
+    if (!perm) return true;
+    try {
+      return new RegExp(perm.read).test(routingKey);
+    } catch {
+      return false;
+    }
+  }
+
+  matchPolicy(vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
+    return matchOne(this.policies, vhost, name, entity);
   }
 
   argsWithPolicy(vhost: string, name: string, args: Record<string, string | number>): Record<string, string | number> {
-    const pol = this.matchPolicy(vhost, name, "queues");
-    if (!pol) return args;
-    const out = { ...args };
-    if (out["x-message-ttl"] == null && pol.messageTtl != null) out["x-message-ttl"] = pol.messageTtl;
-    if (out["x-dead-letter-exchange"] == null && pol.dlx) out["x-dead-letter-exchange"] = pol.dlx;
-    if (out["x-dead-letter-routing-key"] == null && pol.dlxKey) out["x-dead-letter-routing-key"] = pol.dlxKey;
-    if (out["x-max-length"] == null && pol.maxLength != null) out["x-max-length"] = pol.maxLength;
-    if (out["x-max-length-bytes"] == null && pol.maxLengthBytes != null) out["x-max-length-bytes"] = pol.maxLengthBytes;
-    if (out["x-expires"] == null && pol.expiresMs != null) out["x-expires"] = pol.expiresMs;
-    if (out["x-overflow"] == null && pol.overflow) out["x-overflow"] = pol.overflow;
-    if (out["x-dead-letter-strategy"] == null && pol.dlxStrategy) out["x-dead-letter-strategy"] = pol.dlxStrategy;
-    if (out["x-delivery-limit"] == null && pol.deliveryLimit != null) out["x-delivery-limit"] = pol.deliveryLimit;
+    const user = this.matchPolicy(vhost, name, "queues");
+    const operator = this.matchOperatorPolicy(vhost, name, "queues");
+    let out = fillPolicyArgs(args, user);
+    out = fillPolicyArgs(args, operator, out);
     return out;
+  }
+
+  matchOperatorPolicy(vhost: string, name: string, entity: "queues" | "exchanges"): Policy | null {
+    return matchOne(this.operatorPolicies, vhost, name, entity);
+  }
+
+  policyNames(vhost: string, name: string): { policy: string | null; operator_policy: string | null } {
+    return {
+      policy: this.matchPolicy(vhost, name, "queues")?.name ?? null,
+      operator_policy: this.matchOperatorPolicy(vhost, name, "queues")?.name ?? null,
+    };
+  }
+
+  upsertOperatorPolicy(p: Policy) {
+    try {
+      new RegExp(p.pattern);
+    } catch {
+      throw new Error("invalid policy pattern");
+    }
+    this.operatorPolicies = this.operatorPolicies.filter((x) => !(x.vhost === p.vhost && x.name === p.name));
+    this.operatorPolicies.push(p);
+    this.applyPolicies();
+  }
+
+  deleteOperatorPolicy(vhost: string, name: string): boolean {
+    const before = this.operatorPolicies.length;
+    this.operatorPolicies = this.operatorPolicies.filter((p) => !(p.vhost === vhost && p.name === name));
+    if (this.operatorPolicies.length === before) return false;
+    this.applyPolicies();
+    return true;
+  }
+
+  deletePolicy(vhost: string, name: string): boolean {
+    const before = this.policies.length;
+    this.policies = this.policies.filter((p) => !(p.vhost === vhost && p.name === name));
+    if (this.policies.length === before) return false;
+    this.store.deletePolicy(vhost, name);
+    this.applyPolicies();
+    return true;
+  }
+
+  listPerms() {
+    return [...this.perms];
   }
 
   upsertPolicy(p: Policy) {
@@ -619,6 +928,12 @@ export class Broker {
       this.prom.queuesDeclared++;
       return { name, messages: existing.ready.length, consumers: existing.consumers.length };
     }
+    const qtype = String(opts.args["x-queue-type"] ?? "");
+    if (!opts.durable && !opts.exclusive && qtype !== "quorum" && !this.transientNonexcl) {
+      throw new ChanError(541, "INTERNAL_ERROR - Feature `transient_nonexcl_queues` is deprecated. By default, this feature is not permitted anymore.");
+    }
+    const here = [...this.queues.values()].filter((q) => q.vhost === opts.vhost).length;
+    if (!this.queueAllowed(opts.vhost, here)) throw new ChanError(403, "ACCESS_REFUSED - queue limit");
     const requested = String(opts.args["x-queue-type"] ?? "");
     if (requested && requested !== "classic" && requested !== "quorum") {
       throw new ChanError(406, `PRECONDITION_FAILED - unsupported x-queue-type '${requested}'`);
@@ -716,8 +1031,9 @@ export class Broker {
         if (ok) pending.push(edge.destination);
       }
       if (!dest.length) {
-        const pol = this.matchPolicy(vhost, current, "exchanges");
-        const alt = ex?.alternate || pol?.alternate || null;
+        const userPol = this.matchPolicy(vhost, current, "exchanges");
+        const opPol = this.matchOperatorPolicy(vhost, current, "exchanges");
+        const alt = ex?.alternate || opPol?.alternate || userPol?.alternate || null;
         if (alt) pending.push(alt);
       }
     }

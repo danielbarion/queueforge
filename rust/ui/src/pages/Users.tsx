@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ApiError,
   createUser,
@@ -104,7 +105,7 @@ export default function UsersPage({ user, onLoggedOut }: Props) {
             {items.map((u) => (
               <tr key={u.name}>
                 <td>
-                  <code>{u.name}</code>
+                  <Link to={`/users/${encodeURIComponent(u.name)}`}><code>{u.name}</code></Link>
                 </td>
                 <td className="muted">{u.tags.join(", ") || "—"}</td>
                 <td className="row-actions">

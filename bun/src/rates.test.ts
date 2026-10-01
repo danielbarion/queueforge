@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatDashboard, sampleFromMetrics, trafficRates, type TrafficSample } from "../../rust/ui/src/rates.ts";
+import { chartSeries, formatDashboard, sampleFromMetrics, trafficRates, type TrafficSample } from "../../rust/ui/src/rates.ts";
 
 const prev: TrafficSample = {
   publish: 100,
@@ -36,6 +36,21 @@ describe("trafficRates", () => {
     expect(rates.unacked).toBe(3);
     expect(rates.consumers).toBe(4);
     expect(rates.confirmsBeforeFsync).toBe(true);
+  });
+});
+
+describe("chartSeries", () => {
+  test("keeps successive sample rates and the later depth", () => {
+    const points = chartSeries([
+      { at: 0, sample: prev },
+      { at: 2000, sample: next },
+    ]);
+    expect(points).toHaveLength(1);
+    expect(points[0]?.publishPerSec).toBe(25);
+    expect(points[0]?.deliverPerSec).toBe(15);
+    expect(points[0]?.ackPerSec).toBe(15);
+    expect(points[0]?.ready).toBe(9);
+    expect(points[0]?.unacked).toBe(3);
   });
 });
 

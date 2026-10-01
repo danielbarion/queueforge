@@ -53,11 +53,21 @@ fn is_api_or_health_path(path: &str) -> bool {
     path == "api" || path.starts_with("api/") || path == "healthz" || path == "readyz"
 }
 
-/// True when the last path segment contains a `.` (e.g. `foo.js`, `a.b/c.css`).
+/// True when the last segment is a static asset (`*.js`, `*.css`, …).
+///
+/// Queue and exchange names such as `rate.q` and `amq.direct` contain a dot
+/// and are still client routes.
 fn path_looks_like_file(path: &str) -> bool {
-    path.rsplit('/')
-        .next()
-        .is_some_and(|segment| segment.contains('.'))
+    let Some(segment) = path.rsplit('/').next() else {
+        return false;
+    };
+    let Some((_, ext)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext,
+        "js" | "css" | "map" | "svg" | "png" | "ico" | "woff" | "woff2" | "json" | "txt" | "html" | "webp" | "gif"
+    )
 }
 
 fn json_not_found() -> Response {
@@ -185,6 +195,20 @@ mod tests {
             let body = res.into_body().collect().await.unwrap().to_bytes();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(json["error"], "not found", "uri={uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dotted_queue_and_exchange_names_are_client_routes() {
+        let app = axum::Router::new().fallback(static_handler);
+        for uri in ["/queues/%2F/rate.q", "/exchanges/%2F/amq.direct"] {
+            let res = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "uri={uri}");
+            assert!(content_type(&res).contains("text/html"), "uri={uri}");
         }
     }
 

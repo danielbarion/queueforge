@@ -34,6 +34,14 @@ pub struct MgmtConfig {
     /// Empty means the TCP peer is the client. A spoofed forwarding header from
     /// any other peer is ignored.
     pub trusted_proxy_cidrs: Vec<String>,
+    /// Node name shown on the Cluster page.
+    pub node_name: String,
+    /// Data directory used for the disk-free reading.
+    pub data_dir: String,
+    /// AMQP listeners as `(host, port)`.
+    pub amqp_listeners: Vec<(String, u16)>,
+    /// Configured QueueForge peer ids, including this node when clustered.
+    pub peers: Vec<String>,
 }
 
 impl Default for MgmtConfig {
@@ -42,6 +50,10 @@ impl Default for MgmtConfig {
             cookie_secure: false,
             product_version: env!("CARGO_PKG_VERSION").to_string(),
             trusted_proxy_cidrs: Vec::new(),
+            node_name: "queueforge".into(),
+            data_dir: String::new(),
+            amqp_listeners: Vec::new(),
+            peers: Vec::new(),
         }
     }
 }

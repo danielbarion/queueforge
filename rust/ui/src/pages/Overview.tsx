@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getOverview, type Overview, type Whoami } from "../api";
 import Layout from "../components/Layout";
-import { trafficRates, type TrafficSample } from "../rates";
+import Spark from "../components/Spark";
+import { chartSeries, trafficRates, type ChartPoint, type TrafficSample } from "../rates";
 
 type Props = {
   user: Whoami;
@@ -12,8 +13,9 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [rates, setRates] = useState({ publish: 0, deliver: 0, ack: 0 });
-  const previous = useRef<{ at: number; sample: TrafficSample } | null>(null);
+  const [rates, setRates] = useState({ publish: 0, deliver: 0, ack: 0, ready: 0, unacked: 0 });
+  const [history, setHistory] = useState<ChartPoint[]>([]);
+  const samples = useRef<{ at: number; sample: TrafficSample }[]>([]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -31,13 +33,23 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
         confirmBeforeFsync: 0,
         fsync: 0,
       };
-      const prior = previous.current;
       const now = Date.now();
+      const series = [...samples.current, { at: now, sample }].slice(-40);
+      samples.current = series;
+      const prior = series.length > 1 ? series[series.length - 2] : null;
       if (prior) {
         const live = trafficRates(prior.sample, sample, (now - prior.at) / 1000);
-        setRates({ publish: live.publishPerSec, deliver: live.deliverPerSec, ack: live.ackPerSec });
+        setRates({
+          publish: live.publishPerSec,
+          deliver: live.deliverPerSec,
+          ack: live.ackPerSec,
+          ready: live.ready,
+          unacked: live.unacked,
+        });
+      } else {
+        setRates((current) => ({ ...current, ready: sample.ready, unacked: sample.unacked }));
       }
-      previous.current = { at: now, sample };
+      setHistory(chartSeries(series));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onLoggedOut();
@@ -99,10 +111,16 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
           </div>
 
           <h2>Message rates</h2>
+          <div className="card spark-card">
+            <Spark points={history} />
+            <div className="muted">publish, deliver, ack, ready, unacked · last {history.length} samples</div>
+          </div>
           <div className="stat-grid">
             <Stat label="Publish /s" value={rates.publish} />
             <Stat label="Deliver /s" value={rates.deliver} />
             <Stat label="Ack /s" value={rates.ack} />
+            <Stat label="Ready" value={rates.ready} />
+            <Stat label="Unacked" value={rates.unacked} />
           </div>
 
           <h2>Queue totals</h2>

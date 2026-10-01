@@ -184,6 +184,7 @@ export type QueueArguments = {
   "x-dead-letter-routing-key"?: string;
   "x-max-death-hops"?: number;
   "x-max-priority"?: number;
+  "x-queue-type"?: "classic" | "quorum";
 };
 
 export async function createQueue(
@@ -348,6 +349,180 @@ export async function publishMessage(
       }),
     },
   );
+}
+
+export type ChannelItem = {
+  name: string;
+  connection_details: { name: string };
+  user: string;
+  vhost: string;
+  number: number;
+  peer_host: string;
+  peer_port: number;
+};
+
+export type ConsumerItem = {
+  consumer_tag: string;
+  channel_details: { name: string; connection_name?: string; number?: number };
+  queue: { name: string; vhost: string };
+  ack_required?: boolean;
+};
+
+export type QueueDetail = QueueItem & {
+  arguments?: Record<string, unknown>;
+  type?: string;
+  policy?: string | null;
+  operator_policy?: string | null;
+  consumer_details?: ConsumerItem[];
+  message_stats?: { publish: number; deliver: number; ack: number };
+};
+
+export type PolicyItem = {
+  vhost: string;
+  name: string;
+  pattern: string;
+  "apply-to": string;
+  priority: number;
+  definition: Record<string, string | number>;
+};
+
+export type PermissionItem = {
+  user: string;
+  vhost: string;
+  configure: string;
+  write: string;
+  read: string;
+};
+
+export type TopicPermissionItem = PermissionItem & { exchange: string };
+
+const enc = encodeURIComponent;
+
+export async function getQueue(vhost: string, name: string): Promise<QueueDetail> {
+  return api<QueueDetail>(`/api/queues/${enc(vhost)}/${enc(name)}`);
+}
+
+export async function getExchange(vhost: string, name: string): Promise<ExchangeItem & { policy?: string | null; operator_policy?: string | null; arguments?: Record<string, unknown> }> {
+  try {
+    return await api(`/api/exchanges/${enc(vhost)}/${enc(name)}`);
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status !== 404) throw err;
+    const page = await listExchanges(vhost);
+    const found = page.items.find((item) => item.name === name);
+    if (!found) throw err;
+    return found;
+  }
+}
+
+export async function listChannels(): Promise<Page<ChannelItem>> {
+  return api(`/api/channels`);
+}
+
+export async function getChannel(name: string): Promise<ChannelItem> {
+  return api(`/api/channels/${enc(name)}`);
+}
+
+export async function listConsumers(vhost: string): Promise<Page<ConsumerItem>> {
+  return api(`/api/consumers/${enc(vhost)}`);
+}
+
+export async function getConnection(name: string): Promise<ConnectionItem> {
+  return api(`/api/connections/${enc(name)}`);
+}
+
+export async function createVhost(name: string): Promise<void> {
+  await api(`/api/vhosts/${enc(name)}`, { method: "PUT", body: "{}" });
+}
+
+export async function deleteVhost(name: string): Promise<void> {
+  await api(`/api/vhosts/${enc(name)}`, { method: "DELETE" });
+}
+
+export async function listPermissions(): Promise<PermissionItem[]> {
+  return api("/api/permissions");
+}
+
+export async function putPermission(user: string, vhost: string, body: { configure: string; write: string; read: string }): Promise<void> {
+  await api(`/api/permissions/${enc(user)}/${enc(vhost)}`, { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function deletePermission(user: string, vhost: string): Promise<void> {
+  await api(`/api/permissions/${enc(user)}/${enc(vhost)}`, { method: "DELETE" });
+}
+
+export async function listTopicPermissions(): Promise<{ items: TopicPermissionItem[] }> {
+  return api("/api/topic-permissions");
+}
+
+export async function putTopicPermission(user: string, vhost: string, body: { exchange: string; write: string; read: string }): Promise<void> {
+  await api(`/api/topic-permissions/${enc(user)}/${enc(vhost)}`, { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function deleteTopicPermission(user: string, vhost: string, exchange: string): Promise<void> {
+  await api(`/api/topic-permissions/${enc(user)}/${enc(vhost)}/${enc(exchange)}`, { method: "DELETE" });
+}
+
+export async function listPolicies(vhost?: string): Promise<{ items: PolicyItem[] }> {
+  return api(vhost ? `/api/policies/${enc(vhost)}` : "/api/policies");
+}
+
+export async function putPolicy(vhost: string, name: string, body: unknown, operator = false): Promise<void> {
+  const root = operator ? "operator-policies" : "policies";
+  await api(`/api/${root}/${enc(vhost)}/${enc(name)}`, { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function deletePolicy(vhost: string, name: string, operator = false): Promise<void> {
+  const root = operator ? "operator-policies" : "policies";
+  await api(`/api/${root}/${enc(vhost)}/${enc(name)}`, { method: "DELETE" });
+}
+
+export async function listLimits(): Promise<{
+  user_limits: { user: string; "max-connections": number | null; "max-channels": number | null }[];
+  vhost_limits: { vhost: string; "max-connections": number | null; "max-queues": number | null }[];
+}> {
+  return api("/api/limits");
+}
+
+export async function putLimit(scope: "user" | "vhost", name: string, kind: string, value: number): Promise<void> {
+  const root = scope === "user" ? "user-limits" : "vhost-limits";
+  await api(`/api/${root}/${enc(name)}/${enc(kind)}`, { method: "PUT", body: JSON.stringify({ value }) });
+}
+
+export async function deleteLimit(scope: "user" | "vhost", name: string, kind: string): Promise<void> {
+  const root = scope === "user" ? "user-limits" : "vhost-limits";
+  await api(`/api/${root}/${enc(name)}/${enc(kind)}`, { method: "DELETE" });
+}
+
+export async function listFeatureFlags(): Promise<{ items: { name: string; state: string; stability: string }[] }> {
+  return api("/api/feature-flags");
+}
+
+export async function setFeatureFlag(name: string, enabled: boolean): Promise<void> {
+  await api(`/api/feature-flags/${enc(name)}/${enabled ? "enable" : "disable"}`, { method: "POST" });
+}
+
+export async function listDeprecated(): Promise<{ items: { name: string; deprecation_phase: string; acknowledged: boolean; description: string }[] }> {
+  return api("/api/deprecated-features");
+}
+
+export async function acknowledgeDeprecated(name: string): Promise<void> {
+  await api(`/api/deprecated-features/${enc(name)}`, { method: "DELETE" });
+}
+
+export async function listNodes(): Promise<{
+  items: {
+    name: string;
+    running: boolean;
+    uptime: number;
+    mem_used: number;
+    disk_free: number;
+    mem_alarm: boolean;
+    disk_free_alarm: boolean;
+    listeners: { protocol: string; ip_address: string; port: number }[];
+    peers: { name: string }[];
+  }[];
+}> {
+  return api("/api/nodes");
 }
 
 export async function getMessages(

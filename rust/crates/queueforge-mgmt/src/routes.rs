@@ -60,10 +60,6 @@ pub fn router(state: MgmtState) -> Router {
             put(put_permission).delete(delete_permission),
         )
         .route("/api/queues/{vhost}", get(list_queues))
-        .route(
-            "/api/queues/{vhost}/{name}",
-            put(put_queue).delete(delete_queue),
-        )
         .route("/api/queues/{vhost}/{name}/purge", post(purge_queue))
         .route("/api/queues/{vhost}/{name}/get", post(get_messages))
         .route(
@@ -73,7 +69,7 @@ pub fn router(state: MgmtState) -> Router {
         .route("/api/exchanges/{vhost}", get(list_exchanges))
         .route(
             "/api/exchanges/{vhost}/{name}",
-            put(put_exchange).delete(delete_exchange),
+            get(get_exchange).put(put_exchange).delete(delete_exchange),
         )
         .route(
             "/api/exchanges/{vhost}/{name}/bindings",
@@ -89,7 +85,54 @@ pub fn router(state: MgmtState) -> Router {
             delete(delete_binding),
         )
         .route("/api/connections", get(list_connections))
-        .route("/api/connections/{name}", delete(delete_connection))
+        .route(
+            "/api/connections/{name}",
+            get(crate::console::get_connection).delete(delete_connection),
+        )
+        .route("/api/channels", get(crate::console::list_channels))
+        .route("/api/channels/{name}", get(crate::console::get_channel))
+        .route("/api/consumers/{vhost}", get(crate::console::list_consumers))
+        .route(
+            "/api/queues/{vhost}/{name}",
+            get(crate::console::get_queue).put(put_queue).delete(delete_queue),
+        )
+        .route("/api/topic-permissions", get(crate::console::list_topic_permissions))
+        .route(
+            "/api/topic-permissions/{user}/{vhost}",
+            put(crate::console::put_topic_permission),
+        )
+        .route(
+            "/api/topic-permissions/{user}/{vhost}/{exchange}",
+            delete(crate::console::delete_topic_permission),
+        )
+        .route("/api/limits", get(crate::console::list_limits))
+        .route(
+            "/api/user-limits/{user}/{kind}",
+            put(crate::console::put_user_limit).delete(crate::console::delete_user_limit),
+        )
+        .route(
+            "/api/vhost-limits/{vhost}/{kind}",
+            put(crate::console::put_vhost_limit).delete(crate::console::delete_vhost_limit),
+        )
+        .route("/api/feature-flags", get(crate::console::list_feature_flags))
+        .route("/api/feature-flags/{name}/enable", post(crate::console::enable_feature_flag))
+        .route("/api/feature-flags/{name}/disable", post(crate::console::disable_feature_flag))
+        .route("/api/deprecated-features", get(crate::console::list_deprecated))
+        .route(
+            "/api/deprecated-features/{name}",
+            delete(crate::console::acknowledge_deprecated),
+        )
+        .route("/api/nodes", get(crate::console::list_nodes))
+        .route("/api/cluster-name", get(crate::console::cluster_name))
+        .route("/api/operator-policies", get(crate::mutations::list_operator_policies))
+        .route(
+            "/api/operator-policies/{vhost}",
+            get(crate::mutations::list_operator_policies_vhost),
+        )
+        .route(
+            "/api/operator-policies/{vhost}/{name}",
+            put(crate::mutations::put_operator_policy).delete(crate::mutations::delete_operator_policy),
+        )
         .route(
             "/api/definitions",
             get(export_definitions).post(import_definitions),
@@ -550,6 +593,30 @@ fn exchange_list_item(ex: queueforge_core::Exchange) -> ExchangeItem {
     }
 }
 
+async fn get_exchange(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path((vhost, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, MgmtError> {
+    let _session = require_session(&state, &headers).await?;
+    let vhost = decode_vhost(&vhost)?;
+    let found = state.router.list_exchanges(&vhost).into_iter().find(|ex| ex.name.as_str() == name);
+    let Some(ex) = found else {
+        return Err(MgmtError::NotFound(format!("exchange '{name}'")));
+    };
+    let (policy, operator_policy) = state.router.matching_exchange_policy_names(&vhost, &name);
+    Ok(Json(serde_json::json!({
+        "name": ex.name.as_str(),
+        "vhost": vhost,
+        "type": ex.kind.as_str(),
+        "durable": ex.durable,
+        "auto_delete": ex.auto_delete,
+        "internal": ex.internal,
+        "policy": policy,
+        "operator_policy": operator_policy,
+    })))
+}
+
 async fn list_exchanges(
     State(state): State<MgmtState>,
     headers: HeaderMap,
@@ -692,7 +759,7 @@ fn percent_decode(input: &str) -> Result<String, String> {
     String::from_utf8(out).map_err(|e| e.to_string())
 }
 
-async fn query_stats(tx: &tokio::sync::mpsc::Sender<QueueCmd>) -> Option<QueueStats> {
+pub(crate) async fn query_stats(tx: &tokio::sync::mpsc::Sender<QueueCmd>) -> Option<QueueStats> {
     let (reply_tx, reply_rx) = oneshot::channel();
     if tx.send(QueueCmd::Stats { reply: reply_tx }).await.is_err() {
         return None;
@@ -942,6 +1009,7 @@ mod tests {
                 cookie_secure: true,
                 product_version: "0.1.0-test".into(),
                 trusted_proxy_cidrs: Vec::new(),
+                ..MgmtConfig::default()
             },
         );
         let app = test_app(state, peer([127, 0, 0, 1], 10011));
@@ -1654,7 +1722,7 @@ mod tests {
                     .header(header::COOKIE, &cookie)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"durable":false,"arguments":{"x-message-ttl":5000,"x-max-length":10,"x-max-priority":5}}"#,
+                        r#"{"durable":true,"arguments":{"x-message-ttl":5000,"x-max-length":10,"x-max-priority":5}}"#,
                     ))
                     .unwrap(),
             )
@@ -1802,5 +1870,174 @@ mod tests {
             )],
         );
         assert_eq!(left[0]["properties_key"], size);
+    }
+
+    async fn authed(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<&str>) -> Response {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, cookie);
+        let owned;
+        if body.is_some() {
+            req = req.header(header::CONTENT_TYPE, "application/json");
+            owned = Body::from(body.unwrap().to_string());
+        } else {
+            owned = Body::empty();
+        }
+        app.clone().oneshot(req.body(owned).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn console_operator_actions() {
+        let (_dir, state) = test_state().await;
+        let app = test_app(state.clone(), peer([127, 0, 0, 1], 21001));
+        let cookie = auth_cookie(app.clone()).await;
+
+        let res = authed(&app, "PUT", "/api/vhosts/ops", &cookie, Some("{}")).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let listed = body_json(authed(&app, "GET", "/api/vhosts", &cookie, None).await).await;
+        assert!(listed["items"].as_array().unwrap().iter().any(|v| v["name"] == "ops"));
+
+        let perm = r#"{"configure":".*","write":".*","read":".*"}"#;
+        let res = authed(&app, "PUT", "/api/permissions/admin/%2F", &cookie, Some(perm)).await;
+        assert!(res.status() == StatusCode::CREATED || res.status() == StatusCode::NO_CONTENT);
+        let perms = body_json(authed(&app, "GET", "/api/permissions", &cookie, None).await).await;
+        assert!(perms.as_array().unwrap().iter().any(|p| p["user"] == "admin" && p["vhost"] == "/"));
+
+        let topic = r#"{"exchange":"amq.topic","write":"^ok\\..*","read":"^ok\\..*"}"#;
+        let res = authed(&app, "PUT", "/api/topic-permissions/admin/%2F", &cookie, Some(topic)).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let topics = body_json(authed(&app, "GET", "/api/topic-permissions", &cookie, None).await).await;
+        assert_eq!(topics["items"][0]["exchange"], "amq.topic");
+        assert!(!state.connections.topic_write_allowed("admin", "/", "amq.topic", "nope"));
+        assert!(state.connections.topic_write_allowed("admin", "/", "amq.topic", "ok.1"));
+
+        let definition = r#"{
+            "pattern":"^pol\\..*",
+            "apply-to":"queues",
+            "priority":5,
+            "definition":{
+                "message-ttl":1000,
+                "dead-letter-exchange":"amq.direct",
+                "dead-letter-routing-key":"dead",
+                "max-length":9,
+                "max-length-bytes":99,
+                "expires":60000,
+                "overflow":"reject-publish",
+                "delivery-limit":3,
+                "alternate-exchange":"amq.fanout"
+            }
+        }"#;
+        let res = authed(&app, "PUT", "/api/policies/%2F/pol.main", &cookie, Some(definition)).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let policies = body_json(authed(&app, "GET", "/api/policies/%2F", &cookie, None).await).await;
+        let def = &policies["items"][0]["definition"];
+        for key in ["message-ttl", "dead-letter-exchange", "dead-letter-routing-key", "max-length", "max-length-bytes", "expires", "overflow", "delivery-limit", "alternate-exchange"] {
+            assert!(def.get(key).is_some(), "missing {key}");
+        }
+        let op = definition.replace("pol\\\\..*", "pol\\\\.op.*").replace("1000", "2500");
+        let res = authed(&app, "PUT", "/api/operator-policies/%2F/pol.op", &cookie, Some(&op)).await;
+        assert_eq!(res.status(), StatusCode::CREATED, "{}", body_json(res).await);
+        let res = authed(&app, "PUT", "/api/queues/%2F/pol.op.q", &cookie, Some(r#"{"durable":true}"#)).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let queues = body_json(authed(&app, "GET", "/api/queues/%2F", &cookie, None).await).await;
+        let q = queues["items"].as_array().unwrap().iter().find(|q| q["name"] == "pol.op.q").unwrap();
+        assert_eq!(q["arguments"]["message_ttl_ms"], 2500, "args={}", q["arguments"]);
+        assert_eq!(q["arguments"]["dead_letter_exchange"], "amq.direct");
+        assert_eq!(q["arguments"]["max_length"], 9);
+        let detail = body_json(authed(&app, "GET", "/api/queues/%2F/pol.op.q", &cookie, None).await).await;
+        assert_eq!(detail["operator_policy"], "pol.op");
+        assert_eq!(detail["policy"], "pol.main");
+        assert_eq!(detail["type"], "classic");
+        let res = authed(
+            &app,
+            "PUT",
+            "/api/queues/%2F/pol.quorum.q",
+            &cookie,
+            Some(r#"{"durable":true,"arguments":{"x-queue-type":"quorum"}}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED, "{}", body_json(res).await);
+        let quorum = body_json(authed(&app, "GET", "/api/queues/%2F/pol.quorum.q", &cookie, None).await).await;
+        assert_eq!(quorum["type"], "quorum");
+
+        let res = authed(&app, "PUT", "/api/queues/%2F/transient.q", &cookie, Some(r#"{"durable":false}"#)).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = authed(&app, "POST", "/api/feature-flags/transient_nonexcl_queues/enable", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let flags = body_json(authed(&app, "GET", "/api/feature-flags", &cookie, None).await).await;
+        assert!(flags["items"].as_array().unwrap().iter().any(|f| f["name"] == "transient_nonexcl_queues" && f["state"] == "enabled"));
+        let res = authed(&app, "PUT", "/api/queues/%2F/transient.q", &cookie, Some(r#"{"durable":false}"#)).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let res = authed(&app, "POST", "/api/feature-flags/transient_nonexcl_queues/disable", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "POST", "/api/feature-flags/quorum_queues/disable", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = authed(&app, "DELETE", "/api/deprecated-features/transient_nonexcl_queues", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(state.connections.transient_nonexcl_permitted());
+
+        let res = authed(&app, "PUT", "/api/user-limits/admin/max-connections", &cookie, Some(r#"{"value":2}"#)).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "PUT", "/api/user-limits/admin/max-channels", &cookie, Some(r#"{"value":4}"#)).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "PUT", "/api/vhost-limits/%2F/max-connections", &cookie, Some(r#"{"value":3}"#)).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "PUT", "/api/vhost-limits/%2F/max-queues", &cookie, Some(r#"{"value":50}"#)).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let limits = body_json(authed(&app, "GET", "/api/limits", &cookie, None).await).await;
+        assert_eq!(limits["user_limits"][0]["max-connections"], 2);
+        assert_eq!(limits["user_limits"][0]["max-channels"], 4);
+        assert_eq!(limits["vhost_limits"][0]["max-queues"], 50);
+        let (first, _) = state.connections.register("127.0.0.1:44001".parse().unwrap(), "admin", "/");
+        let (second, _) = state.connections.register("127.0.0.1:44002".parse().unwrap(), "admin", "/");
+        assert!(!state.connections.connection_allowed("admin", "/"), "user max-connections is 2");
+        state.connections.unregister(&first);
+        state.connections.unregister(&second);
+        assert!(state.connections.connection_allowed("admin", "/"));
+
+        let (id, _rx) = state.connections.register("127.0.0.1:44000".parse().unwrap(), "admin", "/");
+        state.connections.sync_channels(&id, "admin", "/", "127.0.0.1:44000".parse().unwrap(), &[1]);
+        state.connections.sync_consumers(&id, vec![crate::connections::ConsumerInfo {
+            consumer_tag: "ctag".into(),
+            connection: id.clone(),
+            channel: 1,
+            queue: "pol.op.q".into(),
+            vhost: "/".into(),
+        }]);
+        let conns = body_json(authed(&app, "GET", "/api/connections", &cookie, None).await).await;
+        assert!(conns["items"].as_array().unwrap().iter().any(|c| c["name"] == id));
+        let channels = body_json(authed(&app, "GET", "/api/channels", &cookie, None).await).await;
+        assert_eq!(channels["items"][0]["name"], format!("{id}:1"));
+        let one = body_json(authed(&app, "GET", &format!("/api/channels/{id}:1"), &cookie, None).await).await;
+        assert_eq!(one["number"], 1);
+        let consumers = body_json(authed(&app, "GET", "/api/consumers/%2F", &cookie, None).await).await;
+        assert_eq!(consumers["items"][0]["consumer_tag"], "ctag");
+        state.connections.unregister(&id);
+        let gone = body_json(authed(&app, "GET", "/api/connections", &cookie, None).await).await;
+        assert!(gone["items"].as_array().unwrap().iter().all(|c| c["name"] != id));
+
+        let nodes = body_json(authed(&app, "GET", "/api/nodes", &cookie, None).await).await;
+        let node = &nodes["items"][0];
+        assert!(node["name"].is_string());
+        assert_eq!(node["running"], true);
+        assert!(node["uptime"].is_number());
+        assert!(node["mem_used"].is_number());
+        assert!(node["disk_free"].is_number());
+        assert!(node["mem_alarm"].is_boolean());
+        assert!(node["disk_free_alarm"].is_boolean());
+        assert!(node["listeners"].is_array());
+        assert!(node["peers"].is_array());
+
+        let res = authed(&app, "DELETE", "/api/operator-policies/%2F/pol.op", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "DELETE", "/api/policies/%2F/pol.main", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "DELETE", "/api/topic-permissions/admin/%2F/amq.topic", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "DELETE", "/api/user-limits/admin/max-connections", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = authed(&app, "DELETE", "/api/vhosts/ops", &cookie, None).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 }

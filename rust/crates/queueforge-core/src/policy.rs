@@ -119,6 +119,47 @@ pub fn select_policy<'a>(
     best
 }
 
+/// User policy fills unset keys, then an operator policy overrides those fills.
+/// A key set on the declare itself stays.
+pub fn apply_user_and_operator(declared: &QueueArgs, user: Option<&Policy>, operator: Option<&Policy>) -> QueueArgs {
+    let mut out = apply_queue_policy(declared, user);
+    let Some(op) = operator else {
+        return out;
+    };
+    if declared.message_ttl_ms.is_none() && op.message_ttl_ms.is_some() {
+        out.message_ttl_ms = op.message_ttl_ms;
+    }
+    if declared.dead_letter_exchange.is_none() && op.dead_letter_exchange.is_some() {
+        out.dead_letter_exchange = op.dead_letter_exchange.clone();
+    }
+    if declared.dead_letter_routing_key.is_none() && op.dead_letter_routing_key.is_some() {
+        out.dead_letter_routing_key = op.dead_letter_routing_key.clone();
+    }
+    if declared.max_length.is_none() && op.max_length.is_some() {
+        out.max_length = op.max_length;
+    }
+    if declared.max_length_bytes.is_none() && op.max_length_bytes.is_some() {
+        out.max_length_bytes = op.max_length_bytes;
+    }
+    if declared.expires_ms.is_none() && op.expires_ms.is_some() {
+        out.expires_ms = op.expires_ms;
+    }
+    if declared.overflow == OverflowPolicy::DropHead {
+        if let Some(overflow) = op.overflow {
+            out.overflow = overflow;
+        }
+    }
+    if declared.delivery_limit.is_none() && op.delivery_limit.is_some() {
+        out.delivery_limit = op.delivery_limit;
+    }
+    if declared.dead_letter_strategy == crate::queue::DeadLetterStrategy::AtMostOnce {
+        if let Some(strategy) = op.dead_letter_strategy {
+            out.dead_letter_strategy = strategy;
+        }
+    }
+    out
+}
+
 /// Fill unset queue arguments from the matching policy. Set declare arguments stay.
 pub fn apply_queue_policy(declared: &QueueArgs, policy: Option<&Policy>) -> QueueArgs {
     let Some(policy) = policy else {

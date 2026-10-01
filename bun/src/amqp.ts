@@ -75,7 +75,7 @@ export function startAmqp(host: string, port: number, broker: Broker) {
         conn.closed = true;
         conn.connClosed = true;
         conn.noteMetricsClosed();
-        void conn.requeueAll().catch(() => {
+        void conn.dropConsumers().then(() => conn.requeueAll()).catch(() => {
           /* a missing queue home rejects nack; that must not exit the process */
         });
       },
@@ -291,6 +291,7 @@ class Conn {
       const rr = new R(payload.subarray(4));
       const vhost = rr.shortstr() || "/";
       if (!this.broker.hasVhostAccess(this.user, vhost)) return this.connClose(403, `ACCESS_REFUSED - vhost ${vhost}`);
+      if (!this.broker.connectionAllowed(this.user, vhost)) return this.connClose(403, "ACCESS_REFUSED - connection limit");
       this.vhost = vhost;
       if (!this.metricsOpened) {
         this.metricsOpened = true;
@@ -317,11 +318,15 @@ class Conn {
     }
     if (cls === 20 && mid === 10) {
       const fresh = !this.channels.has(channel);
+      if (fresh && !this.broker.channelAllowed(this.user)) {
+        await this.chanClose(channel, 403, "ACCESS_REFUSED - channel limit");
+        return;
+      }
       this.ch(channel);
       if (fresh) {
         this.broker.prom.channels++;
         this.broker.prom.channelsOpened++;
-        this.broker.setMgmtChannels(this.mgmtName, this.channels.size);
+        this.syncMgmt();
       }
       await this.send(methodFrame(channel, method(20, 11, (w) => w.u32(0))));
       return;
@@ -331,10 +336,11 @@ class Conn {
       await this.requeueChannel(this.ch(channel));
       await this.send(methodFrame(channel, method(20, 41, () => {})));
       this.channels.delete(channel);
+      this.broker.forgetMgmtChannelConsumers(this.mgmtName, channel);
       if (open) {
         this.broker.prom.channels = Math.max(0, this.broker.prom.channels - 1);
         this.broker.prom.channelsClosed++;
-        this.broker.setMgmtChannels(this.mgmtName, this.channels.size);
+        this.syncMgmt();
       }
       return;
     }
@@ -433,6 +439,10 @@ class Conn {
     c.publish = null;
     if (pub.immediate) {
       await this.chanClose(channel, 540, "NOT_IMPLEMENTED - immediate=true", 60, 40);
+      return;
+    }
+    if (!this.broker.topicWriteAllowed(this.user, this.vhost, pub.exchange, pub.routingKey)) {
+      await this.chanClose(channel, 403, "ACCESS_REFUSED - write access to topic refused", 60, 40);
       return;
     }
     const op = async () => {
@@ -548,7 +558,7 @@ class Conn {
     const durable = (bits & 2) !== 0;
     const exclusive = (bits & 4) !== 0;
     const qtype = String(fields["x-queue-type"] ?? "");
-    if (!passive && !durable && !exclusive && qtype !== "quorum") {
+    if (!passive && !durable && !exclusive && qtype !== "quorum" && !this.broker.transientNonexcl) {
       await this.connClose(
         541,
         "INTERNAL_ERROR - Feature `transient_nonexcl_queues` is deprecated.\nBy default, this feature is not permitted anymore.",
@@ -652,6 +662,13 @@ class Conn {
     if (!tag) tag = `ctag-${crypto.randomUUID()}`;
     const session = this.broker.nextSession();
     c.consumers.set(tag, queue);
+    this.broker.noteMgmtConsumer({
+      consumer_tag: tag,
+      connection: this.mgmtName,
+      channel,
+      queue,
+      vhost: this.vhost,
+    });
     await this.broker.consume(this.vhost, queue, {
       tag,
       session,
@@ -705,6 +722,7 @@ class Conn {
     const queue = c.consumers.get(tag);
     if (queue) await this.broker.cancel(this.vhost, queue, tag);
     c.consumers.delete(tag);
+    this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
     await this.send(methodFrame(channel, method(60, 31, (w) => w.shortstr(tag))));
   }
 
@@ -801,6 +819,16 @@ class Conn {
     }
   }
 
+  async dropConsumers() {
+    for (const [channel, c] of this.channels) {
+      for (const [tag, queue] of c.consumers) {
+        await this.broker.cancel(this.vhost, queue, tag);
+        this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
+      }
+      c.consumers.clear();
+    }
+  }
+
   async requeueAll() {
     for (const c of this.channels.values()) await this.requeueChannel(c);
   }
@@ -816,6 +844,18 @@ class Conn {
           w.u16(methodId);
         }),
       ),
+    );
+  }
+
+  syncMgmt() {
+    if (!this.mgmtName) return;
+    this.broker.syncMgmtChannels(
+      this.mgmtName,
+      this.user,
+      this.vhost,
+      this.socket.remoteAddress ?? "",
+      this.socket.remotePort ?? 0,
+      [...this.channels.keys()],
     );
   }
 

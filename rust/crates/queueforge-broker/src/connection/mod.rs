@@ -1194,6 +1194,18 @@ where
         metrics::gauge!("queueforge_connections").increment(1.0);
         queueforge_core::prom::connection_opened();
         self.gauges_held = true;
+        if !self.connections.connection_allowed(user.as_str(), vhost.as_str()) {
+            let _ = self
+                .send_connection_close(
+                    REPLY_ACCESS_REFUSED,
+                    "ACCESS_REFUSED - connection limit reached",
+                    conn_method::CLASS_ID,
+                    conn_method::Open::METHOD_ID,
+                )
+                .await;
+            self.mark_closed();
+            return Ok(Step::Done);
+        }
         let (track_id, force_rx) =
             self.connections
                 .register(self.peer, user.as_str(), vhost.as_str());
@@ -1257,6 +1269,18 @@ where
                         channel,
                         REPLY_COMMAND_INVALID,
                         "channel already open",
+                        chan_method::CLASS_ID,
+                        chan_method::Open::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
+                let user = self.user.clone().unwrap_or_default();
+                if !self.connections.channel_allowed(&user) {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_ACCESS_REFUSED,
+                        "ACCESS_REFUSED - channel limit reached",
                         chan_method::CLASS_ID,
                         chan_method::Open::METHOD_ID,
                     )
@@ -2646,10 +2670,25 @@ where
 
     /// Push current open-channel count into the management connection tracker.
     fn sync_tracked_channels(&self) {
-        if let Some(id) = self.conn_track_id.as_deref() {
-            self.connections
-                .set_channels(id, self.channels.len() as u32);
-        }
+        let Some(id) = self.conn_track_id.as_deref() else {
+            return;
+        };
+        let user = self.user.clone().unwrap_or_default();
+        let vhost = self.vhost.clone().unwrap_or_default();
+        let numbers: Vec<u16> = self.channels.keys().copied().collect();
+        self.connections.sync_channels(id, &user, &vhost, self.peer, &numbers);
+        let consumers = self
+            .sessions
+            .values()
+            .map(|session| queueforge_mgmt::ConsumerInfo {
+                consumer_tag: session.consumer_tag.clone(),
+                connection: id.to_string(),
+                channel: session.channel,
+                vhost: session.queue_key.vhost.to_string(),
+                queue: session.queue_key.name.to_string(),
+            })
+            .collect();
+        self.connections.sync_consumers(id, consumers);
     }
 
     async fn handle_content_frame(&mut self, frame: Frame) -> Result<Step, ConnError> {
@@ -3460,6 +3499,19 @@ where
                 channel,
                 REPLY_COMMAND_INVALID,
                 "publish already in progress on channel",
+                basic_method::CLASS_ID,
+                basic_method::Publish::METHOD_ID,
+            )
+            .await?;
+            return Ok(Step::Continue);
+        }
+        let user = self.user.clone().unwrap_or_default();
+        let vhost = self.vhost.clone().unwrap_or_default();
+        if !self.connections.topic_write_allowed(&user, &vhost, &publish.exchange, &publish.routing_key) {
+            self.server_channel_close(
+                channel,
+                REPLY_ACCESS_REFUSED,
+                "ACCESS_REFUSED - topic permission write pattern",
                 basic_method::CLASS_ID,
                 basic_method::Publish::METHOD_ID,
             )

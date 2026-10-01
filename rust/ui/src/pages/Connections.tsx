@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ApiError,
   forceCloseConnection,
@@ -82,7 +83,7 @@ export default function ConnectionsPage({ user, onLoggedOut }: Props) {
             {items.map((c) => (
               <tr key={c.name}>
                 <td>
-                  <code>{c.name}</code>
+                  <Link to={`/connections/${encodeURIComponent(c.name)}`}><code>{c.name}</code></Link>
                 </td>
                 <td>{c.user}</td>
                 <td>

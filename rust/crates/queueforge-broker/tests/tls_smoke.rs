@@ -228,6 +228,7 @@ async fn https_health_and_login_sets_secure_cookie() {
             cookie_secure: true,
             product_version: "0.1.0-test".into(),
             trusted_proxy_cidrs: Vec::new(),
+            ..MgmtConfig::default()
         },
     );
 

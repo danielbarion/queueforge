@@ -466,6 +466,7 @@ async fn definitions_export_includes_resources() {
             cookie_secure: false,
             product_version: "0.1.0-test".into(),
             trusted_proxy_cidrs: Vec::new(),
+            ..MgmtConfig::default()
         },
     );
     let server = start_mgmt_server("127.0.0.1:0".parse().unwrap(), state, None)

@@ -2,14 +2,22 @@ import { NavLink } from "react-router-dom";
 import type { Whoami } from "../api";
 import { logout } from "../api";
 
-const NAV = [
+const OPERATE = [
   { to: "/", label: "Overview", end: true },
-  { to: "/queues", label: "Queues" },
-  { to: "/exchanges", label: "Exchanges" },
-  { to: "/bindings", label: "Bindings" },
-  { to: "/users", label: "Users" },
   { to: "/connections", label: "Connections" },
-  { to: "/publish", label: "Publish / Get" },
+  { to: "/channels", label: "Channels" },
+  { to: "/exchanges", label: "Exchanges" },
+  { to: "/queues", label: "Queues" },
+];
+
+const ADMIN = [
+  { to: "/users", label: "Users" },
+  { to: "/vhosts", label: "Virtual Hosts" },
+  { to: "/feature-flags", label: "Feature Flags" },
+  { to: "/deprecated-features", label: "Deprecated Features" },
+  { to: "/policies", label: "Policies" },
+  { to: "/limits", label: "Limits" },
+  { to: "/cluster", label: "Cluster" },
   { to: "/definitions", label: "Definitions" },
 ];
 
@@ -26,39 +34,45 @@ export default function Layout({ user, onLoggedOut, children, title, actions }: 
     try {
       await logout();
     } catch {
-      /* ignore */
+      /* the session is already gone */
     }
     onLoggedOut();
   }
 
   return (
     <div className="layout">
-      <header className="topbar">
-        <div className="brand">QueueForge</div>
-        <nav className="nav">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="topbar-right">
-          <span className="muted">
-            {user.name}
-            {user.tags.length > 0 && (
-              <span className="tag-list"> · {user.tags.join(", ")}</span>
-            )}
-          </span>
-          <button type="button" className="btn-secondary" onClick={() => void onLogout()}>
-            Log out
-          </button>
+      <aside className="rail">
+        <div className="brand">
+          <strong>QueueForge</strong>
+          <span>operations console</span>
         </div>
-      </header>
+        <div className="rail-scroll">
+          <div>
+            <div className="rail-label">Operate</div>
+            <div className="rail-group">
+              {OPERATE.map((item) => (
+                <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="rail-label">Admin</div>
+            <div className="rail-group">
+              {ADMIN.map((item) => (
+                <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="rail-foot">
+          <span className="muted">{user.name}</span>
+          <button type="button" className="btn-secondary" onClick={() => void onLogout()}>Log out</button>
+        </div>
+      </aside>
       <main className="content">
         <div className="page-header">
           <h1>{title}</h1>

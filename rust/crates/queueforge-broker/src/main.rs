@@ -292,6 +292,15 @@ async fn run() -> Result<()> {
             cookie_secure: config.tls.enabled,
             product_version: env!("CARGO_PKG_VERSION").to_string(),
             trusted_proxy_cidrs: config.management.trusted_proxy_cidrs.clone(),
+            node_name: if config.cluster.node_id.is_empty() {
+                "queueforge".into()
+            } else {
+                config.cluster.node_id.clone()
+            },
+            data_dir: config.data.dir.display().to_string(),
+            amqp_listeners: vec![(config.listeners.amqp.ip().to_string(), config.listeners.amqp.port())],
+            peers: config.cluster.members.iter().map(|m| m.id.clone()).collect(),
+            ..MgmtConfig::default()
         },
     );
     if let Some(tx) = replicate_tx {
