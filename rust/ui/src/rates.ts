@@ -75,6 +75,73 @@ export type ChartPoint = {
   unacked: number;
 };
 
+export const CHART_SERIES = ["publish", "deliver", "ack", "ready", "unacked"] as const;
+
+/** Series drawn on the live chart. Rate series never share a scale with depth. */
+export type ChartSeriesName = (typeof CHART_SERIES)[number];
+
+export type ChartScaleName = "rate" | "depth";
+
+/** Rate ceiling from publish, deliver, and ack. Depth ceiling from ready and unacked. */
+export type ChartScaleSplit = {
+  rateMax: number;
+  depthMax: number;
+  series: { name: ChartSeriesName; scale: ChartScaleName }[];
+};
+
+const SCALE_BY_SERIES: Record<ChartSeriesName, ChartScaleName> = {
+  publish: "rate",
+  deliver: "rate",
+  ack: "rate",
+  ready: "depth",
+  unacked: "depth",
+};
+
+function seriesValue(point: ChartPoint, name: ChartSeriesName): number {
+  switch (name) {
+    case "publish":
+      return point.publishPerSec;
+    case "deliver":
+      return point.deliverPerSec;
+    case "ack":
+      return point.ackPerSec;
+    case "ready":
+      return point.ready;
+    case "unacked":
+      return point.unacked;
+  }
+}
+
+/**
+ * Split the five series onto two scales.
+ * A large ready or unacked count cannot raise the rate ceiling, and a large
+ * per-second rate cannot raise the depth ceiling.
+ */
+export function chartScaleSplit(points: ChartPoint[]): ChartScaleSplit {
+  let rateMax = 1;
+  let depthMax = 1;
+  for (const point of points) {
+    for (const name of CHART_SERIES) {
+      const value = seriesValue(point, name);
+      if (SCALE_BY_SERIES[name] === "rate") rateMax = Math.max(rateMax, value);
+      else depthMax = Math.max(depthMax, value);
+    }
+  }
+  return {
+    rateMax,
+    depthMax,
+    series: CHART_SERIES.map((name) => ({ name, scale: SCALE_BY_SERIES[name] })),
+  };
+}
+
+/** Seconds from the first chart point to the last. Zero until two samples exist. */
+export function chartWindowSec(points: ChartPoint[]): number {
+  if (points.length < 2) return 0;
+  const first = points[0]!.t;
+  const last = points[points.length - 1]!.t;
+  return Math.max(0, (last - first) / 1000);
+}
+
 /** One point per pair of successive samples. Depth comes from the later sample. */
 export function chartSeries(samples: { at: number; sample: TrafficSample }[]): ChartPoint[] {
   const points: ChartPoint[] = [];

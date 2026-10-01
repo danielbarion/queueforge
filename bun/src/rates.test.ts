@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chartSeries, formatDashboard, sampleFromMetrics, trafficRates, type TrafficSample } from "../../rust/ui/src/rates.ts";
+import { chartScaleSplit, chartSeries, formatDashboard, sampleFromMetrics, trafficRates, type TrafficSample } from "../../rust/ui/src/rates.ts";
 
 const prev: TrafficSample = {
   publish: 100,
@@ -51,6 +51,30 @@ describe("chartSeries", () => {
     expect(points[0]?.ackPerSec).toBe(15);
     expect(points[0]?.ready).toBe(9);
     expect(points[0]?.unacked).toBe(3);
+  });
+});
+
+describe("chartScaleSplit", () => {
+  test("rate scale ignores depth and depth scale ignores rates", () => {
+    const base = { ...prev, publish: 0, deliver: 0, ack: 0, ready: 4, unacked: 1 };
+    const deep = chartSeries([
+      { at: 0, sample: base },
+      { at: 1000, sample: { ...base, publish: 25, deliver: 10, ack: 8, ready: 1_000_000, unacked: 40_000 } },
+    ]);
+    const deepSplit = chartScaleSplit(deep);
+    expect(deepSplit.series.map((series) => series.name)).toEqual(["publish", "deliver", "ack", "ready", "unacked"]);
+    expect(deepSplit.series.filter((series) => series.scale === "rate").map((series) => series.name)).toEqual(["publish", "deliver", "ack"]);
+    expect(deepSplit.series.filter((series) => series.scale === "depth").map((series) => series.name)).toEqual(["ready", "unacked"]);
+    expect(deepSplit.rateMax).toBe(25);
+    expect(deepSplit.depthMax).toBe(1_000_000);
+
+    const loud = chartSeries([
+      { at: 0, sample: { ...base, ready: 2, unacked: 1 } },
+      { at: 1000, sample: { ...base, publish: 500_000, deliver: 12, ack: 9, ready: 8, unacked: 3 } },
+    ]);
+    const loudSplit = chartScaleSplit(loud);
+    expect(loudSplit.rateMax).toBe(500_000);
+    expect(loudSplit.depthMax).toBe(8);
   });
 });
 

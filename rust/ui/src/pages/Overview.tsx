@@ -112,8 +112,7 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
 
           <h2>Message rates</h2>
           <div className="card spark-card">
-            <Spark points={history} />
-            <div className="muted">publish, deliver, ack, ready, unacked · last {history.length} samples</div>
+            <Spark points={history} magnitudes={rates} />
           </div>
           <div className="stat-grid">
             <Stat label="Publish /s" value={rates.publish} />

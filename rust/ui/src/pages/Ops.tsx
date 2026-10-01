@@ -238,7 +238,7 @@ export function QueueDetailPage({ user, onLoggedOut }: Props) {
             <div><span className="label">Operator policy</span><strong>{queue.operator_policy || "—"}</strong></div>
             <div><span className="label">Type</span><strong>{queue.type || "classic"}</strong></div>
           </section>
-          <div className="card spark-card"><Spark points={history} /></div>
+          <div className="card spark-card"><Spark points={history} magnitudes={rates} /></div>
           <div className="stat-grid">
             <div className="stat card"><span className="label">Publish /s</span><span className="stat-value">{rates.publish.toFixed(1)}</span></div>
             <div className="stat card"><span className="label">Deliver /s</span><span className="stat-value">{rates.deliver.toFixed(1)}</span></div>
