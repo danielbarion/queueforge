@@ -15,6 +15,11 @@ export function Nav() {
     <header>
       <div className="wrap bar">
         <Link className="brand" href="/">
+          <span className="mark" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
           QueueForge
         </Link>
         <nav aria-label="Site">

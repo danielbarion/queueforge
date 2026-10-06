@@ -4,33 +4,16 @@ import { formatTimes, GITHUB, paced, scale } from "./bench";
 
 export default function Page() {
   const rabbit = paced[0].rate;
+  const figures = paced.slice(1);
   return (
     <main id="content">
-      <section className="hero wrap">
-        <div>
+      <section className="hero">
+        <div className="wrap">
           <p className="kicker">Open source · AMQP 0-9-1</p>
           <h1>An AMQP broker in Rust, Bun, and PHP.</h1>
           <p className="lede">
             Three processes, one client protocol. You run QueueForge yourself. There is no account
             and no hosted broker.
-          </p>
-          <div className="figures" aria-label="Kept rate versus RabbitMQ">
-            <div>
-              <span>Rust</span>
-              <strong>{formatTimes(paced[1].rate, rabbit)}×</strong>
-            </div>
-            <div>
-              <span>Bun</span>
-              <strong>{formatTimes(paced[2].rate, rabbit)}×</strong>
-            </div>
-            <div>
-              <span>PHP</span>
-              <strong>{formatTimes(paced[3].rate, rabbit)}×</strong>
-            </div>
-          </div>
-          <p className="note">
-            Versus RabbitMQ 4.3, on one core. QueueForge&apos;s durable confirm returns after the
-            covering fsync. RabbitMQ 4.3 classic confirms before its flush.
           </p>
           <div className="actions">
             <a className="btn" href={GITHUB}>
@@ -41,15 +24,37 @@ export default function Page() {
             </Link>
           </div>
         </div>
-        <div className="chart">
-          <p className="chart-title">Kept messages/s</p>
-          <Bars rows={paced} unit="/s" />
-          <p className="caption">
-            128 confirms in flight. Durable 256-byte body. Mac client through the published port.
-            RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only when
-            confirms and acks both reach 95% of the offer. The PHP bar is the parity build,
-            measured 2026-10-06T18:17Z.
-          </p>
+      </section>
+
+      <section className="score-section">
+        <div className="wrap">
+          <div className="panel scoreboard">
+            <div>
+              <p className="panel-title">Kept rate versus RabbitMQ 4.3</p>
+              <ul className="figures" aria-label="Kept rate versus RabbitMQ">
+                {figures.map((row) => (
+                  <li key={row.name} className={`tone-${row.tone}`}>
+                    <span>{row.name}</span>
+                    <strong>{formatTimes(row.rate, rabbit)}×</strong>
+                  </li>
+                ))}
+              </ul>
+              <p className="note">
+                Versus RabbitMQ 4.3, on one core. QueueForge&apos;s durable confirm returns after
+                the covering fsync. RabbitMQ 4.3 classic confirms before its flush.
+              </p>
+            </div>
+            <div className="chart">
+              <p className="chart-title">Kept messages/s</p>
+              <Bars rows={paced} unit="/s" base={rabbit} />
+              <p className="caption">
+                128 confirms in flight. Durable 256-byte body. Mac client through the published
+                port. RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only
+                when confirms and acks both reach 95% of the offer. The PHP bar is the parity
+                build, measured 2026-10-06T18:17Z.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -69,9 +74,9 @@ export default function Page() {
               network, measured for 8 seconds. Not the paced score.
             </p>
           </div>
-          <div className="chart">
+          <div className="panel chart">
             <p className="chart-title">16 queues, confirm/s</p>
-            <Bars rows={scale} unit="/s" />
+            <Bars rows={scale} unit="/s" base={scale[0].rate} />
           </div>
         </div>
       </section>

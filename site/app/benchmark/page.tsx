@@ -1,6 +1,29 @@
 import type { Metadata } from "next";
 import { Bars } from "../bars";
-import { BENCH_MD, formatRate, formatTimes, loadRows, paced, scale } from "../bench";
+import {
+  BENCH_MD,
+  formatRate,
+  formatTimes,
+  loadRows,
+  paced,
+  scale,
+  type LoadRow,
+  type Tone,
+} from "../bench";
+
+const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
+const RATES = ["one", "shared", "spread"] as const;
+
+function groups(rows: LoadRow[]) {
+  const sizes = [...new Set(rows.map((row) => row.size))];
+  return sizes.map((size) => {
+    const members = rows.filter((row) => row.size === size);
+    const best = Object.fromEntries(
+      RATES.map((key) => [key, Math.max(...members.map((row) => row[key]))]),
+    ) as Record<(typeof RATES)[number], number>;
+    return { size, members, best };
+  });
+}
 
 export const metadata: Metadata = {
   title: "Benchmark",
@@ -12,16 +35,18 @@ export default function BenchmarkPage() {
   const rabbit = paced[0].rate;
   return (
     <main id="content">
-      <section className="wrap page-intro">
-        <p className="kicker">Benchmark · 2026-10-05</p>
-        <h1>Measured against RabbitMQ 4.3.</h1>
-        <p className="lede">
-          QueueForge waits for the covering fsync. RabbitMQ 4.3 classic confirms before its flush.
-          These are not the same moment. The rates below are not a slogan.
-        </p>
+      <section className="page-intro">
+        <div className="wrap">
+          <p className="kicker">Benchmark · 2026-10-05</p>
+          <h1>Measured against RabbitMQ 4.3.</h1>
+          <p className="lede">
+            QueueForge waits for the covering fsync. RabbitMQ 4.3 classic confirms before its
+            flush. These are not the same moment. The rates below are not a slogan.
+          </p>
+        </div>
       </section>
 
-      <section className="rule">
+      <section className="score-section">
         <div className="wrap split-proof">
           <div>
             <h2>
@@ -35,9 +60,9 @@ export default function BenchmarkPage() {
               and limits. A step counts only when confirms and acks both reach 95% of the offer.
             </p>
           </div>
-          <div className="chart">
+          <div className="panel chart">
             <p className="chart-title">Kept messages/s</p>
-            <Bars rows={paced} unit="/s" />
+            <Bars rows={paced} unit="/s" base={rabbit} />
           </div>
         </div>
       </section>
@@ -57,9 +82,9 @@ export default function BenchmarkPage() {
               parity build and the small-batch flush. The login column has no PHP cell.
             </p>
           </div>
-          <div className="chart">
+          <div className="panel chart">
             <p className="chart-title">16 queues, confirm/s</p>
-            <Bars rows={scale} unit="/s" />
+            <Bars rows={scale} unit="/s" base={scale[0].rate} />
           </div>
         </div>
       </section>
@@ -74,36 +99,55 @@ export default function BenchmarkPage() {
             and that hold were not measured together. There is no 1 CPU / 1 GiB login cell, and no
             PHP login cell.
           </p>
-          <div className="scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">App</th>
-                  <th scope="col">Size</th>
-                  <th scope="col">1 conn msg/s</th>
-                  <th scope="col">16 conn msg/s</th>
-                  <th scope="col">16 queues msg/s</th>
-                  <th scope="col">Connections</th>
-                  <th scope="col">MiB</th>
-                  <th scope="col">Login memory</th>
-                </tr>
-              </thead>
-              <tbody>
-                {loadRows.map((row) => (
-                  <tr key={`${row.app}-${row.size}`}>
-                    <td>{row.app}</td>
-                    <td>{row.size}</td>
-                    <td>{formatRate(row.one)}</td>
-                    <td>{formatRate(row.shared)}</td>
-                    <td>{formatRate(row.spread)}</td>
-                    <td>{row.connections}</td>
-                    <td>{row.mib}</td>
-                    <td>{row.login}</td>
+          <div className="panel table-panel">
+            <div className="scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">App</th>
+                    <th scope="col">1 conn msg/s</th>
+                    <th scope="col">16 conn msg/s</th>
+                    <th scope="col">16 queues msg/s</th>
+                    <th scope="col">Connections</th>
+                    <th scope="col">MiB</th>
+                    <th scope="col">Login memory</th>
                   </tr>
+                </thead>
+                {groups(loadRows).map(({ size, members, best }) => (
+                  <tbody key={size}>
+                    <tr className="group">
+                      <th scope="rowgroup" colSpan={7}>
+                        {size}
+                      </th>
+                    </tr>
+                    {members.map((row) => (
+                      <tr key={`${row.app}-${row.size}`}>
+                        <td>
+                          <span className={`app tone-${TONES[row.app]}`}>
+                            <span className="dot" aria-hidden="true" />
+                            {row.app}
+                          </span>
+                        </td>
+                        {RATES.map((key) => (
+                          <td key={key} className={row[key] === best[key] ? "best" : undefined}>
+                            {formatRate(row[key])}
+                          </td>
+                        ))}
+                        <td className={row.connections === "n/a" ? "na" : undefined}>
+                          {row.connections}
+                        </td>
+                        <td>{row.mib}</td>
+                        <td className={row.login === "n/a" ? "na" : undefined}>{row.login}</td>
+                      </tr>
+                    ))}
+                  </tbody>
                 ))}
-              </tbody>
-            </table>
+              </table>
+            </div>
           </div>
+          <p className="caption">
+            Highlighted: the highest message rate for that container size, per column.
+          </p>
           <p className="caption">
             Bun at 4 CPU held 160,000 connections. Attempts of 320,000 were cut by the login
             window at 171,961 (4 GiB) and 174,334 (8 GiB). Rust at 4 CPU / 8 GiB held 100,000, and
