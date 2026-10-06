@@ -95,6 +95,53 @@ final class Features
         return intdiv(max($members, 1), 2) + 1;
     }
 
+    /**
+     * Whether this node should open the connection to a peer. Only the lower
+     * id dials, so a pair gets exactly one connection instead of two. Bun
+     * applies the same rule (bun/src/cluster.ts:143).
+     */
+    public static function shouldDial(string $self, string $peer): bool
+    {
+        return strcmp($peer, $self) > 0;
+    }
+
+    /**
+     * 32-bit FNV-1a over bytes, used to pick the home node of a classic
+     * queue. This matches Bun, whose hash runs over UTF-16 code units and so
+     * agrees with a byte-wise pass for ASCII names. Bun documents that it
+     * already diverges from Rust's 64-bit byte FNV
+     * (bun/src/broker/routing.ts:46-59), so agreeing with both is not
+     * possible; this side matches Bun.
+     */
+    public static function fnv1a32(string $text): int
+    {
+        $hash = 0x811c9dc5;
+        $len = strlen($text);
+        for ($i = 0; $i < $len; $i++) {
+            $hash ^= ord($text[$i]);
+            // Multiply by the 32-bit FNV prime, 16777619, without overflowing
+            // into PHP's 64-bit int sign.
+            $hash = ($hash + (($hash << 1) + ($hash << 4) + ($hash << 7) + ($hash << 8) + ($hash << 24))) & 0xffffffff;
+        }
+        return $hash;
+    }
+
+    /**
+     * Picks the home node of a classic queue: the member at
+     * fnv1a(vhost \0 name) % count, over the member ids in sorted order.
+     *
+     * @param list<array{id:string,addr:string}> $members
+     */
+    public static function home(array $members, string $vhost, string $name): string
+    {
+        if ($members === []) {
+            return '';
+        }
+        $ids = array_column($members, 'id');
+        sort($ids);
+        return $ids[self::fnv1a32($vhost . "\0" . $name) % count($ids)];
+    }
+
     /** @param list<string> $copies durable|memory */
     public static function durableMajority(int $members, array $copies): bool
     {

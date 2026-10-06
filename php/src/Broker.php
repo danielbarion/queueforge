@@ -410,6 +410,36 @@ final class Broker
         }
     }
 
+    /**
+     * Drops a replica a leader rolled back with quorum_drop, by the message
+     * id the leader assigned rather than the local id.
+     */
+    public function dropReplica(string $queue, string $messageId): void
+    {
+        if ($messageId === '') {
+            return;
+        }
+        foreach ($this->msgs as $id => $msg) {
+            if (($msg['qid'] ?? '') !== $messageId) {
+                continue;
+            }
+            if ($queue !== '' && $msg['queue'] !== $queue) {
+                continue;
+            }
+            $name = $msg['queue'];
+            if (isset($this->queues[$name])) {
+                foreach (['ready', 'replicas'] as $list) {
+                    $this->queues[$name][$list] = array_values(array_filter(
+                        $this->queues[$name][$list],
+                        static fn (int $held): bool => $held !== $id,
+                    ));
+                }
+            }
+            $this->ack($id);
+            return;
+        }
+    }
+
     /** Store a peer's quorum append. The body is durable before the reply. */
     public function enqueueLocal(string $queue, string $messageId, string $body, string $exchange, string $key, bool $persistent): bool
     {
@@ -674,5 +704,139 @@ final class Broker
                 && $row['key'] === $key
             ),
         ));
+    }
+
+    /**
+     * The node that owns a classic queue. An empty member list means this is
+     * a single node and everything is local.
+     */
+    public function home(string $queue): string
+    {
+        if (count($this->members) < 2) {
+            return $this->nodeId;
+        }
+        return Features::home($this->members, '/', $queue);
+    }
+
+    /** True when this node owns the queue, so no forwarding is needed. */
+    public function ownsQueue(string $queue): bool
+    {
+        $home = $this->home($queue);
+        return $home === '' || $home === $this->nodeId;
+    }
+
+    /**
+     * Merges a peer's topology. Additive on purpose: an existing user,
+     * exchange or queue is never overwritten, which is how Bun's
+     * applySnapshot behaves. Bindings are matched before insert so repeated
+     * handshakes do not pile up duplicates, which Bun does not guard against
+     * (bun/src/broker/snapshot.ts:192-195).
+     *
+     * @param array<string, mixed> $snapshot
+     */
+    public function applySnapshot(array $snapshot): void
+    {
+        foreach ((array) ($snapshot['users'] ?? []) as $name => $hash) {
+            // Accepts both a name list and a name to hash map.
+            if (is_int($name) && is_string($hash)) {
+                continue;
+            }
+            if (is_string($name) && is_string($hash) && !isset($this->users[$name])) {
+                $this->users[$name] = $hash;
+            }
+        }
+        foreach ((array) ($snapshot['exchanges'] ?? []) as $name => $kind) {
+            if (is_string($name) && is_string($kind) && !isset($this->exchanges[$name])) {
+                $this->exchanges[$name] = $kind;
+            }
+        }
+        foreach ((array) ($snapshot['queues'] ?? []) as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $name = (string) ($row['name'] ?? '');
+            if ($name === '' || isset($this->queues[$name])) {
+                continue;
+            }
+            $type = (string) ($row['type'] ?? $row['queue_type'] ?? 'classic');
+            $this->declareQueue($name, $type === 'quorum' ? ['x-queue-type' => 'quorum'] : []);
+        }
+        foreach ((array) ($snapshot['bindings'] ?? []) as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $queue = (string) ($row['queue'] ?? '');
+            $exchange = (string) ($row['exchange'] ?? '');
+            if ($queue === '') {
+                continue;
+            }
+            $this->bind($queue, $exchange, (string) ($row['key'] ?? $row['routing_key'] ?? ''), []);
+        }
+    }
+
+    /**
+     * Registers a consumer that lives on another node. The pump sends it a
+     * cluster deliver frame instead of an AMQP frame.
+     */
+    public function addRemoteConsumer(string $queue, string $peer, int $session, bool $noAck, ?int $credit): void
+    {
+        $this->declareQueue($queue);
+        foreach ($this->queues[$queue]['consumers'] as $existing) {
+            if (($existing['peer'] ?? '') === $peer && ($existing['session'] ?? 0) === $session) {
+                return;
+            }
+        }
+        $this->queues[$queue]['consumers'][] = [
+            'conn' => -1,
+            'ch' => 0,
+            'tag' => 'peer-' . $peer . '-' . $session,
+            'credit' => $credit ?? 0,
+            'peer' => $peer,
+            'session' => $session,
+            'noAck' => $noAck,
+        ];
+    }
+
+    public function removeRemoteConsumer(string $queue, string $peer, int $session): void
+    {
+        if (!isset($this->queues[$queue])) {
+            return;
+        }
+        $this->queues[$queue]['consumers'] = array_values(array_filter(
+            $this->queues[$queue]['consumers'],
+            static fn (array $c): bool => !(($c['peer'] ?? '') === $peer && ($c['session'] ?? 0) === $session),
+        ));
+    }
+
+    /** Adds delivery credit for a remote subscriber. Null means unlimited. */
+    public function setRemoteCredit(string $queue, string $peer, int $session, ?int $credit, bool $add): void
+    {
+        if (!isset($this->queues[$queue])) {
+            return;
+        }
+        foreach ($this->queues[$queue]['consumers'] as $i => $c) {
+            if (($c['peer'] ?? '') !== $peer || ($c['session'] ?? 0) !== $session) {
+                continue;
+            }
+            if ($credit === null) {
+                $this->queues[$queue]['consumers'][$i]['credit'] = 0;
+                return;
+            }
+            $this->queues[$queue]['consumers'][$i]['credit'] = $add
+                ? (int) $c['credit'] + $credit
+                : $credit;
+            return;
+        }
+    }
+
+    /** Drops every remote consumer belonging to a peer that went away. */
+    public function dropPeerConsumers(string $peer): void
+    {
+        foreach ($this->queues as $name => $queue) {
+            $this->queues[$name]['consumers'] = array_values(array_filter(
+                $queue['consumers'],
+                static fn (array $c): bool => ($c['peer'] ?? '') !== $peer,
+            ));
+        }
     }
 }

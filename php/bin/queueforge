@@ -47,7 +47,7 @@ $cfg = [
     'key' => '',
 ];
 $section = '';
-$memberId = '';
+$raw = (string) file_get_contents($configPath);
 foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
     $line = trim($line);
     if ($line === '' || str_starts_with($line, '#')) {
@@ -55,15 +55,6 @@ foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
     }
     if (preg_match('/^\[(.+)\]$/', $line, $m) === 1) {
         $section = $m[1];
-        continue;
-    }
-    if (preg_match('/^id\s*=\s*"([^"]+)"/', $line, $m) === 1 && $section === 'cluster') {
-        $memberId = $m[1];
-        continue;
-    }
-    if (preg_match('/^addr\s*=\s*"([^"]+)"/', $line, $m) === 1 && $section === 'cluster' && $memberId !== '') {
-        $cfg['members'][] = ['id' => $memberId, 'addr' => $m[1]];
-        $memberId = '';
         continue;
     }
     if (!str_contains($line, '=')) {
@@ -94,6 +85,29 @@ foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
     }
     if ($section === 'tls' && $key === 'key_path') {
         $cfg['key'] = $value;
+    }
+}
+
+// The member list is an array of inline tables that spans several lines, so
+// it is matched against the whole file rather than line by line. Either key
+// order is accepted, as is the one-per-line spelling.
+if (preg_match('/^\[cluster\](.*?)(?=^\[|\z)/ms', $raw, $block) === 1) {
+    $text = (string) $block[1];
+    if (preg_match('/members\s*=\s*\[(.*?)\]/s', $text, $list) === 1) {
+        preg_match_all('/\{([^}]*)\}/', (string) $list[1], $rows);
+        foreach ($rows[1] as $row) {
+            $id = preg_match('/id\s*=\s*"([^"]+)"/', $row, $a) === 1 ? $a[1] : '';
+            $addr = preg_match('/addr\s*=\s*"([^"]+)"/', $row, $b) === 1 ? $b[1] : '';
+            if ($id !== '' && $addr !== '') {
+                $cfg['members'][] = ['id' => $id, 'addr' => $addr];
+            }
+        }
+    }
+    if ($cfg['members'] === []) {
+        preg_match_all('/^\s*id\s*=\s*"([^"]+)"\s*$\s*^\s*addr\s*=\s*"([^"]+)"\s*$/m', $text, $pairs, PREG_SET_ORDER);
+        foreach ($pairs as $pair) {
+            $cfg['members'][] = ['id' => $pair[1], 'addr' => $pair[2]];
+        }
     }
 }
 

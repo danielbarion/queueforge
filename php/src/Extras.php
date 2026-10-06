@@ -12,12 +12,53 @@ final class Extras
     public Http $http;
     public Protocols $protocols;
     private float $nextDial = 0.0;
+    private string $membersFile = '';
+
+    /**
+     * Reads the stored member list, falling back to the config. The file wins
+     * so a membership change made at runtime survives a restart, which is how
+     * Bun treats members.json (bun/src/cluster.ts:111-128).
+     *
+     * @param list<array{id:string,addr:string}> $fromConfig
+     * @return list<array{id:string,addr:string}>
+     */
+    private function loadMembers(array $fromConfig): array
+    {
+        if (!is_file($this->membersFile)) {
+            return $fromConfig;
+        }
+        $decoded = json_decode((string) file_get_contents($this->membersFile), true);
+        if (!is_array($decoded)) {
+            return $fromConfig;
+        }
+        $members = [];
+        foreach ($decoded as $row) {
+            if (is_array($row) && isset($row['id'], $row['addr'])) {
+                $members[] = ['id' => (string) $row['id'], 'addr' => (string) $row['addr']];
+            }
+        }
+        return $members === [] ? $fromConfig : $members;
+    }
+
+    /** Writes the member list so a runtime change outlives the process. */
+    public function saveMembers(): void
+    {
+        if ($this->membersFile === '') {
+            return;
+        }
+        $dir = dirname($this->membersFile);
+        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+            return;
+        }
+        @file_put_contents($this->membersFile, json_encode($this->broker->members));
+    }
 
     /** @param array<string, mixed> $cfg */
     public function __construct(public Broker $broker, array $cfg)
     {
         $this->cluster = new Cluster($broker, (string) ($cfg['node_id'] ?? 'queueforge'));
-        $broker->members = $cfg['members'] ?? [];
+        $this->membersFile = rtrim((string) ($cfg['dir'] ?? '.'), '/') . '/members.json';
+        $broker->members = $this->loadMembers(is_array($cfg['members'] ?? null) ? $cfg['members'] : []);
         $port = self::port((string) ($cfg['management'] ?? '127.0.0.1:15672'));
         $ui = dirname(__DIR__, 2) . '/rust/ui/dist';
         $this->http = new Http($broker, $ui, $port, !empty($cfg['tls']));
@@ -89,12 +130,18 @@ final class Extras
 
     public function tick(): void
     {
+        $this->cluster->tick();
         if (microtime(true) < $this->nextDial) {
             return;
         }
         $this->nextDial = microtime(true) + 0.2;
         foreach ($this->broker->members as $member) {
-            if ($member['id'] === $this->broker->nodeId || isset($this->cluster->peers[$member['id']])) {
+            // Only the lower id dials, so a pair gets exactly one connection
+            // instead of two. Bun uses the same rule.
+            if (!Features::shouldDial($this->broker->nodeId, $member['id'])) {
+                continue;
+            }
+            if (isset($this->cluster->peers[$member['id']])) {
                 continue;
             }
             $fp = @stream_socket_client('tcp://' . $member['addr'], $errno, $errstr, 0.05);

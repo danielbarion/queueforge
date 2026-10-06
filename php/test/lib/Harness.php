@@ -34,9 +34,10 @@ final class Harness
      * verbatim, so a test can turn on management, cluster, or MQTT listeners.
      *
      * @param list<string> $extraListeners
+     * @param array{listen?:string,members?:list<array{id:string,addr:string}>} $cluster
      * @return array{proc:mixed,dir:string,port:int}
      */
-    public static function broker(array $extraListeners = [], int $fsyncMs = 10, string $nodeId = ''): array
+    public static function broker(array $extraListeners = [], int $fsyncMs = 10, string $nodeId = '', array $cluster = []): array
     {
         $port = self::freePort();
         $dir = sys_get_temp_dir() . '/qf-test-' . bin2hex(random_bytes(6));
@@ -52,10 +53,22 @@ final class Harness
         $lines[] = "dir = \"$dir/data\"";
         $lines[] = 'fsync_policy = "every_n_ms"';
         $lines[] = "fsync_interval_ms = $fsyncMs";
-        if ($nodeId !== '') {
+        if ($nodeId !== '' || $cluster !== []) {
             $lines[] = '';
             $lines[] = '[cluster]';
-            $lines[] = "node_id = \"$nodeId\"";
+            if ($nodeId !== '') {
+                $lines[] = "node_id = \"$nodeId\"";
+            }
+            if (isset($cluster['listen'])) {
+                $lines[] = 'listen = "' . $cluster['listen'] . '"';
+            }
+            if (isset($cluster['members']) && $cluster['members'] !== []) {
+                $lines[] = 'members = [';
+                foreach ($cluster['members'] as $member) {
+                    $lines[] = '  { id = "' . $member['id'] . '", addr = "' . $member['addr'] . '" },';
+                }
+                $lines[] = ']';
+            }
         }
         file_put_contents("$dir/config.toml", implode("\n", $lines) . "\n");
 

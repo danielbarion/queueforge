@@ -765,6 +765,15 @@ final class Server
                 for ($k = 0; $k < $n; $k++) {
                     $i = ($this->rr + $k) % $n;
                     $cons = $consumers[$i];
+                    if (($cons['peer'] ?? '') !== '') {
+                        // A consumer on another node. Credit of zero means
+                        // unlimited, matching the AMQP prefetch convention.
+                        if (($cons['credit'] ?? 0) < 0) {
+                            continue;
+                        }
+                        $pick = $i;
+                        break;
+                    }
                     if (!isset($this->conns[$cons['conn']])) {
                         continue;
                     }
@@ -791,6 +800,22 @@ final class Server
                     continue;
                 }
                 $cons = $this->broker->queues[$name]['consumers'][$pick];
+                if (($cons['peer'] ?? '') !== '' && $this->extras !== null) {
+                    $msg = $this->broker->msgs[$msgId];
+                    $this->extras->cluster->deliverTo(
+                        (string) $cons['peer'],
+                        $name,
+                        (int) ($cons['session'] ?? 0),
+                        $msg,
+                        $msgId,
+                        (bool) ($cons['noAck'] ?? false),
+                    );
+                    if (($cons['noAck'] ?? false) === true) {
+                        $this->broker->ack($msgId);
+                    }
+                    $this->broker->prom['delivered']++;
+                    continue;
+                }
                 $sock = $this->conns[$cons['conn']];
                 $ch = $sock->channels[$cons['ch']];
                 $dtag = $ch->nextDel++;
