@@ -5,10 +5,28 @@ $root = dirname(__DIR__);
 $php = PHP_BINARY;
 $dir = sys_get_temp_dir() . '/qf-php-' . getmypid();
 mkdir($dir);
+// A reserved free port rather than a fixed one, so a run does not collide
+// with another broker or with a parallel test.
+$probe = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+$name = (string) stream_socket_get_name($probe, false);
+fclose($probe);
+$port = (int) substr($name, (int) strrpos($name, ':') + 1);
+
+// The temp directory goes away however this script exits.
+register_shutdown_function(static function () use ($dir): void {
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST,
+    );
+    foreach ($it as $entry) {
+        $entry->isDir() ? @rmdir($entry->getPathname()) : @unlink($entry->getPathname());
+    }
+    @rmdir($dir);
+});
 $config = $dir . '/config.toml';
 file_put_contents($config, <<<TOML
 [listeners]
-amqp = "127.0.0.1:5675"
+amqp = "127.0.0.1:$port"
 
 [data]
 dir = "$dir/data"
@@ -29,7 +47,7 @@ if (!is_resource($proc)) {
 $ready = false;
 $deadline = microtime(true) + 3;
 while (microtime(true) < $deadline) {
-    $conn = @stream_socket_client('tcp://127.0.0.1:5675', $e, $s, 0.1);
+    $conn = @stream_socket_client("tcp://127.0.0.1:$port", $e, $s, 0.1);
     if ($conn !== false) {
         $ready = true;
         break;
@@ -149,7 +167,7 @@ try {
     fclose($conn);
     $deadline = microtime(true) + 2;
     while (microtime(true) < $deadline) {
-        $held = @stream_socket_client('tcp://127.0.0.1:5675', $e, $s, 0.05);
+        $held = @stream_socket_client("tcp://127.0.0.1:$port", $e, $s, 0.05);
         if ($held === false) {
             break;
         }
@@ -165,7 +183,7 @@ try {
     $conn = false;
     $deadline = microtime(true) + 3;
     while (microtime(true) < $deadline) {
-        $conn = @stream_socket_client('tcp://127.0.0.1:5675', $e, $s, 0.1);
+        $conn = @stream_socket_client("tcp://127.0.0.1:$port", $e, $s, 0.1);
         if ($conn !== false) {
             break;
         }

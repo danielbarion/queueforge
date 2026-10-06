@@ -279,17 +279,20 @@ final class Extras
             return;
         }
         if ($row['kind'] === 'mqtt') {
+            // The buffer goes in by reference so a packet split across reads
+            // keeps its tail for the next pass.
             $buf = $this->conns[$id]['buf'];
             $out = $this->protocols->mqtt($buf, $fp, $row['conn']);
-            $this->conns[$id]['buf'] = '';
+            $this->conns[$id]['buf'] = $buf;
             if ($out !== '') {
-                fwrite($fp, $out);
+                self::writeAll($fp, $out);
             }
             return;
         }
         if ($row['kind'] === 'stomp') {
-            $out = $this->protocols->stomp($this->conns[$id]['buf'], $fp, $row['conn']);
-            $this->conns[$id]['buf'] = '';
+            $buf = $this->conns[$id]['buf'];
+            $out = $this->protocols->stomp($buf, $fp, $row['conn']);
+            $this->conns[$id]['buf'] = $buf;
             if ($out !== '') {
                 self::writeAll($fp, $out);
             }

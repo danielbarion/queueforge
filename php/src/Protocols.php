@@ -17,11 +17,20 @@ final class Protocols
     {
     }
 
-    /** @param resource $fp */
-    public function mqtt(string $buf, $fp, int $conn): string
+    /**
+     * Handles whole MQTT packets in the buffer and leaves any partial tail
+     * behind. The buffer is taken by reference because a packet larger than
+     * one TCP read arrives in pieces, and discarding the remainder lost it.
+     *
+     * @param resource $fp
+     */
+    public function mqtt(string &$buf, $fp, int $conn): string
     {
         $out = '';
-        while (strlen($buf) > 2) {
+        // A fixed header plus a one-byte remaining length is two bytes, which
+        // is exactly what PINGREQ and DISCONNECT are. Requiring more than two
+        // meant neither was ever handled.
+        while (strlen($buf) >= 2) {
             $value = 0;
             $shift = 0;
             $i = 1;
@@ -102,14 +111,21 @@ final class Protocols
         return $this->stompConn++;
     }
 
-    /** @param resource $fp */
-    public function stomp(string $buf, $fp, int $conn): string
+    /**
+     * Handles whole STOMP frames and leaves a partial tail buffered, for the
+     * same reason as mqtt().
+     *
+     * @param resource $fp
+     */
+    public function stomp(string &$buf, $fp, int $conn): string
     {
         $out = '';
         $text = $buf;
+        $consumed = 0;
         while (($nul = strpos($text, "\0")) !== false) {
             $frame = substr($text, 0, $nul);
             $text = substr($text, $nul + 1);
+            $consumed += $nul + 1;
             $lines = array_map(static fn (string $l): string => rtrim($l, "\r"), explode("\n", $frame));
             $cmd = $lines[0] ?? '';
             $headers = [];
@@ -153,9 +169,11 @@ final class Protocols
                     $out .= "MESSAGE\nsubscription:{$id}\ndestination:{$dest}\ncontent-length:" . strlen($queued) . "\n\n{$queued}\0";
                 }
             } elseif ($cmd === 'DISCONNECT') {
+                $buf = '';
                 return $out;
             }
         }
+        $buf = substr($buf, $consumed);
         return $out;
     }
 
