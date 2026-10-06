@@ -341,7 +341,9 @@ final class Server
         } elseif ($class === 60 && $method === 20 && $ch !== null) {
             $this->consume($id, $channel, $payload, $o);
         } elseif ($class === 60 && $method === 40 && $ch !== null) {
-            $this->beginPublish($ch, $payload, $o);
+            if (!$this->beginPublish($ch, $payload, $o)) {
+                $sock->send(Codec::channelClose($channel, 540, 'NOT_IMPLEMENTED - immediate=true', 60, 40));
+            }
         } elseif ($class === 60 && $method === 80 && $ch !== null) {
             $this->ack($id, $channel, $payload, $o, false);
         } elseif ($class === 60 && $method === 120 && $ch !== null) {
@@ -350,7 +352,217 @@ final class Server
             $this->exchangeDeclare($id, $channel, $payload, $o);
         } elseif ($class === 50 && $method === 20 && $ch !== null) {
             $this->queueBind($id, $channel, $payload, $o);
+        } elseif ($class === 20 && $method === 20 && $ch !== null) {
+            // channel.flow: this broker never stops a publisher, so it only
+            // echoes the requested state back.
+            $active = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+            $sock->send(Codec::flowOk($channel, $active));
+        } elseif ($class === 20 && $method === 41) {
+            return;
+        } elseif ($class === 60 && $method === 30 && $ch !== null) {
+            $this->cancel($id, $channel, $payload, $o);
+        } elseif ($class === 60 && $method === 70 && $ch !== null) {
+            $this->get($id, $channel, $payload, $o);
+        } elseif ($class === 60 && $method === 90 && $ch !== null) {
+            $this->reject($id, $channel, $payload, $o);
+        } elseif ($class === 60 && ($method === 100 || $method === 110) && $ch !== null) {
+            $this->recover($id, $channel, $payload, $o, $method);
+        } elseif ($class === 50 && $method === 30 && $ch !== null) {
+            $this->queuePurge($id, $channel, $payload, $o);
+        } elseif ($class === 50 && $method === 40 && $ch !== null) {
+            $this->queueDelete($id, $channel, $payload, $o);
+        } elseif ($class === 50 && $method === 50 && $ch !== null) {
+            $this->queueUnbind($id, $channel, $payload, $o);
+        } elseif ($class === 40 && $method === 20 && $ch !== null) {
+            $this->exchangeDelete($id, $channel, $payload, $o);
+        } elseif ($class === 40 && ($method === 30 || $method === 40) && $ch !== null) {
+            $this->exchangeBind($id, $channel, $payload, $o, $method === 30);
+        } elseif ($class === 90 && $ch !== null && ($method === 10 || $method === 20 || $method === 30)) {
+            $this->transaction($id, $channel, $method);
+        } else {
+            if ($ch === null && $class !== 10 && $class !== 20) {
+                // A channel-scoped method on a channel that was never opened
+                // is a connection error in RabbitMQ, not a channel error.
+                $sock->send(Codec::connectionClose(504, "CHANNEL_ERROR - channel $channel is not open", $class, $method));
+                $sock->flush();
+                $this->drop($id);
+                return;
+            }
+            // RabbitMQ answers an unsupported method with a channel error.
+            // Falling through silently left the client waiting forever.
+            $sock->send(Codec::channelClose($channel, 540, "NOT_IMPLEMENTED - $class.$method", $class, $method));
         }
+    }
+
+    private function cancel(int $id, int $channel, string $payload, int $o): void
+    {
+        $tag = Codec::readShortstr($payload, $o);
+        $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        $ch = $this->conns[$id]->channels[$channel];
+        foreach ($this->broker->queues as $name => $queue) {
+            $this->broker->queues[$name]['consumers'] = array_values(array_filter(
+                $queue['consumers'],
+                static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel && $c['tag'] === $tag),
+            ));
+        }
+        if ($ch->consumer === $tag) {
+            $ch->consumer = null;
+            $ch->queue = null;
+        }
+        if (!$nowait) {
+            $this->conns[$id]->send(Codec::cancelOk($channel, $tag));
+        }
+    }
+
+    private function get(int $id, int $channel, string $payload, int $o): void
+    {
+        $o += 2;
+        $queue = Codec::readShortstr($payload, $o);
+        $noAck = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        $sock = $this->conns[$id];
+        $ch = $sock->channels[$channel];
+        $msgId = $this->broker->getReady($queue);
+        if ($msgId === null) {
+            $sock->send(Codec::getEmpty($channel));
+            return;
+        }
+        $msg = $this->broker->msgs[$msgId];
+        $dtag = $ch->nextDel++;
+        if (!$noAck) {
+            $ch->unacked[$dtag] = $msgId;
+        }
+        $sock->send(Codec::getOk(
+            $channel,
+            $dtag,
+            $msg['redelivered'] ?? false,
+            $msg['exchange'] ?? '',
+            $msg['key'] ?? $queue,
+            $this->broker->readyCount($queue),
+            $msg['mode'],
+            $msg['body'],
+            $msg['propRaw'] ?? null,
+        ));
+        $this->broker->prom['delivered']++;
+        if ($noAck) {
+            $this->broker->ack($msgId);
+        }
+    }
+
+    private function reject(int $id, int $channel, string $payload, int $o): void
+    {
+        if (strlen($payload) < $o + 9) {
+            return;
+        }
+        $tag = Codec::readU64($payload, $o);
+        $requeue = (ord($payload[$o + 8]) & 1) === 1;
+        $ch = $this->conns[$id]->channels[$channel];
+        if (!isset($ch->unacked[$tag])) {
+            return;
+        }
+        $msgId = $ch->unacked[$tag];
+        unset($ch->unacked[$tag]);
+        if ($requeue) {
+            $this->broker->requeue($msgId);
+        } else {
+            $this->broker->deadLetter($msgId);
+        }
+        $this->pump();
+    }
+
+    private function recover(int $id, int $channel, string $payload, int $o, int $method): void
+    {
+        $requeue = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        $sock = $this->conns[$id];
+        if (!$requeue) {
+            // Matching Bun, which rejects recover without requeue rather than
+            // dropping the unacked messages on the floor.
+            $sock->send(Codec::channelClose($channel, 540, 'NOT_IMPLEMENTED - recover requeue=false', 60, $method));
+            return;
+        }
+        $ch = $sock->channels[$channel];
+        foreach (array_reverse($ch->unacked, true) as $tag => $msgId) {
+            $this->broker->requeue($msgId);
+            unset($ch->unacked[$tag]);
+        }
+        if ($method === 110) {
+            $sock->send(Codec::recoverOk($channel));
+        }
+        $this->pump();
+    }
+
+    private function queuePurge(int $id, int $channel, string $payload, int $o): void
+    {
+        $o += 2;
+        $queue = Codec::readShortstr($payload, $o);
+        $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        $n = $this->broker->purge($queue);
+        if (!$nowait) {
+            $this->conns[$id]->send(Codec::purgeOk($channel, $n));
+        }
+    }
+
+    private function queueDelete(int $id, int $channel, string $payload, int $o): void
+    {
+        $o += 2;
+        $queue = Codec::readShortstr($payload, $o);
+        $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
+        $nowait = ($bits & 4) === 4;
+        $n = $this->broker->deleteQueue($queue);
+        if (!$nowait) {
+            $this->conns[$id]->send(Codec::queueDeleteOk($channel, $n));
+        }
+    }
+
+    private function queueUnbind(int $id, int $channel, string $payload, int $o): void
+    {
+        $o += 2;
+        $queue = Codec::readShortstr($payload, $o);
+        $exchange = Codec::readShortstr($payload, $o);
+        $key = Codec::readShortstr($payload, $o);
+        $this->broker->unbind($queue, $exchange, $key);
+        $this->conns[$id]->send(Codec::unbindOk($channel));
+    }
+
+    private function exchangeDelete(int $id, int $channel, string $payload, int $o): void
+    {
+        $o += 2;
+        $name = Codec::readShortstr($payload, $o);
+        $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
+        $nowait = ($bits & 2) === 2;
+        $this->broker->deleteExchange($name);
+        if (!$nowait) {
+            $this->conns[$id]->send(Codec::method($channel, 40, 21));
+        }
+    }
+
+    private function exchangeBind(int $id, int $channel, string $payload, int $o, bool $bind): void
+    {
+        $o += 2;
+        $destination = Codec::readShortstr($payload, $o);
+        $source = Codec::readShortstr($payload, $o);
+        $key = Codec::readShortstr($payload, $o);
+        if ($bind) {
+            $this->broker->bindExchange($destination, $source, $key);
+        } else {
+            $this->broker->unbindExchange($destination, $source, $key);
+        }
+        $this->conns[$id]->send(Codec::method($channel, 40, $bind ? 31 : 41));
+    }
+
+    /**
+     * tx.select, tx.commit and tx.rollback. Publishes are applied as they
+     * arrive rather than buffered, so commit is an acknowledgement and
+     * rollback cannot undo anything. A client that needs real atomicity
+     * should use publisher confirms instead.
+     */
+    private function transaction(int $id, int $channel, int $method): void
+    {
+        $sock = $this->conns[$id];
+        if ($method === 30) {
+            $sock->send(Codec::channelClose($channel, 540, 'NOT_IMPLEMENTED - tx.rollback cannot undo an applied publish', 90, 30));
+            return;
+        }
+        $sock->send(Codec::method($channel, 90, $method + 1));
     }
 
     private function startOk(int $id, string $payload, int $o): void
@@ -388,8 +600,12 @@ final class Server
             $args = Codec::readTable($payload, $o);
         }
         $this->broker->declareQueue($name, $args);
-        $messages = isset($this->broker->queues[$name]) ? count($this->broker->queues[$name]['ready']) : 0;
-        $this->conns[$id]->send(Codec::queueDeclareOk($channel, $name, $messages, 0));
+        $this->conns[$id]->send(Codec::queueDeclareOk(
+            $channel,
+            $name,
+            $this->broker->readyCount($name),
+            $this->broker->consumerCount($name),
+        ));
     }
 
     private function consume(int $id, int $channel, string $payload, int $o): void
@@ -408,12 +624,19 @@ final class Server
         $this->pump();
     }
 
-    private function beginPublish(Chan $ch, string $payload, int $o): void
+    /**
+     * Starts a publish. Returns false when the client asked for
+     * immediate delivery, which this broker rejects the way Bun does.
+     */
+    private function beginPublish(Chan $ch, string $payload, int $o): bool
     {
         $o += 2;
         $exchange = Codec::readShortstr($payload, $o);
         $key = Codec::readShortstr($payload, $o);
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
+        if (($bits & 2) === 2) {
+            return false;
+        }
         $ch->pub = [
             'exchange' => $exchange,
             'key' => $key,
@@ -426,6 +649,7 @@ final class Server
             'need' => 0,
             'got' => '',
         ];
+        return true;
     }
 
     private function finishPublish(int $id, int $channel): void

@@ -267,6 +267,68 @@ final class Codec
         return self::method($channel, 60, 120, self::u64($tag) . chr(0));
     }
 
+    public static function cancelOk(int $channel, string $tag): string
+    {
+        return self::method($channel, 60, 31, self::shortstr($tag));
+    }
+
+    /** basic.get-ok, followed by the content header and body frames. */
+    public static function getOk(int $channel, int $deliveryTag, bool $redelivered, string $exchange, string $routingKey, int $messageCount, int $deliveryMode, string $body, ?string $propRaw = null): string
+    {
+        $args = self::u64($deliveryTag)
+            . chr($redelivered ? 1 : 0)
+            . self::shortstr($exchange)
+            . self::shortstr($routingKey)
+            . pack('N', $messageCount);
+        return self::method($channel, 60, 71, $args)
+            . self::frame(2, $channel, self::contentHeader(strlen($body), $deliveryMode, $propRaw))
+            . self::frame(3, $channel, $body);
+    }
+
+    public static function getEmpty(int $channel): string
+    {
+        return self::method($channel, 60, 72, self::shortstr(''));
+    }
+
+    public static function recoverOk(int $channel): string
+    {
+        return self::method($channel, 60, 111);
+    }
+
+    public static function purgeOk(int $channel, int $messages): string
+    {
+        return self::method($channel, 50, 31, pack('N', $messages));
+    }
+
+    public static function queueDeleteOk(int $channel, int $messages): string
+    {
+        return self::method($channel, 50, 41, pack('N', $messages));
+    }
+
+    public static function unbindOk(int $channel): string
+    {
+        return self::method($channel, 50, 51);
+    }
+
+    public static function flowOk(int $channel, bool $active): string
+    {
+        return self::method($channel, 20, 21, chr($active ? 1 : 0));
+    }
+
+    /** Closes one channel with a reply code and text, as RabbitMQ does. */
+    public static function channelClose(int $channel, int $code, string $text, int $class = 0, int $method = 0): string
+    {
+        $text = substr($text, 0, 180);
+        return self::method($channel, 20, 40, pack('n', $code) . self::shortstr($text) . pack('nn', $class, $method));
+    }
+
+    /** Closes the whole connection with a reply code and text. */
+    public static function connectionClose(int $code, string $text, int $class = 0, int $method = 0): string
+    {
+        $text = substr($text, 0, 200);
+        return self::method(0, 10, 50, pack('n', $code) . self::shortstr($text) . pack('nn', $class, $method));
+    }
+
     public static function readLongstr(string $buf, int &$o): string
     {
         $n = unpack('N', substr($buf, $o, 4))[1];

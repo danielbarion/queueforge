@@ -25,6 +25,13 @@ final class Broker
     ];
     /** @var list<array{exchange:string,queue:string,key:string,args:list<array{0:string,1:string}>}> */
     public array $bindings = [];
+    /**
+     * Exchange-to-exchange links. In memory only, so they do not survive a
+     * restart. Bun keeps them the same way (bun/src/broker/topology.ts:255).
+     *
+     * @var list<array{source:string,destination:string,key:string}>
+     */
+    public array $e2e = [];
     public int $nextId = 1;
     public int $cursor = 0;
     public string $nodeId = 'queueforge';
@@ -130,6 +137,45 @@ final class Broker
     /** @param list<array{0:string,1:string}> $headers
      *  @return list<string> */
     public function route(string $exchange, string $key, array $headers = []): array
+    {
+        return $this->routeFrom($exchange, $key, $headers, []);
+    }
+
+    /**
+     * Routes through an exchange, following exchange-to-exchange links. The
+     * seen set means a link cycle is visited once instead of looping.
+     *
+     * @param list<array{0:string,1:string}> $headers
+     * @param array<string, bool> $seen
+     * @return list<string>
+     */
+    private function routeFrom(string $exchange, string $key, array $headers, array $seen): array
+    {
+        if (isset($seen[$exchange])) {
+            return [];
+        }
+        $seen[$exchange] = true;
+        $out = $this->routeDirect($exchange, $key, $headers);
+        foreach ($this->e2e as $link) {
+            if ($link['source'] !== $exchange) {
+                continue;
+            }
+            $kind = $this->exchanges[$exchange] ?? 'direct';
+            $matches = match ($kind) {
+                'fanout' => true,
+                'topic' => Routing::topic($link['key'], $key),
+                default => $link['key'] === $key,
+            };
+            if ($matches) {
+                $out = array_merge($out, $this->routeFrom($link['destination'], $key, $headers, $seen));
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
+    /** @param list<array{0:string,1:string}> $headers
+     *  @return list<string> */
+    private function routeDirect(string $exchange, string $key, array $headers = []): array
     {
         if ($exchange === '') {
             return isset($this->queues[$key]) ? [$key] : [];
@@ -498,5 +544,135 @@ final class Broker
         }
         $at = $this->msgs[$id]['expires'] ?? null;
         return is_int($at) && $at <= (int) (microtime(true) * 1000);
+    }
+
+    /**
+     * Takes the next ready message without involving a consumer, for
+     * basic.get. Expired messages are dead-lettered and skipped.
+     */
+    public function getReady(string $queue): ?int
+    {
+        if (!isset($this->queues[$queue])) {
+            return null;
+        }
+        while ($this->queues[$queue]['ready'] !== []) {
+            $id = array_shift($this->queues[$queue]['ready']);
+            if (!is_int($id) || !isset($this->msgs[$id])) {
+                continue;
+            }
+            if ($this->expired($id)) {
+                $this->deadLetter($id);
+                continue;
+            }
+            return $id;
+        }
+        return null;
+    }
+
+    /** Ready message count, for basic.get-ok and queue.declare-ok. */
+    public function readyCount(string $queue): int
+    {
+        return isset($this->queues[$queue]) ? count($this->queues[$queue]['ready']) : 0;
+    }
+
+    /** Consumer count, for queue.declare-ok. */
+    public function consumerCount(string $queue): int
+    {
+        return isset($this->queues[$queue]) ? count($this->queues[$queue]['consumers']) : 0;
+    }
+
+    /** Drops every ready message and returns how many went. */
+    public function purge(string $queue): int
+    {
+        if (!isset($this->queues[$queue])) {
+            return 0;
+        }
+        $ids = $this->queues[$queue]['ready'];
+        $this->queues[$queue]['ready'] = [];
+        $n = 0;
+        foreach ($ids as $id) {
+            if (!is_int($id) || !isset($this->msgs[$id])) {
+                continue;
+            }
+            $this->ack($id);
+            $n++;
+        }
+        return $n;
+    }
+
+    /**
+     * Removes a queue, its ready messages, and every binding that names it.
+     * Returns the message count that went with it.
+     */
+    public function deleteQueue(string $name): int
+    {
+        if (!isset($this->queues[$name])) {
+            return 0;
+        }
+        $n = $this->purge($name);
+        unset($this->queues[$name]);
+        $this->bindings = array_values(array_filter(
+            $this->bindings,
+            static fn (array $row): bool => $row['queue'] !== $name,
+        ));
+        return $n;
+    }
+
+    /** @param list<array{0:string,1:string}> $args */
+    public function unbind(string $queue, string $exchange, string $key, array $args = []): void
+    {
+        $this->bindings = array_values(array_filter(
+            $this->bindings,
+            static fn (array $row): bool => !(
+                $row['queue'] === $queue
+                && $row['exchange'] === $exchange
+                && $row['key'] === $key
+                && ($args === [] || $row['args'] === $args)
+            ),
+        ));
+    }
+
+    /**
+     * Removes an exchange along with its bindings and exchange-to-exchange
+     * links. The default exchange and the amq.* built-ins stay.
+     */
+    public function deleteExchange(string $name): bool
+    {
+        if ($name === '' || str_starts_with($name, 'amq.') || !isset($this->exchanges[$name])) {
+            return false;
+        }
+        unset($this->exchanges[$name]);
+        $this->bindings = array_values(array_filter(
+            $this->bindings,
+            static fn (array $row): bool => $row['exchange'] !== $name,
+        ));
+        $this->e2e = array_values(array_filter(
+            $this->e2e,
+            static fn (array $row): bool => $row['source'] !== $name && $row['destination'] !== $name,
+        ));
+        return true;
+    }
+
+    /** Links one exchange to another. Held in memory only, as Bun does. */
+    public function bindExchange(string $destination, string $source, string $key): void
+    {
+        foreach ($this->e2e as $row) {
+            if ($row['source'] === $source && $row['destination'] === $destination && $row['key'] === $key) {
+                return;
+            }
+        }
+        $this->e2e[] = ['source' => $source, 'destination' => $destination, 'key' => $key];
+    }
+
+    public function unbindExchange(string $destination, string $source, string $key): void
+    {
+        $this->e2e = array_values(array_filter(
+            $this->e2e,
+            static fn (array $row): bool => !(
+                $row['source'] === $source
+                && $row['destination'] === $destination
+                && $row['key'] === $key
+            ),
+        ));
     }
 }
