@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use queueforge_amqp::connection as conn_method;
 use queueforge_amqp::Method;
+use queueforge_auth::{dummy_password_hash, verify_password};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
@@ -99,40 +100,49 @@ where
             }
         };
 
-        // Argon2 is intentionally slow; run off the async worker.
+        // redb lookup stays on the blocking pool. The SHA-256 password-hash
+        // is checked here.
         let store = Arc::clone(&self.store);
         let user_owned = username.clone();
-        let pass_owned = password.clone();
-        let auth_result = MetadataStore::blocking(store, move |s| {
-            Ok(AuthService::new(s).authenticate(&user_owned, &pass_owned))
-        })
-        .await
-        .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?;
+        let looked_up = MetadataStore::blocking(store, move |s| s.get_user(&user_owned))
+            .await
+            .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?;
 
-        match auth_result {
-            Ok(Some(user)) => {
+        let authed = match looked_up {
+            Some(user) => match verify_password(&password, &user.password_hash) {
+                Ok(true) => Some(user),
+                Ok(false) => None,
+                Err(e) => {
+                    warn!(peer = %self.peer, error = %e, "auth error");
+                    let _ = self
+                        .send_connection_close(
+                            REPLY_ACCESS_REFUSED,
+                            "ACCESS_REFUSED - authentication error",
+                            conn_method::CLASS_ID,
+                            conn_method::StartOk::METHOD_ID,
+                        )
+                        .await;
+                    self.mark_closed();
+                    return Ok(Step::Done);
+                }
+            },
+            None => {
+                let _ = verify_password(&password, dummy_password_hash());
+                None
+            }
+        };
+
+        match authed {
+            Some(user) => {
                 info!(peer = %self.peer, user = %user.name, "authenticated");
                 self.user = Some(user.name.to_string());
             }
-            Ok(None) => {
+            None => {
                 warn!(peer = %self.peer, user = %username, "authentication failed");
                 let _ = self
                     .send_connection_close(
                         REPLY_ACCESS_REFUSED,
                         "ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN",
-                        conn_method::CLASS_ID,
-                        conn_method::StartOk::METHOD_ID,
-                    )
-                    .await;
-                self.mark_closed();
-                return Ok(Step::Done);
-            }
-            Err(e) => {
-                warn!(peer = %self.peer, error = %e, "auth error");
-                let _ = self
-                    .send_connection_close(
-                        REPLY_ACCESS_REFUSED,
-                        "ACCESS_REFUSED - authentication error",
                         conn_method::CLASS_ID,
                         conn_method::StartOk::METHOD_ID,
                     )

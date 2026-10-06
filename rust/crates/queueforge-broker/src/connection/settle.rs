@@ -3,6 +3,7 @@
 use super::*;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use queueforge_amqp::{basic as basic_method, Method};
 use queueforge_core::{ConsumerDeliveryId, ConsumerSessionId, QueueCmd, QueueKey, QueueType};
@@ -189,7 +190,15 @@ where
                             cluster
                                 .note_quorum_consumed(&queue_key, message_id.as_str())
                                 .await;
-                            cluster.quorum_forget(&queue_key, message_id.as_str()).await;
+                            // Deliver already waited for this drop before the
+                            // client saw the body. Waiting again here puts one
+                            // round trip per ack ahead of publisher confirms.
+                            let cluster = Arc::clone(cluster);
+                            let key = queue_key.clone();
+                            let id = message_id;
+                            tokio::spawn(async move {
+                                cluster.quorum_forget(&key, id.as_str()).await;
+                            });
                         }
                     }
                 }

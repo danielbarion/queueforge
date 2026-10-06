@@ -11,7 +11,6 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use super::forward::{apply_one, forward_nowait};
-use super::quorum::flush_queue;
 use super::state::remember_consumed;
 use super::wire::{decode_quorum_append, json_str, key_from, message_to_wire, replica_key};
 use super::{Cluster, Inner, Msg};
@@ -23,6 +22,28 @@ pub(super) async fn dispatch_op(
     peer_tx: mpsc::Sender<String>,
 ) -> Result<Value, Error> {
     match msg.op.as_str() {
+        "join" => {
+            let id = json_str(&msg.payload, "id");
+            let Some(addr) = super::membership::addr_of(&msg.payload) else {
+                return Err(Error::PreconditionFailed(
+                    "join requires id and addr".into(),
+                ));
+            };
+            if id.is_empty() {
+                return Err(Error::PreconditionFailed(
+                    "join requires id and addr".into(),
+                ));
+            }
+            let members = super::membership::join_member(inner, &id, addr);
+            super::membership::broadcast_members(inner, &members).await;
+            Ok(super::membership::members_json(&members))
+        }
+        "forget" => {
+            let id = json_str(&msg.payload, "id");
+            let members = super::membership::forget_member(inner, &id)?;
+            super::membership::broadcast_members(inner, &members).await;
+            Ok(super::membership::members_json(&members))
+        }
         "apply" => {
             let nested = msg
                 .payload
@@ -111,7 +132,7 @@ pub(super) async fn dispatch_op(
             }
             Ok(serde_json::json!({"queue": queue}))
         }
-        "forget" | "quorum_drop" => {
+        "quorum_drop" => {
             let key = QueueKey::new(
                 json_str(&msg.payload, "vhost"),
                 json_str(&msg.payload, "queue"),
@@ -155,8 +176,7 @@ pub(super) async fn dispatch_op(
                 .queues
                 .get(&key)
                 .ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
-            // Leader and follower both append before the peer is acked. every_n_ms
-            // completes durable_done after that write; the fsync stays on the timer.
+            // The reply waits until durable_done, the fsync that covers this append.
             let (reply_tx, reply_rx) = oneshot::channel();
             handle
                 .tx
@@ -169,8 +189,12 @@ pub(super) async fn dispatch_op(
             let completion = reply_rx
                 .await
                 .map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
-            let _ = completion.durable_done.await;
-            flush_queue(&inner, &key, completion.offset).await?;
+            // durable_done is the covering fsync. A second FlushDurable waits
+            // another full interval on top of the network round trip.
+            completion
+                .durable_done
+                .await
+                .map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
             Ok(serde_json::json!({"offset": completion.offset.0}))
         }
         "ack" => {
@@ -179,7 +203,7 @@ pub(super) async fn dispatch_op(
                 &inner.queues,
                 &key,
                 QueueCmd::Ack {
-                    id: ConsumerDeliveryId(msg.payload["delivery_id"].as_u64().unwrap_or(0)),
+                    id: ConsumerDeliveryId(delivery_id_of(&msg.payload)),
                     multiple_to: None,
                 },
             )
@@ -191,7 +215,7 @@ pub(super) async fn dispatch_op(
                 &inner.queues,
                 &key,
                 QueueCmd::Nack {
-                    id: ConsumerDeliveryId(msg.payload["delivery_id"].as_u64().unwrap_or(0)),
+                    id: ConsumerDeliveryId(delivery_id_of(&msg.payload)),
                     requeue: msg.payload["requeue"].as_bool().unwrap_or(true),
                 },
             )
@@ -210,7 +234,7 @@ pub(super) async fn dispatch_op(
                 &inner.queues,
                 &key,
                 QueueCmd::SettleDelivered {
-                    id: ConsumerDeliveryId(msg.payload["delivery_id"].as_u64().unwrap_or(0)),
+                    id: ConsumerDeliveryId(delivery_id_of(&msg.payload)),
                 },
             )
             .await
@@ -246,7 +270,10 @@ pub(super) async fn dispatch_op(
             handle
                 .tx
                 .send(QueueCmd::Get {
-                    no_ack: msg.payload["no_ack"].as_bool().unwrap_or(false),
+                    no_ack: msg.payload["no_ack"]
+                        .as_bool()
+                        .or_else(|| msg.payload["noAck"].as_bool())
+                        .unwrap_or(false),
                     reply: tx,
                 })
                 .await
@@ -280,7 +307,10 @@ pub(super) async fn dispatch_op(
                 .tx
                 .send(QueueCmd::RegisterConsumer {
                     session,
-                    no_ack: msg.payload["no_ack"].as_bool().unwrap_or(false),
+                    no_ack: msg.payload["no_ack"]
+                        .as_bool()
+                        .or_else(|| msg.payload["noAck"].as_bool())
+                        .unwrap_or(false),
                     exclusive: msg.payload["exclusive"].as_bool().unwrap_or(false),
                     priority: msg.payload["priority"].as_i64().unwrap_or(0) as i32,
                     initial_credit: credit,
@@ -437,4 +467,13 @@ pub(super) async fn dispatch_op(
         }
         other => Err(Error::Unavailable(format!("unknown cluster op {other}"))),
     }
+}
+
+/// Cluster acks name the delivery as `delivery_id` or as a numeric `id`.
+fn delivery_id_of(payload: &Value) -> u64 {
+    payload["delivery_id"]
+        .as_u64()
+        .or_else(|| payload["id"].as_u64())
+        .or_else(|| payload["id"].as_str().and_then(|text| text.parse().ok()))
+        .unwrap_or(0)
 }

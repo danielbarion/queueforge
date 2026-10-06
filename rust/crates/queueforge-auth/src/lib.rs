@@ -1,6 +1,6 @@
 //! Authentication and authorization for QueueForge.
 //!
-//! - **AuthN:** Argon2id password hashing (design params: m=19456, t=2, p=1)
+//! - **AuthN:** passwords are the RabbitMQ SHA-256 hash (4-byte salt plus SHA-256).
 //! - **AuthZ:** per-vhost configure/write/read regexes (RabbitMQ-compatible),
 //!   including `queue.bind` / `queue.unbind` (write on queue, read on exchange)
 //! - **Bootstrap:** admin from `QUEUEFORGE_ADMIN_USER` /
@@ -12,7 +12,7 @@
 
 /// Auth error types.
 pub mod error;
-/// Argon2id password hashing.
+/// Password hashing. Passwords are the RabbitMQ SHA-256 password-hash.
 pub mod password;
 /// Permission kinds and regex matching.
 pub mod permission;
@@ -21,8 +21,8 @@ pub mod service;
 
 pub use error::{AuthError, Result};
 pub use password::{
-    dummy_password_hash, hash_password, validate_password_policy, verify_password,
-    ARGON2_MEMORY_KIB, ARGON2_PARALLELISM, ARGON2_TIME_COST, MAX_PASSWORD_BYTES, MIN_PASSWORD_LEN,
+    dummy_password_hash, hash_password, rabbit_sha256_with_salt, validate_password_policy,
+    verify_password, MAX_PASSWORD_BYTES, MIN_PASSWORD_LEN,
 };
 pub use permission::{
     check_permission, check_queue_bind, check_queue_unbind, check_user_permission,

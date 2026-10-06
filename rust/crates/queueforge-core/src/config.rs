@@ -35,7 +35,7 @@ pub const DEFAULT_HEARTBEAT: u16 = 60;
 pub const DEFAULT_MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Default maximum concurrent AMQP connections.
-pub const DEFAULT_MAX_CONNECTIONS: u32 = 10_000;
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 100_000;
 
 /// Default per-queue actor mailbox capacity.
 pub const DEFAULT_QUEUE_ENQUEUE_BOUND: usize = 1024;
@@ -143,9 +143,7 @@ impl ClusterConfig {
         let mut ids: Vec<_> = self.members.iter().map(|m| m.id.as_str()).collect();
         ids.sort_unstable();
         if ids.windows(2).any(|w| w[0] == w[1]) {
-            return Err(Error::Config(
-                "cluster.members ids must be unique".into(),
-            ));
+            return Err(Error::Config("cluster.members ids must be unique".into()));
         }
         Ok(())
     }
@@ -179,7 +177,7 @@ pub enum FsyncPolicy {
     /// Never fsync (dev only; durable_done completes after buffered write).
     Never,
     /// Group-commit fsync every `fsync_interval_ms` (production default).
-    /// Publisher confirms complete after the buffered write, before this fsync.
+    /// Publisher confirms complete when that fsync covers the append.
     #[default]
     EveryNMs,
     /// Fsync after every `fsync_every_n_messages` durable appends.
@@ -498,6 +496,8 @@ mod tests {
         assert_eq!(cfg.listeners.metrics, metrics_default);
         assert!(cfg.listeners.metrics.ip().is_loopback());
         assert_eq!(cfg.logging.level, "info");
+        assert_eq!(cfg.limits.max_connections, DEFAULT_MAX_CONNECTIONS);
+        assert!(cfg.limits.max_connections > 50_000);
     }
 
     #[test]
@@ -524,7 +524,7 @@ frame_max = 131072
 channel_max = 2047
 heartbeat_default = 60
 max_message_bytes = 16777216
-max_connections = 10000
+max_connections = 100000
 queue_enqueue_bound = 1024
 
 [logging]
@@ -543,6 +543,7 @@ level = "info,queueforge=debug"
         assert!((cfg.memory.soft_watermark_relative - 0.5).abs() < f64::EPSILON);
         assert_eq!(cfg.limits.max_message_bytes, DEFAULT_MAX_MESSAGE_BYTES);
         assert_eq!(cfg.limits.max_connections, DEFAULT_MAX_CONNECTIONS);
+        assert!(DEFAULT_MAX_CONNECTIONS > 50_000);
         assert_eq!(cfg.logging.level, "info,queueforge=debug");
         let metrics_expected: SocketAddr = "127.0.0.1:15692".parse().unwrap();
         assert_eq!(cfg.listeners.metrics, metrics_expected);

@@ -20,6 +20,12 @@ impl QueueState {
     pub(super) async fn fsync_now(&mut self) -> Result<(), Error> {
         self.pending_fsync = false;
         let Some(mut wal) = self.wal.take() else {
+            // No log to sync. Completing these waiters releases the confirm
+            // before any fsync of the append.
+            let early = self.fsync_waiters.len();
+            for _ in 0..early {
+                crate::prom::confirm_before_fsync();
+            }
             self.complete_waiters_up_to(QueueOffset(u64::MAX), Ok(()), false);
             return Ok(());
         };
@@ -152,6 +158,23 @@ impl QueueState {
         }
     }
 
+    /// Confirms already waiting. Below this, a quiet group of more than one publish stays on the interval timer.
+    ///
+    /// 96 is most of the benchmark's 128-confirm window, so one sync covers that burst. A single waiter flushes after 1 ms of quiet until a lone confirm has been observed.
+    pub(super) const PIPELINE_FOLLOW_UP: usize = 96;
+
+    /// Waiters left behind by one in-flight lone fsync that still share the next sync.
+    ///
+    /// A 96-confirm burst can overlap that fsync by one message. The rest must not sit until the interval.
+    pub(super) const LONE_BURST_REMAINDER: usize = 64;
+
+    /// Report whether a burst that missed the in-flight sync should flush without another interval.
+    ///
+    /// Quiet publishes stay on the timer. A deep waiter list is the benchmark pipeline, and waiting out the interval caps that window at one batch per tick.
+    pub(super) fn pipeline_follow_up_ready(&self) -> bool {
+        self.fsync_waiters.len() >= Self::PIPELINE_FOLLOW_UP
+    }
+
     /// Report whether the interval arm should fsync. Returns true when waiters, unsynced appends, deferred appends, deferred acks, or a dirty watermark exist.
     pub(super) fn needs_group_commit_flush(&self) -> bool {
         if !self.fsync_waiters.is_empty()
@@ -180,6 +203,44 @@ impl QueueState {
         self.wal_parked = true;
         Some(tokio::task::spawn_blocking(move || {
             let result = wal.fsync().map(|offset| offset).map_err(|e| e.to_string());
+            let compact_err = if result.is_ok() {
+                wal.compact().err().map(|e| e.to_string())
+            } else {
+                None
+            };
+            (wal, result, compact_err)
+        }))
+    }
+
+    /// Park the log, fsync it, and complete the waiters already queued.
+    ///
+    /// The oneshots fire on the blocking thread as soon as `fsync` returns, before compact, so a lone confirm does not wait to be scheduled back onto the actor. Waiters that arrive while the log is parked stay in `fsync_waiters` and are not completed here.
+    pub(super) fn begin_lone_fsync(
+        &mut self,
+    ) -> Option<
+        tokio::task::JoinHandle<(
+            Box<dyn DurableQueueLog>,
+            Result<QueueOffset, String>,
+            Option<String>,
+        )>,
+    > {
+        let mut wal = self.wal.take()?;
+        self.wal_parked = true;
+        let waiters = std::mem::take(&mut self.fsync_waiters);
+        self.pending_fsync = false;
+        Some(tokio::task::spawn_blocking(move || {
+            let result = wal.fsync().map_err(|e| e.to_string());
+            for w in waiters {
+                let value = match &result {
+                    Ok(synced) if w.offset.0 <= synced.0 => Ok(()),
+                    Ok(_) => Err(Error::Store("wal fsync missed offset".into())),
+                    Err(e) => Err(Error::Store(e.clone())),
+                };
+                let _ = w.tx.send(value);
+            }
+            // The confirm is already waking. Yield so the runtime can write it
+            // before compact runs on this same CPU.
+            std::thread::yield_now();
             let compact_err = if result.is_ok() {
                 wal.compact().err().map(|e| e.to_string())
             } else {
@@ -252,7 +313,12 @@ impl QueueState {
             }
         }
         self.flush_deferred_wal();
-        if !self.fsync_waiters.is_empty() || self.unsynced_appends > 0 {
+        // EveryNMs confirms on the next interval tick. An immediate second
+        // fsync here stalls the actor for every batch the pipeline lands
+        // while the first sync is still running.
+        if self.durability_policy.policy != FsyncPolicy::EveryNMs
+            && (!self.fsync_waiters.is_empty() || self.unsynced_appends > 0)
+        {
             self.pending_fsync = true;
         }
     }

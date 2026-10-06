@@ -180,9 +180,9 @@ async fn slow_durable_fsync_does_not_block_other_queue() {
     shutdown(tx_fast, fast_actor).await;
 }
 
-/// Interval fsync still runs. The confirm returns after the buffered append.
+/// Interval fsync still runs. The confirm returns only after that fsync covers the append.
 #[tokio::test]
-async fn every_n_ms_confirm_returns_before_the_interval_fsync() {
+async fn every_n_ms_confirm_waits_for_the_interval_fsync() {
     let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let key = QueueKey::new("/", "group");
     let memory = MemoryTracker::shared();
@@ -212,29 +212,316 @@ async fn every_n_ms_confirm_returns_before_the_interval_fsync() {
 
     let mut msg = (*sample_msg(b"durable")).clone();
     msg.persistent = true;
-    let done = enqueue(&tx, Arc::new(msg)).await;
+    let mut done = enqueue(&tx, Arc::new(msg)).await;
     let started = std::time::Instant::now();
-    done.durable_done.await.unwrap().unwrap();
-    assert!(
-        started.elapsed() < Duration::from_millis(30),
-        "publisher confirm waited for the group-commit fsync"
-    );
-    assert!(
-        !entered.load(std::sync::atomic::Ordering::SeqCst),
-        "interval fsync ran before the confirm returned"
-    );
-
     let wait = std::time::Instant::now();
     while !entered.load(std::sync::atomic::Ordering::SeqCst) {
         if wait.elapsed() > Duration::from_secs(2) {
             panic!("group-commit timer did not fsync");
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
     }
+    assert!(
+        wait.elapsed() < Duration::from_millis(30),
+        "lone confirm waited out the interval before fsync started"
+    );
+    assert!(
+        done.durable_done.try_recv().is_err(),
+        "publisher confirm returned before the interval fsync finished"
+    );
+    done.durable_done.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(60),
+        "publisher confirm returned before the group-commit fsync"
+    );
     shutdown(tx, actor).await;
 }
 
-/// A confirm issued while the interval fsync is blocked does not wait for it.
+/// A deep burst after one interval sync is covered by the next sync, not the next tick.
+#[tokio::test]
+async fn pipeline_burst_after_interval_sync_does_not_wait_another_tick() {
+    let key = QueueKey::new("/", "pipeline-follow");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(SlowLog {
+            delay: Duration::from_millis(30),
+            entered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(128);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let mut first = (*sample_msg(b"first")).clone();
+    first.persistent = true;
+    let first_done = enqueue(&tx, Arc::new(first)).await;
+    let started = std::time::Instant::now();
+    first_done.durable_done.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "the first confirm returned before its fsync"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(80),
+        "the first confirm waited out the interval"
+    );
+
+    let burst = std::time::Instant::now();
+    let mut waiting = Vec::new();
+    for i in 0..96u8 {
+        let mut msg = (*sample_msg(&[i])).clone();
+        msg.persistent = true;
+        waiting.push(enqueue(&tx, Arc::new(msg)).await);
+    }
+    for done in waiting {
+        done.durable_done.await.unwrap().unwrap();
+    }
+    let elapsed = burst.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(20),
+        "pipeline confirms returned before the covering fsync: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "pipeline confirms waited for another interval: {elapsed:?}"
+    );
+
+    // A single publish after that burst flushes on its own, still after the fsync.
+    let mut quiet = (*sample_msg(b"quiet")).clone();
+    quiet.persistent = true;
+    let quiet_started = std::time::Instant::now();
+    let quiet_done = enqueue(&tx, Arc::new(quiet)).await;
+    quiet_done.durable_done.await.unwrap().unwrap();
+    assert!(
+        quiet_started.elapsed() >= Duration::from_millis(20),
+        "a lone confirm returned before its fsync"
+    );
+    assert!(
+        quiet_started.elapsed() < Duration::from_millis(80),
+        "a lone confirm waited out the interval"
+    );
+    shutdown(tx, actor).await;
+}
+
+struct CountLog {
+    syncs: Arc<std::sync::atomic::AtomicU64>,
+    appends: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl DurableQueueLog for CountLog {
+    fn append_enqueue(&mut self, _offset: QueueOffset, _msg: &Message) -> crate::error::Result<()> {
+        self.appends
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn acknowledge(&mut self, _offset: QueueOffset) -> crate::error::Result<()> {
+        Ok(())
+    }
+    fn fsync(&mut self) -> crate::error::Result<QueueOffset> {
+        self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(QueueOffset(u64::MAX))
+    }
+    fn durable_offset(&self) -> QueueOffset {
+        QueueOffset(0)
+    }
+    fn ack_watermark(&self) -> QueueOffset {
+        QueueOffset(0)
+    }
+    fn meta_dirty(&self) -> bool {
+        false
+    }
+    fn compact(&mut self) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
+/// 128 durable publishes already in the mailbox share one fsync. The confirm
+/// resolves only after that fsync, not at the 400 ms interval.
+#[tokio::test(flavor = "current_thread")]
+async fn one_hundred_twenty_eight_waiters_share_one_fsync() {
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let appends = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "batch-128");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::clone(&appends),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(256);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let started = std::time::Instant::now();
+    let mut waiting = Vec::new();
+    for i in 0..128u8 {
+        let mut msg = (*sample_msg(&[i])).clone();
+        msg.persistent = true;
+        waiting.push(enqueue(&tx, Arc::new(msg)).await);
+    }
+    for done in waiting {
+        done.durable_done.await.unwrap().unwrap();
+    }
+    assert_eq!(appends.load(std::sync::atomic::Ordering::SeqCst), 128);
+    assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "128 confirms waited out the interval: {:?}",
+        started.elapsed()
+    );
+    shutdown(tx, actor).await;
+}
+
+/// The second and later lone confirms must not sit out the 1 ms quiet window.
+#[tokio::test]
+async fn steady_lone_confirm_does_not_wait_a_millisecond() {
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "steady-lone");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(8);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let mut first = (*sample_msg(b"first")).clone();
+    first.persistent = true;
+    let first_done = enqueue(&tx, Arc::new(first)).await;
+    first_done.durable_done.await.unwrap().unwrap();
+
+    let started = std::time::Instant::now();
+    for i in 0..12u8 {
+        let mut msg = (*sample_msg(&[i])).clone();
+        msg.persistent = true;
+        let done = enqueue(&tx, Arc::new(msg)).await;
+        done.durable_done.await.unwrap().unwrap();
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(
+        syncs.load(std::sync::atomic::Ordering::SeqCst),
+        13,
+        "steady lone confirms did not each wait for their own fsync"
+    );
+    assert!(
+        elapsed < Duration::from_millis(10),
+        "steady lone confirms still waited out a quiet window: {elapsed:?}"
+    );
+    shutdown(tx, actor).await;
+}
+
+/// A burst already sitting in the mailbox still shares one fsync after a lone confirm.
+#[tokio::test(flavor = "current_thread")]
+async fn learned_lone_flag_keeps_a_queued_burst_on_one_fsync() {
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let appends = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "lone-then-burst");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::clone(&appends),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(256);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let mut first = (*sample_msg(b"learn")).clone();
+    first.persistent = true;
+    let first_done = enqueue(&tx, Arc::new(first)).await;
+    first_done.durable_done.await.unwrap().unwrap();
+    assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let started = std::time::Instant::now();
+    let mut waiting = Vec::new();
+    for i in 0..128u8 {
+        let mut msg = (*sample_msg(&[i])).clone();
+        msg.persistent = true;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.try_send(QueueCmd::Enqueue {
+            msg: Arc::new(msg),
+            reply: reply_tx,
+        })
+        .expect("mailbox accepted the burst");
+        waiting.push(reply_rx);
+    }
+    let mut dones = Vec::new();
+    for reply in waiting {
+        dones.push(reply.await.unwrap().unwrap());
+    }
+    for done in dones {
+        done.durable_done.await.unwrap().unwrap();
+    }
+    assert_eq!(appends.load(std::sync::atomic::Ordering::SeqCst), 129);
+    assert_eq!(
+        syncs.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a queued burst after a lone confirm fsynced one message at a time"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "queued burst waited out the interval: {:?}",
+        started.elapsed()
+    );
+    shutdown(tx, actor).await;
+}
+
+/// A confirm issued while the interval fsync is blocked waits until its own append is synced.
 #[tokio::test]
 async fn interval_fsync_does_not_queue_the_next_confirm() {
     let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -269,7 +556,6 @@ async fn interval_fsync_does_not_queue_the_next_confirm() {
     let mut first = (*sample_msg(b"first")).clone();
     first.persistent = true;
     let first_done = enqueue(&tx, Arc::new(first)).await;
-    first_done.durable_done.await.unwrap().unwrap();
     let wait = std::time::Instant::now();
     while !entered.load(std::sync::atomic::Ordering::SeqCst) {
         if wait.elapsed() > Duration::from_secs(2) {
@@ -284,17 +570,7 @@ async fn interval_fsync_does_not_queue_the_next_confirm() {
 
     let mut second = (*sample_msg(b"second")).clone();
     second.persistent = true;
-    let started = std::time::Instant::now();
     let second_done = enqueue(&tx, Arc::new(second)).await;
-    second_done.durable_done.await.unwrap().unwrap();
-    assert!(
-        started.elapsed() < Duration::from_millis(80),
-        "confirm waited for the in-flight interval fsync"
-    );
-    assert!(
-        !released.load(std::sync::atomic::Ordering::SeqCst),
-        "interval fsync returned before the confirm"
-    );
     assert_eq!(
         appends.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -351,6 +627,8 @@ async fn interval_fsync_does_not_queue_the_next_confirm() {
         still_deferred, 0,
         "following command ran while the deferred append was still unflushed"
     );
+    first_done.durable_done.await.unwrap().unwrap();
+    second_done.durable_done.await.unwrap().unwrap();
     shutdown(tx, actor).await;
 }
 
@@ -394,7 +672,6 @@ async fn flush_durable_waits_for_the_deferred_append_to_be_fsynced() {
     let mut first = (*sample_msg(b"first")).clone();
     first.persistent = true;
     let first_done = enqueue(&tx, Arc::new(first)).await;
-    first_done.durable_done.await.unwrap().unwrap();
     let wait = std::time::Instant::now();
     while fsyncs.load(std::sync::atomic::Ordering::SeqCst) < 1 {
         if wait.elapsed() > Duration::from_secs(2) {
@@ -405,13 +682,7 @@ async fn flush_durable_waits_for_the_deferred_append_to_be_fsynced() {
 
     let mut second = (*sample_msg(b"kept")).clone();
     second.persistent = true;
-    let started = std::time::Instant::now();
     let second_done = enqueue(&tx, Arc::new(second)).await;
-    second_done.durable_done.await.unwrap().unwrap();
-    assert!(
-        started.elapsed() < Duration::from_millis(80),
-        "classic every_n_ms confirm waited for the interval fsync"
-    );
     let offset = second_done.offset;
 
     let (flush_tx, mut flush_rx) = oneshot::channel();
@@ -461,6 +732,8 @@ async fn flush_durable_waits_for_the_deferred_append_to_be_fsynced() {
         synced.load(std::sync::atomic::Ordering::SeqCst) >= offset.0,
         "confirm returned before a fsync covered the enqueue offset"
     );
+    first_done.durable_done.await.unwrap().unwrap();
+    second_done.durable_done.await.unwrap().unwrap();
     shutdown(tx, actor).await;
 }
 
@@ -1283,4 +1556,181 @@ async fn mutual_dlx_overflow_no_deadlock() {
         .await
         .unwrap();
     let _ = srx.await.unwrap();
+}
+
+struct ConfirmCounter {
+    n: std::sync::atomic::AtomicU64,
+}
+
+impl metrics::CounterFn for ConfirmCounter {
+    fn increment(&self, value: u64) {
+        self.n
+            .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn absolute(&self, value: u64) {
+        self.n.store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+struct ConfirmRecorder {
+    counters: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<ConfirmCounter>>>,
+}
+
+impl ConfirmRecorder {
+    fn get(&self, name: &str) -> u64 {
+        self.counters
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|c| c.n.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+}
+
+impl metrics::Recorder for ConfirmRecorder {
+    fn describe_counter(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn register_counter(
+        &self,
+        key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Counter {
+        let mut map = self.counters.lock().unwrap();
+        let counter = map
+            .entry(key.name().to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(ConfirmCounter {
+                    n: std::sync::atomic::AtomicU64::new(0),
+                })
+            })
+            .clone();
+        metrics::Counter::from_arc(counter)
+    }
+    fn register_gauge(
+        &self,
+        _key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+    fn register_histogram(
+        &self,
+        _key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
+}
+
+fn confirm_recorder() -> &'static ConfirmRecorder {
+    static ONCE: std::sync::OnceLock<&'static ConfirmRecorder> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let rec: &'static ConfirmRecorder = Box::leak(Box::new(ConfirmRecorder {
+            counters: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }));
+        metrics::set_global_recorder(rec).expect("install confirm recorder");
+        rec
+    })
+}
+
+fn confirm_before_total() -> u64 {
+    confirm_recorder().get("queueforge_confirm_before_fsync_total")
+}
+
+/// `never` completes the confirm after the buffered append. That is a confirm
+/// before fsync, so the counter moves. A non-persistent publish does not.
+#[tokio::test(flavor = "current_thread")]
+async fn never_policy_counts_a_confirm_that_skips_fsync() {
+    let before = confirm_before_total();
+    let key = QueueKey::new("/", "never-count");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::Never,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(8);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let mut msg = (*sample_msg(b"buffered")).clone();
+    msg.persistent = true;
+    let done = enqueue(&tx, Arc::new(msg)).await;
+    done.durable_done.await.unwrap().unwrap();
+    assert_eq!(confirm_before_total() - before, 1);
+
+    let transient = enqueue(&tx, sample_msg(b"temp")).await;
+    transient.durable_done.await.unwrap().unwrap();
+    assert_eq!(confirm_before_total() - before, 1);
+    shutdown(tx, actor).await;
+}
+
+/// A confirm that waited for the covering fsync does not move the counter.
+#[tokio::test(flavor = "current_thread")]
+async fn covered_every_n_ms_confirm_does_not_count_before_fsync() {
+    let before = confirm_before_total();
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "covered-count");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(8);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let mut msg = (*sample_msg(b"synced")).clone();
+    msg.persistent = true;
+    let done = enqueue(&tx, Arc::new(msg)).await;
+    done.durable_done.await.unwrap().unwrap();
+    assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(confirm_before_total(), before);
+    shutdown(tx, actor).await;
 }

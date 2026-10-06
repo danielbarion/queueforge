@@ -173,6 +173,9 @@ pub async fn handle_connection<S>(
 {
     let delivery_bound = usize::from(params.default_prefetch.max(1));
     let (delivery_tx, delivery_rx) = mpsc::channel(delivery_bound);
+    let (confirm_tx, confirm_rx) = mpsc::unbounded_channel();
+    let (handoff_tx, handoff_rx) = mpsc::unbounded_channel();
+    let durable_tx = spawn_durable_confirms(confirm_tx.clone());
     let mut conn = Connection {
         stream: &mut stream,
         peer,
@@ -201,11 +204,23 @@ pub async fn handle_connection<S>(
         replay: VecDeque::new(),
         delivery_tx,
         delivery_rx,
+        handoff_tx,
+        handoff_rx,
+        next_delivery_seq: 0,
+        next_delivery_write: 0,
+        finished_handoffs: BTreeMap::new(),
+        confirm_tx,
+        confirm_rx,
+        durable_tx,
+        publish_counters: HashMap::new(),
+        exchange_write_ok: HashMap::new(),
         tx_applying: false,
         sessions: HashMap::new(),
         declared_queues: Vec::new(),
         cleaned_up: false,
         cluster,
+        outbound: Vec::with_capacity(4096),
+        coalesce_depth: 0,
     };
 
     let run_result = conn.run(shutdown).await;
@@ -263,6 +278,10 @@ struct ChannelState {
     tx_mode: bool,
     /// Unpublished operations waiting for `tx.commit` or `tx.rollback`.
     tx_ops: Vec<TxOp>,
+    /// Confirm results waiting until every lower tag on this channel is ready.
+    held_confirms: BTreeMap<u64, bool>,
+    /// Next publisher-confirm tag to write. Tags below this were already sent.
+    next_confirm_emit: u64,
 }
 
 enum TxOp {
@@ -290,6 +309,8 @@ impl ChannelState {
             held: Vec::new(),
             tx_mode: false,
             tx_ops: Vec::new(),
+            held_confirms: BTreeMap::new(),
+            next_confirm_emit: 1,
         }
     }
 
@@ -349,6 +370,25 @@ struct Connection<'a, S> {
     delivery_tx: mpsc::Sender<QueueDelivery>,
     cluster: Option<Arc<crate::cluster::Cluster>>,
     delivery_rx: mpsc::Receiver<QueueDelivery>,
+    /// Completed quorum claims, in the order `stage_delivery` reserved them.
+    /// The read loop writes `basic.deliver` only for the next sequence, after
+    /// that claim. Publisher confirms are not waiting on this channel.
+    handoff_tx: mpsc::UnboundedSender<FinishedHandoff>,
+    handoff_rx: mpsc::UnboundedReceiver<FinishedHandoff>,
+    next_delivery_seq: u64,
+    next_delivery_write: u64,
+    finished_handoffs: BTreeMap<u64, FinishedHandoff>,
+    /// Confirms whose covering fsync finished. The read loop writes the ack.
+    confirm_tx: mpsc::UnboundedSender<DeferredConfirm>,
+    confirm_rx: mpsc::UnboundedReceiver<DeferredConfirm>,
+    /// One task waits for classic fsyncs. A task per publish was the pipeline tax.
+    durable_tx: mpsc::UnboundedSender<DurableWait>,
+    /// `queueforge_publish_total` handles, keyed by exchange. The first publish
+    /// to an exchange builds the handle; the rest clone it.
+    publish_counters: HashMap<String, metrics::Counter>,
+    /// Exchange write permission already resolved for this connection.
+    /// A publish to the same exchange does not read metadata again.
+    exchange_write_ok: HashMap<String, bool>,
     /// True while applying a `tx.commit` batch so those ops are not re-buffered.
     tx_applying: bool,
     sessions: HashMap<ConsumerSessionId, SessionInfo>,
@@ -356,6 +396,94 @@ struct Connection<'a, S> {
     declared_queues: Vec<QueueKey>,
     /// True after [`Self::cleanup_on_close`] has run (idempotent).
     cleaned_up: bool,
+    /// Staged AMQP bytes. Written when [`Self::coalesce_depth`] returns to 0,
+    /// or sooner once the buffer reaches [`Self::COALESCE_LIMIT`].
+    outbound: Vec<u8>,
+    /// Nesting count for a coalesced write. Zero sends each frame immediately
+    /// so a heartbeat or connection.close reaches the socket before the next read.
+    coalesce_depth: u32,
+}
+
+/// One quorum delivery whose follower drop has finished, or a delivery that
+/// did not need a drop. `seq` is the order reserved on the connection.
+struct FinishedHandoff {
+    seq: u64,
+    delivery: QueueDelivery,
+    channel: u16,
+    /// Tag reserved before the claim. `None` is a server cancel.
+    delivery_tag: Option<u64>,
+}
+
+/// Publisher confirm whose fsync (or quorum append) finished off the read loop.
+struct DeferredConfirm {
+    channel: u16,
+    delivery_tag: u64,
+    ok: bool,
+}
+
+/// One classic publish waiting for its enqueue reply and the covering fsync.
+struct DurableWait {
+    channel: u16,
+    seq: u64,
+    waits:
+        Vec<oneshot::Receiver<Result<queueforge_core::EnqueueCompletion, queueforge_core::Error>>>,
+    send_failures: u32,
+    counter: metrics::Counter,
+}
+
+/// Wait for classic confirms on one task per connection.
+///
+/// The read loop only enqueues the wait. Spawning a task per publish woke the
+/// runtime once per message after every group commit.
+fn spawn_durable_confirms(
+    confirm_tx: mpsc::UnboundedSender<DeferredConfirm>,
+) -> mpsc::UnboundedSender<DurableWait> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<DurableWait>();
+    tokio::spawn(async move {
+        while let Some(wait) = rx.recv().await {
+            let mut ok = wait.send_failures == 0 && !wait.waits.is_empty();
+            let mut completions = Vec::with_capacity(wait.waits.len());
+            for reply_rx in wait.waits {
+                match reply_rx.await {
+                    Ok(Ok(completion)) => completions.push(completion),
+                    Ok(Err(error)) => {
+                        warn!(error = %error, "enqueue rejected");
+                        ok = false;
+                    }
+                    Err(_) => {
+                        warn!("enqueue reply canceled");
+                        ok = false;
+                    }
+                }
+            }
+            if ok {
+                for completion in completions {
+                    match completion.durable_done.await {
+                        Ok(Ok(())) => {}
+                        Err(_) => {
+                            warn!("durable_done oneshot canceled (queue actor gone?)");
+                            ok = false;
+                        }
+                        Ok(Err(error)) => {
+                            warn!(error = %error, "durable_done error on enqueue");
+                            ok = false;
+                        }
+                    }
+                }
+            }
+            if ok {
+                wait.counter.increment(1);
+            } else {
+                metrics::counter!("queueforge_publish_partial_failure_total").increment(1);
+            }
+            let _ = confirm_tx.send(DeferredConfirm {
+                channel: wait.channel,
+                delivery_tag: wait.seq,
+                ok,
+            });
+        }
+    });
+    tx
 }
 
 /// Internal control-flow for the connection loop.
@@ -411,8 +539,34 @@ where
 
             // A biased select that always prefers a readable socket will never
             // write deliveries while a publisher floods this connection.
+            // One coalesce covers deliveries and confirms from this read.
+            self.begin_coalesce();
+            let mut failed: Option<ConnError> = None;
+            let mut confirm_failed = false;
             if let Err(e) = self.flush_deliveries().await {
-                debug!(peer = %self.peer, error = %e, "delivery forward failed");
+                failed = Some(e);
+            } else if let Err(e) = self.flush_staged_deliveries().await {
+                failed = Some(e);
+            } else if let Err(e) = self.flush_confirms().await {
+                confirm_failed = true;
+                failed = Some(e);
+            }
+            if let Err(e) = self.end_coalesce().await {
+                if failed.is_none() {
+                    failed = Some(e);
+                }
+            }
+            if let Some(e) = failed {
+                debug!(
+                    peer = %self.peer,
+                    error = %e,
+                    "{}",
+                    if confirm_failed {
+                        "confirm forward failed"
+                    } else {
+                        "delivery forward failed"
+                    }
+                );
                 self.cleanup_on_close().await;
                 self.mark_closed();
                 return Ok(());
@@ -484,8 +638,37 @@ where
                 }
 
                 Some(delivery) = self.delivery_rx.recv(), if open => {
-                    if let Err(e) = self.forward_delivery(delivery).await {
+                    // The wake delivers one message. Drain the rest in the same write.
+                    self.begin_coalesce();
+                    let forwarded = self.forward_delivery(delivery).await;
+                    let rest = if forwarded.is_ok() {
+                        self.flush_deliveries().await
+                    } else {
+                        forwarded
+                    };
+                    let ended = self.end_coalesce().await;
+                    if let Err(e) = rest.and(ended) {
                         debug!(peer = %self.peer, error = %e, "delivery forward failed");
+                        self.cleanup_on_close().await;
+                        self.mark_closed();
+                        return Ok(());
+                    }
+                }
+
+                Some(done) = self.handoff_rx.recv(), if open => {
+                    self.finished_handoffs.insert(done.seq, done);
+                    if let Err(e) = self.flush_staged_deliveries().await {
+                        debug!(peer = %self.peer, error = %e, "delivery forward failed");
+                        self.cleanup_on_close().await;
+                        self.mark_closed();
+                        return Ok(());
+                    }
+                }
+
+                Some(confirm) = self.confirm_rx.recv(), if open => {
+                    self.stage_confirm(confirm.channel, confirm.delivery_tag, confirm.ok);
+                    if let Err(e) = self.flush_confirms().await {
+                        debug!(peer = %self.peer, error = %e, "confirm forward failed");
                         self.cleanup_on_close().await;
                         self.mark_closed();
                         return Ok(());
@@ -587,15 +770,57 @@ where
         if self.state != State::Open {
             return Ok(());
         }
+        self.begin_coalesce();
+        let mut result = Ok(());
         loop {
             match self.delivery_rx.try_recv() {
-                Ok(delivery) => self.forward_delivery(delivery).await?,
-                Err(_) => return Ok(()),
+                Ok(delivery) => {
+                    if let Err(e) = self.forward_delivery(delivery).await {
+                        result = Err(e);
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
         }
+        self.end_coalesce().await?;
+        result
+    }
+
+    /// Write publisher confirms whose fsync already finished.
+    async fn flush_confirms(&mut self) -> Result<(), ConnError> {
+        if self.state != State::Open {
+            while self.confirm_rx.try_recv().is_ok() {}
+            return Ok(());
+        }
+        self.begin_coalesce();
+        loop {
+            match self.confirm_rx.try_recv() {
+                Ok(confirm) => {
+                    self.stage_confirm(confirm.channel, confirm.delivery_tag, confirm.ok);
+                }
+                Err(_) => break,
+            }
+        }
+        let result = self.emit_ready_confirms().await;
+        self.end_coalesce().await?;
+        result
     }
 
     async fn drain_buffer(&mut self) -> Result<Step, ConnError> {
+        // One socket read holds many publishes. The per-frame flush below
+        // pulls deliveries and confirms into the burst, and this outer
+        // coalesce writes that burst once when the buffered frames are done.
+        self.begin_coalesce();
+        let step = self.drain_buffered_frames().await;
+        let ended = self.end_coalesce().await;
+        match step {
+            Ok(step) => ended.map(|()| step),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn drain_buffered_frames(&mut self) -> Result<Step, ConnError> {
         loop {
             if self.state == State::Closed {
                 return Ok(Step::Done);
@@ -641,9 +866,15 @@ where
                     match self.handle_frame(frame).await? {
                         Step::Done => return Ok(Step::Done),
                         Step::Continue => {
-                            // Deliver before the next publish frame so a
-                            // same-connection consumer is not starved.
+                            // Pull deliveries and confirms before the next
+                            // publish frame so one connection is not stuck
+                            // behind its own flood. The outer coalesce holds
+                            // the TCP write until this buffer is drained.
+                            // Staged quorum bodies are written only after their
+                            // claim; a claim still in flight does not hold this.
                             self.flush_deliveries().await?;
+                            self.flush_staged_deliveries().await?;
+                            self.flush_confirms().await?;
                             continue;
                         }
                     }
@@ -1270,6 +1501,33 @@ where
         }
     }
 
+    /// One TCP write once a burst reaches this size. 128 small deliveries fit.
+    const COALESCE_LIMIT: usize = 64 * 1024;
+
+    fn begin_coalesce(&mut self) {
+        self.coalesce_depth = self.coalesce_depth.saturating_add(1);
+    }
+
+    async fn end_coalesce(&mut self) -> Result<(), ConnError> {
+        debug_assert!(self.coalesce_depth > 0);
+        self.coalesce_depth = self.coalesce_depth.saturating_sub(1);
+        if self.coalesce_depth == 0 {
+            self.flush_coalesced().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_coalesced(&mut self) -> Result<(), ConnError> {
+        if self.outbound.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::take(&mut self.outbound);
+        self.stream.write_all(&bytes).await?;
+        self.stream.flush().await?;
+        self.last_send = Instant::now();
+        Ok(())
+    }
+
     async fn send_method(&mut self, channel: u16, method: &Method) -> Result<(), ConnError> {
         let frame = method.to_frame(channel)?;
         self.send_frame(&frame).await
@@ -1277,9 +1535,19 @@ where
 
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), ConnError> {
         let bytes = frame.encode()?;
-        self.stream.write_all(&bytes).await?;
-        self.stream.flush().await?;
-        self.last_send = Instant::now();
+        if self.coalesce_depth == 0 {
+            if !self.outbound.is_empty() {
+                self.flush_coalesced().await?;
+            }
+            self.stream.write_all(&bytes).await?;
+            self.stream.flush().await?;
+            self.last_send = Instant::now();
+        } else {
+            self.outbound.extend_from_slice(&bytes);
+            if self.outbound.len() >= Self::COALESCE_LIMIT {
+                self.flush_coalesced().await?;
+            }
+        }
         trace!(
             peer = %self.peer,
             kind = ?frame.kind,

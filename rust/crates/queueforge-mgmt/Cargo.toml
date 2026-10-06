@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 axum = { workspace = true }
+futures-lite = "2.6"
+lapin = "2.5"
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }

@@ -278,6 +278,19 @@ pub async fn put_policy(
                 body.pattern.clone(),
             );
         }
+        for uri in queueforge_core::federation::federation_uris(&vhost) {
+            let downstream = vhost.clone();
+            let pattern = body.pattern.clone();
+            let queues = std::sync::Arc::clone(&state.queues);
+            let router = std::sync::Arc::clone(&state.router);
+            tokio::spawn(async move {
+                if let Err(err) =
+                    super::shovel::federation_link(uri, downstream, pattern, queues, router).await
+                {
+                    tracing::warn!(error = %err, "federation link stopped");
+                }
+            });
+        }
     }
     let policy = policy_from_body(&vhost, &name, body)?;
     state

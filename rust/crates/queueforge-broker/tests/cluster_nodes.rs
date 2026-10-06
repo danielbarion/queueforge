@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures_lite::StreamExt;
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions, ConfirmSelectOptions,
-    ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+    BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
+    ConfirmSelectOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
 };
 use lapin::types::{AMQPValue, FieldTable, ShortString};
 use lapin::{BasicProperties, Connection, ConnectionProperties, ExchangeKind};
@@ -305,7 +305,10 @@ async fn declare_on_one_node_is_usable_on_the_other() {
             break;
         }
     }
-    assert!(saw_kept, "durable message confirmed on the home must survive restart");
+    assert!(
+        saw_kept,
+        "durable message confirmed on the home must survive restart"
+    );
 }
 
 #[tokio::test]
@@ -383,7 +386,10 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
             _ => break,
         }
     }
-    assert!(got > 256, "prefetch 0 on a non-home connection delivered {got}");
+    assert!(
+        got > 256,
+        "prefetch 0 on a non-home connection delivered {got}"
+    );
 
     let ch = amqp(&b).await;
     ch.exchange_declare(
@@ -408,15 +414,24 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
     .await
     .expect("hq");
     let mut args = FieldTable::default();
-    args.insert(ShortString::from("x-match"), AMQPValue::LongString("all".into()));
-    args.insert(ShortString::from("color"), AMQPValue::LongString("blue".into()));
+    args.insert(
+        ShortString::from("x-match"),
+        AMQPValue::LongString("all".into()),
+    );
+    args.insert(
+        ShortString::from("color"),
+        AMQPValue::LongString("blue".into()),
+    );
     ch.queue_bind("hq", "hdr", "", QueueBindOptions::default(), args)
         .await
         .expect("bind headers");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let publisher = amqp(&a).await;
     let mut headers = FieldTable::default();
-    headers.insert(ShortString::from("color"), AMQPValue::LongString("blue".into()));
+    headers.insert(
+        ShortString::from("color"),
+        AMQPValue::LongString("blue".into()),
+    );
     publisher
         .basic_publish(
             "hdr",
@@ -430,7 +445,12 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
         .await
         .ok();
     let mut hdr_consumer = ch
-        .basic_consume("hq", "hc", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            "hq",
+            "hc",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("consume headers");
     let delivery = timeout(Duration::from_secs(5), hdr_consumer.next())
@@ -451,15 +471,24 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
     .await
     .expect("anyq");
     let mut any_args = FieldTable::default();
-    any_args.insert(ShortString::from("x-match"), AMQPValue::LongString("any".into()));
-    any_args.insert(ShortString::from("color"), AMQPValue::LongString("blue".into()));
+    any_args.insert(
+        ShortString::from("x-match"),
+        AMQPValue::LongString("any".into()),
+    );
+    any_args.insert(
+        ShortString::from("color"),
+        AMQPValue::LongString("blue".into()),
+    );
     any_args.insert(ShortString::from("size"), AMQPValue::LongString("l".into()));
     ch.queue_bind("anyq", "hdr", "", QueueBindOptions::default(), any_args)
         .await
         .expect("bind any");
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut only_color = FieldTable::default();
-    only_color.insert(ShortString::from("color"), AMQPValue::LongString("blue".into()));
+    only_color.insert(
+        ShortString::from("color"),
+        AMQPValue::LongString("blue".into()),
+    );
     publisher
         .basic_publish(
             "hdr",
@@ -473,7 +502,12 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
         .await
         .ok();
     let mut any_consumer = publisher
-        .basic_consume("anyq", "anyc", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            "anyq",
+            "anyc",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("consume any");
     let delivery = timeout(Duration::from_secs(5), any_consumer.next())
@@ -524,7 +558,13 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
         .await
         .expect("altq");
     publisher
-        .queue_bind("altq", "alt", "", QueueBindOptions::default(), FieldTable::default())
+        .queue_bind(
+            "altq",
+            "alt",
+            "",
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("bind alt");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -540,7 +580,12 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
     .await
     .ok();
     let mut alt_consumer = ch
-        .basic_consume("altq", "ac", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            "altq",
+            "ac",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("consume alt");
     let delivery = timeout(Duration::from_secs(5), alt_consumer.next())
@@ -574,7 +619,13 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
         .await
         .expect("tq");
     publisher
-        .queue_bind("tq", "topics", "orders.*", QueueBindOptions::default(), FieldTable::default())
+        .queue_bind(
+            "tq",
+            "topics",
+            "orders.*",
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("bind topic");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -590,7 +641,12 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
     .await
     .ok();
     let mut topic_consumer = ch
-        .basic_consume("tq", "tc", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            "tq",
+            "tc",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("consume topic");
     let delivery = timeout(Duration::from_secs(5), topic_consumer.next())
@@ -624,7 +680,12 @@ async fn cross_node_headers_alternate_tx_and_prefetch() {
     .ok();
     ch.tx_rollback().await.expect("rollback");
     let mut tx_consumer = ch
-        .basic_consume("txq", "txc", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            "txq",
+            "txc",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("consume txq");
     let hidden = timeout(Duration::from_millis(400), tx_consumer.next()).await;
@@ -717,7 +778,8 @@ async fn cross_node_publish_consume_window() {
             .await
             .ok();
         published += 1;
-        while let Ok(Some(Ok(delivery))) = timeout(Duration::from_millis(1), consumer.next()).await {
+        while let Ok(Some(Ok(delivery))) = timeout(Duration::from_millis(1), consumer.next()).await
+        {
             delivery.ack(BasicAckOptions::default()).await.ok();
             consumed += 1;
         }
@@ -733,7 +795,10 @@ async fn cross_node_publish_consume_window() {
         }
     }
     eprintln!("published={published} consumed={consumed}");
-    assert!(published > 0 && consumed > 0, "published={published} consumed={consumed}");
+    assert!(
+        published > 0 && consumed > 0,
+        "published={published} consumed={consumed}"
+    );
 }
 
 #[tokio::test]
@@ -765,23 +830,43 @@ async fn consumers_on_both_nodes_receive_from_one_queue() {
     }
     let setup = amqp(&a).await;
     setup
-        .queue_declare(&queue_name, QueueDeclareOptions::default(), FieldTable::default())
+        .queue_declare(
+            &queue_name,
+            QueueDeclareOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("queue");
     let home = amqp(&a).await;
     let peer = amqp(&b).await;
     let mut home_consumer = home
-        .basic_consume(&queue_name, "home", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            &queue_name,
+            "home",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("home consume");
     let mut peer_consumer = peer
-        .basic_consume(&queue_name, "peer", BasicConsumeOptions::default(), FieldTable::default())
+        .basic_consume(
+            &queue_name,
+            "peer",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
         .await
         .expect("peer consume must not collide with the home session");
     let publisher = amqp(&a).await;
     for n in 0..8u8 {
         publisher
-            .basic_publish("", &queue_name, BasicPublishOptions::default(), &[n], BasicProperties::default())
+            .basic_publish(
+                "",
+                &queue_name,
+                BasicPublishOptions::default(),
+                &[n],
+                BasicProperties::default(),
+            )
             .await
             .expect("publish")
             .await
@@ -791,16 +876,23 @@ async fn consumers_on_both_nodes_receive_from_one_queue() {
     let mut got_peer = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while (got_home == 0 || got_peer == 0) && tokio::time::Instant::now() < deadline {
-        if let Ok(Some(Ok(delivery))) = timeout(Duration::from_millis(100), home_consumer.next()).await {
+        if let Ok(Some(Ok(delivery))) =
+            timeout(Duration::from_millis(100), home_consumer.next()).await
+        {
             delivery.ack(BasicAckOptions::default()).await.ok();
             got_home += 1;
         }
-        if let Ok(Some(Ok(delivery))) = timeout(Duration::from_millis(100), peer_consumer.next()).await {
+        if let Ok(Some(Ok(delivery))) =
+            timeout(Duration::from_millis(100), peer_consumer.next()).await
+        {
             delivery.ack(BasicAckOptions::default()).await.ok();
             got_peer += 1;
         }
     }
-    assert!(got_home > 0 && got_peer > 0, "home={got_home} peer={got_peer}");
+    assert!(
+        got_home > 0 && got_peer > 0,
+        "home={got_home} peer={got_peer}"
+    );
 }
 
 #[tokio::test]
@@ -813,23 +905,37 @@ async fn user_created_on_one_node_opens_amqp_on_the_other() {
     wait_ready(&mut b).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let http = reqwest::Client::builder().cookie_store(true).build().unwrap();
+    let http = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
     let login = http
         .post(format!("http://127.0.0.1:{}/api/login", a.mgmt))
         .json(&serde_json::json!({"username": "admin", "password": "devpassword12"}))
         .send()
         .await
         .expect("login");
-    assert!(login.status().is_success(), "admin login {}", login.status());
+    assert!(
+        login.status().is_success(),
+        "admin login {}",
+        login.status()
+    );
     let created = http
         .put(format!("http://127.0.0.1:{}/api/users/alice", a.mgmt))
         .json(&serde_json::json!({"password": "alicepassword1", "tags": ["management"]}))
         .send()
         .await
         .expect("create user");
-    assert!(created.status().is_success(), "create user {}", created.status());
+    assert!(
+        created.status().is_success(),
+        "create user {}",
+        created.status()
+    );
     let perm = http
-        .put(format!("http://127.0.0.1:{}/api/permissions/alice/%2F", a.mgmt))
+        .put(format!(
+            "http://127.0.0.1:{}/api/permissions/alice/%2F",
+            a.mgmt
+        ))
         .json(&serde_json::json!({"configure": ".*", "write": ".*", "read": ".*"}))
         .send()
         .await

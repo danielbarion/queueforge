@@ -20,6 +20,23 @@ impl<'a, S> Connection<'a, S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Counter for publishes to `exchange` on this connection. The handle is
+    /// built once so a confirm burst does not allocate label strings.
+    fn cached_publish_counter(&mut self, exchange: &str) -> metrics::Counter {
+        if let Some(counter) = self.publish_counters.get(exchange) {
+            return counter.clone();
+        }
+        let vhost = self.vhost.clone().unwrap_or_else(|| "/".to_string());
+        let counter = metrics::counter!(
+            "queueforge_publish_total",
+            "vhost" => vhost,
+            "exchange" => exchange.to_string()
+        );
+        self.publish_counters
+            .insert(exchange.to_string(), counter.clone());
+        counter
+    }
+
     /// `finish_publish` on the open connection.
     pub(in crate::connection) async fn finish_publish(
         &mut self,
@@ -62,44 +79,52 @@ where
         let exchange_name = publish.exchange.clone();
 
         // Write permission on the exchange (default `""` → `amq.default`).
-        let user_auth = user.clone();
-        let vhost_auth = vhost.clone();
-        let exchange_auth = exchange_name.clone();
-        match self
-            .auth_bool(move |auth| {
-                auth.check_permission(
-                    &user_auth,
-                    &vhost_auth,
-                    &exchange_auth,
-                    ResourceKind::Exchange,
-                    PermissionKind::Write,
-                )
-            })
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                self.server_channel_close(
-                    channel,
-                    REPLY_ACCESS_REFUSED,
-                    "ACCESS_REFUSED - write access to exchange refused",
-                    basic_method::CLASS_ID,
-                    basic_method::Publish::METHOD_ID,
-                )
-                .await?;
-                return Ok(Step::Continue);
+        let exchange_key = exchange_name.to_string();
+        let allowed = if let Some(allowed) = self.exchange_write_ok.get(&exchange_key).copied() {
+            allowed
+        } else {
+            let user_auth = user.clone();
+            let vhost_auth = vhost.clone();
+            let exchange_auth = exchange_name.clone();
+            match self
+                .auth_bool(move |auth| {
+                    auth.check_permission(
+                        &user_auth,
+                        &vhost_auth,
+                        &exchange_auth,
+                        ResourceKind::Exchange,
+                        PermissionKind::Write,
+                    )
+                })
+                .await
+            {
+                Ok(allowed) => {
+                    self.exchange_write_ok.insert(exchange_key, allowed);
+                    allowed
+                }
+                Err(e) => {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_INTERNAL_ERROR,
+                        &format!("INTERNAL_ERROR - auth: {e}"),
+                        basic_method::CLASS_ID,
+                        basic_method::Publish::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
             }
-            Err(e) => {
-                self.server_channel_close(
-                    channel,
-                    REPLY_INTERNAL_ERROR,
-                    &format!("INTERNAL_ERROR - auth: {e}"),
-                    basic_method::CLASS_ID,
-                    basic_method::Publish::METHOD_ID,
-                )
-                .await?;
-                return Ok(Step::Continue);
-            }
+        };
+        if !allowed {
+            self.server_channel_close(
+                channel,
+                REPLY_ACCESS_REFUSED,
+                "ACCESS_REFUSED - write access to exchange refused",
+                basic_method::CLASS_ID,
+                basic_method::Publish::METHOD_ID,
+            )
+            .await?;
+            return Ok(Step::Continue);
         }
 
         queueforge_core::prom::message_received(confirm_seq.is_some());
@@ -327,6 +352,33 @@ where
         });
         if all_quorum {
             if let Some(cluster) = &self.cluster {
+                // The read loop must accept the next publish while this majority
+                // fsync is still running. tx.commit still waits inline.
+                if let Some(seq) = confirm_seq {
+                    if !self.tx_applying {
+                        let cluster = Arc::clone(cluster);
+                        let keys: Vec<_> = destinations
+                            .iter()
+                            .map(|handle| handle.info.key.clone())
+                            .collect();
+                        let msg = Arc::clone(&msg);
+                        let tx = self.confirm_tx.clone();
+                        tokio::spawn(async move {
+                            let mut failed = false;
+                            for key in &keys {
+                                if cluster.quorum_enqueue(key, Arc::clone(&msg)).await.is_err() {
+                                    failed = true;
+                                }
+                            }
+                            let _ = tx.send(DeferredConfirm {
+                                channel,
+                                delivery_tag: seq,
+                                ok: !failed,
+                            });
+                        });
+                        return Ok(Step::Continue);
+                    }
+                }
                 let mut failed = false;
                 for handle in &destinations {
                     if cluster
@@ -345,6 +397,50 @@ where
                 }
                 return Ok(Step::Continue);
             }
+        }
+
+        // Confirms: hand the publish to the queue and keep reading. The actor
+        // appends while the next frame is parsed. The ack waits for that
+        // append's covering fsync, off this loop.
+        if confirm_seq.is_some() && !self.tx_applying {
+            let seq = confirm_seq.expect("confirm seq");
+            let mut waits = Vec::with_capacity(destinations.len());
+            let mut send_failures = 0u32;
+            for handle in &destinations {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                if handle
+                    .tx
+                    .send(QueueCmd::Enqueue {
+                        msg: Arc::clone(&msg),
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    send_failures = send_failures.saturating_add(1);
+                    continue;
+                }
+                waits.push(reply_rx);
+            }
+            let counter = self.cached_publish_counter(&exchange_name);
+            if self
+                .durable_tx
+                .send(DurableWait {
+                    channel,
+                    seq,
+                    waits,
+                    send_failures,
+                    counter,
+                })
+                .is_err()
+            {
+                let _ = self.confirm_tx.send(DeferredConfirm {
+                    channel,
+                    delivery_tag: seq,
+                    ok: false,
+                });
+            }
+            return Ok(Step::Continue);
         }
 
         // Multi-destination wait-all: enqueue to every live dest, then await all
@@ -398,6 +494,8 @@ where
             }
         }
 
+        // Transactions and publishes without confirms wait here. Confirm-mode
+        // publishes returned above so the next frame can join this flush.
         // Always complete durable_done wait-all for enqueues that were accepted.
         for completion in completions {
             match completion.durable_done.await {

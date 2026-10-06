@@ -23,26 +23,41 @@ fn started() -> Instant {
 }
 
 /// GET /api/channels
-pub async fn list_channels(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn list_channels(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
-    let items: Vec<_> = state.connections.list_channels().into_iter().map(|c| {
-        json!({
-            "name": c.name,
-            "connection_details": { "name": c.connection },
-            "user": c.user,
-            "vhost": c.vhost,
-            "number": c.number,
-            "peer_host": c.peer_host,
-            "peer_port": c.peer_port,
+    let items: Vec<_> = state
+        .connections
+        .list_channels()
+        .into_iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "connection_details": { "name": c.connection },
+                "user": c.user,
+                "vhost": c.vhost,
+                "number": c.number,
+                "peer_host": c.peer_host,
+                "peer_port": c.peer_port,
+            })
         })
-    }).collect();
+        .collect();
     Ok(Json(json!({ "items": items, "total_count": items.len() })))
 }
 
 /// GET /api/channels/{name}
-pub async fn get_channel(State(state): State<MgmtState>, headers: HeaderMap, Path(name): Path<String>) -> Result<Json<Value>> {
+pub async fn get_channel(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
-    let channel = state.connections.get_channel(&name).ok_or_else(|| MgmtError::NotFound(format!("channel '{name}'")))?;
+    let channel = state
+        .connections
+        .get_channel(&name)
+        .ok_or_else(|| MgmtError::NotFound(format!("channel '{name}'")))?;
     Ok(Json(json!({
         "name": channel.name,
         "connection_details": { "name": channel.connection },
@@ -55,7 +70,11 @@ pub async fn get_channel(State(state): State<MgmtState>, headers: HeaderMap, Pat
 }
 
 /// GET /api/consumers/{vhost}
-pub async fn list_consumers(State(state): State<MgmtState>, headers: HeaderMap, Path(vhost): Path<String>) -> Result<Json<Value>> {
+pub async fn list_consumers(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(vhost): Path<String>,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let vhost = decode_vhost(&vhost)?;
     Ok(Json(consumer_page(&state, Some(&vhost), None)))
@@ -108,9 +127,18 @@ pub async fn get_queue(
 }
 
 /// GET /api/connections/{name}
-pub async fn get_connection(State(state): State<MgmtState>, headers: HeaderMap, Path(name): Path<String>) -> Result<Json<Value>> {
+pub async fn get_connection(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
-    let conn = state.connections.list().into_iter().find(|c| c.id == name).ok_or_else(|| MgmtError::NotFound(format!("connection '{name}'")))?;
+    let conn = state
+        .connections
+        .list()
+        .into_iter()
+        .find(|c| c.id == name)
+        .ok_or_else(|| MgmtError::NotFound(format!("connection '{name}'")))?;
     Ok(Json(json!({
         "name": conn.id,
         "user": conn.user,
@@ -141,7 +169,10 @@ pub struct TopicBody {
 }
 
 /// GET /api/topic-permissions
-pub async fn list_topic_permissions(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn list_topic_permissions(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let items: Vec<_> = state.connections.list_topic_permissions(None).into_iter().map(|p| {
         json!({ "user": p.user, "vhost": p.vhost, "exchange": p.exchange, "write": p.write, "read": p.read })
@@ -159,8 +190,13 @@ pub async fn put_topic_permission(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     let vhost = decode_vhost(&vhost)?;
-    if body.exchange.is_empty() || regex::Regex::new(&body.write).is_err() || regex::Regex::new(&body.read).is_err() {
-        return Err(MgmtError::BadRequest("exchange and valid write/read patterns are required".into()));
+    if body.exchange.is_empty()
+        || regex::Regex::new(&body.write).is_err()
+        || regex::Regex::new(&body.read).is_err()
+    {
+        return Err(MgmtError::BadRequest(
+            "exchange and valid write/read patterns are required".into(),
+        ));
     }
     state.connections.put_topic_permission(TopicPermission {
         user,
@@ -181,7 +217,10 @@ pub async fn delete_topic_permission(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     let vhost = decode_vhost(&vhost)?;
-    if !state.connections.delete_topic_permission(&user, &vhost, &exchange) {
+    if !state
+        .connections
+        .delete_topic_permission(&user, &vhost, &exchange)
+    {
         return Err(MgmtError::NotFound("topic permission".into()));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -193,7 +232,10 @@ pub struct LimitBody {
 }
 
 /// GET /api/user-limits and vhost limits together for the Limits page.
-pub async fn list_limits(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn list_limits(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let users: Vec<_> = state.connections.list_user_limits().into_iter().map(|(user, connections, channels)| {
         json!({ "user": user, "max-connections": connections, "max-channels": channels })
@@ -201,7 +243,9 @@ pub async fn list_limits(State(state): State<MgmtState>, headers: HeaderMap) -> 
     let vhosts: Vec<_> = state.connections.list_vhost_limits().into_iter().map(|(vhost, connections, queues)| {
         json!({ "vhost": vhost, "max-connections": connections, "max-queues": queues })
     }).collect();
-    Ok(Json(json!({ "user_limits": users, "vhost_limits": vhosts })))
+    Ok(Json(
+        json!({ "user_limits": users, "vhost_limits": vhosts }),
+    ))
 }
 
 /// PUT /api/user-limits/{user}/{kind}
@@ -213,12 +257,24 @@ pub async fn put_user_limit(
 ) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let current = state.connections.list_user_limits().into_iter().find(|row| row.0 == user);
+    let current = state
+        .connections
+        .list_user_limits()
+        .into_iter()
+        .find(|row| row.0 == user);
     let (connections, channels) = current.map(|row| (row.1, row.2)).unwrap_or((None, None));
     match kind.as_str() {
-        "max-connections" => state.connections.set_user_limit(&user, Some(body.value), channels),
-        "max-channels" => state.connections.set_user_limit(&user, connections, Some(body.value)),
-        _ => return Err(MgmtError::BadRequest("limit must be max-connections or max-channels".into())),
+        "max-connections" => state
+            .connections
+            .set_user_limit(&user, Some(body.value), channels),
+        "max-channels" => state
+            .connections
+            .set_user_limit(&user, connections, Some(body.value)),
+        _ => {
+            return Err(MgmtError::BadRequest(
+                "limit must be max-connections or max-channels".into(),
+            ))
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -231,12 +287,20 @@ pub async fn delete_user_limit(
 ) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let current = state.connections.list_user_limits().into_iter().find(|row| row.0 == user);
+    let current = state
+        .connections
+        .list_user_limits()
+        .into_iter()
+        .find(|row| row.0 == user);
     let (connections, channels) = current.map(|row| (row.1, row.2)).unwrap_or((None, None));
     match kind.as_str() {
         "max-connections" => state.connections.set_user_limit(&user, None, channels),
         "max-channels" => state.connections.set_user_limit(&user, connections, None),
-        _ => return Err(MgmtError::BadRequest("limit must be max-connections or max-channels".into())),
+        _ => {
+            return Err(MgmtError::BadRequest(
+                "limit must be max-connections or max-channels".into(),
+            ))
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -251,12 +315,24 @@ pub async fn put_vhost_limit(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     let vhost = decode_vhost(&vhost)?;
-    let current = state.connections.list_vhost_limits().into_iter().find(|row| row.0 == vhost);
+    let current = state
+        .connections
+        .list_vhost_limits()
+        .into_iter()
+        .find(|row| row.0 == vhost);
     let (connections, queues) = current.map(|row| (row.1, row.2)).unwrap_or((None, None));
     match kind.as_str() {
-        "max-connections" => state.connections.set_vhost_limit(&vhost, Some(body.value), queues),
-        "max-queues" => state.connections.set_vhost_limit(&vhost, connections, Some(body.value)),
-        _ => return Err(MgmtError::BadRequest("limit must be max-connections or max-queues".into())),
+        "max-connections" => state
+            .connections
+            .set_vhost_limit(&vhost, Some(body.value), queues),
+        "max-queues" => state
+            .connections
+            .set_vhost_limit(&vhost, connections, Some(body.value)),
+        _ => {
+            return Err(MgmtError::BadRequest(
+                "limit must be max-connections or max-queues".into(),
+            ))
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -270,18 +346,29 @@ pub async fn delete_vhost_limit(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     let vhost = decode_vhost(&vhost)?;
-    let current = state.connections.list_vhost_limits().into_iter().find(|row| row.0 == vhost);
+    let current = state
+        .connections
+        .list_vhost_limits()
+        .into_iter()
+        .find(|row| row.0 == vhost);
     let (connections, queues) = current.map(|row| (row.1, row.2)).unwrap_or((None, None));
     match kind.as_str() {
         "max-connections" => state.connections.set_vhost_limit(&vhost, None, queues),
         "max-queues" => state.connections.set_vhost_limit(&vhost, connections, None),
-        _ => return Err(MgmtError::BadRequest("limit must be max-connections or max-queues".into())),
+        _ => {
+            return Err(MgmtError::BadRequest(
+                "limit must be max-connections or max-queues".into(),
+            ))
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/feature-flags
-pub async fn list_feature_flags(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn list_feature_flags(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let transient = state.connections.transient_nonexcl_permitted();
     Ok(Json(json!({
@@ -293,7 +380,11 @@ pub async fn list_feature_flags(State(state): State<MgmtState>, headers: HeaderM
 }
 
 /// POST /api/feature-flags/{name}/enable
-pub async fn enable_feature_flag(State(state): State<MgmtState>, headers: HeaderMap, Path(name): Path<String>) -> Result<StatusCode> {
+pub async fn enable_feature_flag(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     match name.as_str() {
@@ -307,7 +398,11 @@ pub async fn enable_feature_flag(State(state): State<MgmtState>, headers: Header
 }
 
 /// POST /api/feature-flags/{name}/disable
-pub async fn disable_feature_flag(State(state): State<MgmtState>, headers: HeaderMap, Path(name): Path<String>) -> Result<StatusCode> {
+pub async fn disable_feature_flag(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     match name.as_str() {
@@ -321,7 +416,10 @@ pub async fn disable_feature_flag(State(state): State<MgmtState>, headers: Heade
 }
 
 /// GET /api/deprecated-features
-pub async fn list_deprecated(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn list_deprecated(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let acknowledged = state.connections.transient_nonexcl_permitted();
     Ok(Json(json!({
@@ -335,7 +433,11 @@ pub async fn list_deprecated(State(state): State<MgmtState>, headers: HeaderMap)
 }
 
 /// DELETE /api/deprecated-features/{name} acknowledges the deprecated behavior.
-pub async fn acknowledge_deprecated(State(state): State<MgmtState>, headers: HeaderMap, Path(name): Path<String>) -> Result<StatusCode> {
+pub async fn acknowledge_deprecated(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     if name != "transient_nonexcl_queues" {
@@ -350,8 +452,17 @@ pub async fn list_nodes(State(state): State<MgmtState>, headers: HeaderMap) -> R
     let _session = require_session(&state, &headers).await?;
     let mem = memory_bytes();
     let disk = disk_free_bytes(&state.config.data_dir);
-    let listeners: Vec<_> = state.config.amqp_listeners.iter().map(|(host, port)| json!({ "protocol": "amqp", "ip_address": host, "port": port })).collect();
-    let peers: Vec<_> = state.config.peers.iter().map(|id| json!({ "name": id })).collect();
+    let listeners: Vec<_> = state
+        .config
+        .amqp_listeners
+        .iter()
+        .map(|(host, port)| json!({ "protocol": "amqp", "ip_address": host, "port": port }))
+        .collect();
+    let peers: Vec<_> = read_member_ids(&state.config.data_dir)
+        .unwrap_or_else(|| state.config.peers.clone())
+        .into_iter()
+        .map(|id| json!({ "name": id }))
+        .collect();
     Ok(Json(json!({
         "items": [{
             "name": state.config.node_name,
@@ -367,8 +478,127 @@ pub async fn list_nodes(State(state): State<MgmtState>, headers: HeaderMap) -> R
     })))
 }
 
+/// POST /api/nodes — add `{id, addr}` to the running member list.
+pub async fn put_node(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let addr = body
+        .get("addr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if id.is_empty() || addr.parse::<std::net::SocketAddr>().is_err() {
+        return Err(MgmtError::BadRequest("id and addr are required".into()));
+    }
+    let mut members = read_member_rows(&state.config.data_dir)
+        .ok_or_else(|| MgmtError::BadRequest("cluster membership is not configured".into()))?;
+    if let Some(row) = members
+        .iter_mut()
+        .find(|row| row.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+    {
+        row["addr"] = json!(addr);
+    } else {
+        members.push(json!({"id": id, "addr": addr}));
+    }
+    write_members(&state, members).await
+}
+
+/// DELETE /api/nodes/{name} — drop a member that is not the home of a stored queue.
+pub async fn delete_node(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    if name == state.config.node_name {
+        return Err(MgmtError::BadRequest("a node cannot forget itself".into()));
+    }
+    for vhost in state
+        .store
+        .list_vhosts()
+        .map_err(|err| MgmtError::Internal(err.to_string()))?
+    {
+        for queue in state
+            .store
+            .list_queues(vhost.name.as_str())
+            .map_err(|err| MgmtError::Internal(err.to_string()))?
+        {
+            if queue.home.as_deref() == Some(name.as_str()) {
+                return Err(MgmtError::BadRequest(format!(
+                    "member {name} still homes a classic queue"
+                )));
+            }
+        }
+    }
+    let Some(mut members) = read_member_rows(&state.config.data_dir) else {
+        return Err(MgmtError::BadRequest(
+            "cluster membership is not configured".into(),
+        ));
+    };
+    members.retain(|row| row.get("id").and_then(|v| v.as_str()) != Some(name.as_str()));
+    if members.is_empty() {
+        return Err(MgmtError::BadRequest(
+            "the member list cannot become empty".into(),
+        ));
+    }
+    write_members(&state, members).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn read_member_ids(dir: &str) -> Option<Vec<String>> {
+    Some(
+        read_member_rows(dir)?
+            .iter()
+            .filter_map(|row| {
+                row.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect(),
+    )
+}
+
+fn read_member_rows(dir: &str) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(std::path::Path::new(dir).join("members.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+async fn write_members(state: &MgmtState, members: Vec<Value>) -> Result<Json<Value>> {
+    let path = std::path::Path::new(&state.config.data_dir).join("members.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&members).unwrap_or_else(|_| "[]".into()),
+    )
+    .map_err(|err| MgmtError::Internal(err.to_string()))?;
+    if let Some(tx) = &state.replicate_tx {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(crate::state::ReplicateReq {
+            kind: "members".into(),
+            payload: Value::Array(members.clone()),
+            done: done_tx,
+        });
+        let _ = done_rx.await;
+    }
+    Ok(Json(json!({ "members": members })))
+}
+
 /// GET /api/cluster-name
-pub async fn cluster_name(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+pub async fn cluster_name(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     Ok(Json(json!({ "name": state.config.node_name })))
 }
@@ -377,7 +607,11 @@ fn memory_bytes() -> u64 {
     let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
             return kb.saturating_mul(1024);
         }
     }
@@ -389,7 +623,8 @@ fn disk_free_bytes(path: &str) -> u64 {
         return 0;
     }
     let mut buf = [0u8; 256];
-    let c_path = std::ffi::CString::new(path).unwrap_or_else(|_| std::ffi::CString::new(".").unwrap());
+    let c_path =
+        std::ffi::CString::new(path).unwrap_or_else(|_| std::ffi::CString::new(".").unwrap());
     extern "C" {
         fn statvfs(path: *const i8, buf: *mut u8) -> i32;
     }

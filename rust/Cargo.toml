@@ -22,7 +22,6 @@ rust-version = "1.75"
 [workspace.dependencies]
 anyhow = "1.0"
 arc-swap = "1.7"
-argon2 = { version = "0.5", features = ["std"] }
 axum = "0.8"
 base64 = "0.22"
 bytes = "1.9"

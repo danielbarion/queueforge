@@ -92,8 +92,18 @@ pub async fn start_amqp_listener(
     connections: Arc<MgmtConnectionTracker>,
     params: ConnectionParams,
 ) -> std::io::Result<AmqpListener> {
-    start_amqp_listener_with_limits(addr, store, queues, router, connections, params, None, None, None)
-        .await
+    start_amqp_listener_with_limits(
+        addr,
+        store,
+        queues,
+        router,
+        connections,
+        params,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Like [`start_amqp_listener`] with optional connection limiter and TLS.

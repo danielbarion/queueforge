@@ -10,7 +10,9 @@ mod ready;
 mod registry;
 
 pub use actor::{run as run_queue_actor, DEFAULT_MAILBOX_CAPACITY};
-pub use args::{ArgValue, DeadLetterStrategy, OverflowPolicy, QueueArgs, QueueType, DEFAULT_MAX_DEATH_HOPS};
+pub use args::{
+    ArgValue, DeadLetterStrategy, OverflowPolicy, QueueArgs, QueueType, DEFAULT_MAX_DEATH_HOPS,
+};
 pub use cmd::{
     AppHeaderValue, ConsumerDeliveryId, ConsumerSessionId, DlxFailAction, EnqueueCompletion,
     Message, MessageHeaders, QueueCmd, QueueDelivery, QueueMessage, QueueOffset, QueueStats,

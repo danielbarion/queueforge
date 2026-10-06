@@ -7,8 +7,6 @@
 
 /// Static cluster membership, topology replication, and queue forwarding.
 pub mod cluster;
-/// Quorum confirm rule: a majority must hold the body in durable storage.
-pub mod quorum_confirm;
 /// Per-connection AMQP 0-9-1 state machine.
 pub mod connection;
 /// Connection and resource limit helpers.
@@ -17,6 +15,8 @@ pub mod limits;
 pub mod listener;
 /// MQTT, STOMP, AMQP 1.0, and stream listeners.
 pub mod protocols;
+/// Quorum confirm rule: a majority must hold the body in durable storage.
+pub mod quorum_confirm;
 /// Graceful drain: connection tracker and shutdown signal.
 pub mod shutdown;
 /// rustls server config for AMQPS / HTTPS.

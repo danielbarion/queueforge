@@ -72,7 +72,7 @@ struct FsyncWaiter {
 
 struct QueueState {
     key: QueueKey,
-    /// Ready set: FIFO or multi-lane priority (`Ready::Fifo` vs `Ready::Priority`).
+    /// Ready set: classic deque, quorum index, or priority lanes.
     ready: Ready,
     /// Approximate ready payload bytes (body only).
     ready_bytes: u64,
@@ -119,10 +119,16 @@ struct QueueState {
     /// Ack or enqueue needs fsync before the next command is fully durable.
     /// The actor loop runs the syscall off the runtime.
     pending_fsync: bool,
+    /// The previous confirm was alone through its fsync. The next single waiter
+    /// skips the 1 ms quiet window. A second command already queued clears it.
+    immediate_lone: bool,
     /// Notify registry when `x-expires` fires.
     expired_tx: Option<mpsc::UnboundedSender<QueueKey>>,
     /// Self-command channel for async DLX completions (unbounded; avoids mailbox deadlock).
     internal_tx: mpsc::UnboundedSender<QueueCmd>,
+    /// Ready and unacked gauges. Created on the first update so a burst does not
+    /// rebuild label strings per message.
+    depth_gauges: Option<DepthGauges>,
 }
 
 mod dead_letter;
@@ -150,6 +156,30 @@ impl Drop for MemoryGuard {
         if residual > 0 {
             self.memory.sub(residual);
         }
+    }
+}
+
+/// Prometheus handles for this queue. Label strings are allocated once.
+struct DepthGauges {
+    ready: metrics::Gauge,
+    unacked: metrics::Gauge,
+    rabbit_ready: metrics::Gauge,
+    rabbit_unacked: metrics::Gauge,
+    rabbit_total: metrics::Gauge,
+    rabbit_consumers: metrics::Gauge,
+}
+
+/// Take one command already sitting in a mailbox, external first.
+fn take_ready_cmd(
+    rx: &mut mpsc::Receiver<QueueCmd>,
+    internal_rx: &mut mpsc::UnboundedReceiver<QueueCmd>,
+) -> Option<QueueCmd> {
+    match rx.try_recv() {
+        Ok(cmd) => Some(cmd),
+        Err(_) => match internal_rx.try_recv() {
+            Ok(cmd) => Some(cmd),
+            Err(_) => None,
+        },
     }
 }
 
@@ -194,6 +224,8 @@ pub async fn run(
     } else {
         None
     };
+    // The bool is true when this sync took the lone waiter and completed it
+    // from the blocking thread. Batch syncs leave it false.
     let mut interval_fsync: Option<(
         std::time::Instant,
         tokio::task::JoinHandle<(
@@ -201,7 +233,22 @@ pub async fn run(
             Result<QueueOffset, String>,
             Option<String>,
         )>,
+        bool,
     )> = None;
+    // The select below prefers the mailbox over the timer. A publisher that
+    // keeps one command queued would otherwise never reach the interval arm,
+    // so a full window and an elapsed interval start the sync before select.
+    let mut last_group_commit = tokio::time::Instant::now();
+    // Set after an interval sync. A deep confirm window then flushes on its own
+    // clock instead of waiting for the next tick.
+    let mut follow_up = false;
+    // Last persistent enqueue. The first lone waiter syncs once this is 1 ms
+    // old. After that confirm stayed alone, the next one syncs immediately.
+    let mut last_enqueue_at: Option<Instant> = None;
+    // A command pulled out of the mailbox so a lone flush does not run ahead of it.
+    let mut held: Option<QueueCmd> = None;
+    // A lone fsync overlapped a deep burst. Cover the remainder on the next pass.
+    let mut flush_remainder = false;
 
     loop {
         // Expire any already-due messages before sleeping.
@@ -218,54 +265,149 @@ pub async fn run(
             state.args.expires_ms = None;
         }
 
-        let deadline = state.next_deadline();
-
-        let cmd = tokio::select! {
-            biased;
-            // The in-flight fsync join is first. A ready mailbox must not park
-            // the log forever; a confirm still returns while the sync blocks.
-            joined = async {
-                if let Some((_, handle)) = interval_fsync.as_mut() {
-                    (&mut *handle).await
-                } else {
-                    std::future::pending().await
-                }
-            }, if interval_fsync.is_some() => {
-                if let Some((started, _)) = interval_fsync.take() {
-                    state.finish_interval_fsync(joined, started);
-                }
-                // Deferred appends landed after the interval fsync. Sync them
-                // before the next command, so a quorum flush cannot confirm early.
-                if state.pending_fsync {
-                    let _ = state.fsync_now().await;
-                }
-                continue;
-            }
-            // Prefer external cmds, but always drain internal DLX completions.
-            cmd = rx.recv() => cmd,
-            cmd = internal_rx.recv() => cmd,
-            _ = async {
-                if let Some(d) = deadline {
-                    tokio::time::sleep_until(d).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if deadline.is_some() => {
-                continue;
-            }
-            _ = async {
-                if let Some(interval) = interval.as_mut() {
-                    interval.tick().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if use_timer && interval_fsync.is_none() => {
-                if state.needs_group_commit_flush() {
-                    if let Some(handle) = state.begin_interval_fsync() {
-                        interval_fsync = Some((std::time::Instant::now(), handle));
+        // 128 waiters share one fsync. The interval still fires while the mailbox
+        // stays full, so a deferred append is not stuck behind a command flood.
+        // A lone publish and a paused burst wait for the coalesce arm: that arm
+        // runs only when the mailbox was empty. Pulling commands aside livelocks
+        // against a flooded mailbox and never joins the in-flight fsync.
+        if use_timer && interval_fsync.is_none() && state.needs_group_commit_flush() {
+            let due = last_group_commit.elapsed() >= policy.interval;
+            let waiting = state.fsync_waiters.len();
+            if due || waiting >= 128 || flush_remainder {
+                flush_remainder = false;
+                if let Some(handle) = state.begin_interval_fsync() {
+                    last_group_commit = tokio::time::Instant::now();
+                    if let Some(interval) = interval.as_mut() {
+                        interval.reset();
                     }
+                    interval_fsync = Some((std::time::Instant::now(), handle, false));
                 }
-                continue;
+            }
+        }
+
+        let from_held = held.take();
+        let cmd = if let Some(cmd) = from_held {
+            Some(cmd)
+        } else {
+            let deadline = state.next_deadline();
+            let waiting_now = state.fsync_waiters.len();
+            let coalesce = waiting_now == 1 || (follow_up && state.pipeline_follow_up_ready());
+            let coalesce_deadline = if use_timer && interval_fsync.is_none() && coalesce {
+                if waiting_now == 1 && state.immediate_lone {
+                    Some(Instant::now())
+                } else {
+                    last_enqueue_at.map(|t| t + std::time::Duration::from_millis(1))
+                }
+            } else {
+                None
+            };
+
+            tokio::select! {
+                biased;
+                // The in-flight fsync join is first. A ready mailbox must not park
+                // the log forever; a confirm still returns while the sync blocks.
+                joined = async {
+                    if let Some((_, handle, _)) = interval_fsync.as_mut() {
+                        (&mut *handle).await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if interval_fsync.is_some() => {
+                    let mut lone_flush = false;
+                    if let Some((started, _, lone)) = interval_fsync.take() {
+                        lone_flush = lone;
+                        state.finish_interval_fsync(joined, started);
+                    }
+                    // Deferred appends landed after the interval fsync. Sync them
+                    // before the next command, so a quorum flush cannot confirm early.
+                    if state.pending_fsync {
+                        let _ = state.fsync_now().await;
+                    }
+                    follow_up = true;
+                    let alone = state.fsync_waiters.is_empty() && state.deferred_appends.is_empty();
+                    state.immediate_lone = lone_flush && alone;
+                    // One message of a 96-burst rode this fsync. The rest are
+                    // still short of the follow-up mark and must not wait out
+                    // the interval.
+                    if lone_flush && state.fsync_waiters.len() >= QueueState::LONE_BURST_REMAINDER
+                    {
+                        flush_remainder = true;
+                    }
+                    continue;
+                }
+                // Prefer external cmds, but always drain internal DLX completions.
+                cmd = rx.recv() => cmd,
+                cmd = internal_rx.recv() => cmd,
+                _ = async {
+                    if let Some(d) = deadline {
+                        tokio::time::sleep_until(d).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if deadline.is_some() => {
+                    continue;
+                }
+                // Mailbox stayed empty. The first lone waiter waits 1 ms so a
+                // burst can share the fsync. A learned lone waiter does not.
+                // Yield before deciding: a ready arm that continues without
+                // awaiting livelocks the current-thread tests.
+                _ = async {
+                    if let Some(t) = coalesce_deadline {
+                        tokio::time::sleep_until(t).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if coalesce_deadline.is_some() && interval_fsync.is_none() => {
+                    tokio::task::yield_now().await;
+                    if let Some(cmd) = take_ready_cmd(&mut rx, &mut internal_rx) {
+                        state.immediate_lone = false;
+                        held = Some(cmd);
+                        continue;
+                    }
+                    let quiet = last_enqueue_at
+                        .map(|t| t.elapsed() >= std::time::Duration::from_millis(1))
+                        .unwrap_or(false);
+                    let waiting = state.fsync_waiters.len();
+                    let learned = waiting == 1 && state.immediate_lone;
+                    let first_lone = waiting == 1 && quiet;
+                    let paused_burst = follow_up && state.pipeline_follow_up_ready() && quiet;
+                    if state.needs_group_commit_flush() && (learned || first_lone) {
+                        if let Some(handle) = state.begin_lone_fsync() {
+                            last_group_commit = tokio::time::Instant::now();
+                            if let Some(interval) = interval.as_mut() {
+                                interval.reset();
+                            }
+                            interval_fsync = Some((std::time::Instant::now(), handle, true));
+                        } else {
+                            // No log to park. A zero deadline would spin this arm.
+                            state.immediate_lone = false;
+                        }
+                    } else if paused_burst && state.needs_group_commit_flush() {
+                        if let Some(handle) = state.begin_interval_fsync() {
+                            last_group_commit = tokio::time::Instant::now();
+                            if let Some(interval) = interval.as_mut() {
+                                interval.reset();
+                            }
+                            interval_fsync = Some((std::time::Instant::now(), handle, false));
+                        }
+                    }
+                    continue;
+                }
+                _ = async {
+                    if let Some(interval) = interval.as_mut() {
+                        interval.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if use_timer && interval_fsync.is_none() => {
+                    if state.needs_group_commit_flush() {
+                        if let Some(handle) = state.begin_interval_fsync() {
+                            last_group_commit = tokio::time::Instant::now();
+                            interval_fsync = Some((std::time::Instant::now(), handle, false));
+                        }
+                    }
+                    continue;
+                }
             }
         };
 
@@ -275,8 +417,30 @@ pub async fn run(
 
         match cmd {
             QueueCmd::Enqueue { msg, reply } => {
+                if msg.persistent {
+                    last_enqueue_at = Some(Instant::now());
+                }
                 let res = state.enqueue(msg);
                 let _ = reply.send(res);
+                // Steady-state lone confirm: fsync as soon as the append is in,
+                // unless the next command is already queued. That command is a
+                // pipeline and has to share the batch.
+                if state.immediate_lone
+                    && use_timer
+                    && interval_fsync.is_none()
+                    && state.fsync_waiters.len() == 1
+                {
+                    if let Some(cmd) = take_ready_cmd(&mut rx, &mut internal_rx) {
+                        state.immediate_lone = false;
+                        held = Some(cmd);
+                    } else if let Some(handle) = state.begin_lone_fsync() {
+                        last_group_commit = tokio::time::Instant::now();
+                        if let Some(interval) = interval.as_mut() {
+                            interval.reset();
+                        }
+                        interval_fsync = Some((std::time::Instant::now(), handle, true));
+                    }
+                }
             }
             QueueCmd::FlushDurable { offset, reply } => {
                 if state.wal.is_none() && !state.wal_parked {
@@ -375,7 +539,7 @@ pub async fn run(
             }
             QueueCmd::Shutdown { reply } => {
                 debug!(vhost = %key.vhost, queue = %key.name, "queue actor shutting down");
-                if let Some((started, handle)) = interval_fsync.take() {
+                if let Some((started, handle, _)) = interval_fsync.take() {
                     let joined = handle.await;
                     state.finish_interval_fsync(joined, started);
                 }

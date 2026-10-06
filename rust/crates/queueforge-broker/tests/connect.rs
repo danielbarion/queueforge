@@ -124,6 +124,71 @@ async fn lapin_bad_credentials_are_rejected() {
     broker.listener.abort();
 }
 
+/// A hash produced by Bun's `hashRabbitPassword` must log in through this broker.
+#[tokio::test]
+async fn lapin_login_accepts_sha256_hash_stored_by_bun() {
+    use queueforge_core::{Permission, User};
+
+    const BUN_HASH: &str = "ECIzRClc/+1u2ev0HwDpqq+CC4ixd405UlwH0cCTvqGs8avG";
+
+    let dir = TempDir::new().expect("tempdir");
+    let store = MetadataStore::open(dir.path()).expect("open store");
+    let auth = AuthService::new(&store);
+    assert!(auth
+        .bootstrap_admin_if_empty(BootstrapMode::DevFallback)
+        .expect("bootstrap"));
+    let admin = store
+        .get_user(DEV_BOOTSTRAP_USER)
+        .expect("get admin")
+        .expect("admin row");
+    assert!(
+        !admin.password_hash.starts_with("$argon2"),
+        "dev bootstrap stored {}",
+        admin.password_hash
+    );
+    assert_eq!(admin.password_hash.len(), 48);
+
+    let imported = User::new("frombun", BUN_HASH, vec![]);
+    let perm = Permission::full_access("frombun", "/");
+    store
+        .create_user_with_permission(&imported, &perm)
+        .expect("import bun hash");
+
+    let store = Arc::new(store);
+    let queues = QueueRegistry::shared(
+        Arc::clone(&store) as Arc<dyn QueueMetaStore>,
+        MemoryTracker::shared(),
+    );
+    let router = Arc::new(store.bootstrap_router().expect("bootstrap router"));
+    let connections = ConnectionTracker::shared();
+    let listener = start_amqp_listener(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        Arc::clone(&queues),
+        router,
+        connections,
+        ConnectionParams::default(),
+    )
+    .await
+    .expect("bind amqp");
+    let port = listener.local_addr.port();
+
+    let options = ConnectionProperties::default()
+        .with_executor(TokioExecutor::current())
+        .with_reactor(TokioReactor);
+    let uri = amqp_url(port, "frombun", "devpassword12");
+    let conn = tokio::time::timeout(Duration::from_secs(10), Connection::connect(&uri, options))
+        .await
+        .expect("connect timed out")
+        .expect("lapin login with bun sha256 hash");
+    assert!(conn.status().connected());
+    let channel = conn.create_channel().await.expect("create_channel");
+    assert!(channel.status().connected());
+    channel.close(200, "bye").await.ok();
+    conn.close(200, "bye").await.ok();
+    listener.abort();
+}
+
 /// Client `heartbeat=0` must disable heartbeats (Issue 1): connection stays up
 /// without the server forcing a close for "missed" heartbeats.
 #[tokio::test]
@@ -1610,9 +1675,13 @@ async fn per_consumer_prefetch_is_not_shared() {
     let broker = start_test_broker().await;
     let conn = connect_test(broker.port).await;
     let ch = conn.create_channel().await.expect("channel");
-    ch.queue_declare("per-c", QueueDeclareOptions::default(), FieldTable::default())
-        .await
-        .expect("declare");
+    ch.queue_declare(
+        "per-c",
+        QueueDeclareOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .expect("declare");
     ch.basic_qos(1, BasicQosOptions { global: false })
         .await
         .expect("qos");
@@ -1904,7 +1973,10 @@ async fn failed_exclusive_consume_does_not_keep_global_credit() {
         .await
         .expect("stats");
     let stats = rx.await.expect("stats reply");
-    assert_eq!(stats.consumer_count, 1, "holder must be registered, {stats:?}");
+    assert_eq!(
+        stats.consumer_count, 1,
+        "holder must be registered, {stats:?}"
+    );
 
     let rejected = failed
         .basic_consume(
@@ -1983,12 +2055,20 @@ async fn headers_exchange_and_alternate_exchange() {
     )
     .await
     .expect("headers exchange");
-    ch.queue_declare("all-q", QueueDeclareOptions::default(), FieldTable::default())
-        .await
-        .expect("all-q");
-    ch.queue_declare("any-q", QueueDeclareOptions::default(), FieldTable::default())
-        .await
-        .expect("any-q");
+    ch.queue_declare(
+        "all-q",
+        QueueDeclareOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .expect("all-q");
+    ch.queue_declare(
+        "any-q",
+        QueueDeclareOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .expect("any-q");
 
     let mut all_args = FieldTable::default();
     all_args.insert(
@@ -2022,9 +2102,15 @@ async fn headers_exchange_and_alternate_exchange() {
         ShortString::from("format"),
         AMQPValue::LongString("json".into()),
     );
-    ch.queue_bind("any-q", "headers-ex", "", QueueBindOptions::default(), any_args)
-        .await
-        .expect("bind any");
+    ch.queue_bind(
+        "any-q",
+        "headers-ex",
+        "",
+        QueueBindOptions::default(),
+        any_args,
+    )
+    .await
+    .expect("bind any");
 
     let mut all_consumer = ch
         .basic_consume(
@@ -2096,7 +2182,10 @@ async fn headers_exchange_and_alternate_exchange() {
     .await
     .ok();
     let partial_all = tokio::time::timeout(Duration::from_millis(300), all_consumer.next()).await;
-    assert!(partial_all.is_err(), "x-match=all must reject a partial header set");
+    assert!(
+        partial_all.is_err(),
+        "x-match=all must reject a partial header set"
+    );
     let partial_any = tokio::time::timeout(Duration::from_millis(300), any_consumer.next()).await;
     assert!(
         partial_any.is_err(),
@@ -2124,9 +2213,13 @@ async fn headers_exchange_and_alternate_exchange() {
     )
     .await
     .expect("alt");
-    ch.queue_declare("alt-q", QueueDeclareOptions::default(), FieldTable::default())
-        .await
-        .expect("alt-q");
+    ch.queue_declare(
+        "alt-q",
+        QueueDeclareOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .expect("alt-q");
     ch.queue_bind(
         "alt-q",
         "alt-ex",
@@ -2223,7 +2316,10 @@ async fn headers_exchange_and_alternate_exchange() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(returned, "a cycled alternate-exchange must basic.return the body");
+    assert!(
+        returned,
+        "a cycled alternate-exchange must basic.return the body"
+    );
     let parked = ch
         .queue_declare(
             "cycle-q",
@@ -2251,9 +2347,13 @@ async fn tx_commit_is_visible_and_rollback_is_not() {
     let broker = start_test_broker().await;
     let conn = connect_test(broker.port).await;
     let ch = conn.create_channel().await.expect("channel");
-    ch.queue_declare("tx-q", QueueDeclareOptions::default(), FieldTable::default())
-        .await
-        .expect("declare");
+    ch.queue_declare(
+        "tx-q",
+        QueueDeclareOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .expect("declare");
     let mut consumer = ch
         .basic_consume(
             "tx-q",

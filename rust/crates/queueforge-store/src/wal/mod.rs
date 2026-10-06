@@ -15,16 +15,20 @@ mod codec;
 mod meta;
 mod path;
 
-pub use codec::{decode_records, encode_enqueue_record, RecordType, WAL_MAGIC, WAL_VERSION};
+pub use codec::{
+    decode_records, encode_ack_record, encode_enqueue_record, RecordType, WAL_MAGIC, WAL_VERSION,
+};
 pub use meta::{QueueMetaFile, META_FILE_NAME};
 pub use path::{encode_name, queue_dir, segment_path};
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use queueforge_core::{
     DurableLogFactory, DurableQueueLog, Error as CoreError, Message, OpenedDurableLog,
@@ -36,6 +40,20 @@ use crate::error::{Result, StoreError};
 
 /// Default max segment size when not configured (128 MiB).
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 134_217_728;
+
+/// Bytes to gather before one `write`. `fsync` flushes a short tail first.
+const WAL_WRITE_BATCH: usize = 32 * 1024;
+
+/// File header for a segment whose tail is preallocated. Records start after it.
+const PREAMBLE_LEN: u64 = 16;
+const PREAMBLE_MAGIC: &[u8; 4] = b"VLHP";
+
+/// How far ahead of the logical end the file is materialized. Overwriting
+/// those blocks keeps `fdatasync` off the allocating path.
+const ALLOC_CHUNK: u64 = 4 * 1024 * 1024;
+
+/// Start the next chunk once less than this much allocated space remains.
+const EXTEND_AHEAD: u64 = 1024 * 1024;
 
 /// Per-queue segmented WAL.
 pub struct QueueWal {
@@ -50,15 +68,252 @@ pub struct QueueWal {
     durable_offset: u64,
     /// Pending acks not yet contiguous with watermark.
     pending_acks: std::collections::BTreeSet<u64>,
-    /// `queue-meta.json` has unpersisted watermark / next_offset changes.
+    /// Watermark or next offset changed since the last group commit.
+    ///
+    /// [`Self::fsync`] clears this after the segment sync. Recovery reads the
+    /// watermark from that segment, so the flag does not mean the json sidecar
+    /// was rewritten.
     meta_dirty: bool,
 }
 
 struct ActiveSegment {
     id: u64,
     file: File,
+    /// End of valid bytes, including bytes still sitting in `buf`.
+    /// Preamble segments start at [`PREAMBLE_LEN`].
     len: u64,
+    /// Bytes that are already materialized. Appends overwrite this region.
+    allocated: Arc<AtomicU64>,
+    extending: Arc<AtomicBool>,
     max_offset: u64,
+    buf: Vec<u8>,
+    segment_max: u64,
+    preamble: bool,
+}
+
+fn write_all_at(file: &File, mut buf: &[u8], mut at: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match file.write_at(buf, at) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "wal segment write",
+                ))
+            }
+            Ok(n) => {
+                buf = &buf[n..];
+                at += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Write zeros over `[from, to)` and `fdatasync` so later overwrites do not allocate.
+fn materialize_range(file: &File, from: u64, to: u64) -> io::Result<()> {
+    if to <= from {
+        return Ok(());
+    }
+    let zeros = vec![0u8; 64 * 1024];
+    let mut at = from;
+    while at < to {
+        let n = ((to - at) as usize).min(zeros.len());
+        write_all_at(file, &zeros[..n], at)?;
+        at += n as u64;
+    }
+    file.sync_data()?;
+    Ok(())
+}
+
+fn write_preamble(file: &File, logical_len: u64) -> io::Result<()> {
+    let mut hdr = [0u8; PREAMBLE_LEN as usize];
+    hdr[0..4].copy_from_slice(PREAMBLE_MAGIC);
+    hdr[4..8].copy_from_slice(&1u32.to_le_bytes());
+    hdr[8..16].copy_from_slice(&logical_len.to_le_bytes());
+    write_all_at(file, &hdr, 0)
+}
+
+/// Logical end recorded in a preallocated segment, when the file has that header.
+fn read_preamble_len(file: &File) -> io::Result<Option<u64>> {
+    let mut hdr = [0u8; PREAMBLE_LEN as usize];
+    let mut filled = 0;
+    while filled < hdr.len() {
+        match file.read_at(&mut hdr[filled..], filled as u64) {
+            Ok(0) => return Ok(None),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if &hdr[0..4] != PREAMBLE_MAGIC {
+        return Ok(None);
+    }
+    let logical = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
+    Ok(Some(logical.max(PREAMBLE_LEN)))
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) -> i32;
+}
+
+/// Sync the logical prefix the confirm is waiting on.
+///
+/// `fdatasync` writes every dirty page of this file. While a background extend
+/// is filling the tail, sync only the logical prefix so that extend does not
+/// join the confirm. With no extend in flight, one `fdatasync` covers the
+/// records and the header.
+fn sync_logical(file: &File, len: u64, extending: bool) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if extending {
+        const WRITE_AND_WAIT: u32 = 2 | 4;
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
+        let nbytes = i64::try_from(len).unwrap_or(i64::MAX);
+        let rc = unsafe { sync_file_range(fd, 0, nbytes, WRITE_AND_WAIT) };
+        if rc == 0 {
+            return Ok(());
+        }
+    }
+    let _ = (len, extending);
+    file.sync_data()
+}
+
+impl ActiveSegment {
+    fn push_record(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.buf.extend_from_slice(bytes);
+        self.len = self.len.saturating_add(bytes.len() as u64);
+        if self.buf.len() >= WAL_WRITE_BATCH {
+            self.flush_buf()?;
+        }
+        Ok(())
+    }
+
+    /// Push gathered records into the kernel at the logical end. A later `sync_data` covers them.
+    fn flush_buf(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let start = self.len - self.buf.len() as u64;
+        self.reserve(self.len)?;
+        if let Err(e) = write_all_at(&self.file, &self.buf, start) {
+            return Err(e);
+        }
+        self.buf.clear();
+        Ok(())
+    }
+
+    /// Make `[allocated, needed)` safe to overwrite. Waits if a background extend owns the range.
+    fn reserve(&mut self, needed: u64) -> io::Result<()> {
+        for _ in 0..10_000 {
+            let alloc = self.allocated.load(Ordering::Acquire);
+            if needed <= alloc {
+                return Ok(());
+            }
+            if self.try_extend(needed)? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "wal segment preallocation",
+        ))
+    }
+
+    /// Claim the extend. `Ok(true)` means `allocated` now covers `needed`.
+    fn try_extend(&mut self, needed: u64) -> io::Result<bool> {
+        if self
+            .extending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let start = self.allocated.load(Ordering::Acquire);
+        if needed <= start {
+            self.extending.store(false, Ordering::Release);
+            return Ok(true);
+        }
+        let target = extend_target(start, needed, self.segment_max);
+        if target < needed {
+            self.extending.store(false, Ordering::Release);
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "wal segment is full",
+            ));
+        }
+        let result = materialize_range(&self.file, start, target);
+        if result.is_ok() {
+            self.allocated.store(target, Ordering::Release);
+        }
+        self.extending.store(false, Ordering::Release);
+        result.map(|()| true)
+    }
+
+    /// Materialize the next chunk on another thread once the runway is short.
+    /// The confirm path does not wait for it.
+    fn kick_extend(&self) {
+        let alloc = self.allocated.load(Ordering::Acquire);
+        if alloc >= self.segment_max || alloc.saturating_sub(self.len) > EXTEND_AHEAD {
+            return;
+        }
+        if self
+            .extending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let start = self.allocated.load(Ordering::Acquire);
+        let target = extend_target(start, start.saturating_add(1), self.segment_max);
+        if target <= start {
+            self.extending.store(false, Ordering::Release);
+            return;
+        }
+        let file = match self.file.try_clone() {
+            Ok(file) => file,
+            Err(_) => {
+                self.extending.store(false, Ordering::Release);
+                return;
+            }
+        };
+        let allocated = Arc::clone(&self.allocated);
+        let extending = Arc::clone(&self.extending);
+        std::thread::spawn(move || {
+            if materialize_range(&file, start, target).is_ok() {
+                allocated.store(target, Ordering::Release);
+            }
+            extending.store(false, Ordering::Release);
+        });
+    }
+
+    fn wait_extend(&self) {
+        for _ in 0..10_000 {
+            if !self.extending.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+}
+
+impl Drop for ActiveSegment {
+    fn drop(&mut self) {
+        self.wait_extend();
+    }
+}
+
+fn extend_target(start: u64, needed: u64, segment_max: u64) -> u64 {
+    let mut target = start.saturating_add(ALLOC_CHUNK);
+    if target < needed {
+        target = needed;
+    }
+    if segment_max > start {
+        target = target.min(segment_max);
+    }
+    target
 }
 
 struct ClosedSegment {
@@ -146,18 +401,25 @@ impl QueueWal {
         }
 
         for (id, path) in entries {
-            let len = fs::metadata(&path)?.len();
+            let phys = fs::metadata(&path)?.len();
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
+            let preamble_len = read_preamble_len(&file)?;
+            let preamble = preamble_len.is_some();
+            let logical = preamble_len.unwrap_or(phys).min(phys);
             let max_offset = scan_max_offset(&path)?;
             if id == max_id {
-                // Re-open the latest segment for append.
-                let file = OpenOptions::new().read(true).write(true).open(&path)?;
-                let mut file = file;
-                file.seek(SeekFrom::End(0))?;
+                // Re-open the latest segment for append. Logical end is the
+                // preamble length, not the preallocated file size.
                 self.active = Some(ActiveSegment {
                     id,
                     file,
-                    len,
+                    len: logical,
+                    allocated: Arc::new(AtomicU64::new(phys)),
+                    extending: Arc::new(AtomicBool::new(false)),
                     max_offset,
+                    buf: Vec::with_capacity(WAL_WRITE_BATCH),
+                    segment_max: self.segment_max_bytes,
+                    preamble,
                 });
             } else {
                 self.closed.insert(
@@ -165,7 +427,7 @@ impl QueueWal {
                     ClosedSegment {
                         path,
                         max_offset,
-                        len,
+                        len: logical,
                     },
                 );
             }
@@ -190,17 +452,32 @@ impl QueueWal {
             .write(true)
             .truncate(false)
             .open(&path)?;
-        let mut file = file;
-        let len = file.seek(SeekFrom::End(0))?;
+        let file = file;
         // Issue 8: parent-dir fsync after creating a new segment file.
-        if created_new {
+        let (len, allocated, preamble) = if created_new {
+            write_preamble(&file, PREAMBLE_LEN)?;
+            // Materialize the first chunk before any confirm so the fsync
+            // overwrites blocks that already have extents.
+            let target = extend_target(PREAMBLE_LEN, PREAMBLE_LEN + 1, self.segment_max_bytes);
+            materialize_range(&file, PREAMBLE_LEN, target)?;
             sync_dir(&self.dir)?;
-        }
+            (PREAMBLE_LEN, target, true)
+        } else {
+            let phys = file.metadata()?.len();
+            let preamble = read_preamble_len(&file)?.is_some();
+            let logical = read_preamble_len(&file)?.unwrap_or(phys).min(phys);
+            (logical, phys, preamble)
+        };
         self.active = Some(ActiveSegment {
             id,
             file,
             len,
+            allocated: Arc::new(AtomicU64::new(allocated)),
+            extending: Arc::new(AtomicBool::new(false)),
             max_offset: 0,
+            buf: Vec::with_capacity(WAL_WRITE_BATCH),
+            segment_max: self.segment_max_bytes,
+            preamble,
         });
         self.meta.next_segment_id = id.saturating_add(1);
         self.meta_dirty = true;
@@ -215,12 +492,20 @@ impl QueueWal {
         if !need_rotate {
             return Ok(());
         }
+        if let Some(active) = self.active.as_ref() {
+            active.wait_extend();
+        }
         // Close current into closed map.
-        if let Some(a) = self.active.take() {
+        if let Some(mut a) = self.active.take() {
             let path = segment_path(&self.dir, a.id);
             // Ensure data is on disk before rotating metadata.
-            let file = a.file;
-            file.sync_all()?;
+            a.flush_buf()?;
+            // A later confirm can cover these offsets. The header has to
+            // include them or recovery would drop bytes the client was acked.
+            if a.preamble {
+                write_preamble(&a.file, a.len)?;
+            }
+            a.file.sync_all()?;
             self.closed.insert(
                 a.id,
                 ClosedSegment {
@@ -239,7 +524,7 @@ impl QueueWal {
     /// On CRC mismatch mid-file: returns Corrupt error (halt that queue).
     /// Torn tail at EOF: truncate and continue.
     pub fn recover_messages(&mut self) -> Result<RecoveredState> {
-        let ack_wm = self.meta.ack_watermark;
+        let mut ack_wm = self.meta.ack_watermark;
         let mut ready: Vec<(u64, Message)> = Vec::new();
         let mut last_offset = ack_wm;
 
@@ -260,12 +545,20 @@ impl QueueWal {
                     messages,
                     last_valid_offset,
                     truncated_to,
+                    ack_watermark,
                 }) => {
+                    ack_wm = ack_wm.max(ack_watermark);
                     if let Some(trunc) = truncated_to {
-                        // Truncate torn tail.
-                        let f = OpenOptions::new().write(true).open(&path)?;
-                        f.set_len(trunc)?;
-                        f.sync_all()?;
+                        // Drop the torn tail. A preallocated segment keeps its
+                        // blocks and rewinds the header instead of shrinking.
+                        let f = OpenOptions::new().write(true).read(true).open(&path)?;
+                        if read_preamble_len(&f)?.is_some() {
+                            write_preamble(&f, trunc)?;
+                            f.sync_data()?;
+                        } else {
+                            f.set_len(trunc)?;
+                            f.sync_all()?;
+                        }
                         // Update in-memory length.
                         if let Some(a) = self.active.as_mut() {
                             if a.id == id {
@@ -318,9 +611,12 @@ impl QueueWal {
         ready.sort_by_key(|(o, _)| *o);
         // Dedup by offset (keep first).
         ready.dedup_by_key(|(o, _)| *o);
+        ready.retain(|(off, _)| *off > ack_wm);
 
+        last_offset = last_offset.max(ack_wm);
         let next_offset = last_offset.saturating_add(1).max(1);
         self.meta.next_offset = next_offset;
+        self.meta.ack_watermark = ack_wm;
         self.durable_offset = last_offset;
 
         Ok(RecoveredState {
@@ -346,45 +642,75 @@ struct ReplayOutcome {
     messages: Vec<(u64, Message)>,
     last_valid_offset: Option<u64>,
     truncated_to: Option<u64>,
+    ack_watermark: u64,
+}
+
+/// Byte range that holds records. Preallocated padding after the preamble's
+/// logical end is not part of the log.
+fn segment_bounds(path: &Path) -> Result<(u64, u64)> {
+    let file = File::open(path)?;
+    let phys = file.metadata()?.len();
+    match read_preamble_len(&file)? {
+        Some(logical) => {
+            let end = logical.min(phys);
+            Ok((PREAMBLE_LEN.min(end), end))
+        }
+        None => Ok((0, phys)),
+    }
 }
 
 fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
-    let file = File::open(path)?;
-    let meta_len = file.metadata()?.len();
-    let mut reader = BufReader::new(file);
-    let mut pos: u64 = 0;
+    let (start, end) = segment_bounds(path)?;
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file).take(end.saturating_sub(start));
+    let mut pos = start;
     let mut messages = Vec::new();
     let mut last_valid_offset = None;
     let mut truncated_to = None;
+    let mut wal_ack = ack_wm;
+    let preamble = start == PREAMBLE_LEN;
 
     loop {
-        if pos >= meta_len {
+        if pos >= end {
             break;
         }
-        let start = pos;
+        let rec_start = pos;
         match codec::read_record(&mut reader) {
             Ok(Some(rec)) => {
-                pos = start + rec.encoded_len as u64;
-                last_valid_offset = Some(rec.offset.max(last_valid_offset.unwrap_or(0)));
-                if rec.rtype == RecordType::Enqueue && rec.offset > ack_wm {
+                let next = rec_start.saturating_add(rec.encoded_len as u64);
+                if next > end {
+                    truncated_to = Some(rec_start);
+                    break;
+                }
+                pos = next;
+                if rec.rtype == RecordType::AckWatermark {
+                    wal_ack = wal_ack.max(rec.offset);
+                } else if rec.rtype == RecordType::Enqueue {
+                    last_valid_offset = Some(rec.offset.max(last_valid_offset.unwrap_or(0)));
                     if let Some(msg) = rec.message {
                         messages.push((rec.offset, msg));
                     }
                 }
             }
-            Ok(None) => {
-                // Clean EOF.
+            Ok(None) => break,
+            Err(StoreError::WalTornTail { .. }) => {
+                // Truncate to the absolute start of the incomplete record,
+                // never the relative in-record offset.
+                truncated_to = Some(rec_start);
                 break;
             }
-            Err(StoreError::WalTornTail { .. }) => {
-                // Issue 1: truncate to the absolute start of the incomplete
-                // record (`start`), never the relative in-record `at`.
-                truncated_to = Some(start);
+            // A zero page inside a preallocated segment is the logical end,
+            // not a corrupt record. A non-zero bad magic still halts.
+            Err(StoreError::WalCorrupt { reason, .. })
+                if preamble && reason == "bad magic 0x0" =>
+            {
+                truncated_to = Some(rec_start);
                 break;
             }
             Err(e @ StoreError::WalCorrupt { .. }) => {
-                // Issue 5: complete-record CRC / magic / version mismatch must
-                // halt the queue — never demote to torn truncate.
+                // A complete record with a bad CRC, magic, or version halts
+                // the queue. Do not demote that to a torn truncate.
                 let path_s = path.display().to_string();
                 return Err(match e {
                     StoreError::WalCorrupt { reason, .. } => StoreError::WalCorrupt {
@@ -398,16 +724,20 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
         }
     }
 
+    messages.retain(|(off, _)| *off > wal_ack);
     Ok(ReplayOutcome {
         messages,
         last_valid_offset,
         truncated_to,
+        ack_watermark: wal_ack,
     })
 }
 
 fn scan_max_offset(path: &Path) -> Result<u64> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let (start, end) = segment_bounds(path)?;
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file).take(end.saturating_sub(start));
     let mut max = 0u64;
     loop {
         match codec::read_record(&mut reader) {
@@ -450,10 +780,8 @@ impl DurableQueueLog for QueueWal {
             .as_mut()
             .ok_or_else(|| CoreError::Store("no active WAL segment".into()))?;
         active
-            .file
-            .write_all(&bytes)
+            .push_record(&bytes)
             .map_err(|e| CoreError::Store(e.to_string()))?;
-        active.len = active.len.saturating_add(bytes.len() as u64);
         active.max_offset = active.max_offset.max(offset.0);
         if offset.0.saturating_add(1) > self.meta.next_offset {
             self.meta.next_offset = offset.0.saturating_add(1);
@@ -481,20 +809,47 @@ impl DurableQueueLog for QueueWal {
     }
 
     fn fsync(&mut self) -> CoreResult<QueueOffset> {
-        // Sync active + recently written closed segments.
+        // The ack watermark rides in the segment so one sync covers bodies and acks.
+        if self.meta_dirty && self.meta.ack_watermark > 0 {
+            if let Some(active) = self.active.as_mut() {
+                let bytes = encode_ack_record(self.meta.ack_watermark);
+                active
+                    .push_record(&bytes)
+                    .map_err(|e| CoreError::Store(e.to_string()))?;
+            }
+        }
         if let Some(active) = self.active.as_mut() {
             active
-                .file
-                .sync_all()
+                .flush_buf()
+                .map_err(|e| CoreError::Store(format!("segment flush: {e}")))?;
+            if active.preamble {
+                write_preamble(&active.file, active.len)
+                    .map_err(|e| CoreError::Store(format!("segment header: {e}")))?;
+            }
+            // The segment is preallocated. Sync the logical prefix while a
+            // background extend is dirtying the tail; otherwise fdatasync.
+            // The json rename is not on this path.
+            let extending = active.extending.load(Ordering::Acquire);
+            let logical = active.len;
+            sync_logical(&active.file, logical, extending)
                 .map_err(|e| CoreError::Store(format!("segment fsync: {e}")))?;
+            active.kick_extend();
             self.durable_offset = self.durable_offset.max(active.max_offset);
         }
-        // Persist meta after data fsync (invariant 2).
-        let meta_path = self.dir.join(META_FILE_NAME);
-        self.meta
-            .save_sync(&meta_path)
-            .map_err(|e| CoreError::Store(format!("meta fsync: {e}")))?;
-        self.meta_dirty = false;
+        if self.meta_dirty {
+            if self.active.is_some() {
+                // The ack record written above is covered by the segment sync.
+                // Rewriting queue-meta.json here was a rename on every group commit.
+                // scan_segments repairs next_segment_id from the filenames.
+                self.meta_dirty = false;
+            } else {
+                let meta_path = self.dir.join(META_FILE_NAME);
+                self.meta
+                    .save_relaxed(&meta_path)
+                    .map_err(|e| CoreError::Store(format!("meta save: {e}")))?;
+                self.meta_dirty = false;
+            }
+        }
         Ok(QueueOffset(self.durable_offset))
     }
 
@@ -703,33 +1058,45 @@ mod tests {
         assert!(p.ends_with("queues/%2F/q") || p.to_string_lossy().contains("%2F"));
     }
 
-    /// Issue 1: torn tail must truncate at the incomplete record start, not a
-    /// relative in-record offset (which would wipe prior valid records).
+fn logical_len(path: &std::path::Path) -> u64 {
+    let f = std::fs::File::open(path).unwrap();
+    super::read_preamble_len(&f)
+        .unwrap()
+        .expect("preallocated segment")
+}
+
+    /// A torn tail rewinds the logical end and keeps the preallocated file.
     #[test]
     fn torn_tail_preserves_prior_records() {
+        use std::os::unix::fs::FileExt;
         let dir = TempDir::new().unwrap();
         let mut wal = QueueWal::open(dir.path(), "/", "torn", 1024 * 1024).unwrap();
         DurableQueueLog::append_enqueue(&mut wal, QueueOffset(1), &sample(b"one", true)).unwrap();
         DurableQueueLog::append_enqueue(&mut wal, QueueOffset(2), &sample(b"two", true)).unwrap();
         DurableQueueLog::fsync(&mut wal).unwrap();
 
-        // Locate the active segment and append a partial third record.
         let seg_path = {
             let a = wal.active.as_ref().expect("active segment");
             segment_path(&wal.dir, a.id)
         };
-        let full_len = std::fs::metadata(&seg_path).unwrap().len();
         drop(wal);
 
-        // Append garbage partial header (not a full record).
+        let logical = logical_len(&seg_path);
+        let phys = std::fs::metadata(&seg_path).unwrap().len();
+        assert!(phys > logical, "segment should be preallocated");
+
+        // Partial record at the logical end, with the header advanced over it.
         {
-            use std::io::Write;
-            let mut f = OpenOptions::new().append(true).open(&seg_path).unwrap();
-            f.write_all(b"VLRA\x01\x01").unwrap(); // incomplete
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&seg_path)
+                .unwrap();
+            f.write_at(b"VLRA\x01\x01", logical).unwrap();
+            super::write_preamble(&f, logical + 6).unwrap();
             f.sync_all().unwrap();
         }
-        let torn_len = std::fs::metadata(&seg_path).unwrap().len();
-        assert!(torn_len > full_len);
+        assert_eq!(std::fs::metadata(&seg_path).unwrap().len(), phys);
 
         let mut wal2 = QueueWal::open(dir.path(), "/", "torn", 1024 * 1024).unwrap();
         let recovered = wal2.recover_messages().unwrap();
@@ -741,17 +1108,18 @@ mod tests {
         assert_eq!(recovered.messages[0].1.body.as_ref(), b"one");
         assert_eq!(recovered.messages[1].1.body.as_ref(), b"two");
         assert_eq!(recovered.next_offset, 3);
-
-        let after = std::fs::metadata(&seg_path).unwrap().len();
+        assert_eq!(logical_len(&seg_path), logical, "torn tail rewinds the header");
         assert_eq!(
-            after, full_len,
-            "file must be truncated to end of last complete record ({full_len}), got {after}"
+            std::fs::metadata(&seg_path).unwrap().len(),
+            phys,
+            "preallocated file must not shrink"
         );
     }
 
-    /// Issue 5: complete-record CRC mismatch must halt, not truncate.
+    /// A complete record with a bad CRC halts and does not shrink the file.
     #[test]
     fn crc_mismatch_halts_not_truncate() {
+        use std::os::unix::fs::FileExt;
         let dir = TempDir::new().unwrap();
         let mut wal = QueueWal::open(dir.path(), "/", "crc", 1024 * 1024).unwrap();
         DurableQueueLog::append_enqueue(&mut wal, QueueOffset(1), &sample(b"ok", true)).unwrap();
@@ -761,24 +1129,24 @@ mod tests {
             let a = wal.active.as_ref().expect("active");
             segment_path(&wal.dir, a.id)
         };
-        let before_len = std::fs::metadata(&seg_path).unwrap().len();
         drop(wal);
 
-        // Flip the last 4 CRC bytes of the file (complete record, bad CRC).
+        let logical = logical_len(&seg_path);
+        let before_len = std::fs::metadata(&seg_path).unwrap().len();
+        assert!(logical > 4 && before_len > logical);
+
+        // The CRC is the 4 bytes that end at the logical end, not the file end.
         {
-            use std::io::{Read, Seek, SeekFrom, Write};
-            let mut f = OpenOptions::new()
+            let f = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&seg_path)
                 .unwrap();
-            let len = f.metadata().unwrap().len();
-            f.seek(SeekFrom::Start(len - 4)).unwrap();
+            let at = logical - 4;
             let mut crc = [0u8; 4];
-            f.read_exact(&mut crc).unwrap();
+            f.read_at(&mut crc, at).unwrap();
             crc[0] ^= 0xFF;
-            f.seek(SeekFrom::Start(len - 4)).unwrap();
-            f.write_all(&crc).unwrap();
+            f.write_at(&crc, at).unwrap();
             f.sync_all().unwrap();
         }
 
@@ -788,9 +1156,10 @@ mod tests {
             matches!(err, StoreError::WalCorrupt { .. }),
             "expected WalCorrupt, got {err}"
         );
-        let after_len = std::fs::metadata(&seg_path).unwrap().len();
+        assert_eq!(logical_len(&seg_path), logical);
         assert_eq!(
-            after_len, before_len,
+            std::fs::metadata(&seg_path).unwrap().len(),
+            before_len,
             "corrupt segment must not be truncated"
         );
     }
@@ -821,6 +1190,60 @@ mod tests {
         assert_eq!(recovered.ack_watermark, 2);
     }
 
+    #[test]
+    fn ack_watermark_in_the_segment_survives_a_missing_meta_file() {
+        let dir = TempDir::new().unwrap();
+        {
+            let mut wal = QueueWal::open(dir.path(), "/", "ackseg", 1024 * 1024).unwrap();
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(1), &sample(b"m1", true))
+                .unwrap();
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(2), &sample(b"m2", true))
+                .unwrap();
+            DurableQueueLog::acknowledge(&mut wal, QueueOffset(1)).unwrap();
+            DurableQueueLog::acknowledge(&mut wal, QueueOffset(2)).unwrap();
+            DurableQueueLog::fsync(&mut wal).unwrap();
+        }
+        let meta = queue_dir(dir.path(), "/", "ackseg").join(META_FILE_NAME);
+        std::fs::remove_file(&meta).unwrap();
+        let mut wal2 = QueueWal::open(dir.path(), "/", "ackseg", 1024 * 1024).unwrap();
+        let recovered = wal2.recover_messages().unwrap();
+        assert!(
+            recovered.messages.is_empty(),
+            "acked bodies must stay acked when meta json is gone"
+        );
+        assert_eq!(recovered.ack_watermark, 2);
+    }
+
+    /// The group commit syncs the segment ack record and leaves queue-meta.json alone.
+    #[test]
+    fn group_commit_does_not_rewrite_meta_json() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = QueueWal::open(dir.path(), "/", "meta", 1024 * 1024).unwrap();
+        let meta_path = queue_dir(dir.path(), "/", "meta").join(META_FILE_NAME);
+        let before = std::fs::read(&meta_path).unwrap();
+        DurableQueueLog::append_enqueue(&mut wal, QueueOffset(1), &sample(b"m1", true)).unwrap();
+        DurableQueueLog::append_enqueue(&mut wal, QueueOffset(2), &sample(b"m2", true)).unwrap();
+        DurableQueueLog::acknowledge(&mut wal, QueueOffset(1)).unwrap();
+        DurableQueueLog::acknowledge(&mut wal, QueueOffset(2)).unwrap();
+        assert!(DurableQueueLog::meta_dirty(&wal));
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        assert!(!DurableQueueLog::meta_dirty(&wal));
+        let after = std::fs::read(&meta_path).unwrap();
+        assert_eq!(
+            before, after,
+            "group commit must not rewrite queue-meta.json"
+        );
+        drop(wal);
+
+        let mut wal2 = QueueWal::open(dir.path(), "/", "meta", 1024 * 1024).unwrap();
+        let recovered = wal2.recover_messages().unwrap();
+        assert!(
+            recovered.messages.is_empty(),
+            "acked bodies stay acked via the segment record"
+        );
+        assert_eq!(recovered.ack_watermark, 2);
+    }
+
     /// Issue 3: factory open recovers existing segments (not empty next_offset=1).
     #[test]
     fn factory_open_recovers_messages() {
@@ -837,5 +1260,65 @@ mod tests {
         assert_eq!(opened.ready[0].message.body.as_ref(), b"live");
         assert!(opened.ready[0].message.redelivered);
         assert_eq!(opened.next_offset, 2);
+    }
+
+    /// The physical file is longer than the logical log, and a later fsync
+    /// overwrites that tail instead of growing it.
+    #[test]
+    fn preallocated_tail_recovers_and_the_next_fsync_does_not_grow() {
+        let dir = TempDir::new().unwrap();
+        let seg_path = {
+            let mut wal = QueueWal::open(dir.path(), "/", "pre", 1024 * 1024).unwrap();
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(1), &sample(b"body", true))
+                .unwrap();
+            DurableQueueLog::fsync(&mut wal).unwrap();
+            let path = segment_path(&wal.dir, wal.active.as_ref().unwrap().id);
+            drop(wal);
+            path
+        };
+        let phys = std::fs::metadata(&seg_path).unwrap().len();
+        let logical = logical_len(&seg_path);
+        assert!(
+            phys > logical,
+            "phys {phys} should pass the logical end {logical}"
+        );
+
+        {
+            let mut wal = QueueWal::open(dir.path(), "/", "pre", 1024 * 1024).unwrap();
+            let recovered = wal.recover_messages().unwrap();
+            assert_eq!(recovered.messages.len(), 1);
+            assert_eq!(recovered.messages[0].1.body.as_ref(), b"body");
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(2), &sample(b"more", true))
+                .unwrap();
+            DurableQueueLog::fsync(&mut wal).unwrap();
+        }
+        assert_eq!(std::fs::metadata(&seg_path).unwrap().len(), phys);
+        assert!(logical_len(&seg_path) > logical);
+
+        let mut wal = QueueWal::open(dir.path(), "/", "pre", 1024 * 1024).unwrap();
+        let recovered = wal.recover_messages().unwrap();
+        assert_eq!(recovered.messages.len(), 2);
+        assert_eq!(recovered.messages[1].1.body.as_ref(), b"more");
+    }
+
+    /// A segment written before the preamble still replays.
+    #[test]
+    fn legacy_segment_without_preamble_still_recovers() {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let qdir = queue_dir(dir.path(), "/", "old");
+        std::fs::create_dir_all(&qdir).unwrap();
+        let bytes = encode_enqueue_record(1, &sample(b"legacy", true)).unwrap();
+        let seg = segment_path(&qdir, 1);
+        {
+            let mut f = std::fs::File::create(&seg).unwrap();
+            f.write_all(&bytes).unwrap();
+            f.sync_all().unwrap();
+        }
+        let mut wal = QueueWal::open(dir.path(), "/", "old", 1024 * 1024).unwrap();
+        let recovered = wal.recover_messages().unwrap();
+        assert_eq!(recovered.messages.len(), 1);
+        assert_eq!(recovered.messages[0].1.body.as_ref(), b"legacy");
+        assert_eq!(recovered.next_offset, 2);
     }
 }

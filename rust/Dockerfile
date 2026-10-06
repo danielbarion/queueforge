@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /src
 
 # Build deps for native crates (ring, etc.)
@@ -19,7 +19,7 @@ RUN cargo build --release -p queueforge-broker \
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.base.name="debian:bookworm-slim" \
-      queueforge.build="rust:1.85-bookworm"
+      queueforge.build="rust:1.88-bookworm"
 # curl: container healthchecks (management /readyz). ca-certificates + tini: TLS roots / PID 1.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tini curl \

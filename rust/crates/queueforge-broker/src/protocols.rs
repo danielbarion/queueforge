@@ -1,7 +1,7 @@
 //! MQTT 3.1.1, STOMP 1.2, AMQP 1.0, and RabbitMQ stream listeners.
 //!
-//! Each listener accepts one publish and one consume of the same body. Messages
-//! are stored in the queue registry so the AMQP 0-9-1 path sees them too.
+//! Each listener accepts many connections. A publish is stored on a classic queue
+//! and fanned out to every live subscriber on this process.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +33,9 @@ pub async fn push_queue(queues: &QueueRegistry, name: &str, body: &[u8]) -> Resu
             .await
             .map_err(|err| err.to_string())?;
     }
-    let handle = queues.get(&key).ok_or_else(|| format!("queue {name} missing"))?;
+    let handle = queues
+        .get(&key)
+        .ok_or_else(|| format!("queue {name} missing"))?;
     let mut msg = Message::blank();
     msg.routing_key = CompactString::from(name);
     msg.body = Bytes::copy_from_slice(body);
@@ -46,7 +48,9 @@ pub async fn push_queue(queues: &QueueRegistry, name: &str, body: &[u8]) -> Resu
         })
         .await
         .map_err(|_| format!("queue {name} is down"))?;
-    rx.await.map_err(|_| format!("queue {name} dropped the publish"))?.map_err(|err| err.to_string())?;
+    rx.await
+        .map_err(|_| format!("queue {name} dropped the publish"))?
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -59,15 +63,23 @@ pub async fn pull_queue(queues: &QueueRegistry, name: &str) -> Result<Option<Vec
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
         .tx
-        .send(QueueCmd::Get { no_ack: true, reply: tx })
+        .send(QueueCmd::Get {
+            no_ack: true,
+            reply: tx,
+        })
         .await
         .map_err(|_| format!("queue {name} is down"))?;
-    let got = rx.await.map_err(|_| format!("queue {name} dropped the get"))?;
+    let got = rx
+        .await
+        .map_err(|_| format!("queue {name} dropped the get"))?;
     Ok(got.map(|(_, message, _)| message.message.body.to_vec()))
 }
 
 /// Bind `addr` and serve MQTT 3.1.1 until the task is dropped.
-pub fn spawn_mqtt(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> tokio::task::JoinHandle<()> {
+pub fn spawn_mqtt(
+    addr: std::net::SocketAddr,
+    queues: Arc<QueueRegistry>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(listener) = TcpListener::bind(addr).await else {
             warn!(%addr, "mqtt bind failed");
@@ -75,7 +87,9 @@ pub fn spawn_mqtt(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> tok
         };
         let subs = Arc::new(Mutex::new(Vec::<MqttSub>::new()));
         loop {
-            let Ok((socket, _)) = listener.accept().await else { break };
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
             let queues = Arc::clone(&queues);
             let subs = Arc::clone(&subs);
             tokio::spawn(async move {
@@ -88,7 +102,10 @@ pub fn spawn_mqtt(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> tok
 }
 
 /// Bind `addr` and serve STOMP 1.2 until the task is dropped.
-pub fn spawn_stomp(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> tokio::task::JoinHandle<()> {
+pub fn spawn_stomp(
+    addr: std::net::SocketAddr,
+    queues: Arc<QueueRegistry>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(listener) = TcpListener::bind(addr).await else {
             warn!(%addr, "stomp bind failed");
@@ -96,7 +113,9 @@ pub fn spawn_stomp(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> to
         };
         let subs = Arc::new(Mutex::new(Vec::<StompSub>::new()));
         loop {
-            let Ok((socket, _)) = listener.accept().await else { break };
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
             let queues = Arc::clone(&queues);
             let subs = Arc::clone(&subs);
             tokio::spawn(async move {
@@ -108,16 +127,23 @@ pub fn spawn_stomp(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> to
     })
 }
 
-/// Bind `addr` and serve the RabbitMQ stream protocol subset used by one publish and one consume.
-pub fn spawn_stream(addr: std::net::SocketAddr, queues: Arc<QueueRegistry>) -> tokio::task::JoinHandle<()> {
+/// Bind `addr` and serve the RabbitMQ stream commands this broker implements.
+pub fn spawn_stream(
+    addr: std::net::SocketAddr,
+    queues: Arc<QueueRegistry>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(listener) = TcpListener::bind(addr).await else {
             warn!(%addr, "stream bind failed");
             return;
         };
-        let streams = Arc::new(Mutex::new(std::collections::HashMap::<String, Vec<Vec<u8>>>::new()));
+        let streams = Arc::new(Mutex::new(
+            std::collections::HashMap::<String, Vec<Vec<u8>>>::new(),
+        ));
         loop {
-            let Ok((socket, _)) = listener.accept().await else { break };
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
             let queues = Arc::clone(&queues);
             let streams = Arc::clone(&streams);
             tokio::spawn(async move {
@@ -202,7 +228,11 @@ fn mqtt_fanout(subs: &Mutex<Vec<MqttSub>>, topic: &str, payload: &[u8]) {
     }
 }
 
-async fn mqtt_conn(mut socket: TcpStream, queues: Arc<QueueRegistry>, subs: Arc<Mutex<Vec<MqttSub>>>) -> Result<(), String> {
+async fn mqtt_conn(
+    mut socket: TcpStream,
+    queues: Arc<QueueRegistry>,
+    subs: Arc<Mutex<Vec<MqttSub>>>,
+) -> Result<(), String> {
     let mut buf = Vec::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
     loop {
@@ -242,7 +272,10 @@ async fn mqtt_handle(
     tx: &mpsc::UnboundedSender<(String, Vec<u8>)>,
 ) -> Result<(), String> {
     match kind {
-        1 => socket.write_all(&[0x20, 0x02, 0x00, 0x00]).await.map_err(|e| e.to_string())?,
+        1 => socket
+            .write_all(&[0x20, 0x02, 0x00, 0x00])
+            .await
+            .map_err(|e| e.to_string())?,
         3 => {
             let (topic, payload_at) = mqtt_str(body, 0).ok_or_else(|| "mqtt topic".to_string())?;
             let payload = body[payload_at..].to_vec();
@@ -262,7 +295,10 @@ async fn mqtt_handle(
                 at = next + 1;
                 {
                     let mut guard = subs.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.push(MqttSub { filter: filter.clone(), tx: tx.clone() });
+                    guard.push(MqttSub {
+                        filter: filter.clone(),
+                        tx: tx.clone(),
+                    });
                 }
                 last = Some(filter);
                 codes.push(0);
@@ -274,11 +310,42 @@ async fn mqtt_handle(
             socket.write_all(&out).await.map_err(|e| e.to_string())?;
             if let Some(filter) = last {
                 if let Some(queued) = pull_queue(queues, &filter).await? {
-                    socket.write_all(&mqtt_publish(&filter, &queued)).await.map_err(|e| e.to_string())?;
+                    socket
+                        .write_all(&mqtt_publish(&filter, &queued))
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
-        12 => socket.write_all(&[0xd0, 0x00]).await.map_err(|e| e.to_string())?,
+        10 => {
+            if body.len() >= 2 {
+                let id0 = body[0];
+                let id1 = body[1];
+                let mut at = 2;
+                let mut guard = subs.lock().unwrap_or_else(|e| e.into_inner());
+                while at < body.len() {
+                    let Some((filter, next)) = mqtt_str(body, at) else {
+                        break;
+                    };
+                    guard.retain(|sub| !(sub.filter == filter && sub.tx.same_channel(tx)));
+                    at = next;
+                }
+                let _ = (id0, id1);
+            }
+            socket
+                .write_all(&[
+                    0xb0,
+                    0x02,
+                    body.first().copied().unwrap_or(0),
+                    body.get(1).copied().unwrap_or(0),
+                ])
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        12 => socket
+            .write_all(&[0xd0, 0x00])
+            .await
+            .map_err(|e| e.to_string())?,
         14 => return Err("disconnect".into()),
         _ => {}
     }
@@ -308,7 +375,9 @@ fn mqtt_match(filter: &str, topic: &str) -> bool {
 }
 
 fn stomp_queue(dest: &str) -> String {
-    dest.trim_start_matches("/queue/").trim_start_matches("/topic/").to_string()
+    dest.trim_start_matches("/queue/")
+        .trim_start_matches("/topic/")
+        .to_string()
 }
 
 fn stomp_fanout(subs: &Mutex<Vec<StompSub>>, dest: &str, body: &str) {
@@ -326,7 +395,11 @@ fn stomp_fanout(subs: &Mutex<Vec<StompSub>>, dest: &str, body: &str) {
     }
 }
 
-async fn stomp_conn(mut socket: TcpStream, queues: Arc<QueueRegistry>, subs: Arc<Mutex<Vec<StompSub>>>) -> Result<(), String> {
+async fn stomp_conn(
+    mut socket: TcpStream,
+    queues: Arc<QueueRegistry>,
+    subs: Arc<Mutex<Vec<StompSub>>>,
+) -> Result<(), String> {
     let mut buf = Vec::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     loop {
@@ -375,10 +448,19 @@ async fn stomp_handle(
             headers.push((k.to_string(), v.to_string()));
         }
     }
-    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap_or_default();
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
     match cmd {
         "CONNECT" | "STOMP" => {
-            socket.write_all(b"CONNECTED\nversion:1.2\nheart-beat:0,0\n\n\0").await.map_err(|e| e.to_string())?;
+            socket
+                .write_all(b"CONNECTED\nversion:1.2\nheart-beat:0,0\n\n\0")
+                .await
+                .map_err(|e| e.to_string())?;
         }
         "SEND" => {
             let dest = header("destination");
@@ -397,14 +479,29 @@ async fn stomp_handle(
             let dest = header("destination");
             {
                 let mut guard = subs.lock().unwrap_or_else(|e| e.into_inner());
-                guard.push(StompSub { destination: dest.clone(), id: id.clone(), tx: tx.clone() });
+                guard.push(StompSub {
+                    destination: dest.clone(),
+                    id: id.clone(),
+                    tx: tx.clone(),
+                });
             }
             let queue = stomp_queue(&dest);
             if let Some(queued) = pull_queue(queues, &queue).await? {
                 let text = String::from_utf8_lossy(&queued);
-                let msg = format!("MESSAGE\nsubscription:{id}\ndestination:{dest}\ncontent-length:{}\n\n{text}\0", text.len());
-                socket.write_all(msg.as_bytes()).await.map_err(|e| e.to_string())?;
+                let msg = format!(
+                    "MESSAGE\nsubscription:{id}\ndestination:{dest}\ncontent-length:{}\n\n{text}\0",
+                    text.len()
+                );
+                socket
+                    .write_all(msg.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
+        }
+        "UNSUBSCRIBE" => {
+            let id = header("id");
+            let mut guard = subs.lock().unwrap_or_else(|e| e.into_inner());
+            guard.retain(|sub| !(sub.id == id && sub.tx.same_channel(tx)));
         }
         "DISCONNECT" => return Err("disconnect".into()),
         _ => {}
@@ -436,41 +533,74 @@ async fn stream_conn(
         }
         let key = u16::from_be_bytes([frame[0], frame[1]]);
         let rest = &frame[4..];
-        let corr = if rest.len() >= 4 { u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) } else { 0 };
+        let corr = if rest.len() >= 4 {
+            u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]])
+        } else {
+            0
+        };
         match key {
             0x0011 => {
                 let body = stream_string_table(&[("product", "RabbitMQ"), ("version", "4.3.6")]);
-                socket.write_all(&stream_response(0x8011, corr, &body)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8011, corr, &body))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0012 => {
                 let mut body = Vec::new();
                 body.extend_from_slice(&1u32.to_be_bytes());
                 body.extend_from_slice(&stream_string("PLAIN"));
-                socket.write_all(&stream_response(0x8012, corr, &body)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8012, corr, &body))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0013 => {
-                socket.write_all(&stream_response(0x8013, corr, &[])).await.map_err(|e| e.to_string())?;
-                socket.write_all(&stream_tune()).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8013, corr, &[]))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_tune())
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0014 => {}
             0x0015 => {
-                socket.write_all(&stream_response(0x8015, corr, &stream_map_empty())).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8015, corr, &stream_map_empty()))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x000d => {
                 let name = stream_read_string(&rest[4..]).unwrap_or_else(|| "stream".into());
-                streams.lock().unwrap_or_else(|e| e.into_inner()).entry(name).or_default();
-                socket.write_all(&stream_response(0x800d, corr, &[])).await.map_err(|e| e.to_string())?;
+                streams
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(name)
+                    .or_default();
+                socket
+                    .write_all(&stream_response(0x800d, corr, &[]))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0001 => {
                 let publisher = rest.get(4).copied().unwrap_or(1);
                 let after_id = stream_skip_string(&rest[5..]).unwrap_or(0);
-                let stream = stream_read_string(&rest[5 + after_id..]).unwrap_or_else(|| "stream".into());
+                let stream =
+                    stream_read_string(&rest[5 + after_id..]).unwrap_or_else(|| "stream".into());
                 publishers.insert(publisher, stream);
-                socket.write_all(&stream_response(0x8001, corr, &[])).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8001, corr, &[]))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0002 => {
                 let publisher = rest.first().copied().unwrap_or(1);
-                let stream = publishers.get(&publisher).cloned().unwrap_or_else(|| "stream".into());
+                let stream = publishers
+                    .get(&publisher)
+                    .cloned()
+                    .unwrap_or_else(|| "stream".into());
                 let mut ids = Vec::new();
                 if rest.len() >= 5 {
                     let count = u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
@@ -484,7 +614,12 @@ async fn stream_conn(
                         if at + 4 > rest.len() {
                             break;
                         }
-                        let n = i32::from_be_bytes([rest[at], rest[at + 1], rest[at + 2], rest[at + 3]]);
+                        let n = i32::from_be_bytes([
+                            rest[at],
+                            rest[at + 1],
+                            rest[at + 2],
+                            rest[at + 3],
+                        ]);
                         at += 4;
                         if n < 0 || at + n as usize > rest.len() {
                             break;
@@ -493,29 +628,54 @@ async fn stream_conn(
                         let payload = rest[at..at + n as usize].to_vec();
                         at += n as usize;
                         ids.push(id);
-                        streams.lock().unwrap_or_else(|e| e.into_inner()).entry(stream.clone()).or_default().push(raw);
+                        streams
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .entry(stream.clone())
+                            .or_default()
+                            .push(raw);
                         push_queue(&queues, &stream, &payload).await.ok();
                     }
                 }
-                socket.write_all(&stream_confirm(publisher, &ids)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_confirm(publisher, &ids))
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             0x0007 => {
                 let sub_id = rest.get(4).copied().unwrap_or(1);
                 let stream = stream_read_string(&rest[5..]).unwrap_or_else(|| "stream".into());
-                let queued = streams.lock().unwrap_or_else(|e| e.into_inner()).get(&stream).cloned().unwrap_or_default();
-                socket.write_all(&stream_response(0x8007, corr, &[])).await.map_err(|e| e.to_string())?;
+                let queued = streams
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&stream)
+                    .cloned()
+                    .unwrap_or_default();
+                socket
+                    .write_all(&stream_response(0x8007, corr, &[]))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if !queued.is_empty() {
-                    socket.write_all(&stream_deliver(sub_id, &queued)).await.map_err(|e| e.to_string())?;
+                    socket
+                        .write_all(&stream_deliver(sub_id, &queued))
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             }
             0x0016 => {
-                socket.write_all(&stream_response(0x8016, corr, &[])).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&stream_response(0x8016, corr, &[]))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 return Ok(());
             }
             0x0017 => {}
             _ => {
                 if key & 0x8000 == 0 {
-                    socket.write_all(&stream_response(key | 0x8000, corr, &[])).await.map_err(|e| e.to_string())?;
+                    socket
+                        .write_all(&stream_response(key | 0x8000, corr, &[]))
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -629,12 +789,21 @@ pub async fn amqp10_conn(mut socket: TcpStream, queues: Arc<QueueRegistry>) -> R
     }
     if buf.starts_with(b"AMQP\x03\x01\x00\x00") {
         buf.drain(..8);
-        socket.write_all(b"AMQP\x03\x01\x00\x00").await.map_err(|e| e.to_string())?;
-        socket.write_all(&amqp_sasl_mechanisms()).await.map_err(|e| e.to_string())?;
+        socket
+            .write_all(b"AMQP\x03\x01\x00\x00")
+            .await
+            .map_err(|e| e.to_string())?;
+        socket
+            .write_all(&amqp_sasl_mechanisms())
+            .await
+            .map_err(|e| e.to_string())?;
         loop {
             if let Some(frame) = amqp_take_frame(&mut buf) {
                 if frame.windows(3).any(|w| w == [0x00, 0x53, 0x41]) {
-                    socket.write_all(&amqp_sasl_outcome()).await.map_err(|e| e.to_string())?;
+                    socket
+                        .write_all(&amqp_sasl_outcome())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     break;
                 }
             } else {
@@ -648,27 +817,44 @@ pub async fn amqp10_conn(mut socket: TcpStream, queues: Arc<QueueRegistry>) -> R
     } else if buf.starts_with(b"AMQP\x00\x01\x00\x00") {
         buf.drain(..8);
     }
-    socket.write_all(b"AMQP\x00\x01\x00\x00").await.map_err(|e| e.to_string())?;
+    socket
+        .write_all(b"AMQP\x00\x01\x00\x00")
+        .await
+        .map_err(|e| e.to_string())?;
     let mut sender: Option<String> = None;
     let mut receiver: Option<String> = None;
     loop {
         while let Some(frame) = amqp_take_frame(&mut buf) {
             let body = &frame[8..];
             if body.windows(3).any(|w| w == [0x00, 0x53, 0x10]) {
-                socket.write_all(&amqp_performative(0x10)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&amqp_performative(0x10))
+                    .await
+                    .map_err(|e| e.to_string())?;
             } else if body.windows(3).any(|w| w == [0x00, 0x53, 0x11]) {
-                socket.write_all(&amqp_performative(0x11)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&amqp_performative(0x11))
+                    .await
+                    .map_err(|e| e.to_string())?;
             } else if body.windows(3).any(|w| w == [0x00, 0x53, 0x12]) {
                 if let Some(queue) = amqp_queue_name(body) {
-                    if body.windows(1).any(|w| w == [0x41]) && body.windows(3).any(|w| w == [0x00, 0x53, 0x28]) {
+                    if body.windows(1).any(|w| w == [0x41])
+                        && body.windows(3).any(|w| w == [0x00, 0x53, 0x28])
+                    {
                         receiver = Some(queue);
                     } else {
                         sender = Some(queue);
                     }
                 }
-                socket.write_all(&amqp_performative(0x12)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&amqp_performative(0x12))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if sender.is_some() && receiver.is_none() {
-                    socket.write_all(&amqp_performative(0x13)).await.map_err(|e| e.to_string())?;
+                    socket
+                        .write_all(&amqp_performative(0x13))
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             } else if let Some(payload) = amqp_data_section(body) {
                 if let Some(queue) = sender.clone() {
@@ -677,11 +863,17 @@ pub async fn amqp10_conn(mut socket: TcpStream, queues: Arc<QueueRegistry>) -> R
             } else if body.windows(3).any(|w| w == [0x00, 0x53, 0x13]) {
                 if let Some(queue) = receiver.clone() {
                     while let Some(payload) = pull_queue(&queues, &queue).await? {
-                        socket.write_all(&amqp_transfer(&payload)).await.map_err(|e| e.to_string())?;
+                        socket
+                            .write_all(&amqp_transfer(&payload))
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
                 }
             } else if body.windows(3).any(|w| w == [0x00, 0x53, 0x18]) {
-                socket.write_all(&amqp_performative(0x18)).await.map_err(|e| e.to_string())?;
+                socket
+                    .write_all(&amqp_performative(0x18))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 return Ok(());
             }
         }
@@ -766,5 +958,3 @@ fn amqp_sasl_mechanisms() -> Vec<u8> {
     body.extend_from_slice(b"\xa3\x05PLAIN");
     amqp_frame(1, &body)
 }
-
-

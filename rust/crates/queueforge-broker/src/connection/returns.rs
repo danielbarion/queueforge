@@ -34,33 +34,89 @@ where
         Ok(Step::Continue)
     }
     /// Map `EnqueueCompletion` outcome onto publisher `basic.ack` / `basic.nack`.
+    ///
+    /// A contiguous run of acks is one `basic.ack` with `multiple=true`. A tag
+    /// is held until every lower tag on the channel has been sent, so a later
+    /// flush cannot cover a publish that is still waiting on its fsync.
     pub(in crate::connection) async fn send_publisher_confirm(
         &mut self,
         channel: u16,
         delivery_tag: u64,
         ok: bool,
     ) -> Result<(), ConnError> {
-        if ok {
-            queueforge_core::prom::message_confirmed();
-            self.send_method(
-                channel,
-                &Method::BasicAck(basic_method::Ack {
-                    delivery_tag,
-                    multiple: false,
-                }),
-            )
-            .await
-        } else {
-            self.send_method(
-                channel,
-                &Method::BasicNack(basic_method::Nack {
-                    delivery_tag,
-                    multiple: false,
-                    requeue: false,
-                }),
-            )
-            .await
+        self.stage_confirm(channel, delivery_tag, ok);
+        self.emit_ready_confirms().await
+    }
+
+    pub(in crate::connection) fn stage_confirm(
+        &mut self,
+        channel: u16,
+        delivery_tag: u64,
+        ok: bool,
+    ) {
+        let Some(ch) = self.channels.get_mut(&channel) else {
+            return;
+        };
+        ch.held_confirms.insert(delivery_tag, ok);
+    }
+
+    pub(in crate::connection) async fn emit_ready_confirms(&mut self) -> Result<(), ConnError> {
+        let mut pending = Vec::new();
+        for (&channel, ch) in self.channels.iter_mut() {
+            loop {
+                let Some(&ok) = ch.held_confirms.get(&ch.next_confirm_emit) else {
+                    break;
+                };
+                if !ok {
+                    ch.held_confirms.remove(&ch.next_confirm_emit);
+                    let tag = ch.next_confirm_emit;
+                    ch.next_confirm_emit = ch.next_confirm_emit.saturating_add(1);
+                    pending.push((channel, tag, false, 1u64));
+                    continue;
+                }
+                let start = ch.next_confirm_emit;
+                let mut last = start;
+                loop {
+                    let next = last.saturating_add(1);
+                    if ch.held_confirms.get(&next) == Some(&true) {
+                        last = next;
+                    } else {
+                        break;
+                    }
+                }
+                for tag in start..=last {
+                    ch.held_confirms.remove(&tag);
+                }
+                ch.next_confirm_emit = last.saturating_add(1);
+                pending.push((channel, last, true, last - start + 1));
+            }
         }
+        for (channel, tag, ok, count) in pending {
+            if ok {
+                for _ in 0..count {
+                    queueforge_core::prom::message_confirmed();
+                }
+                self.send_method(
+                    channel,
+                    &Method::BasicAck(basic_method::Ack {
+                        delivery_tag: tag,
+                        multiple: count > 1,
+                    }),
+                )
+                .await?;
+            } else {
+                self.send_method(
+                    channel,
+                    &Method::BasicNack(basic_method::Nack {
+                        delivery_tag: tag,
+                        multiple: false,
+                        requeue: false,
+                    }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
     /// `handle_basic_publish` on the open connection.
     pub(in crate::connection) async fn handle_basic_publish(

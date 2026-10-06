@@ -131,7 +131,11 @@ pub fn router(state: MgmtState) -> Router {
             "/api/deprecated-features/{name}",
             delete(crate::console::acknowledge_deprecated),
         )
-        .route("/api/nodes", get(crate::console::list_nodes))
+        .route(
+            "/api/nodes",
+            get(crate::console::list_nodes).post(crate::console::put_node),
+        )
+        .route("/api/nodes/{name}", delete(crate::console::delete_node))
         .route("/api/cluster-name", get(crate::console::cluster_name))
         .route(
             "/api/operator-policies",

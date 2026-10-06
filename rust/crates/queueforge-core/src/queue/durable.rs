@@ -48,9 +48,10 @@ pub trait DurableQueueLog: Send {
     /// contiguous. Sets [`Self::meta_dirty`] when the watermark moves.
     fn acknowledge(&mut self, offset: QueueOffset) -> Result<()>;
 
-    /// Fsync data segments then meta. Returns the highest offset known durable.
+    /// Fsync the active segment. Returns the highest offset known durable.
     ///
-    /// Waiters with `offset <= returned` may be completed successfully.
+    /// The segment ack-watermark record is the durability point for consumed
+    /// messages. Waiters with `offset <= returned` may be completed successfully.
     /// Clears [`Self::meta_dirty`].
     fn fsync(&mut self) -> Result<QueueOffset>;
 

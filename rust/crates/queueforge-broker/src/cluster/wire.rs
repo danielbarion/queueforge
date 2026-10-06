@@ -10,7 +10,7 @@ use super::{Inner, WireMessage, BASE64};
 
 /// Report whether `inner` is the current quorum leader. Callers must not start a leader-only consume on a follower.
 pub(super) fn node_is_quorum_leader(inner: &Inner) -> bool {
-    if inner.members.is_empty() {
+    if inner.member_list().is_empty() {
         return true;
     }
     let slot = inner.leader.lock().unwrap_or_else(|err| err.into_inner());
@@ -28,6 +28,7 @@ pub(super) fn wire_forget(key: &QueueKey, message_id: &str) -> Value {
         "vhost": key.vhost.as_str(),
         "queue": key.name.as_str(),
         "message_id": message_id,
+        "id": message_id,
     })
 }
 

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use queueforge_amqp::{basic as basic_method, BasicProperties, ContentHeader, Frame, Method};
 use queueforge_core::{ConsumerSessionId, QueueCmd, QueueDelivery, QueueType};
@@ -9,36 +11,57 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use tracing::debug;
 
+use super::FinishedHandoff;
+
 impl<'a, S> Connection<'a, S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     /// `forward_delivery` on the open connection.
+    ///
+    /// A quorum body is reserved here and written only after followers drop
+    /// their copy. That drop runs off this task: awaiting it here put one
+    /// cluster round trip per prefetch slot in front of publisher confirms.
     pub(in crate::connection) async fn forward_delivery(
         &mut self,
         delivery: QueueDelivery,
     ) -> Result<(), ConnError> {
+        self.begin_coalesce();
+        self.stage_delivery(delivery).await;
+        let result = self.flush_staged_deliveries().await;
+        self.end_coalesce().await?;
+        result
+    }
+
+    fn alloc_delivery_seq(&mut self) -> u64 {
+        let seq = self.next_delivery_seq;
+        self.next_delivery_seq = self.next_delivery_seq.wrapping_add(1);
+        seq
+    }
+
+    async fn stage_delivery(&mut self, delivery: QueueDelivery) {
         if delivery.server_cancel {
-            if let Some(info) = self.sessions.remove(&delivery.session) {
-                if let Some(ch) = self.channels.get_mut(&info.channel) {
-                    ch.consumers.remove(&info.consumer_tag);
-                }
-                self.send_method(
-                    info.channel,
-                    &Method::BasicCancel(basic_method::Cancel {
-                        consumer_tag: info.consumer_tag,
-                        no_wait: true,
-                    }),
-                )
-                .await?;
+            if !self.sessions.contains_key(&delivery.session) {
+                debug!(session = delivery.session.0, "orphan delivery dropped");
+                return;
             }
-            return Ok(());
+            let seq = self.alloc_delivery_seq();
+            self.finished_handoffs.insert(
+                seq,
+                FinishedHandoff {
+                    seq,
+                    delivery,
+                    channel: 0,
+                    delivery_tag: None,
+                },
+            );
+            return;
         }
         let Some(info) = self.sessions.get(&delivery.session).cloned() else {
             // Orphan delivery — nack/requeue.
             // We don't know the queue handle easily; drop.
             debug!(session = delivery.session.0, "orphan delivery dropped");
-            return Ok(());
+            return;
         };
 
         if !self.channels.contains_key(&info.channel) {
@@ -51,7 +74,7 @@ where
                     requeue: true,
                 })
                 .await;
-            return Ok(());
+            return;
         }
 
         // Channel prefetch enforcement: if over limit, requeue (shouldn't happen with credit).
@@ -77,7 +100,7 @@ where
                     requeue: true,
                 })
                 .await;
-            return Ok(());
+            return;
         }
         self.spend_grant(delivery.session);
 
@@ -94,18 +117,10 @@ where
             .unwrap_or_else(|err| err.into_inner())
             .queue_type
             == Some(QueueType::Quorum);
-        if quorum {
-            if let Some(message_id) = delivery.message.message.message_id.clone() {
-                if let Some(cluster) = &self.cluster {
-                    cluster
-                        .claim_for_handoff(&info.queue_key, message_id.as_str(), !local_holder)
-                        .await;
-                }
-            }
-        }
-
+        let message_id = delivery.message.message.message_id.clone();
+        let channel = info.channel;
         let delivery_tag = {
-            let ch = self.channels.get_mut(&info.channel).unwrap();
+            let ch = self.channels.get_mut(&channel).unwrap();
             let tag = ch.next_delivery_tag;
             ch.next_delivery_tag = ch.next_delivery_tag.saturating_add(1);
             if !info.no_ack {
@@ -121,6 +136,90 @@ where
             }
             tag
         };
+        let seq = self.alloc_delivery_seq();
+        let handoff = FinishedHandoff {
+            seq,
+            delivery,
+            channel,
+            delivery_tag: Some(delivery_tag),
+        };
+        if quorum {
+            if let Some(message_id) = message_id {
+                if let Some(cluster) = &self.cluster {
+                    let cluster = Arc::clone(cluster);
+                    let tx = self.handoff_tx.clone();
+                    let key = info.queue_key.clone();
+                    let drop_local = !local_holder;
+                    tokio::spawn(async move {
+                        cluster
+                            .claim_for_handoff(&key, message_id.as_str(), drop_local)
+                            .await;
+                        let _ = tx.send(handoff);
+                    });
+                    return;
+                }
+            }
+        }
+        self.finished_handoffs.insert(seq, handoff);
+    }
+
+    /// Write every reserved delivery whose claim is done, in reserve order.
+    pub(in crate::connection) async fn flush_staged_deliveries(&mut self) -> Result<(), ConnError> {
+        self.begin_coalesce();
+        loop {
+            match self.handoff_rx.try_recv() {
+                Ok(done) => {
+                    self.finished_handoffs.insert(done.seq, done);
+                }
+                Err(_) => break,
+            }
+        }
+        let mut result = Ok(());
+        while let Some(done) = self.finished_handoffs.remove(&self.next_delivery_write) {
+            if let Err(e) = self.write_reserved_delivery(done).await {
+                result = Err(e);
+                break;
+            }
+            self.next_delivery_write = self.next_delivery_write.wrapping_add(1);
+        }
+        self.end_coalesce().await?;
+        result
+    }
+
+    async fn write_reserved_delivery(&mut self, handoff: FinishedHandoff) -> Result<(), ConnError> {
+        let FinishedHandoff {
+            delivery,
+            channel,
+            delivery_tag,
+            ..
+        } = handoff;
+        if delivery.server_cancel {
+            if let Some(info) = self.sessions.remove(&delivery.session) {
+                if let Some(ch) = self.channels.get_mut(&info.channel) {
+                    ch.consumers.remove(&info.consumer_tag);
+                }
+                self.send_method(
+                    info.channel,
+                    &Method::BasicCancel(basic_method::Cancel {
+                        consumer_tag: info.consumer_tag,
+                        no_wait: true,
+                    }),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+        let Some(delivery_tag) = delivery_tag else {
+            return Ok(());
+        };
+        let Some(info) = self.sessions.get(&delivery.session).cloned() else {
+            self.nack_reserved(channel, delivery_tag).await;
+            return Ok(());
+        };
+        if !self.channels.contains_key(&info.channel) {
+            self.nack_reserved(channel, delivery_tag).await;
+            return Ok(());
+        }
 
         let props = message_to_properties(&delivery.message.message);
         let body = delivery.message.message.body.clone();
@@ -156,6 +255,25 @@ where
                 .await;
         }
         Ok(())
+    }
+
+    async fn nack_reserved(&mut self, channel: u16, tag: u64) {
+        let Some(entry) = self
+            .channels
+            .get_mut(&channel)
+            .and_then(|ch| ch.delivery_ledger.remove(&tag))
+        else {
+            return;
+        };
+        if let Some(handle) = self.queues.get(&entry.queue_key) {
+            let _ = handle
+                .tx
+                .send(QueueCmd::Nack {
+                    id: entry.consumer_delivery_id,
+                    requeue: true,
+                })
+                .await;
+        }
     }
     /// `send_content` on the open connection.
     pub(in crate::connection) async fn send_content(

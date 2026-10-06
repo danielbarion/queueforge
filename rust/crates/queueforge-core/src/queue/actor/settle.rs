@@ -36,18 +36,15 @@ impl QueueState {
     }
 
     /// Drop every ready or unacked copy whose message id equals `message_id`. Each dropped copy is acked for the watermark. A message id that matches nothing leaves the queue unchanged.
+    ///
+    /// Ready removal is by id. Rebuilding the whole ready queue here made a
+    /// prefetch window of quorum drops stall the appends that publisher
+    /// confirms are waiting on.
     pub(super) fn forget_message(&mut self, message_id: &str) {
-        let mut kept = Vec::new();
-        while let Some(qm) = self.pop_ready_front() {
-            if qm.message.message_id.as_deref() == Some(message_id) {
-                self.mem_release(qm.message.tracked_bytes());
-                self.note_acked_offset(qm.offset);
-            } else {
-                kept.push(qm);
-            }
-        }
-        for qm in kept {
-            self.push_ready(qm);
+        for qm in self.ready.remove_message_id(message_id) {
+            self.ready_bytes = self.ready_bytes.saturating_sub(qm.message.body_bytes());
+            self.mem_release(qm.message.tracked_bytes());
+            self.note_acked_offset(qm.offset);
         }
         let doomed: Vec<_> = self
             .unacked

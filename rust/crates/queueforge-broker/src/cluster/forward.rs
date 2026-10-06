@@ -33,8 +33,12 @@ pub(super) async fn forward_nowait(
 /// Apply one replicated mutation of `kind` with JSON `body` on `inner`. Unknown kinds are ignored so a newer peer cannot crash an older node.
 pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
     match kind {
+        "members" => {
+            super::membership::apply_members(inner, body);
+        }
         "queue" => {
-            if let Ok(queue) = serde_json::from_value::<Queue>(body.clone()) {
+            let normalized = normalize_queue_json(body);
+            if let Ok(queue) = serde_json::from_value::<Queue>(normalized) {
                 if queue.durable {
                     let _ = MetadataStore::blocking(Arc::clone(&inner.store), {
                         let queue = queue.clone();
@@ -257,4 +261,77 @@ pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
         }
         _ => {}
     }
+}
+
+/// Turn a Bun queue record into the Rust `Queue` shape.
+///
+/// Bun sends `autoDelete` and `args["x-queue-type"]`. Serde rejects those
+/// names, and a rejected record never becomes a local quorum actor.
+pub(super) fn normalize_queue_json(body: &Value) -> Value {
+    let Some(obj) = body.as_object() else {
+        return body.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for key in [
+        "vhost",
+        "name",
+        "durable",
+        "exclusive",
+        "auto_delete",
+        "home",
+    ] {
+        if let Some(value) = obj.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    if !out.contains_key("name") {
+        if let Some(value) = obj.get("queue").or_else(|| obj.get("name")) {
+            out.insert("name".to_string(), value.clone());
+        }
+    }
+    if !out.contains_key("auto_delete") {
+        if let Some(value) = obj.get("autoDelete") {
+            out.insert("auto_delete".to_string(), value.clone());
+        }
+    }
+    let mut args = serde_json::Map::new();
+    if let Some(raw) = obj.get("args").and_then(|value| value.as_object()) {
+        const PAIRS: &[(&str, &str)] = &[
+            ("x-message-ttl", "message_ttl_ms"),
+            ("message_ttl_ms", "message_ttl_ms"),
+            ("x-expires", "expires_ms"),
+            ("expires_ms", "expires_ms"),
+            ("x-max-length", "max_length"),
+            ("max_length", "max_length"),
+            ("x-max-length-bytes", "max_length_bytes"),
+            ("max_length_bytes", "max_length_bytes"),
+            ("x-overflow", "overflow"),
+            ("overflow", "overflow"),
+            ("x-dead-letter-exchange", "dead_letter_exchange"),
+            ("dead_letter_exchange", "dead_letter_exchange"),
+            ("x-dead-letter-routing-key", "dead_letter_routing_key"),
+            ("dead_letter_routing_key", "dead_letter_routing_key"),
+            ("x-max-death-hops", "max_death_hops"),
+            ("max_death_hops", "max_death_hops"),
+            ("x-max-priority", "max_priority"),
+            ("max_priority", "max_priority"),
+            ("x-single-active-consumer", "single_active"),
+            ("single_active", "single_active"),
+            ("x-delivery-limit", "delivery_limit"),
+            ("delivery_limit", "delivery_limit"),
+            ("x-queue-type", "queue_type"),
+            ("queue_type", "queue_type"),
+            ("x-dead-letter-strategy", "dead_letter_strategy"),
+            ("dead_letter_strategy", "dead_letter_strategy"),
+        ];
+        for (from, to) in PAIRS {
+            if let Some(value) = raw.get(*from) {
+                args.insert((*to).to_string(), value.clone());
+            }
+        }
+    }
+    if !args.is_empty() {
+        out.insert("args".to_string(), Value::Object(args));
+    }
+    Value::Object(out)
 }

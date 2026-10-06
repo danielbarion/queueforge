@@ -1,9 +1,8 @@
-//! In-process exchange federation links.
+//! Exchange federation links.
 //!
-//! A link copies a publish on the upstream vhost to queues bound to the same
-//! exchange on the downstream vhost. RabbitMQ does this over AMQP; one
-//! QueueForge process does it in memory so a single node can still federate
-//! between vhosts.
+//! A vhost-to-vhost link copies a publish inside this process. An `amqp://`
+//! upstream is stored here and dialed by the management handler, which consumes
+//! the upstream exchange and republishes on the downstream vhost.
 
 use std::sync::Mutex;
 
@@ -17,17 +16,42 @@ struct Link {
 
 static LINKS: Mutex<Vec<Link>> = Mutex::new(Vec::new());
 static UPSTREAMS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static URIS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Record an AMQP URI the downstream vhost dials. A duplicate URI is stored again.
+pub fn add_federation_uri(downstream: String, uri: String) {
+    URIS.lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((downstream, uri));
+}
+
+/// URIs recorded for `downstream`.
+pub fn federation_uris(downstream: &str) -> Vec<String> {
+    URIS.lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .filter(|(down, _)| down == downstream)
+        .map(|(_, uri)| uri.clone())
+        .collect()
+}
 
 /// Record the upstream vhost a downstream vhost federates from.
 pub fn add_federation_upstream(downstream: String, upstream: String) {
-    UPSTREAMS.lock().unwrap_or_else(|err| err.into_inner()).push((downstream, upstream));
+    UPSTREAMS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((downstream, upstream));
 }
 
 /// Remember that publishes to `upstream` exchanges matching `pattern` also
 /// route on `downstream`.
 pub fn add_federation_link(upstream: String, downstream: String, pattern: String) {
     let mut guard = LINKS.lock().unwrap_or_else(|err| err.into_inner());
-    guard.push(Link { upstream, downstream, pattern });
+    guard.push(Link {
+        upstream,
+        downstream,
+        pattern,
+    });
 }
 
 /// Upstream vhosts configured for `downstream`.

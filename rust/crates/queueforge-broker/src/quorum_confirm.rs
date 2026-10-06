@@ -21,7 +21,11 @@ pub enum MemberCopy {
 /// after that single durable copy.
 pub fn durable_majority(members: usize, copies: &[MemberCopy]) -> bool {
     let need = members.max(1) / 2 + 1;
-    copies.iter().filter(|copy| *copy == &MemberCopy::Durable).count() >= need
+    copies
+        .iter()
+        .filter(|copy| *copy == &MemberCopy::Durable)
+        .count()
+        >= need
 }
 
 #[cfg(test)]
@@ -30,10 +34,24 @@ mod tests {
 
     #[test]
     fn memory_copies_do_not_confirm_and_durable_copies_do() {
-        let memory = [MemberCopy::MemoryOnly, MemberCopy::MemoryOnly, MemberCopy::Durable];
-        assert!(!durable_majority(3, &memory), "one durable copy is not a majority of three");
-        let durable = [MemberCopy::Durable, MemberCopy::Durable, MemberCopy::MemoryOnly];
-        assert!(durable_majority(3, &durable), "two durable copies confirm a three-member queue");
+        let memory = [
+            MemberCopy::MemoryOnly,
+            MemberCopy::MemoryOnly,
+            MemberCopy::Durable,
+        ];
+        assert!(
+            !durable_majority(3, &memory),
+            "one durable copy is not a majority of three"
+        );
+        let durable = [
+            MemberCopy::Durable,
+            MemberCopy::Durable,
+            MemberCopy::MemoryOnly,
+        ];
+        assert!(
+            durable_majority(3, &durable),
+            "two durable copies confirm a three-member queue"
+        );
         assert!(durable_majority(1, &[MemberCopy::Durable]));
         assert!(!durable_majority(1, &[MemberCopy::MemoryOnly]));
     }

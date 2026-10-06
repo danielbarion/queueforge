@@ -14,7 +14,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use queueforge_core::{
-    DurabilityPolicy, Queue, QueueActorBootstrap, QueueMessage, QueueOffset, QueueRegistry, QueueType,
+    DurabilityPolicy, Queue, QueueActorBootstrap, QueueMessage, QueueOffset, QueueRegistry,
+    QueueType,
 };
 use tracing::{error, info, warn};
 
@@ -54,6 +55,8 @@ pub struct RecoveryReport {
     pub queues_corrupt: u64,
     /// Total messages rebuilt into ready.
     pub messages_recovered: u64,
+    /// Quorum messages rebuilt into ready. A cluster node holds `/readyz` until peers apply their consumed sets.
+    pub quorum_messages_recovered: u64,
 }
 
 /// Run the durable recovery algorithm and populate `registry`.
@@ -98,17 +101,17 @@ pub async fn recover_durable_queues(
         if q.durable {
             let quorum = q.args.queue_type == Some(QueueType::Quorum);
             if !quorum {
-            if let (Some(local), Some(home)) = (cfg.local_node.as_deref(), q.home.as_deref()) {
-                if home != local {
-                    info!(
-                        vhost = %q.vhost,
-                        queue = %q.name,
-                        home,
-                        "skipping durable queue homed on a peer"
-                    );
-                    continue;
+                if let (Some(local), Some(home)) = (cfg.local_node.as_deref(), q.home.as_deref()) {
+                    if home != local {
+                        info!(
+                            vhost = %q.vhost,
+                            queue = %q.name,
+                            home,
+                            "skipping durable queue homed on a peer"
+                        );
+                        continue;
+                    }
                 }
-            }
             }
             remaining.push(q);
         }
@@ -121,6 +124,10 @@ pub async fn recover_durable_queues(
             Ok(n) => {
                 report.queues_restored = report.queues_restored.saturating_add(1);
                 report.messages_recovered = report.messages_recovered.saturating_add(n);
+                if q.args.queue_type == Some(QueueType::Quorum) {
+                    report.quorum_messages_recovered =
+                        report.quorum_messages_recovered.saturating_add(n);
+                }
             }
             Err(StoreError::WalCorrupt { path, reason }) => {
                 error!(

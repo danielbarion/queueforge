@@ -49,7 +49,7 @@ impl<'a> AuthService<'a> {
         self.store
     }
 
-    /// Create a user with a plaintext password (hashed with Argon2id).
+    /// Create a user with a plaintext password (stored as RabbitMQ SHA-256).
     pub fn create_user(&self, name: &str, password: &str, tags: Vec<UserTag>) -> Result<User> {
         validate_username(name)?;
         let password_hash = hash_password(password)?;
@@ -60,8 +60,7 @@ impl<'a> AuthService<'a> {
 
     /// Verify username + password. Returns the user on success, `None` on bad credentials.
     ///
-    /// Missing users still run Argon2 against a dummy hash so the cost is
-    /// comparable to a failed password (mitigates online username enumeration).
+    /// Missing users run the same SHA-256 compare as a real password.
     pub fn authenticate(&self, name: &str, password: &str) -> Result<Option<User>> {
         match self.store.get_user(name)? {
             Some(user) => {
@@ -327,6 +326,20 @@ mod tests {
             .unwrap()
             .expect("dev admin");
         assert!(user.is_administrator());
+        let stored = store
+            .get_user(DEV_BOOTSTRAP_USER)
+            .unwrap()
+            .expect("stored admin");
+        assert!(
+            !stored.password_hash.starts_with("$argon2"),
+            "dev bootstrap must be the RabbitMQ SHA-256 hash, got {}",
+            stored.password_hash
+        );
+        assert_eq!(
+            stored.password_hash.len(),
+            48,
+            "base64(4-byte salt || SHA-256) has no padding"
+        );
         // Permission row must exist in the same bootstrap (atomic).
         assert!(store
             .get_permission(DEV_BOOTSTRAP_USER, DEFAULT_VHOST)

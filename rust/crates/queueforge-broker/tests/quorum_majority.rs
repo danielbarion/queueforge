@@ -1,12 +1,14 @@
-//! Three-node quorum: confirm after an in-memory majority, before the 10 ms fsync.
-//! SIGKILL the leader and consume from a survivor. After the fsync, restart one node and consume again.
+//! Three-node quorum: a confirm counts only a durable fsynced majority.
+//! SIGKILL the leader and consume that body once from a survivor. A later publish is delivered from the restarted node.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lapin::options::{BasicGetOptions, BasicPublishOptions, ConfirmSelectOptions, QueueDeclareOptions};
+use lapin::options::{
+    BasicGetOptions, BasicPublishOptions, ConfirmSelectOptions, QueueDeclareOptions,
+};
 use lapin::types::{FieldTable, LongString};
 use lapin::{BasicProperties, Connection, ConnectionProperties};
 use reqwest::Client;
@@ -23,10 +25,20 @@ impl Drop for Kids {
 }
 
 fn stamp() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
-fn write_cfg(path: &std::path::Path, amqp: u16, mgmt: u16, metrics: u16, data: &std::path::Path, cluster: &str) {
+fn write_cfg(
+    path: &std::path::Path,
+    amqp: u16,
+    mgmt: u16,
+    metrics: u16,
+    data: &std::path::Path,
+    cluster: &str,
+) {
     fs::create_dir_all(data).unwrap();
     fs::write(
         path,
@@ -90,7 +102,14 @@ async fn wait_ready(mgmt: u16) {
 
 async fn metric(metrics: u16, name: &str) -> f64 {
     let url = format!("http://127.0.0.1:{metrics}/metrics");
-    let text = Client::new().get(url).send().await.unwrap().text().await.unwrap_or_default();
+    let text = Client::new()
+        .get(url)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap_or_default();
     for line in text.lines() {
         if line.starts_with('#') || !line.starts_with(name) {
             continue;
@@ -99,7 +118,12 @@ async fn metric(metrics: u16, name: &str) -> f64 {
         if rest.starts_with('{') {
             continue;
         }
-        return rest.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0.0);
+        return rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0.0);
     }
     0.0
 }
@@ -112,12 +136,23 @@ async fn publish(port: u16, queue: &str, body: &[u8]) {
     .await
     .expect("connect");
     let ch = conn.create_channel().await.unwrap();
-    ch.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
-    let conf = ch
-        .basic_publish("", queue, BasicPublishOptions::default(), body, BasicProperties::default().with_delivery_mode(2))
+    ch.confirm_select(ConfirmSelectOptions::default())
         .await
         .unwrap();
-    assert!(conf.await.expect("confirm").is_ack(), "publisher confirm was nacked");
+    let conf = ch
+        .basic_publish(
+            "",
+            queue,
+            BasicPublishOptions::default(),
+            body,
+            BasicProperties::default().with_delivery_mode(2),
+        )
+        .await
+        .unwrap();
+    assert!(
+        conf.await.expect("confirm").is_ack(),
+        "publisher confirm was nacked"
+    );
 }
 
 async fn get_body(port: u16, queue: &str) -> Option<Vec<u8>> {
@@ -128,7 +163,10 @@ async fn get_body(port: u16, queue: &str) -> Option<Vec<u8>> {
     .await
     .ok()?;
     let ch = conn.create_channel().await.ok()?;
-    ch.basic_get(queue, BasicGetOptions { no_ack: true }).await.ok()?.map(|msg| msg.data.to_vec())
+    ch.basic_get(queue, BasicGetOptions { no_ack: true })
+        .await
+        .ok()?
+        .map(|msg| msg.data.to_vec())
 }
 
 async fn quorum_failover(kind: &str, base: u16) {
@@ -155,7 +193,9 @@ members = [
     for (i, (amqp, mgmt, metrics, cluster_port)) in ports.iter().copied().enumerate() {
         let dir = std::env::temp_dir().join(format!("qf-qm-{kind}-{base}-{i}"));
         let _ = fs::remove_dir_all(&dir);
-        let cfg = cluster.replace("NODE", ids[i]).replace("PORT", &cluster_port.to_string());
+        let cfg = cluster
+            .replace("NODE", ids[i])
+            .replace("PORT", &cluster_port.to_string());
         kids.0.push(spawn(kind, amqp, mgmt, metrics, &dir, &cfg));
         dirs.push(dir);
     }
@@ -165,8 +205,14 @@ members = [
     tokio::time::sleep(Duration::from_millis(700)).await;
 
     let mut args = FieldTable::default();
-    args.insert("x-queue-type".into(), lapin::types::AMQPValue::LongString(LongString::from("quorum")));
-    let decl = QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() };
+    args.insert(
+        "x-queue-type".into(),
+        lapin::types::AMQPValue::LongString(LongString::from("quorum")),
+    );
+    let decl = QueueDeclareOptions {
+        durable: true,
+        ..QueueDeclareOptions::default()
+    };
     for (amqp, _, _, _) in ports {
         let conn = Connection::connect(
             &format!("amqp://admin:devpassword12@127.0.0.1:{amqp}/%2f"),
@@ -174,15 +220,23 @@ members = [
         )
         .await
         .unwrap();
-        conn.create_channel().await.unwrap().queue_declare("qq-live", decl, args.clone()).await.unwrap();
+        conn.create_channel()
+            .await
+            .unwrap()
+            .queue_declare("qq-live", decl, args.clone())
+            .await
+            .unwrap();
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let early = metric(ports[0].2, "queueforge_confirm_before_fsync_total").await;
     publish(ports[0].0, "qq-live", b"body-one").await;
     let after = metric(ports[0].2, "queueforge_confirm_before_fsync_total").await;
-    assert!(after > early, "{kind} confirm waited for the interval fsync ({early} -> {after})");
-    println!("{kind} confirm before fsync {early} -> {after}");
+    assert_eq!(
+        after, early,
+        "{kind} confirm counted a pre-fsync ack ({early} -> {after})"
+    );
+    println!("{kind} confirm before fsync stayed {after}");
 
     kids.0[0].kill().unwrap();
     let _ = kids.0[0].wait();
@@ -198,7 +252,11 @@ members = [
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(seen.as_deref(), Some(b"body-one".as_slice()), "{kind} survivor did not deliver body-one");
+    assert_eq!(
+        seen.as_deref(),
+        Some(b"body-one".as_slice()),
+        "{kind} survivor did not deliver body-one"
+    );
     println!("{kind} consumed body-one from survivor");
 
     let flush_before = metric(ports[1].2, "queueforge_wal_fsync_seconds_count").await
@@ -220,7 +278,9 @@ members = [
     kids.0[1].kill().unwrap();
     let _ = kids.0[1].wait();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let cfg = cluster.replace("NODE", "b").replace("PORT", &ports[1].3.to_string());
+    let cfg = cluster
+        .replace("NODE", "b")
+        .replace("PORT", &ports[1].3.to_string());
     kids.0[1] = spawn(kind, ports[1].0, ports[1].1, ports[1].2, &dirs[1], &cfg);
     wait_ready(ports[1].1).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
@@ -233,7 +293,11 @@ members = [
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(restarted.as_deref(), Some(b"body-two".as_slice()), "{kind} restarted node did not deliver body-two");
+    assert_eq!(
+        restarted.as_deref(),
+        Some(b"body-two".as_slice()),
+        "{kind} restarted node did not deliver body-two"
+    );
     println!("{kind} consumed body-two from restarted node");
 }
 

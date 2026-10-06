@@ -30,8 +30,8 @@ impl QueueState {
         let now = Instant::now();
         let mut state = Self {
             key,
-            // Zero overhead when x-max-priority unset: Ready::Fifo.
-            ready: Ready::from_max_priority(boot.args.max_priority),
+            // Classic stays a deque. Quorum indexes by id so a drop does not slide the tail.
+            ready: Ready::for_queue(&boot.args),
             ready_bytes: 0,
             ttl_heap: BinaryHeap::new(),
             unacked: HashMap::new(),
@@ -58,8 +58,10 @@ impl QueueState {
             dlx: boot.dlx,
             last_used: now,
             pending_fsync: false,
+            immediate_lone: false,
             expired_tx: boot.expired_tx,
             internal_tx,
+            depth_gauges: None,
         };
         // Recovered messages with `expires_unix_ms` keep the remaining deadline.
         // Older records (field absent) still receive a fresh TTL.

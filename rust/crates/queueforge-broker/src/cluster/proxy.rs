@@ -7,10 +7,12 @@ use bytes::Bytes;
 use compact_str::CompactString;
 use queueforge_core::{ConsumerDeliveryId, EnqueueCompletion, Error, Message, Queue, QueueCmd};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
+use super::lifecycle::PendingCall;
 use super::subscribe::open_subscription;
 use super::wire::{message_to_wire, wire_to_message};
-use super::{Cluster, Inner, SubOpen, WireMessage, BASE64};
+use super::{Cluster, Inner, Msg, SubOpen, WireMessage, BASE64};
 
 /// Forward mailbox commands for `queue` to its home through `inner`. `rx` is the local proxy mailbox. The loop ends when the mailbox closes.
 pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Receiver<QueueCmd>) {
@@ -22,11 +24,12 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
     let cluster = Cluster {
         inner: Arc::clone(&inner),
     };
+    let mut inflight: Vec<JoinHandle<()>> = Vec::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             QueueCmd::Enqueue { msg, reply } => {
-                let result = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "enqueue",
                         serde_json::json!({
@@ -36,24 +39,26 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
-                let _ = reply.send(match result {
-                    Ok(msg) if msg.ok => {
-                        let (done_tx, done_rx) = oneshot::channel();
-                        let _ = done_tx.send(Ok(()));
-                        Ok(EnqueueCompletion {
-                            offset: queueforge_core::QueueOffset(
-                                msg.payload["offset"].as_u64().unwrap_or(0),
-                            ),
-                            durable_done: done_rx,
-                        })
-                    }
-                    Ok(msg) => Err(Error::Unavailable(msg.error)),
-                    Err(err) => Err(err),
+                spawn_forward(&mut inflight, pending, move |result| {
+                    let _ = reply.send(match result {
+                        Ok(msg) if msg.ok => {
+                            let (done_tx, done_rx) = oneshot::channel();
+                            let _ = done_tx.send(Ok(()));
+                            Ok(EnqueueCompletion {
+                                offset: queueforge_core::QueueOffset(
+                                    msg.payload["offset"].as_u64().unwrap_or(0),
+                                ),
+                                durable_done: done_rx,
+                            })
+                        }
+                        Ok(msg) => Err(Error::Unavailable(msg.error)),
+                        Err(err) => Err(err),
+                    });
                 });
             }
             QueueCmd::Ack { id, .. } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "ack",
                         serde_json::json!({
@@ -63,10 +68,11 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::Nack { id, requeue } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "nack",
                         serde_json::json!({
@@ -77,10 +83,11 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::AckReport { id, reply } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "ack",
                         serde_json::json!({
@@ -90,11 +97,13 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
-                let _ = reply.send(None);
+                spawn_forward(&mut inflight, pending, move |_| {
+                    let _ = reply.send(None);
+                });
             }
             QueueCmd::NackReport { id, requeue, reply } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "nack",
                         serde_json::json!({
@@ -105,24 +114,28 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
-                let _ = reply.send(None);
+                spawn_forward(&mut inflight, pending, move |_| {
+                    let _ = reply.send(None);
+                });
             }
             QueueCmd::Forget { message_id } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
-                        "forget",
+                        "quorum_drop",
                         serde_json::json!({
                             "vhost": queue.vhost.as_str(),
                             "queue": queue.name.as_str(),
                             "message_id": message_id.as_str(),
+                            "id": message_id.as_str(),
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::SettleDelivered { id } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "settle",
                         serde_json::json!({
@@ -132,8 +145,10 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::Get { no_ack, reply } => {
+                drain_forwarded(&mut inflight).await;
                 let result = cluster
                     .call(
                         &home,
@@ -237,6 +252,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 }
             }
             QueueCmd::RegisterConsumer {
+                // Prior appends must be on the home before the consumer is attached.
                 session,
                 no_ack,
                 exclusive,
@@ -245,6 +261,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 deliver_tx,
                 reply,
             } => {
+                drain_forwarded(&mut inflight).await;
                 let opened = open_subscription(
                     &cluster,
                     SubOpen {
@@ -262,8 +279,8 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 let _ = reply.send(opened);
             }
             QueueCmd::AddCredit { session, credit } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "credit",
                         serde_json::json!({
@@ -274,10 +291,11 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::SetCredit { session, credit } => {
-                let _ = cluster
-                    .call(
+                let pending = cluster
+                    .begin_call(
                         &home,
                         "set_credit",
                         serde_json::json!({
@@ -288,12 +306,14 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         }),
                     )
                     .await;
+                spawn_forward(&mut inflight, pending, |_| {});
             }
             QueueCmd::UnregisterConsumer {
                 session,
                 requeue,
                 reply,
             } => {
+                drain_forwarded(&mut inflight).await;
                 let _ = cluster
                     .call(
                         &home,
@@ -309,6 +329,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 let _ = reply.send(());
             }
             QueueCmd::RequeueUnacked { sessions, reply } => {
+                drain_forwarded(&mut inflight).await;
                 let _ = cluster
                     .call(
                         &home,
@@ -323,6 +344,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 let _ = reply.send(());
             }
             QueueCmd::Purge { reply } => {
+                drain_forwarded(&mut inflight).await;
                 let result = cluster
                     .call(
                         &home,
@@ -341,6 +363,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 );
             }
             QueueCmd::Stats { reply } => {
+                drain_forwarded(&mut inflight).await;
                 let result = cluster
                     .call(
                         &home,
@@ -365,6 +388,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                 let _ = reply.send(stats);
             }
             QueueCmd::SetArgs { args } => {
+                drain_forwarded(&mut inflight).await;
                 let _ = cluster
                     .call(
                         &home,
@@ -391,5 +415,28 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
             }
             QueueCmd::DlxResolved { .. } => {}
         }
+    }
+}
+
+/// Keep `pending` off the proxy loop. The request line was already sent in order.
+fn spawn_forward(
+    inflight: &mut Vec<JoinHandle<()>>,
+    pending: Result<PendingCall, Error>,
+    finish: impl FnOnce(Result<Msg, Error>) + Send + 'static,
+) {
+    inflight.retain(|job| !job.is_finished());
+    inflight.push(tokio::spawn(async move {
+        let result = match pending {
+            Ok(call) => call.wait().await,
+            Err(err) => Err(err),
+        };
+        finish(result);
+    }));
+}
+
+/// Wait until every forwarded RPC started so far has a reply.
+async fn drain_forwarded(inflight: &mut Vec<JoinHandle<()>>) {
+    for job in inflight.drain(..) {
+        let _ = job.await;
     }
 }

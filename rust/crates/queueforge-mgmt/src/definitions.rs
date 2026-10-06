@@ -60,7 +60,7 @@ fn default_apply_all() -> String {
 #[derive(Debug, Serialize, Deserialize)]
 struct DefUser {
     name: String,
-    /// PHC Argon2 hash when exporting; optional on import if `password` set.
+    /// RabbitMQ password-hash when exporting; optional on import if `password` set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,10 +148,16 @@ fn queue_args_map(args: &queueforge_core::QueueArgs) -> serde_json::Map<String, 
         map.insert("x-max-length-bytes".into(), serde_json::json!(v));
     }
     if let Some(v) = args.dead_letter_exchange.as_ref() {
-        map.insert("x-dead-letter-exchange".into(), serde_json::json!(v.as_str()));
+        map.insert(
+            "x-dead-letter-exchange".into(),
+            serde_json::json!(v.as_str()),
+        );
     }
     if let Some(v) = args.dead_letter_routing_key.as_ref() {
-        map.insert("x-dead-letter-routing-key".into(), serde_json::json!(v.as_str()));
+        map.insert(
+            "x-dead-letter-routing-key".into(),
+            serde_json::json!(v.as_str()),
+        );
     }
     if let Some(v) = args.max_priority {
         map.insert("x-max-priority".into(), serde_json::json!(v));
@@ -309,7 +315,12 @@ pub async fn export_definitions(
             exclusive: q.exclusive,
             auto_delete: q.auto_delete,
             arguments: queue_args_map(&q.args),
-            queue_type: q.args.queue_type.unwrap_or(queueforge_core::QueueType::Classic).as_str().to_string(),
+            queue_type: q
+                .args
+                .queue_type
+                .unwrap_or(queueforge_core::QueueType::Classic)
+                .as_str()
+                .to_string(),
         });
     }
     // Include live-only (transient) queues from registry.
@@ -319,7 +330,12 @@ pub async fn export_definitions(
                 .iter()
                 .any(|q| q.vhost == key.vhost.as_str() && q.name == key.name.as_str())
             {
-                let args = h.info.args.lock().unwrap_or_else(|err| err.into_inner()).clone();
+                let args = h
+                    .info
+                    .args
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .clone();
                 queues.push(DefQueue {
                     name: h.info.key.name.to_string(),
                     vhost: h.info.key.vhost.to_string(),
@@ -327,7 +343,11 @@ pub async fn export_definitions(
                     exclusive: h.info.exclusive,
                     auto_delete: h.info.auto_delete,
                     arguments: queue_args_map(&args),
-                    queue_type: args.queue_type.unwrap_or(queueforge_core::QueueType::Classic).as_str().to_string(),
+                    queue_type: args
+                        .queue_type
+                        .unwrap_or(queueforge_core::QueueType::Classic)
+                        .as_str()
+                        .to_string(),
                 });
             }
         }
@@ -583,8 +603,12 @@ pub async fn import_definitions(
             argument_map.insert("x-queue-type".into(), serde_json::json!(q.queue_type));
         }
         let declared = crate::mutations::parse_mgmt_queue_args(&Some(argument_map))?;
-        let mut args = state.router.queue_args_with_policy(&q.vhost, &q.name, &declared);
-        if args.queue_type == Some(queueforge_core::QueueType::Quorum) && args.delivery_limit.is_none() {
+        let mut args = state
+            .router
+            .queue_args_with_policy(&q.vhost, &q.name, &declared);
+        if args.queue_type == Some(queueforge_core::QueueType::Quorum)
+            && args.delivery_limit.is_none()
+        {
             args.delivery_limit = Some(20);
         }
         let opts = QueueDeclareOpts {

@@ -274,10 +274,7 @@ async fn tx_commit_of_durable_publish_survives_restart() {
 
 fn header_table(name: &str, value: &str) -> FieldTable {
     let mut table = FieldTable::default();
-    table.insert(
-        ShortString::from(name),
-        AMQPValue::LongString(value.into()),
-    );
+    table.insert(ShortString::from(name), AMQPValue::LongString(value.into()));
     table
 }
 
@@ -347,8 +344,10 @@ async fn headers_bindings_with_empty_routing_key_survive_unbind_and_restart() {
             )
             .await
             .expect("consume");
-        for (header, value, body) in [("color", "blue", "color-lives"), ("size", "l", "size-lives")]
-        {
+        for (header, value, body) in [
+            ("color", "blue", "color-lives"),
+            ("size", "l", "size-lives"),
+        ] {
             ch.basic_publish(
                 "hdr-dur",
                 "",
@@ -369,8 +368,8 @@ async fn headers_bindings_with_empty_routing_key_survive_unbind_and_restart() {
             delivery.ack(BasicAckOptions::default()).await.expect("ack");
         }
         ch.queue_unbind("q2", "hdr-dur", "", header_table("color", "blue"))
-        .await
-        .expect("unbind color");
+            .await
+            .expect("unbind color");
         conn.close(200, "bye").await.ok();
     }
     shutdown_broker(broker2).await;

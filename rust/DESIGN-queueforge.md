@@ -81,7 +81,7 @@ No existing code. This document defines architecture, crates, protocol choice, p
 3. **Persistence:** WAL + segment files for durable queues; crash recovery per documented invariants
 4. **Performance:** Validate single-node hypotheses in [Performance Targets](#performance-targets)
 5. **Web management UI:** Control of vhosts, users, exchanges, queues, bindings, connections, consumers; metrics; publish/get test
-6. **Auth:** Users, Argon2id passwords, permissions per vhost
+6. **Auth:** Users, RabbitMQ SHA-256 password-hash, permissions per vhost
 7. **Observability:** `tracing`, Prometheus, health endpoints with correct ready semantics during recovery
 8. **Ship as:** Single-node process; HA is **out of scope** for v1 (export/import only)
 
@@ -758,11 +758,8 @@ GET    /readyz
 
 **Users:**
 
-- Argon2id via `argon2` crate with parameters:
-  - **memory_cost = 19456 KiB (~19 MiB)**
-  - **time_cost = 2**
-  - **parallelism = 1**
-- Password policy: min **12** characters; reject empty; optional complexity not enforced beyond length in v1
+- RabbitMQ SHA-256 password-hash: base64(4-byte salt || SHA-256(salt || password)). A SHA-512 password-hash still verifies. An argon2 PHC string does not.
+- Password policy: min **8** characters; reject empty; optional complexity not enforced beyond length in v1
 - Tags: `administrator`, `management`, `monitoring`
 
 **Permissions:** configure / write / read regexes per vhost. Checked on declare, **queue.bind** / **queue.unbind**, publish, consume, get, purge, delete, **and** all management mutations including publish/get. (`exchange.bind` is not implemented—no AuthZ path.)
@@ -1045,7 +1042,7 @@ If a future HA RFC proceeds, candidates include **`openraft`** for quorum-queue 
 |--------|----------|------------|
 | Unauthenticated AMQP | High | Auth required; no blank passwords |
 | guest/guest remote | High | No guest by default; bootstrap admin env |
-| Credential stuffing | Medium | Argon2id params above; login 5/60s/IP |
+| Credential stuffing | Medium | Login 5/60s/IP |
 | Session theft | Medium | HttpOnly/SameSite/Secure cookies; TTL; logout invalidation |
 | CSRF | Medium | SameSite + SPA Bearer optional path |
 | Metrics scrape exfil | Medium | Default bind **127.0.0.1:15692**; document network policy if exposed |
@@ -1187,7 +1184,7 @@ queueforge/
 | Strings | `compact_str` | Names |
 | Arc swap | `arc-swap` | Binding RCU |
 | Metadata DB | **`redb`** | Crash-safe embedded |
-| Password hashing | `argon2` | Argon2id params above |
+| Password hashing | `sha2` | RabbitMQ SHA-256 password-hash |
 | IDs | `ulid` | Message / gen names |
 | Config | `serde` + `toml` + env | |
 | CLI | `clap` | |

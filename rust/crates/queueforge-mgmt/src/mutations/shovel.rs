@@ -51,6 +51,17 @@ pub async fn put_shovel(
         .ok_or_else(|| MgmtError::BadRequest("src-queue is required".into()))?;
     let dest = json_str(&body.value, "dest-queue")
         .ok_or_else(|| MgmtError::BadRequest("dest-queue is required".into()))?;
+    if let (Some(src_uri), Some(dest_uri)) = (
+        json_str(&body.value, "src-uri"),
+        json_str(&body.value, "dest-uri"),
+    ) {
+        tokio::spawn(async move {
+            if let Err(err) = shovel_link(src_uri, dest_uri, src, dest).await {
+                tracing::warn!(error = %err, "shovel stopped");
+            }
+        });
+        return Ok(StatusCode::CREATED);
+    }
     let queues = Arc::clone(&state.queues);
     tokio::spawn(async move {
         loop {
@@ -117,6 +128,187 @@ pub async fn put_federation_upstream(
     require_administrator(&session)?;
     let downstream = decode_vhost(&raw_vhost)?;
     let uri = json_str(&body.value, "uri").unwrap_or_default();
-    queueforge_core::federation::add_federation_upstream(downstream, vhost_from_amqp_uri(&uri));
+    queueforge_core::federation::add_federation_upstream(
+        downstream.clone(),
+        vhost_from_amqp_uri(&uri),
+    );
+    if uri.contains("://") {
+        queueforge_core::federation::add_federation_uri(downstream, uri);
+    }
     Ok(StatusCode::CREATED)
+}
+
+async fn shovel_link(
+    src_uri: String,
+    dest_uri: String,
+    src_queue: String,
+    dest_queue: String,
+) -> Result<(), String> {
+    use futures_lite::StreamExt;
+    use lapin::options::{
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
+    };
+    use lapin::types::FieldTable;
+    use lapin::{BasicProperties, Connection, ConnectionProperties};
+    let src = Connection::connect(&src_uri, ConnectionProperties::default())
+        .await
+        .map_err(|err| err.to_string())?;
+    let dest = Connection::connect(&dest_uri, ConnectionProperties::default())
+        .await
+        .map_err(|err| err.to_string())?;
+    let src_ch = src.create_channel().await.map_err(|err| err.to_string())?;
+    let dest_ch = dest.create_channel().await.map_err(|err| err.to_string())?;
+    let declare = QueueDeclareOptions {
+        durable: true,
+        ..QueueDeclareOptions::default()
+    };
+    src_ch
+        .queue_declare(&src_queue, declare, FieldTable::default())
+        .await
+        .map_err(|err| err.to_string())?;
+    dest_ch
+        .queue_declare(&dest_queue, declare, FieldTable::default())
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut consumer = src_ch
+        .basic_consume(
+            &src_queue,
+            "queueforge-shovel",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    while let Some(delivery) = consumer.next().await {
+        let delivery = delivery.map_err(|err| err.to_string())?;
+        dest_ch
+            .basic_publish(
+                "",
+                &dest_queue,
+                BasicPublishOptions::default(),
+                &delivery.data,
+                BasicProperties::default().with_delivery_mode(2),
+            )
+            .await
+            .map_err(|err| err.to_string())?
+            .await
+            .map_err(|err| err.to_string())?;
+        delivery
+            .ack(BasicAckOptions::default())
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+/// Dial `uri`, consume `pattern` as an exchange name, and enqueue each body on `downstream`.
+pub(super) async fn federation_link(
+    uri: String,
+    downstream: String,
+    pattern: String,
+    queues: Arc<queueforge_core::QueueRegistry>,
+    router: Arc<queueforge_core::ExchangeRouter>,
+) -> Result<(), String> {
+    let Some(exchange) = exchange_from_pattern(&pattern) else {
+        return Ok(());
+    };
+    use futures_lite::StreamExt;
+    use lapin::options::{
+        BasicAckOptions, BasicConsumeOptions, ExchangeDeclareOptions, QueueBindOptions,
+        QueueDeclareOptions,
+    };
+    use lapin::types::FieldTable;
+    use lapin::{Connection, ConnectionProperties};
+    use queueforge_core::{Message, QueueCmd};
+    let conn = Connection::connect(&uri, ConnectionProperties::default())
+        .await
+        .map_err(|err| err.to_string())?;
+    let ch = conn.create_channel().await.map_err(|err| err.to_string())?;
+    let queue = format!("qf-fed-{exchange}");
+    ch.exchange_declare(
+        &exchange,
+        lapin::ExchangeKind::Topic,
+        ExchangeDeclareOptions {
+            durable: true,
+            ..ExchangeDeclareOptions::default()
+        },
+        FieldTable::default(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    ch.queue_declare(
+        &queue,
+        QueueDeclareOptions {
+            durable: true,
+            ..QueueDeclareOptions::default()
+        },
+        FieldTable::default(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    ch.queue_bind(
+        &queue,
+        &exchange,
+        "#",
+        QueueBindOptions::default(),
+        FieldTable::default(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let mut consumer = ch
+        .basic_consume(
+            &queue,
+            "queueforge-federation",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    while let Some(delivery) = consumer.next().await {
+        let delivery = delivery.map_err(|err| err.to_string())?;
+        let key = delivery.routing_key.as_str();
+        let Ok(route) = router.route_publish(&downstream, &exchange, key, &[]) else {
+            delivery
+                .ack(BasicAckOptions::default())
+                .await
+                .map_err(|err| err.to_string())?;
+            continue;
+        };
+        for dest in route.destinations {
+            let Some(handle) = queues.get(&dest) else {
+                continue;
+            };
+            let mut msg = Message::blank();
+            msg.routing_key = compact_str::CompactString::from(key);
+            msg.body = bytes::Bytes::from(delivery.data.clone());
+            msg.persistent = true;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if handle
+                .tx
+                .send(QueueCmd::Enqueue {
+                    msg: std::sync::Arc::new(msg),
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let _ = rx.await;
+        }
+        delivery
+            .ack(BasicAckOptions::default())
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn exchange_from_pattern(pattern: &str) -> Option<String> {
+    let body = pattern.strip_prefix('^')?.strip_suffix('$')?;
+    let name = body.replace("\\.", ".");
+    if name.is_empty() || name.contains(['*', '+', '?', '(', '[', '|']) {
+        return None;
+    }
+    Some(name)
 }

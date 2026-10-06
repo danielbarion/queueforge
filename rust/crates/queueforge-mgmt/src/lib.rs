@@ -34,7 +34,9 @@ mod session;
 mod spa;
 mod state;
 
-pub use connections::{ChannelInfo, ConnectionInfo, ConnectionTracker, ConsumerInfo, TopicPermission};
+pub use connections::{
+    ChannelInfo, ConnectionInfo, ConnectionTracker, ConsumerInfo, TopicPermission,
+};
 pub use error::{MgmtError, Result};
 pub use session::{SessionStore, SESSION_COOKIE_NAME};
 pub use state::{MgmtConfig, MgmtState};

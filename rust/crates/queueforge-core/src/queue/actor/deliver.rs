@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use super::super::cmd::{
     ConsumerDeliveryId, ConsumerSessionId, QueueDelivery, QueueMessage, QueueOffset, QueueStats,
 };
-use super::{ConsumerState, QueueState, TtlKey, UnackedEntry};
+use super::{ConsumerState, DepthGauges, QueueState, TtlKey, UnackedEntry};
 
 impl QueueState {
     /// Return ready, unacked, consumer, and per-priority counts. The values are the actor's in-memory view at this command.
@@ -55,26 +55,59 @@ impl QueueState {
     }
 
     /// Publish ready, unacked, and consumer gauges for this queue. Labels are the vhost and queue name.
-    pub(super) fn update_gauges(&self) {
-        metrics::gauge!(
-            "queueforge_messages_ready",
-            "queue" => self.key.name.to_string(),
-            "vhost" => self.key.vhost.to_string()
-        )
-        .set(self.ready.len() as f64);
-        metrics::gauge!(
-            "queueforge_messages_unacked",
-            "queue" => self.key.name.to_string(),
-            "vhost" => self.key.vhost.to_string()
-        )
-        .set(self.unacked.len() as f64);
-        crate::prom::queue_depth(
-            self.key.vhost.as_str(),
-            self.key.name.as_str(),
-            self.ready.len() as u64,
-            self.unacked.len() as u64,
-            self.consumers.len() as u64,
-        );
+    ///
+    /// The handles are built once. A pipelined confirm used to allocate a fresh
+    /// label set on every enqueue, delivery, and ack.
+    pub(super) fn update_gauges(&mut self) {
+        let ready = self.ready.len() as f64;
+        let unacked = self.unacked.len() as f64;
+        let consumers = self.consumers.len() as f64;
+        if self.depth_gauges.is_none() {
+            let queue = self.key.name.to_string();
+            let vhost = self.key.vhost.to_string();
+            self.depth_gauges = Some(DepthGauges {
+                ready: metrics::gauge!(
+                    "queueforge_messages_ready",
+                    "queue" => queue.clone(),
+                    "vhost" => vhost.clone()
+                ),
+                unacked: metrics::gauge!(
+                    "queueforge_messages_unacked",
+                    "queue" => queue.clone(),
+                    "vhost" => vhost.clone()
+                ),
+                rabbit_ready: metrics::gauge!(
+                    "rabbitmq_queue_messages_ready",
+                    "vhost" => vhost.clone(),
+                    "queue" => queue.clone()
+                ),
+                rabbit_unacked: metrics::gauge!(
+                    "rabbitmq_queue_messages_unacked",
+                    "vhost" => vhost.clone(),
+                    "queue" => queue.clone()
+                ),
+                rabbit_total: metrics::gauge!(
+                    "rabbitmq_queue_messages",
+                    "vhost" => vhost.clone(),
+                    "queue" => queue.clone()
+                ),
+                rabbit_consumers: metrics::gauge!(
+                    "rabbitmq_queue_consumers",
+                    "vhost" => vhost,
+                    "queue" => queue
+                ),
+            });
+        }
+        let gauges = self
+            .depth_gauges
+            .as_ref()
+            .expect("depth gauges are installed above");
+        gauges.ready.set(ready);
+        gauges.unacked.set(unacked);
+        gauges.rabbit_ready.set(ready);
+        gauges.rabbit_unacked.set(unacked);
+        gauges.rabbit_total.set(ready + unacked);
+        gauges.rabbit_consumers.set(consumers);
     }
 
     /// Report whether `c` can take a delivery. Unlimited credit (`None`) and a positive count return true.

@@ -8,7 +8,7 @@ use queueforge_store::MetadataStore;
 use serde_json::Value;
 
 use super::quorum::local_forget;
-use super::{Cluster, Inner, Snapshot};
+use super::{Cluster, ConsumedId, Inner, Snapshot};
 
 /// Build the topology snapshot this node sends to a peer. `inner` supplies the metadata store. Returns JSON the peer can apply.
 pub(super) async fn snapshot(inner: &Inner) -> Value {
@@ -52,11 +52,11 @@ pub(super) async fn snapshot(inner: &Inner) -> Value {
 
 /// Record `message_id` as consumed on `key` in `inner`. A later snapshot must not resurrect that id on this node.
 pub(super) async fn remember_consumed(inner: &Inner, key: &QueueKey, message_id: &str) {
-    let entry = serde_json::json!({"vhost": key.vhost.as_str(), "queue": key.name.as_str(), "id": message_id});
-    let mut consumed = inner.consumed.lock().await;
-    if !consumed.iter().any(|item| item == &entry) {
-        consumed.push(entry);
-    }
+    inner.consumed.lock().await.insert(ConsumedId {
+        vhost: key.vhost.to_string(),
+        queue: key.name.to_string(),
+        id: message_id.to_string(),
+    });
 }
 
 /// Apply a peer consumed-set update in `value` to `inner`. Unknown queue keys are ignored.
@@ -73,12 +73,15 @@ pub(super) async fn apply_consumed(inner: &Arc<Inner>, value: &Value) {
         }
         let key = QueueKey::new(vhost, queue);
         remember_consumed(inner, &key, id).await;
+        // The recovered body is on the actor before this hello. Wait until that
+        // copy is gone, then keep retrying for a drop that beat the append.
+        let _ = local_forget(inner, &key, id).await;
         let inner = Arc::clone(inner);
         let id = id.to_string();
         tokio::spawn(async move {
-            for _ in 0..15 {
-                let _ = local_forget(&inner, &key, &id).await;
+            for _ in 0..14 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = local_forget(&inner, &key, &id).await;
             }
         });
     }

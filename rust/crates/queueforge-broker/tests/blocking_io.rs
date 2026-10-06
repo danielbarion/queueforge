@@ -224,10 +224,15 @@ async fn amqp_transient_nonexclusive_declare_follows_feature_flag() {
     let denied = refused_ch
         .queue_declare("transient.q", transient, FieldTable::default())
         .await;
-    assert!(denied.is_err(), "transient declare must fail before the flag is enabled");
+    assert!(
+        denied.is_err(),
+        "transient declare must fail before the flag is enabled"
+    );
 
     let enabled = client
-        .post(format!("{base}/api/feature-flags/transient_nonexcl_queues/enable"))
+        .post(format!(
+            "{base}/api/feature-flags/transient_nonexcl_queues/enable"
+        ))
         .send()
         .await
         .expect("enable");
@@ -241,7 +246,9 @@ async fn amqp_transient_nonexclusive_declare_follows_feature_flag() {
         .expect("transient declare succeeds after enable");
 
     let disabled = client
-        .post(format!("{base}/api/feature-flags/transient_nonexcl_queues/disable"))
+        .post(format!(
+            "{base}/api/feature-flags/transient_nonexcl_queues/disable"
+        ))
         .send()
         .await
         .expect("disable");
@@ -251,10 +258,15 @@ async fn amqp_transient_nonexclusive_declare_follows_feature_flag() {
     let denied_again = refused_again_ch
         .queue_declare("transient.again", transient, FieldTable::default())
         .await;
-    assert!(denied_again.is_err(), "disabling the flag refuses the next declare");
+    assert!(
+        denied_again.is_err(),
+        "disabling the flag refuses the next declare"
+    );
 
     let acked = client
-        .delete(format!("{base}/api/deprecated-features/transient_nonexcl_queues"))
+        .delete(format!(
+            "{base}/api/deprecated-features/transient_nonexcl_queues"
+        ))
         .send()
         .await
         .expect("acknowledge");

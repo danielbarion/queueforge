@@ -7,7 +7,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use queueforge_auth::AuthService;
+use queueforge_auth::{dummy_password_hash, verify_password};
 use queueforge_core::{User, UserTag};
 
 use super::health::peer_in_cidrs;
@@ -54,17 +54,28 @@ pub(super) async fn login(
         ));
     }
 
-    // Argon2 is intentionally slow — run off the async runtime.
+    // The user row is a redb read, so it stays on the blocking pool.
+    // The SHA-256 password-hash is checked on this task.
     let store = Arc::clone(&state.store);
     let username = body.username.clone();
     let password = body.password.clone();
-    let user = tokio::task::spawn_blocking(move || {
-        let auth = AuthService::new(store.as_ref());
-        auth.authenticate(&username, &password)
-    })
-    .await
-    .map_err(|e| MgmtError::Internal(format!("login task join: {e}")))?
-    .map_err(MgmtError::from)?;
+    let looked_up = tokio::task::spawn_blocking(move || store.get_user(&username))
+        .await
+        .map_err(|e| MgmtError::Internal(format!("login task join: {e}")))?
+        .map_err(MgmtError::from)?;
+    let user = match looked_up {
+        Some(user) => {
+            if verify_password(&password, &user.password_hash).map_err(MgmtError::from)? {
+                Some(user)
+            } else {
+                None
+            }
+        }
+        None => {
+            let _ = verify_password(&password, dummy_password_hash());
+            None
+        }
+    };
 
     let Some(user) = user else {
         state.sessions.record_login_failure(&ip);

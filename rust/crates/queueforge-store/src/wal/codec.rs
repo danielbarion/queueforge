@@ -199,10 +199,91 @@ pub struct DecodedRecord {
     pub encoded_len: usize,
 }
 
+/// Encode an ack-watermark record. The offset is the contiguous watermark.
+pub fn encode_ack_record(watermark: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + 1 + 1 + 8 + 1 + 4 + 4 + 4);
+    buf.extend_from_slice(&WAL_MAGIC.to_le_bytes());
+    buf.push(WAL_VERSION);
+    buf.push(RecordType::AckWatermark as u8);
+    buf.extend_from_slice(&watermark.to_le_bytes());
+    buf.push(0u8);
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    let mut hasher = Hasher::new();
+    hasher.update(&buf);
+    let crc = hasher.finalize();
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf
+}
+
+/// A bench publish has no headers and no optional properties. Skipping serde
+/// avoids a property struct and a JSON buffer on every append.
+fn message_props_are_plain(msg: &Message) -> bool {
+    msg.content_type.is_none()
+        && msg.content_encoding.is_none()
+        && msg.correlation_id.is_none()
+        && msg.message_id.is_none()
+        && msg.reply_to.is_none()
+        && msg.expiration.is_none()
+        && msg.app_id.is_none()
+        && msg.user_id.is_none()
+        && msg.type_.is_none()
+        && msg.priority.is_none()
+        && msg.timestamp.is_none()
+        && msg.expires_unix_ms.is_none()
+        && msg.headers.is_empty()
+}
+
+fn push_json_str(out: &mut Vec<u8>, value: &str) {
+    out.push(b'"');
+    for byte in value.bytes() {
+        match byte {
+            b'"' | b'\\' => {
+                out.push(b'\\');
+                out.push(byte);
+            }
+            b'\n' => out.extend_from_slice(br"\n"),
+            b'\r' => out.extend_from_slice(br"\r"),
+            b'\t' => out.extend_from_slice(br"\t"),
+            0x00..=0x1f => {
+                out.extend_from_slice(br"\u00");
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                out.push(HEX[(byte >> 4) as usize]);
+                out.push(HEX[(byte & 0x0f) as usize]);
+            }
+            _ => out.push(byte),
+        }
+    }
+    out.push(b'"');
+}
+
+fn plain_props_json(msg: &Message) -> Vec<u8> {
+    let mut props = Vec::with_capacity(48 + msg.exchange.len() + msg.routing_key.len());
+    props.extend_from_slice(br#"{"exchange":"#);
+    push_json_str(&mut props, &msg.exchange);
+    props.extend_from_slice(br#","routing_key":"#);
+    push_json_str(&mut props, &msg.routing_key);
+    props.extend_from_slice(if msg.persistent {
+        br#","persistent":true"#
+    } else {
+        br#","persistent":false"#
+    });
+    props.extend_from_slice(if msg.redelivered {
+        br#","redelivered":true}"#
+    } else {
+        br#","redelivered":false}"#
+    });
+    props
+}
+
 /// Encode an enqueue record (including CRC).
 pub fn encode_enqueue_record(offset: u64, msg: &Message) -> Result<Vec<u8>> {
-    let props = WalProps::from(msg);
-    let props_bytes = serde_json::to_vec(&props)?;
+    let props_bytes = if message_props_are_plain(msg) {
+        plain_props_json(msg)
+    } else {
+        let props = WalProps::from(msg);
+        serde_json::to_vec(&props)?
+    };
     let body = msg.body.as_ref();
 
     // Header without CRC: magic(4)+ver(1)+rtype(1)+offset(8)+flags(1)+props_len(4)+props+body_len(4)+body
@@ -421,5 +502,38 @@ mod tests {
         assert_eq!(m.body.as_ref(), b"payload");
         assert_eq!(m.priority, Some(9));
         assert_eq!(m.correlation_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn plain_publish_roundtrips_without_optional_props() {
+        let msg = Message {
+            exchange: CompactString::from(""),
+            routing_key: CompactString::from("bench-q"),
+            body: Bytes::from_static(b"payload"),
+            persistent: true,
+            redelivered: false,
+            content_type: None,
+            content_encoding: None,
+            correlation_id: None,
+            message_id: None,
+            reply_to: None,
+            expiration: None,
+            app_id: None,
+            user_id: None,
+            type_: None,
+            priority: None,
+            timestamp: None,
+            expires_unix_ms: None,
+            headers: Default::default(),
+        };
+        let bytes = encode_enqueue_record(7, &msg).unwrap();
+        let recs = decode_records(&bytes).unwrap();
+        let decoded = recs[0].message.as_ref().unwrap();
+        assert_eq!(decoded.exchange.as_str(), "");
+        assert_eq!(decoded.routing_key.as_str(), "bench-q");
+        assert!(decoded.persistent);
+        assert!(!decoded.redelivered);
+        assert_eq!(decoded.body.as_ref(), b"payload");
+        assert!(decoded.priority.is_none());
     }
 }

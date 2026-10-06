@@ -41,9 +41,10 @@ impl Cluster {
         crate::connection::install_session_namespace(slot);
         let listener = TcpListener::bind(listen).await?;
         info!(%listen, node_id, members = members.len(), "cluster listening");
+        let members = super::membership::load_members(&store, &members);
         let inner = Arc::new(Inner {
             node_id,
-            members,
+            members: std::sync::Mutex::new(members),
             store,
             queues,
             router,
@@ -51,7 +52,12 @@ impl Cluster {
             next_id: AtomicU64::new(1),
             leader: std::sync::Mutex::new(String::new()),
             replicas: Mutex::new(HashMap::new()),
-            consumed: Mutex::new(Vec::new()),
+            consumed: Mutex::new(std::collections::HashSet::new()),
+            append_inflight: std::sync::Mutex::new(HashMap::new()),
+            heard: std::sync::Mutex::new(std::collections::HashSet::new()),
+            dial_fails: std::sync::Mutex::new(HashMap::new()),
+            down: std::sync::Mutex::new(std::collections::HashSet::new()),
+            catchup: tokio::sync::Notify::new(),
         });
         let cluster = Arc::new(Self {
             inner: Arc::clone(&inner),
@@ -61,6 +67,7 @@ impl Cluster {
             loop {
                 match listener.accept().await {
                     Ok((stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
                         let inner = Arc::clone(&accept_inner);
                         tokio::spawn(async move {
                             if let Err(err) = serve_conn(inner, stream).await {
@@ -85,12 +92,95 @@ impl Cluster {
         Ok(cluster)
     }
 
+    /// Wait until every other member's hello has applied its consumed set.
+    ///
+    /// Startup calls this before `/readyz` when quorum messages were recovered,
+    /// so a restarted leader cannot `basic.get` a body a survivor already acked.
+    /// A member that refuses the cluster dial five times is down. That member
+    /// does not keep `/readyz` false. A member that accepts stays required.
+    pub async fn wait_quorum_catchup(&self) {
+        loop {
+            if self.catchup_done() {
+                return;
+            }
+            self.probe_lower_peers().await;
+            if self.catchup_done() {
+                return;
+            }
+            tokio::select! {
+                _ = self.inner.catchup.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+    }
+
+    fn catchup_done(&self) -> bool {
+        let ids: Vec<String> = self
+            .inner
+            .member_list()
+            .into_iter()
+            .map(|member| member.id)
+            .collect();
+        let heard = self
+            .inner
+            .heard
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let down = self
+            .inner
+            .down
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        super::catchup_satisfied(&self.inner.node_id, &ids, &heard, &down)
+    }
+
+    /// Dial members with a lower id. The steady-state loop only dials higher ids,
+    /// so a dead lower id would otherwise never produce a refused connect.
+    async fn probe_lower_peers(&self) {
+        let snapshot = {
+            let heard = self
+                .inner
+                .heard
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            let down = self
+                .inner
+                .down
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            (heard, down, self.inner.member_list())
+        };
+        let (heard, down, members) = snapshot;
+        for member in members {
+            if member.id.as_str() >= self.inner.node_id.as_str() {
+                continue;
+            }
+            if heard.contains(member.id.as_str()) || down.contains(member.id.as_str()) {
+                continue;
+            }
+            let id = member.id.clone();
+            let addr = member.addr;
+            match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => {
+                    drop(stream);
+                    super::clear_dial_failure(&self.inner, &id);
+                }
+                Ok(Err(_)) => super::record_dial_failure(&self.inner, &id),
+                Err(_) => {}
+            }
+        }
+    }
+
     /// Home id for this queue.
     pub fn home_of(&self, vhost: &str, queue: &str, exclusive: bool) -> String {
         if exclusive {
             return self.inner.node_id.clone();
         }
-        queue_home(&self.inner.members, vhost, queue).to_string()
+        queue_home(&self.inner.member_list(), vhost, queue).to_string()
     }
 
     /// Whether the queue actor should live in this process.
@@ -302,6 +392,7 @@ impl Cluster {
 
     /// Dial every configured member except this node. A failed dial is retried by the peer task; startup does not wait for every peer.
     pub(super) async fn connect_peers(&self) {
+        super::membership::reload_from_disk(&self.inner);
         let stale: Vec<String> = {
             let peers = self.inner.peers.lock().await;
             peers
@@ -318,7 +409,8 @@ impl Cluster {
             drop(peers);
             refresh_leader(&self.inner).await;
         }
-        for member in &self.inner.members {
+        let members = self.inner.member_list();
+        for member in &members {
             if member.id == self.inner.node_id || member.id.as_str() < self.inner.node_id.as_str() {
                 continue;
             }
@@ -332,12 +424,15 @@ impl Cluster {
             tokio::spawn(async move {
                 match TcpStream::connect(addr).await {
                     Ok(stream) => {
+                        let _ = stream.set_nodelay(true);
+                        super::clear_dial_failure(&inner, &id);
                         if let Err(err) = attach_peer(inner, id.clone(), addr, stream, true).await {
                             debug!(peer = %id, error = %err, "cluster dial failed");
                         }
                     }
                     Err(err) => {
                         debug!(peer = %id, error = %err, "cluster peer unreachable");
+                        super::record_dial_failure(&inner, &id);
                     }
                 }
             });
@@ -345,7 +440,7 @@ impl Cluster {
         let connected = self.inner.peers.lock().await.len();
         let expected = self
             .inner
-            .members
+            .member_list()
             .iter()
             .filter(|member| member.id != self.inner.node_id)
             .count();
@@ -354,6 +449,16 @@ impl Cluster {
 
     /// Send `op` with `payload` to `node` and wait for one reply. Returns the reply message, or unavailable when the peer is down or times out. `Ok` means a reply arrived, including one with `ok: false`.
     pub(super) async fn call(&self, node: &str, op: &str, payload: Value) -> Result<Msg, Error> {
+        self.begin_call(node, op, payload).await?.wait().await
+    }
+
+    /// Send one RPC and return before the reply arrives. The caller chooses when to wait, so a proxy can keep several appends in flight. Sends from one task stay in call order.
+    pub(super) async fn begin_call(
+        &self,
+        node: &str,
+        op: &str,
+        payload: Value,
+    ) -> Result<PendingCall, Error> {
         let peer = self
             .inner
             .peers
@@ -382,12 +487,38 @@ impl Cluster {
             self.inner.peers.lock().await.remove(node);
             return Err(Error::Unavailable(format!("cluster peer {node} is down")));
         }
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(PendingCall {
+            rx,
+            peer,
+            id,
+            node: node.to_string(),
+        })
+    }
+}
+
+/// An RPC whose request line has already been sent.
+pub(super) struct PendingCall {
+    rx: oneshot::Receiver<Msg>,
+    peer: Arc<super::Peer>,
+    id: u64,
+    node: String,
+}
+
+impl PendingCall {
+    /// Wait for the reply. A timeout forgets this call only.
+    ///
+    /// The socket stays in the peer map. Removing it here also removed a
+    /// connection that had already replaced this one, and the next publish
+    /// then failed before the dial loop could restore the member.
+    pub(super) async fn wait(self) -> Result<Msg, Error> {
+        match tokio::time::timeout(Duration::from_secs(5), self.rx).await {
             Ok(Ok(msg)) => Ok(msg),
             _ => {
-                peer.pending.lock().await.remove(&id);
-                self.inner.peers.lock().await.remove(node);
-                Err(Error::Unavailable(format!("cluster peer {node} timed out")))
+                self.peer.pending.lock().await.remove(&self.id);
+                Err(Error::Unavailable(format!(
+                    "cluster peer {} timed out",
+                    self.node
+                )))
             }
         }
     }

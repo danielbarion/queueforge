@@ -9,7 +9,7 @@ pub enum AuthError {
     #[error("password policy violation: {0}")]
     PasswordPolicy(String),
 
-    /// Argon2 hash or verify failure.
+    /// Password hash could not be checked.
     #[error("password hash error: {0}")]
     PasswordHash(String),
 

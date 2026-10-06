@@ -121,7 +121,11 @@ pub fn select_policy<'a>(
 
 /// User policy fills unset keys, then an operator policy overrides those fills.
 /// A key set on the declare itself stays.
-pub fn apply_user_and_operator(declared: &QueueArgs, user: Option<&Policy>, operator: Option<&Policy>) -> QueueArgs {
+pub fn apply_user_and_operator(
+    declared: &QueueArgs,
+    user: Option<&Policy>,
+    operator: Option<&Policy>,
+) -> QueueArgs {
     let mut out = apply_queue_policy(declared, user);
     let Some(op) = operator else {
         return out;
@@ -199,7 +203,10 @@ pub fn apply_queue_policy(declared: &QueueArgs, policy: Option<&Policy>) -> Queu
 }
 
 /// Declare-time `alternate-exchange` wins. Otherwise use the exchange policy.
-pub fn effective_alternate(declared: Option<&str>, policy: Option<&Policy>) -> Option<CompactString> {
+pub fn effective_alternate(
+    declared: Option<&str>,
+    policy: Option<&Policy>,
+) -> Option<CompactString> {
     if let Some(name) = declared.filter(|s| !s.is_empty()) {
         return Some(CompactString::from(name));
     }
@@ -232,7 +239,11 @@ mod tests {
 
     #[test]
     fn higher_priority_wins_and_name_breaks_ties() {
-        let rows = vec![policy("b", 1, "^q"), policy("a", 1, "^q"), policy("z", 0, "^q")];
+        let rows = vec![
+            policy("b", 1, "^q"),
+            policy("a", 1, "^q"),
+            policy("z", 0, "^q"),
+        ];
         let won = select_policy(&rows, "/", "q1", PolicyTarget::Queues).unwrap();
         assert_eq!(won.name.as_str(), "a");
     }

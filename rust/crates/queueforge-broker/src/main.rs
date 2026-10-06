@@ -227,7 +227,10 @@ async fn run() -> Result<()> {
     let metrics_handle = install_recorder().context("installing metrics recorder")?;
     queueforge_core::prom::prime();
     queueforge_core::prom::identity(
-        &config.cluster.local_node_id().unwrap_or_else(|| "queueforge".into()),
+        &config
+            .cluster
+            .local_node_id()
+            .unwrap_or_else(|| "queueforge".into()),
         "queueforge",
     );
     let metrics_render = metrics_handle.clone();
@@ -243,11 +246,14 @@ async fn run() -> Result<()> {
     {
         let disk = Arc::clone(&disk);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            // Off the queue actor. A slow statvfs on that actor delayed the
+            // group commit for every confirm waiting on the queue.
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                disk.refresh();
+                let disk = Arc::clone(&disk);
+                let _ = tokio::task::spawn_blocking(move || disk.refresh()).await;
             }
         });
     }
@@ -265,14 +271,21 @@ async fn run() -> Result<()> {
         exclusive_purged = recovery_report.exclusive_purged,
         queues_restored = recovery_report.queues_restored,
         messages_recovered = recovery_report.messages_recovered,
+        quorum_messages_recovered = recovery_report.quorum_messages_recovered,
         queues_corrupt = recovery_report.queues_corrupt,
         "recovery finished"
     );
 
-    // Issue 7: mark ready before binding AMQP so /readyz is not 503 while
-    // the listener already accepts connections (recovery is already finished).
-    ready.set_ready(true);
-    info!("broker ready (recovery complete)");
+    // Recovered quorum bodies stay unservable until every peer hello has
+    // applied its consumed set. An empty data dir still becomes ready here.
+    let hold_quorum_catchup =
+        config.cluster.is_enabled() && recovery_report.quorum_messages_recovered > 0;
+    if !hold_quorum_catchup {
+        // Issue 7: mark ready before binding AMQP so /readyz is not 503 while
+        // the listener already accepts connections (recovery is already finished).
+        ready.set_ready(true);
+        info!("broker ready (recovery complete)");
+    }
 
     // Management HTTP API (session auth + resource CRUD).
     // Dev cookie defaults: HttpOnly + SameSite=Lax, Secure=false (plain HTTP).
@@ -298,8 +311,16 @@ async fn run() -> Result<()> {
                 config.cluster.node_id.clone()
             },
             data_dir: config.data.dir.display().to_string(),
-            amqp_listeners: vec![(config.listeners.amqp.ip().to_string(), config.listeners.amqp.port())],
-            peers: config.cluster.members.iter().map(|m| m.id.clone()).collect(),
+            amqp_listeners: vec![(
+                config.listeners.amqp.ip().to_string(),
+                config.listeners.amqp.port(),
+            )],
+            peers: config
+                .cluster
+                .members
+                .iter()
+                .map(|m| m.id.clone())
+                .collect(),
             ..MgmtConfig::default()
         },
     );
@@ -384,6 +405,13 @@ async fn run() -> Result<()> {
             }
         });
     }
+    if hold_quorum_catchup {
+        if let Some(cluster) = &cluster {
+            info!("waiting for quorum catchup before readyz");
+            cluster.wait_quorum_catchup().await;
+            info!("quorum catchup finished");
+        }
+    }
 
     // AMQP TCP listener + connection state machine.
     let amqp_listener = start_amqp_listener_with_limits(
@@ -400,6 +428,10 @@ async fn run() -> Result<()> {
     .await
     .with_context(|| format!("binding AMQP listener on {}", config.listeners.amqp))?;
     info!(local_addr = %amqp_listener.local_addr, tls = amqp_listener.tls, "AMQP listener ready");
+    if hold_quorum_catchup {
+        ready.set_ready(true);
+        info!("broker ready (quorum catchup complete)");
+    }
     if let Some(addr) = config.listeners.mqtt {
         queueforge_broker::protocols::spawn_mqtt(addr, Arc::clone(&queues));
         info!(%addr, "MQTT listening");

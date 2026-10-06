@@ -12,7 +12,7 @@ A config with no `[cluster].members` stays a single node. With members set, ever
 
 A durable quorum queue (`x-queue-type` = `quorum`) confirms a persistent publish after a majority of the members hold the body in memory. Each member appends that body to its own write-ahead log before it acks the peer. The client can publish to any member. Bun nodes can sit in the same member list: both sides speak cluster protocol version 1, and each stores the body in its own engine. Once a majority is reachable, the live leader is the lowest member id among the reachable members. See the [repository README](../README.md) for a member-list example.
 
-`fsync_policy = "every_n_ms"` completes a durable confirm after the buffered write. The group-commit fsync runs on `fsync_interval_ms` (100 in the example config). `always` and `every_n_messages` wait for the fsync before the confirm. A crash before the interval fsync can drop a confirm that already returned.
+`fsync_policy = "every_n_ms"` completes a durable confirm when the group-commit fsync covers that append. The timer runs on `fsync_interval_ms` (100 in the example config). `always` and `every_n_messages` also wait for the fsync before the confirm.
 
 For local development and PR workflow, see [`CONTRIBUTING.md`](CONTRIBUTING.md). For backup, restore, sessions, and production hardening, see [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Historical architecture notes live in [`DESIGN-queueforge.md`](DESIGN-queueforge.md).
 
@@ -136,7 +136,7 @@ Other env overrides: `QUEUEFORGE_DATA_DIR`, `QUEUEFORGE_LOG`, `QUEUEFORGE_AMQP_A
 | `queueforge-broker` | Binary (`queueforge`) |
 | `queueforge-core` | Shared config / domain types / queue runtime |
 | `queueforge-amqp` | AMQP framing and methods |
-| `queueforge-auth` | Argon2id users and permissions |
+| `queueforge-auth` | Password-hash users and permissions |
 | `queueforge-store` | redb metadata |
 | `queueforge-metrics` | Prometheus registry + health HTTP |
 | `queueforge-mgmt` | Management HTTP API (sessions, CRUD, definitions) + embedded SPA (`ui/dist`) |

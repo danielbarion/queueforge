@@ -64,11 +64,17 @@ pub fn prime() {
     gauge("rabbitmq_unreachable_cluster_peers_count", 0.0);
     metrics::counter!("queueforge_confirm_before_fsync_total").absolute(0);
     metrics::gauge!("rabbitmq_identity_info", "rabbitmq_node" => "queueforge", "rabbitmq_cluster" => "queueforge").set(1.0);
-    metrics::gauge!("rabbitmq_build_info", "rabbitmq_version" => env!("CARGO_PKG_VERSION")).set(1.0);
+    metrics::gauge!("rabbitmq_build_info", "rabbitmq_version" => env!("CARGO_PKG_VERSION"))
+        .set(1.0);
 }
 
 fn counter_abs(name: &'static str) {
     metrics::counter!(name).absolute(0);
+}
+
+/// A durable confirm was released while that append was not in a completed fsync.
+pub fn confirm_before_fsync() {
+    counter("queueforge_confirm_before_fsync_total");
 }
 
 const GLOBAL_COUNTERS: &[&str] = &[
@@ -123,15 +129,23 @@ pub fn queue_declared(created: bool) {
     counter("rabbitmq_queues_declared_total");
     if created {
         counter("rabbitmq_queues_created_total");
-        gauge("rabbitmq_queues", QUEUES.fetch_add(1, Ordering::Relaxed) as f64 + 1.0);
+        gauge(
+            "rabbitmq_queues",
+            QUEUES.fetch_add(1, Ordering::Relaxed) as f64 + 1.0,
+        );
     }
 }
 
 /// A queue was deleted.
 pub fn queue_deleted() {
     counter("rabbitmq_queues_deleted_total");
-    let left = QUEUES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(1)));
-    gauge("rabbitmq_queues", left.unwrap_or(0).saturating_sub(1) as f64);
+    let left = QUEUES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(1))
+    });
+    gauge(
+        "rabbitmq_queues",
+        left.unwrap_or(0).saturating_sub(1) as f64,
+    );
 }
 
 /// A consumer was registered.
@@ -144,7 +158,9 @@ pub fn consumer_opened() {
 /// A registered consumer was removed.
 pub fn consumer_closed() {
     let left = CONSUMERS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_sub(1)))
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_sub(1))
+        })
         .unwrap_or(0)
         .saturating_sub(1);
     gauge("rabbitmq_consumers", left as f64);
@@ -244,12 +260,18 @@ pub fn disk_space_available(bytes: u64) {
 
 /// Memory high-watermark alarm. `1` while publishes are blocked.
 pub fn memory_alarm(on: bool) {
-    gauge("rabbitmq_alarms_memory_used_watermark", if on { 1.0 } else { 0.0 });
+    gauge(
+        "rabbitmq_alarms_memory_used_watermark",
+        if on { 1.0 } else { 0.0 },
+    );
 }
 
 /// Free-disk watermark alarm.
 pub fn disk_alarm(on: bool) {
-    gauge("rabbitmq_alarms_free_disk_space_watermark", if on { 1.0 } else { 0.0 });
+    gauge(
+        "rabbitmq_alarms_free_disk_space_watermark",
+        if on { 1.0 } else { 0.0 },
+    );
 }
 
 /// Configured cluster peers that are not connected.

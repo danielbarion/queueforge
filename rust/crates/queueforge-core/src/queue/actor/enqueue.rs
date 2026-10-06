@@ -93,7 +93,8 @@ impl QueueState {
                 })?;
                 self.unsynced_appends = self.unsynced_appends.saturating_add(1);
             } else {
-                // The interval fsync holds the log. The confirm does not wait for it.
+                // The interval fsync holds the log. The body is written when that
+                // sync returns, and the confirm waits for a later sync that covers it.
                 self.deferred_appends.push((offset, Arc::clone(msg)));
             }
             self.next_offset = self.next_offset.saturating_add(1);
@@ -177,7 +178,7 @@ impl QueueState {
         }
     }
 
-    /// Accept `msg` onto the ready set. Returns the offset and the `durable_done` oneshot, or the limit, memory, disk, or WAL error. `EveryNMs` completes `durable_done` before the interval fsync. `Always` and a full `EveryNMessages` batch set `pending_fsync` so the select loop syncs before the next command.
+    /// Accept `msg` onto the ready set. Returns the offset and the `durable_done` oneshot, or the limit, memory, disk, or WAL error. `EveryNMs` completes `durable_done` when the interval fsync covers this offset. `Always` and a full `EveryNMessages` batch set `pending_fsync` so the select loop syncs before the next command.
     pub(super) fn enqueue(&mut self, msg: Arc<Message>) -> Result<EnqueueCompletion, Error> {
         let body_bytes = msg.body_bytes();
         if let Err(err) = self.enforce_overflow_for_incoming(body_bytes) {
@@ -251,7 +252,8 @@ impl QueueState {
         if needs_wal {
             match self.durability_policy.policy {
                 FsyncPolicy::Never => {
-                    // Buffered write only — treat as durable immediately.
+                    // Buffered write only. The confirm did not wait for an fsync.
+                    crate::prom::confirm_before_fsync();
                     let _ = tx.send(Ok(()));
                 }
                 FsyncPolicy::Always => {
@@ -260,9 +262,9 @@ impl QueueState {
                     self.pending_fsync = true;
                 }
                 FsyncPolicy::EveryNMs => {
-                    // The interval timer still fsyncs. The confirm does not wait for it.
-                    metrics::counter!("queueforge_confirm_before_fsync_total").increment(1);
-                    let _ = tx.send(Ok(()));
+                    // Group commit: the interval fsync completes this waiter. A confirm
+                    // therefore means the offset was synced, not merely buffered.
+                    self.fsync_waiters.push(FsyncWaiter { offset, tx });
                 }
                 FsyncPolicy::EveryNMessages => {
                     self.fsync_waiters.push(FsyncWaiter { offset, tx });

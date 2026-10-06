@@ -1,13 +1,140 @@
-//! Ready-set storage: plain FIFO or multi-lane priority queues.
+//! Ready-set storage: plain FIFO, an indexed quorum FIFO, or priority lanes.
 //!
-//! Queues without `x-max-priority` use [`Ready::Fifo`] (single `VecDeque`,
-//! zero lane overhead). Priority queues use [`Ready::Priority`]: an array of
-//! deques of length `max_priority + 1`. Deliver scans high→low; drop-head
-//! scans low→high (lowest-priority oldest first, RabbitMQ-like).
+//! Classic queues use [`Ready::Fifo`] (single `VecDeque`). Quorum queues without
+//! `x-max-priority` use [`Ready::Indexed`], so a drop by message id does not
+//! slide the messages behind it. Priority queues use [`Ready::Priority`]: an
+//! array of deques of length `max_priority + 1`. Deliver scans high→low;
+//! drop-head scans low→high (lowest-priority oldest first, RabbitMQ-like).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
+use compact_str::CompactString;
+
+use super::args::{QueueArgs, QueueType};
 use super::cmd::{Message, QueueMessage, QueueOffset};
+
+/// Quorum ready set. A drop by message id does not slide the messages behind it.
+///
+/// Classic queues stay on [`Ready::Fifo`]. This exists because a quorum follower
+/// holds every copy until the leader delivers it, and a prefetch window drops
+/// those copies while newer appends are still in the same deque.
+#[derive(Debug)]
+struct IndexedFifo {
+    order: VecDeque<u64>,
+    live: HashMap<u64, QueueMessage>,
+    by_id: HashMap<CompactString, Vec<u64>>,
+    tombstones: usize,
+}
+
+impl IndexedFifo {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            live: HashMap::new(),
+            by_id: HashMap::new(),
+            tombstones: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.live.len()
+    }
+
+    fn index_id(&mut self, qm: &QueueMessage) {
+        if let Some(id) = qm.message.message_id.clone() {
+            self.by_id.entry(id).or_default().push(qm.offset.0);
+        }
+    }
+
+    fn unindex_id(&mut self, qm: &QueueMessage) {
+        let Some(id) = qm.message.message_id.as_ref() else {
+            return;
+        };
+        let Some(slots) = self.by_id.get_mut(id) else {
+            return;
+        };
+        if let Some(pos) = slots.iter().position(|offset| *offset == qm.offset.0) {
+            slots.swap_remove(pos);
+        }
+        if slots.is_empty() {
+            self.by_id.remove(id);
+        }
+    }
+
+    fn push_back(&mut self, qm: QueueMessage) {
+        let offset = qm.offset.0;
+        self.index_id(&qm);
+        self.order.push_back(offset);
+        self.live.insert(offset, qm);
+    }
+
+    fn push_front(&mut self, qm: QueueMessage) {
+        let offset = qm.offset.0;
+        self.index_id(&qm);
+        self.order.push_front(offset);
+        self.live.insert(offset, qm);
+    }
+
+    fn take_live(&mut self, offset: u64) -> Option<QueueMessage> {
+        let qm = self.live.remove(&offset)?;
+        self.unindex_id(&qm);
+        Some(qm)
+    }
+
+    fn pop_front(&mut self) -> Option<QueueMessage> {
+        while let Some(offset) = self.order.pop_front() {
+            if let Some(qm) = self.take_live(offset) {
+                return Some(qm);
+            }
+            self.tombstones = self.tombstones.saturating_sub(1);
+        }
+        self.tombstones = 0;
+        None
+    }
+
+    fn remove_offset(&mut self, offset: u64) -> Option<QueueMessage> {
+        let qm = self.take_live(offset)?;
+        self.tombstones = self.tombstones.saturating_add(1);
+        self.maybe_compact();
+        Some(qm)
+    }
+
+    fn remove_message_id(&mut self, message_id: &str) -> Vec<QueueMessage> {
+        let Some(offsets) = self.by_id.remove(message_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            if let Some(qm) = self.live.remove(&offset) {
+                self.tombstones = self.tombstones.saturating_add(1);
+                out.push(qm);
+            }
+        }
+        self.maybe_compact();
+        out
+    }
+
+    fn maybe_compact(&mut self) {
+        if self.tombstones > self.live.len().max(32) {
+            let live = &self.live;
+            self.order.retain(|offset| live.contains_key(offset));
+            self.tombstones = 0;
+        }
+    }
+
+    fn has_ttl(&self, offset: u64, expires_at: Option<tokio::time::Instant>) -> bool {
+        self.live
+            .get(&offset)
+            .is_some_and(|message| message.expires_at == expires_at)
+    }
+
+    fn drain_all(&mut self) -> Vec<QueueMessage> {
+        self.order.clear();
+        self.by_id.clear();
+        self.tombstones = 0;
+        self.live.drain().map(|(_, message)| message).collect()
+    }
+}
 
 /// Effective priority: `min(properties.priority.unwrap_or(0), max_priority)`.
 #[inline]
@@ -20,6 +147,8 @@ pub fn effective_priority(msg: &Message, max_priority: u8) -> u8 {
 pub enum Ready {
     /// Non-priority queue: classic FIFO.
     Fifo(VecDeque<QueueMessage>),
+    /// Quorum FIFO. Drops by id leave holes instead of sliding the tail.
+    Indexed(IndexedFifo),
     /// Priority queue: one lane per priority level `0..=max_priority`.
     Priority {
         /// Lanes indexed by effective priority; higher index = higher priority.
@@ -32,6 +161,14 @@ pub enum Ready {
 }
 
 impl Ready {
+    /// Classic queues stay a deque. A quorum queue without priority uses the indexed set.
+    pub fn for_queue(args: &QueueArgs) -> Self {
+        if args.queue_type == Some(QueueType::Quorum) && args.max_priority.unwrap_or(0) == 0 {
+            return Self::Indexed(IndexedFifo::new());
+        }
+        Self::from_max_priority(args.max_priority)
+    }
+
     /// Build ready storage from declare args (`None` / zero → FIFO).
     pub fn from_max_priority(max_priority: Option<u8>) -> Self {
         match max_priority {
@@ -56,6 +193,7 @@ impl Ready {
     pub fn len(&self) -> usize {
         match self {
             Self::Fifo(q) => q.len(),
+            Self::Indexed(q) => q.len(),
             Self::Priority { len, .. } => *len,
         }
     }
@@ -70,7 +208,7 @@ impl Ready {
     #[inline]
     pub fn max_priority(&self) -> Option<u8> {
         match self {
-            Self::Fifo(_) => None,
+            Self::Fifo(_) | Self::Indexed(_) => None,
             Self::Priority { max_priority, .. } => Some(*max_priority),
         }
     }
@@ -78,7 +216,7 @@ impl Ready {
     /// Per-priority ready counts (`None` for FIFO).
     pub fn counts_by_priority(&self) -> Option<Vec<u32>> {
         match self {
-            Self::Fifo(_) => None,
+            Self::Fifo(_) | Self::Indexed(_) => None,
             Self::Priority { lanes, .. } => Some(lanes.iter().map(|l| l.len() as u32).collect()),
         }
     }
@@ -87,6 +225,7 @@ impl Ready {
     pub fn push_back(&mut self, qm: QueueMessage) {
         match self {
             Self::Fifo(q) => q.push_back(qm),
+            Self::Indexed(q) => q.push_back(qm),
             Self::Priority {
                 lanes,
                 len,
@@ -103,6 +242,7 @@ impl Ready {
     pub fn push_front(&mut self, qm: QueueMessage) {
         match self {
             Self::Fifo(q) => q.push_front(qm),
+            Self::Indexed(q) => q.push_front(qm),
             Self::Priority {
                 lanes,
                 len,
@@ -119,6 +259,7 @@ impl Ready {
     pub fn pop_front(&mut self) -> Option<QueueMessage> {
         match self {
             Self::Fifo(q) => q.pop_front(),
+            Self::Indexed(q) => q.pop_front(),
             Self::Priority { lanes, len, .. } => {
                 for lane in lanes.iter_mut().rev() {
                     if let Some(qm) = lane.pop_front() {
@@ -138,6 +279,7 @@ impl Ready {
     pub fn pop_drop_head(&mut self) -> Option<QueueMessage> {
         match self {
             Self::Fifo(q) => q.pop_front(),
+            Self::Indexed(q) => q.pop_front(),
             Self::Priority { lanes, len, .. } => {
                 for lane in lanes.iter_mut() {
                     if let Some(qm) = lane.pop_front() {
@@ -157,6 +299,7 @@ impl Ready {
                 let pos = q.iter().position(|m| m.offset == offset)?;
                 q.remove(pos)
             }
+            Self::Indexed(q) => q.remove_offset(offset.0),
             Self::Priority { lanes, len, .. } => {
                 for lane in lanes.iter_mut() {
                     if let Some(pos) = lane.iter().position(|m| m.offset == offset) {
@@ -166,6 +309,26 @@ impl Ready {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Remove every ready body whose message id is `message_id`.
+    ///
+    /// The head is the usual quorum drop, and that case does not walk the
+    /// queue. A later id is removed in place. The other bodies stay in order.
+    pub fn remove_message_id(&mut self, message_id: &str) -> Vec<QueueMessage> {
+        match self {
+            Self::Fifo(q) => remove_id_from_deque(q, message_id),
+            Self::Indexed(q) => q.remove_message_id(message_id),
+            Self::Priority { lanes, len, .. } => {
+                let mut out = Vec::new();
+                for lane in lanes.iter_mut() {
+                    let dropped = remove_id_from_deque(lane, message_id);
+                    *len = len.saturating_sub(dropped.len());
+                    out.extend(dropped);
+                }
+                out
             }
         }
     }
@@ -180,6 +343,7 @@ impl Ready {
             Self::Fifo(q) => q
                 .iter()
                 .any(|m| m.offset == offset && m.expires_at == expires_at),
+            Self::Indexed(q) => q.has_ttl(offset.0, expires_at),
             Self::Priority { lanes, .. } => lanes.iter().any(|lane| {
                 lane.iter()
                     .any(|m| m.offset == offset && m.expires_at == expires_at)
@@ -191,6 +355,7 @@ impl Ready {
     pub fn drain_all(&mut self) -> Vec<QueueMessage> {
         match self {
             Self::Fifo(q) => q.drain(..).collect(),
+            Self::Indexed(q) => q.drain_all(),
             Self::Priority { lanes, len, .. } => {
                 let mut out = Vec::with_capacity(*len);
                 for lane in lanes.iter_mut() {
@@ -201,6 +366,28 @@ impl Ready {
             }
         }
     }
+}
+
+/// Take every body in `q` whose id is `message_id`. Head matches return without a scan.
+fn remove_id_from_deque(q: &mut VecDeque<QueueMessage>, message_id: &str) -> Vec<QueueMessage> {
+    let mut out = Vec::new();
+    while q.front().and_then(|m| m.message.message_id.as_deref()) == Some(message_id) {
+        if let Some(qm) = q.pop_front() {
+            out.push(qm);
+        }
+    }
+    let mut i = 0;
+    while i < q.len() {
+        let matches = q.get(i).and_then(|m| m.message.message_id.as_deref()) == Some(message_id);
+        if matches {
+            if let Some(qm) = q.remove(i) {
+                out.push(qm);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -235,6 +422,16 @@ mod tests {
 
     fn qm(offset: u64, body: &[u8], priority: Option<u8>) -> QueueMessage {
         QueueMessage::new(QueueOffset(offset), msg(body, priority))
+    }
+
+    fn qm_id(offset: u64, body: &[u8], id: &str) -> QueueMessage {
+        qm_prio(offset, body, id, None)
+    }
+
+    fn qm_prio(offset: u64, body: &[u8], id: &str, priority: Option<u8>) -> QueueMessage {
+        let mut message = (*msg(body, priority)).clone();
+        message.message_id = Some(CompactString::from(id));
+        QueueMessage::new(QueueOffset(offset), Arc::new(message))
     }
 
     #[test]
@@ -280,6 +477,99 @@ mod tests {
         // Deliver still prefers high.
         assert_eq!(r.pop_front().unwrap().message.body.as_ref(), b"high");
         assert_eq!(r.pop_front().unwrap().message.body.as_ref(), b"low-new");
+    }
+
+    #[test]
+    fn remove_message_id_keeps_fifo_order() {
+        let mut ready = Ready::from_max_priority(None);
+        for n in 0..64 {
+            ready.push_back(qm_id(n, &[n as u8], &format!("id-{n}")));
+        }
+        let head = ready.remove_message_id("id-0");
+        assert_eq!(head.len(), 1);
+        assert_eq!(head[0].offset.0, 0);
+        let dropped = ready.remove_message_id("id-40");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].offset.0, 40);
+        assert_eq!(ready.len(), 62);
+        assert!(ready.remove_message_id("id-40").is_empty());
+        let mut seen = Vec::new();
+        while let Some(message) = ready.pop_front() {
+            seen.push(message.offset.0);
+        }
+        let expected: Vec<u64> = (1..64).filter(|n| *n != 40).collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn quorum_remove_does_not_slide_the_tail() {
+        let mut args = QueueArgs::default();
+        args.queue_type = Some(QueueType::Quorum);
+        let mut ready = Ready::for_queue(&args);
+        assert!(matches!(ready, Ready::Indexed(_)));
+        for n in 0..128 {
+            ready.push_back(qm_id(n, &[n as u8], &format!("id-{n}")));
+        }
+        // Drop a body from the middle, the way an out-of-order quorum drop does.
+        let dropped = ready.remove_message_id("id-90");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].offset.0, 90);
+        assert_eq!(ready.len(), 127);
+        assert_eq!(ready.pop_front().unwrap().offset.0, 0);
+        let dropped_head = ready.remove_message_id("id-1");
+        assert_eq!(dropped_head[0].offset.0, 1);
+        assert_eq!(ready.pop_front().unwrap().offset.0, 2);
+    }
+
+    #[test]
+    fn classic_for_queue_stays_a_deque() {
+        let ready = Ready::for_queue(&QueueArgs::default());
+        assert!(matches!(ready, Ready::Fifo(_)));
+        let mut args = QueueArgs::default();
+        args.queue_type = Some(QueueType::Quorum);
+        args.max_priority = Some(2);
+        let ready = Ready::for_queue(&args);
+        assert!(matches!(ready, Ready::Priority { .. }));
+    }
+
+    #[test]
+    fn quorum_compact_keeps_survivor_order() {
+        let mut args = QueueArgs::default();
+        args.queue_type = Some(QueueType::Quorum);
+        let mut ready = Ready::for_queue(&args);
+        for n in 0..4000 {
+            ready.push_back(qm_id(n, b"x", &format!("id-{n}")));
+        }
+        for n in (0..4000).filter(|n| n % 2 == 1) {
+            let dropped = ready.remove_message_id(&format!("id-{n}"));
+            assert_eq!(dropped.len(), 1);
+            assert_eq!(dropped[0].offset.0, n);
+        }
+        // Tombstones now equal the survivors. One more drop compacts.
+        let extra = ready.remove_message_id("id-0");
+        assert_eq!(extra.len(), 1);
+        assert_eq!(ready.len(), 1999);
+        let mut seen = Vec::new();
+        while let Some(message) = ready.pop_front() {
+            seen.push(message.offset.0);
+        }
+        let expected: Vec<u64> = (2..4000).filter(|n| n % 2 == 0).collect();
+        assert_eq!(seen, expected);
+        assert!(ready.remove_message_id("id-2").is_empty());
+    }
+
+    #[test]
+    fn remove_message_id_on_a_priority_lane() {
+        let mut ready = Ready::from_max_priority(Some(2));
+        ready.push_back(qm_prio(1, b"low-old", "low-old", Some(0)));
+        ready.push_back(qm_prio(2, b"high", "high", Some(2)));
+        ready.push_back(qm_prio(3, b"low-new", "low-new", Some(0)));
+        let dropped = ready.remove_message_id("low-old");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].offset.0, 1);
+        assert_eq!(ready.pop_front().unwrap().message.body.as_ref(), b"high");
+        assert_eq!(ready.pop_front().unwrap().message.body.as_ref(), b"low-new");
+        assert!(ready.pop_front().is_none());
     }
 
     #[test]

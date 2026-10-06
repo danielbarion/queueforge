@@ -22,7 +22,7 @@ pub(super) async fn attach_peer(
     send_hello: bool,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
-    let (tx, mut rx) = mpsc::channel::<String>(256);
+    let (tx, mut rx) = mpsc::channel::<String>(1024);
     let pending = Arc::new(Mutex::new(HashMap::new()));
     let peer = Arc::new(Peer {
         tx: tx.clone(),
@@ -37,9 +37,21 @@ pub(super) async fn attach_peer(
     refresh_leader(&inner).await;
     tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
-            if write.write_all(line.as_bytes()).await.is_err()
-                || write.write_all(b"\n").await.is_err()
-            {
+            // One write covers the lines already queued. A quiet socket still
+            // sends this line immediately; the batch does not wait for more.
+            let mut buf = String::with_capacity(line.len().saturating_add(1));
+            buf.push_str(&line);
+            buf.push('\n');
+            while buf.len() < 64 * 1024 {
+                match rx.try_recv() {
+                    Ok(next) => {
+                        buf.push_str(&next);
+                        buf.push('\n');
+                    }
+                    Err(_) => break,
+                }
+            }
+            if write.write_all(buf.as_bytes()).await.is_err() {
                 break;
             }
         }
@@ -72,6 +84,14 @@ pub(super) async fn attach_peer(
             }
             if let Some(consumed) = msg.payload.get("consumed") {
                 apply_consumed(&inner, consumed).await;
+                let peer = if !msg.from.is_empty() {
+                    msg.from.clone()
+                } else if !msg.node_id.is_empty() {
+                    msg.node_id.clone()
+                } else {
+                    node_id.clone()
+                };
+                note_peer_caught_up(&inner, &peer);
             }
             if let Some(waiter) = pending.lock().await.remove(&msg.id) {
                 let _ = waiter.send(msg);
@@ -105,6 +125,7 @@ pub(super) async fn attach_peer(
                 if let Some(consumed) = msg.payload.get("consumed") {
                     apply_consumed(&inner, consumed).await;
                 }
+                note_peer_caught_up(&inner, node);
                 let _ = peer.tx.send(
                     serde_json::to_string(&Msg {
                         id: msg.id,
@@ -120,7 +141,6 @@ pub(super) async fn attach_peer(
                     .unwrap_or_default(),
                 )
                 .await;
-                let _ = node;
             }
             continue;
         }
@@ -140,20 +160,31 @@ pub(super) async fn attach_peer(
     Ok(())
 }
 
+/// Record that `peer`'s hello consumed-set has been applied.
+fn note_peer_caught_up(inner: &Inner, peer: &str) {
+    if peer.is_empty() || peer == inner.node_id || peer.starts_with("inbound-") {
+        return;
+    }
+    let mut heard = inner.heard.lock().unwrap_or_else(|err| err.into_inner());
+    if heard.insert(peer.to_string()) {
+        inner.catchup.notify_one();
+    }
+}
+
 /// Recompute the quorum leader from `inner` membership and the live set. The lowest live member id, including this node, becomes leader.
 pub(super) async fn refresh_leader(inner: &Arc<Inner>) {
     let mut ids = vec![inner.node_id.clone()];
     {
         let peers = inner.peers.lock().await;
         for id in peers.keys() {
-            if inner.members.iter().any(|member| member.id == *id) {
+            if inner.member_list().iter().any(|member| member.id == *id) {
                 ids.push(id.clone());
             }
         }
     }
     ids.sort();
     ids.dedup();
-    let majority = inner.members.len().max(1) / 2 + 1;
+    let majority = inner.member_list().len().max(1) / 2 + 1;
     if ids.len() < majority {
         return;
     }

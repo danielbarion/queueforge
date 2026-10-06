@@ -39,7 +39,7 @@ soft_watermark_relative = 0.5
 # channel_max = 2047
 # heartbeat_default = 60
 # max_message_bytes = 16777216
-# max_connections = 10000
+# max_connections = 100000
 # queue_enqueue_bound = 1024
 # basic.qos prefetch_count 0 is unlimited.
 # default_prefetch only sizes the internal queue-to-connection delivery buffer.

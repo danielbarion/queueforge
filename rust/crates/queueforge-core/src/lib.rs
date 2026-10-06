@@ -59,13 +59,12 @@ pub use policy::{apply_queue_policy, effective_alternate, select_policy, Policy,
 pub use queue::{
     death_hop_count, effective_priority, generate_server_queue_name, is_cycle_destination,
     prepare_dead_letter, should_drop_for_cycle, AppHeaderValue, ArgValue, ConsumerDeliveryId,
-    ConsumerSessionId, DeathEntry, DeathReason, DeclareResult, DlxFailAction, DlxOutcome,
-    DlxPublishResult, DlxRouter, DurabilityPolicy, DurableLogFactory, DurableQueueLog,
-    DeadLetterStrategy, EnqueueCompletion, Message, MessageHeaders, NoopMetaStore, OpenedDurableLog, OverflowPolicy,
+    ConsumerSessionId, DeadLetterStrategy, DeathEntry, DeathReason, DeclareResult, DlxFailAction,
+    DlxOutcome, DlxPublishResult, DlxRouter, DurabilityPolicy, DurableLogFactory, DurableQueueLog,
+    EnqueueCompletion, Message, MessageHeaders, NoopMetaStore, OpenedDurableLog, OverflowPolicy,
     PrepareDeath, QueueActorBootstrap, QueueActorState, QueueArgs, QueueCmd, QueueDeclareOpts,
-    QueueType,
     QueueDelivery, QueueHandle, QueueInfo, QueueKey, QueueMessage, QueueMetaStore, QueueOffset,
-    QueueRegistry, QueueStats, Ready, SharedDurableLogFactory, ShutdownReport,
+    QueueRegistry, QueueStats, QueueType, Ready, SharedDurableLogFactory, ShutdownReport,
     DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
 };
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};

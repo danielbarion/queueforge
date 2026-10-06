@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Authentication and authorization for QueueForge (Argon2id, permissions)"
+description = "Authentication and authorization for QueueForge (password-hash, permissions)"
 rust-version.workspace = true
 
 [dependencies]
-argon2 = { workspace = true }
 base64 = { workspace = true }
 compact_str = { workspace = true }
 sha2 = "0.10"

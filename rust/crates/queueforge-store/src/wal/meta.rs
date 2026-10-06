@@ -79,6 +79,18 @@ impl QueueMetaFile {
     pub fn save_sync(&self, path: &Path) -> Result<()> {
         self.save(path)
     }
+
+    /// Replace `path` without an fsync. The covering segment sync is the durability point.
+    pub fn save_relaxed(&self, path: &Path) -> Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut f = File::create(&tmp)?;
+            let text = serde_json::to_string(self)?;
+            f.write_all(text.as_bytes())?;
+        }
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 impl Default for QueueMetaFile {

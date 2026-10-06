@@ -66,7 +66,18 @@ fn path_looks_like_file(path: &str) -> bool {
     };
     matches!(
         ext,
-        "js" | "css" | "map" | "svg" | "png" | "ico" | "woff" | "woff2" | "json" | "txt" | "html" | "webp" | "gif"
+        "js" | "css"
+            | "map"
+            | "svg"
+            | "png"
+            | "ico"
+            | "woff"
+            | "woff2"
+            | "json"
+            | "txt"
+            | "html"
+            | "webp"
+            | "gif"
     )
 }
 
