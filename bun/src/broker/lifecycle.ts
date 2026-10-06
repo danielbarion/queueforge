@@ -14,13 +14,13 @@ import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
-import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
+import { BUILTIN, EMPTY_BODY, EMPTY_HEADERS, emptyProm, ReadyQueue, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
 /**
  * Load vhosts, users, topology, and stored messages into memory.
  *
- * @returns Nothing. Exclusive queues are skipped. A classic queue whose home is another node is kept as a proxy and its messages are not loaded. `ready` is true only after this returns.
+ * @returns Nothing. Exclusive queues are skipped. A classic queue whose home is another node is kept as a proxy and its messages are not loaded. `ready` stays false when recovered quorum messages still need peer hellos.
  */
 export function load(this: Broker) {
   this.store.ensureVhost("/");
@@ -42,6 +42,8 @@ export function load(this: Broker) {
   this.bindings = this.store.listBindings();
   for (const p of this.store.listPolicies() as Policy[]) this.policies.push(p);
   this.applyPolicies();
+  const otherMembers = this.cfg.members.some((member) => member.id !== this.cfg.nodeId);
+  let recoveredQuorum = false;
   for (const row of this.store.listMessages()) {
     const q = this.queues.get(this.key(row.vhost, row.queue));
     if (!q || (q.argsParsed.queueType !== "quorum" && q.home && this.cfg.nodeId && q.home !== this.cfg.nodeId)) continue;
@@ -56,21 +58,34 @@ export function load(this: Broker) {
       expiresAt: number | null;
       redelivered: boolean;
     };
-    q.ready.push({
+    const bytes = row.body instanceof Uint8Array ? row.body : new Uint8Array(row.body as ArrayBuffer);
+    const quorum = q.argsParsed.queueType === "quorum";
+    const live = {
       id: meta.id || `d-${row.id}`,
       rowId: row.id,
-      body: row.body instanceof Uint8Array ? row.body : new Uint8Array(row.body as ArrayBuffer),
-      exchange: meta.exchange,
-      routingKey: meta.routingKey,
-      headers: meta.headers ?? [],
-      propRaw: new Uint8Array(Buffer.from(meta.propRaw, "base64")),
+      body: quorum ? EMPTY_BODY : bytes,
+      bodyBytes: quorum ? bytes.byteLength : undefined,
+      exchange: quorum ? "" : meta.exchange,
+      routingKey: quorum ? "" : meta.routingKey,
+      headers: quorum ? EMPTY_HEADERS : (meta.headers ?? []),
+      propRaw: quorum ? EMPTY_BODY : new Uint8Array(Buffer.from(meta.propRaw, "base64")),
       persistent: meta.persistent,
       priority: meta.priority ?? 0,
       expiresAt: meta.expiresAt,
       redelivered: !!meta.redelivered,
-    });
+      slim: quorum,
+    };
+    // Park quorum copies until peer hellos apply the consumed set. Putting
+    // them on ready here made basic.get succeed at the first readyz byte.
+    if (quorum && otherMembers) {
+      recoveredQuorum = true;
+      q.replicas.set(live.id, live);
+    } else {
+      q.ready.push(live);
+    }
   }
-  this.ready = true;
+  this.quorumHold = recoveredQuorum;
+  this.ready = !recoveredQuorum;
 }
 
 /**
@@ -86,8 +101,8 @@ export function makeQueue(this: Broker, q: QueueRow, proxy: boolean): QueueLive 
     home: proxy ? q.home : q.home,
     argsParsed: parseArgs(q.args),
     declaredArgs: { ...q.args },
-    ready: [],
-    replicas: [],
+    ready: new ReadyQueue(),
+    replicas: new Map(),
     unacked: new Map(),
     consumers: [],
     rr: 0,
@@ -118,13 +133,12 @@ export function ensureBuiltins(this: Broker, vhost: string) {
  * Check a management or AMQP password.
  *
  * @param user User name. An unknown user returns false.
- * @param password Plain password. A hash that starts with `$` uses Bun's verifier. Any other hash uses the RabbitMQ password-hash check.
+ * @param password Plain password. The stored hash is a RabbitMQ password-hash.
  * @returns True when the password matches. A mismatch returns false and does not throw.
  */
 export async function verify(this: Broker, user: string, password: string): Promise<boolean> {
   const row = this.users.get(user);
   if (!row) return false;
-  if (row.hash.startsWith("$")) return Bun.password.verify(password, row.hash);
   return rabbitPasswordHashMatches(password, row.hash);
 }
 

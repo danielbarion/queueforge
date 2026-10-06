@@ -24,10 +24,12 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  * @returns Nothing. At-least-once that cannot dead-letter keeps the message and clears its expiry so it is not retried forever.
  */
 export function expire(this: Broker, q: QueueLive) {
+  if (q.ready.expiring === 0) return;
   const now = Date.now();
   const keep: LiveMsg[] = [];
   for (const m of q.ready) {
     if (m.expiresAt != null && m.expiresAt <= now) {
+      this.materialize(m);
       if (m.rowId != null) this.store.deleteMessage(m.rowId);
       const accepted = this.deadLetter(q, m, 0, "expired");
       if (!accepted && q.argsParsed.dlxStrategy === "at-least-once") {
@@ -38,7 +40,7 @@ export function expire(this: Broker, q: QueueLive) {
       }
     } else keep.push(m);
   }
-  q.ready = keep;
+  q.ready.rebuild(keep);
 }
 
 /**
@@ -51,6 +53,7 @@ export function expire(this: Broker, q: QueueLive) {
  * @returns True when the message was accepted or there is nothing to do. False only for at-least-once when no destination accepted it. The caller then keeps the original message.
  */
 export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: number, reason: "expired" | "rejected" | "maxlen"): boolean {
+  this.materialize(msg);
   if (!q.argsParsed.dlx || depth > 8) return true;
   const headers = deathHeaders(q.name, reason, msg.exchange, msg.routingKey, msg.headers);
   const rk = q.argsParsed.dlxKey ?? msg.routingKey;
@@ -109,12 +112,17 @@ export function pump(this: Broker, q: QueueLive) {
   this.expire(q);
   let guard = 0;
   while (q.ready.length && guard++ < 100000) {
+    if (q.ready.at(0)?.confirmGate?.hold) return;
     const chosen = pickConsumer(q);
     if (!chosen) return;
     const msg = q.ready.shift()!;
+    this.materialize(msg);
     if (!chosen.noAck) q.unacked.set(msg.id, msg);
     else if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
     if (q.argsParsed.queueType === "quorum") {
+      // `deliver` runs after the follower drop. Reserve prefetch now so the
+      // next pump sees the claim and leaves the rest of the ready set alone.
+      chosen.reserve?.();
       const target = chosen;
       void this.claimThenDeliver(q, target, msg);
       return;
@@ -147,7 +155,8 @@ export function noteDeliver(this: Broker, autoAck: boolean, redelivered: boolean
  * @returns Nothing. The next pump runs only after the peer drop finishes.
  */
 export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consumer, msg: LiveMsg) {
-  await this.quorumDrop(q, msg.id);
+  msg.quorumDropped = await this.quorumDrop(q, msg.id);
+  this.materialize(msg);
   this.noteDeliver(chosen.noAck, msg.redelivered);
   chosen.deliver(msg);
   this.pump(q);
@@ -261,16 +270,14 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
  * @param id Message id. An id that is not unacked returns, or is forwarded to the leader for a follower quorum queue.
  * @returns Nothing. A remote classic home is acked there. A quorum ack also drops the id on the peers.
  */
-export async function ack(this: Broker, vhost: string, queue: string, id: string) {
+export function ack(this: Broker, vhost: string, queue: string, id: string): Promise<void> | void {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
-    await this.cluster!.call(q.home!, "ack", { vhost, queue, id });
-    return;
+    return this.cluster!.call(q.home!, "ack", { vhost, queue, id }).then(() => undefined);
   }
   if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader()) {
-    await this.cluster!.call(this.quorumLeader(), "ack", { vhost, queue, id });
-    return;
+    return this.cluster!.call(this.quorumLeader(), "ack", { vhost, queue, id }).then(() => undefined);
   }
   const msg = q.unacked.get(id);
   if (!msg) return;
@@ -279,7 +286,10 @@ export async function ack(this: Broker, vhost: string, queue: string, id: string
   this.prom.acknowledged++;
   if (q.argsParsed.queueType === "quorum") {
     this.noteConsumed(q.vhost, q.name, id);
-    await this.quorumDrop(q, id);
+    // The claim drop already ran before basic.deliver. Retry only when a peer
+    // missed it. A second drop on the success path holds the event loop behind
+    // another pair of cluster calls for every ack.
+    if (!msg.quorumDropped) void this.quorumDrop(q, id).catch(() => {});
   }
   this.pump(q);
 }
@@ -293,16 +303,14 @@ export async function ack(this: Broker, vhost: string, queue: string, id: string
  * @param requeue True puts the message back at the head until the delivery limit. False dead-letters it.
  * @returns Nothing. At-least-once that cannot dead-letter keeps the message. A remote home receives the same flag.
  */
-export async function nack(this: Broker, vhost: string, queue: string, id: string, requeue: boolean) {
+export function nack(this: Broker, vhost: string, queue: string, id: string, requeue: boolean): Promise<void> | void {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
-    await this.cluster!.call(q.home!, "nack", { vhost, queue, id, requeue });
-    return;
+    return this.cluster!.call(q.home!, "nack", { vhost, queue, id, requeue }).then(() => undefined);
   }
   if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader()) {
-    await this.cluster!.call(this.quorumLeader(), "nack", { vhost, queue, id, requeue });
-    return;
+    return this.cluster!.call(this.quorumLeader(), "nack", { vhost, queue, id, requeue }).then(() => undefined);
   }
   const msg = q.unacked.get(id);
   if (!msg) return;
@@ -317,7 +325,7 @@ export async function nack(this: Broker, vhost: string, queue: string, id: strin
       }
       if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
       this.prom.dlxDeliveryLimit++;
-      if (q.argsParsed.queueType === "quorum") await this.quorumDrop(q, id);
+      if (q.argsParsed.queueType === "quorum") void this.quorumDrop(q, id).catch(() => {});
     } else {
       msg.redelivered = true;
       q.ready.unshift(msg);
@@ -333,7 +341,7 @@ export async function nack(this: Broker, vhost: string, queue: string, id: strin
     }
     if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
     this.prom.dlxRejected++;
-    if (q.argsParsed.queueType === "quorum") await this.quorumDrop(q, id);
+    if (q.argsParsed.queueType === "quorum") void this.quorumDrop(q, id).catch(() => {});
   }
 }
 
@@ -348,6 +356,7 @@ export async function nack(this: Broker, vhost: string, queue: string, id: strin
 export async function get(this: Broker, vhost: string, queue: string, noAck: boolean): Promise<LiveMsg | null> {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
+  if (q.argsParsed.queueType === "quorum") this.promoteIfLeader();
   if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
     try {
       const raw = (await this.cluster!.call(this.quorumLeader(), "get", { vhost, queue, noAck, no_ack: noAck })) as {
@@ -385,22 +394,46 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   }
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     try {
-      const raw = (await this.cluster!.call(q.home!, "get", { vhost, queue, noAck })) as {
+      const raw = (await this.cluster!.call(q.home!, "get", { vhost, queue, noAck, no_ack: noAck })) as {
         empty?: boolean;
+        delivery_id?: number;
         msg?: LiveMsg & { body: string; propRaw: string };
-      };
-      if (!raw || raw.empty || !raw.msg) return null;
-      const m = raw.msg;
+        message?: { message_id?: string; body_b64?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
+      } | null;
+      if (!raw || raw.empty) return null;
+      if (raw.msg?.body) {
+        const m = raw.msg;
+        return {
+          ...m,
+          id: String(m.id ?? raw.delivery_id ?? ""),
+          body: new Uint8Array(Buffer.from(m.body, "base64")),
+          propRaw: new Uint8Array(Buffer.from(m.propRaw ?? "", "base64")),
+        };
+      }
+      const rustMsg = raw.message;
+      if (!rustMsg?.body_b64) return null;
       return {
-        ...m,
-        body: new Uint8Array(Buffer.from(m.body, "base64")),
-        propRaw: new Uint8Array(Buffer.from(m.propRaw, "base64")),
+        id: String(raw.delivery_id ?? rustMsg.message_id ?? ""),
+        rowId: null,
+        body: new Uint8Array(Buffer.from(rustMsg.body_b64, "base64")),
+        exchange: String(rustMsg.exchange ?? ""),
+        routingKey: String(rustMsg.routing_key ?? ""),
+        headers: [],
+        propRaw: new Uint8Array(),
+        persistent: rustMsg.persistent !== false,
+        priority: 0,
+        expiresAt: null,
+        redelivered: !!rustMsg.redelivered,
       };
     } catch {
       throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
     }
   }
   this.expire(q);
+  if (q.ready.at(0)?.confirmGate?.hold) {
+    this.prom.getEmpty++;
+    return null;
+  }
   const msg = q.ready.shift();
   if (!msg) {
     this.prom.getEmpty++;
@@ -410,10 +443,36 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   if (noAck) this.prom.deliveredGetAuto++;
   else this.prom.deliveredGetManual++;
   if (msg.redelivered) this.prom.redelivered++;
+  this.materialize(msg);
   if (!noAck) q.unacked.set(msg.id, msg);
   else if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
   if (q.argsParsed.queueType === "quorum") await this.quorumDrop(q, msg.id);
   return msg;
+}
+
+/** Fill a durable quorum body and its properties from the store. The ready queue keeps the row id. */
+export function materialize(this: Broker, msg: LiveMsg) {
+  if (msg.rowId == null) return;
+  if (!msg.slim && msg.body.length > 0) return;
+  const row = this.store.readStored(msg.rowId);
+  if (!row) return;
+  if (msg.body.length === 0) msg.body = row.body;
+  if (!msg.slim) return;
+  const meta = JSON.parse(row.meta) as {
+    exchange?: string;
+    routingKey?: string;
+    headers?: Array<[string, Field]>;
+    propRaw?: string;
+    persistent?: boolean;
+    priority?: number;
+  };
+  msg.exchange = meta.exchange ?? "";
+  msg.routingKey = meta.routingKey ?? "";
+  msg.headers = meta.headers ?? [];
+  msg.propRaw = new Uint8Array(Buffer.from(meta.propRaw ?? "", "base64"));
+  if (meta.persistent != null) msg.persistent = meta.persistent;
+  if (meta.priority != null) msg.priority = meta.priority;
+  msg.slim = false;
 }
 
 /**
@@ -432,7 +491,7 @@ export async function purge(this: Broker, vhost: string, queue: string): Promise
   }
   const n = q.ready.length;
   for (const m of q.ready) if (m.rowId != null) this.store.deleteMessage(m.rowId);
-  q.ready = [];
+  q.ready.clear();
   return n;
 }
 
@@ -450,6 +509,7 @@ Broker.prototype.ack = ack;
 Broker.prototype.nack = nack;
 Broker.prototype.get = get;
 Broker.prototype.purge = purge;
+Broker.prototype.materialize = materialize;
 
 declare module "./class.ts" {
   interface Broker {
@@ -467,5 +527,6 @@ declare module "./class.ts" {
     nack: typeof nack;
     get: typeof get;
     purge: typeof purge;
+    materialize: typeof materialize;
   }
 }

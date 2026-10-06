@@ -4,7 +4,7 @@
  * Owns delivery tags and prefetch credit for one channel. Ack and reject
  * inside a transaction wait for tx.commit.
  */
-import { bodyFrame, contentHeaderFrame, emptyProps, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
+import { bodyFrame, contentHeaderFrame, emptyProps, encodeDeliver, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
 import type { LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
 
@@ -74,13 +74,23 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     queue,
     vhost: this.vhost,
   });
+  // Quorum claims the body before `deliver`. Count that claim against prefetch
+  // or pump keeps taking messages while `byConsumer` is still zero.
+  let reserved = 0;
   await this.broker.consume(this.vhost, queue, {
     tag,
     session,
     noAck,
     exclusive,
     priority: Number.isFinite(priority) ? priority : 0,
-    want: () => this.creditOk(c, tag),
+    want: () => {
+      if (!this.creditOk(c, tag)) return false;
+      if (c.prefetch !== 0 && (c.byConsumer.get(tag) ?? 0) + reserved >= c.prefetch) return false;
+      return true;
+    },
+    reserve: () => {
+      reserved++;
+    },
     onCancel: () => {
       c.consumers.delete(tag);
       void this.send(methodFrame(channel, method(60, 30, (w) => {
@@ -90,18 +100,58 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     },
     deliver: (msg) => {
       if (!this.creditOk(c, tag)) {
-        void this.broker.nack(this.vhost, queue, msg.id, true);
+        c.parked.push({
+          channel,
+          tag,
+          queue,
+          msg,
+          release: reserved > 0 ? () => {
+            if (reserved > 0) reserved--;
+          } : undefined,
+        });
         return;
       }
-      const dtag = c.nextDel++;
-      c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag });
-      c.byConsumer.set(tag, (c.byConsumer.get(tag) ?? 0) + 1);
-      c.globalUnacked++;
-      void this.deliver(channel, tag, dtag, msg);
+      if (reserved > 0) reserved--;
+      this.handOff(channel, c, tag, queue, msg);
     },
   });
   if (!nowait) await this.send(methodFrame(channel, method(60, 21, (w) => w.shortstr(tag))));
   await this.broker.kick(this.vhost, queue, session);
+}
+
+/**
+ * Record one delivery and write it once this channel has credit.
+ *
+ * @param channel Channel the consumer was registered on.
+ * @param c Channel state that tracks the delivery tag.
+ * @param tag Consumer tag.
+ * @param queue Queue the message came from.
+ * @param msg Message to put on the wire.
+ */
+export function handOff(this: Conn, channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg) {
+  const dtag = c.nextDel++;
+  c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag });
+  c.byConsumer.set(tag, (c.byConsumer.get(tag) ?? 0) + 1);
+  c.globalUnacked++;
+  void this.deliver(channel, tag, dtag, msg);
+}
+
+/**
+ * Send deliveries that were waiting for prefetch credit.
+ *
+ * @param c Channel whose parked list and prefetch are checked.
+ */
+export function flushParked(this: Conn, c: Ch) {
+  const rest: Ch["parked"] = [];
+  for (const item of c.parked) {
+    if (!this.creditOk(c, item.tag)) {
+      rest.push(item);
+      continue;
+    }
+    item.release?.();
+    this.handOff(item.channel, c, item.tag, item.queue, item.msg);
+  }
+  c.parked = rest;
 }
 
 /**
@@ -112,8 +162,13 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
  * @param dtag Delivery tag the client will ack or reject.
  * @param msg Message body, properties, and routing fields from the broker.
  */
-export async function deliver(this: Conn, channel: number, tag: string, dtag: number, msg: LiveMsg) {
-  await this.sendMany([
+export function deliver(this: Conn, channel: number, tag: string, dtag: number, msg: LiveMsg): void {
+  const hot = encodeDeliver(channel, tag, dtag, msg);
+  if (hot) {
+    void this.send(hot);
+    return;
+  }
+  void this.sendMany([
     methodFrame(
       channel,
       method(60, 60, (w) => {
@@ -154,13 +209,15 @@ export async function cancel(this: Conn, channel: number, c: Ch, payload: Uint8A
  * @param payload Method payload. Bit 0 of the flags is multiple.
  * Inside a transaction the settle waits for tx.commit.
  */
-export async function ack(this: Conn, c: Ch, payload: Uint8Array) {
+export function ack(this: Conn, c: Ch, payload: Uint8Array): Promise<void> | void {
   const r = new R(payload.subarray(4));
   const tag = r.u64();
   const multiple = (r.u8() & 1) !== 0;
-  const op = async () => this.settle(c, tag, multiple, false, false);
-  if (c.tx) c.txBatch.push(op);
-  else await op();
+  if (c.tx) {
+    c.txBatch.push(() => this.settle(c, tag, multiple, false, false));
+    return;
+  }
+  return this.settle(c, tag, multiple, false, false);
 }
 
 /**
@@ -202,16 +259,38 @@ export async function nack(this: Conn, c: Ch, payload: Uint8Array) {
  * @param negative When true, the broker nacks; otherwise it acks.
  * @param requeue Passed to nack. Ignored for acks.
  */
-export async function settle(this: Conn, c: Ch, tag: number, multiple: boolean, negative: boolean, requeue: boolean) {
-  const ids = [...c.deliveries.keys()].filter((t) => (multiple ? t <= tag : t === tag));
+export function settle(this: Conn, c: Ch, tag: number, multiple: boolean, negative: boolean, requeue: boolean): Promise<void> | void {
+  if (!multiple) {
+    const one = c.deliveries.get(tag);
+    if (one) {
+      c.deliveries.delete(tag);
+      c.byConsumer.set(one.consumer, Math.max(0, (c.byConsumer.get(one.consumer) ?? 1) - 1));
+      c.globalUnacked = Math.max(0, c.globalUnacked - 1);
+      const pending = negative
+        ? this.broker.nack(one.vhost, one.queue, one.id, requeue)
+        : this.broker.ack(one.vhost, one.queue, one.id);
+      if (pending) return Promise.resolve(pending).then(() => this.flushParked(c));
+    }
+    this.flushParked(c);
+    return;
+  }
+  return settleMany.call(this, c, tag, negative, requeue);
+}
+
+/** Ack or nack every tag up to `tag`. Remote homes are awaited one at a time. */
+async function settleMany(this: Conn, c: Ch, tag: number, negative: boolean, requeue: boolean) {
+  const ids = [...c.deliveries.keys()].filter((t) => t <= tag);
   for (const t of ids) {
     const d = c.deliveries.get(t)!;
     c.deliveries.delete(t);
     c.byConsumer.set(d.consumer, Math.max(0, (c.byConsumer.get(d.consumer) ?? 1) - 1));
     c.globalUnacked = Math.max(0, c.globalUnacked - 1);
-    if (negative) await this.broker.nack(d.vhost, d.queue, d.id, requeue);
-    else await this.broker.ack(d.vhost, d.queue, d.id);
+    const pending = negative
+      ? this.broker.nack(d.vhost, d.queue, d.id, requeue)
+      : this.broker.ack(d.vhost, d.queue, d.id);
+    if (pending) await pending;
   }
+  this.flushParked(c);
 }
 
 /**
@@ -279,6 +358,8 @@ export async function recover(this: Conn, channel: number, c: Ch, payload: Uint8
 Conn.prototype.qos = qos;
 Conn.prototype.creditOk = creditOk;
 Conn.prototype.consume = consume;
+Conn.prototype.handOff = handOff;
+Conn.prototype.flushParked = flushParked;
 Conn.prototype.deliver = deliver;
 Conn.prototype.cancel = cancel;
 Conn.prototype.ack = ack;

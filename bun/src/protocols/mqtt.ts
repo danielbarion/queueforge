@@ -53,7 +53,8 @@ function mqttPublish(topic: string, payload: Uint8Array): Uint8Array {
   return out;
 }
 
-type MqttSub = { filter: string; write: (frame: Uint8Array) => void };
+type MqttSub = { filter: string; conn: number; write: (frame: Uint8Array) => void };
+let mqttConn = 1;
 const mqttHub: MqttSub[] = [];
 
 function mqttFanout(topic: string, payload: Uint8Array) {
@@ -73,12 +74,12 @@ function mqttFanout(topic: string, payload: Uint8Array) {
  * @returns Nothing. The listener stays open until the process exits.
  */
 export function startMqtt(host: string, port: number, broker: Broker) {
-  Bun.listen<{ buf: Uint8Array }>({
+  Bun.listen<{ buf: Uint8Array; conn: number }>({
     hostname: host,
     port,
     socket: {
       open(socket) {
-        socket.data = { buf: new Uint8Array() };
+        socket.data = { buf: new Uint8Array(), conn: mqttConn++ };
       },
       async data(socket, data) {
         const state = socket.data as { buf: Uint8Array };
@@ -129,6 +130,7 @@ export function startMqtt(host: string, port: number, broker: Broker) {
               last = filter.text;
               mqttHub.push({
                 filter: filter.text,
+                conn: (socket.data as { conn?: number }).conn ?? 0,
                 write: (frame) => {
                   try {
                     socket.write(frame);
@@ -151,6 +153,19 @@ export function startMqtt(host: string, port: number, broker: Broker) {
               const queued = await pull(broker, last);
               if (queued) socket.write(mqttPublish(last, queued));
             }
+          } else if (kind === 10 && body.length >= 2) {
+            const conn = (socket.data as { conn?: number }).conn ?? 0;
+            let at = 2;
+            while (at < body.length) {
+              const filter = mqttStr(body, at);
+              if (!filter) break;
+              at = filter.next;
+              for (let i = mqttHub.length - 1; i >= 0; i--) {
+                const sub = mqttHub[i];
+                if (sub && sub.conn === conn && sub.filter === filter.text) mqttHub.splice(i, 1);
+              }
+            }
+            socket.write(Uint8Array.of(0xb0, 0x02, body[0]!, body[1]!));
           } else if (kind === 12) socket.write(Uint8Array.of(0xd0, 0x00));
           else if (kind === 14) socket.end();
         }

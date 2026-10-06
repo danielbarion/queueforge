@@ -10,7 +10,7 @@ import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
-import { rabbitPasswordHashMatches } from "./auth.ts";
+import { hashRabbitPassword, passwordPolicyError } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
@@ -24,12 +24,16 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  * @param password New password, or null to keep the current hash. A new user without a password throws.
  * @param tags Replacement tags. An empty list keeps the current tags.
  * @param create Returned as-is so the caller can tell a create from an update.
- * @returns The `create` flag. The password is stored as an argon2id hash and replicated.
+ * @returns The `create` flag. The password is stored as a RabbitMQ SHA-256 hash and replicated.
  */
 export async function putUser(this: Broker, name: string, password: string | null, tags: string[], create: boolean) {
   const existing = this.users.get(name);
   if (!existing && !password) throw new Error("password required");
-  const hash = password ? await Bun.password.hash(password, { algorithm: "argon2id" }) : existing!.hash;
+  if (password) {
+    const policy = passwordPolicyError(password);
+    if (policy) throw new Error(policy);
+  }
+  const hash = password ? hashRabbitPassword(password) : existing!.hash;
   this.users.set(name, { hash, tags: tags.length ? tags : existing?.tags ?? [] });
   this.store.putUser({ name, hash, tags: this.users.get(name)!.tags });
   await this.cluster?.replicate("user", { name, hash, tags: this.users.get(name)!.tags });

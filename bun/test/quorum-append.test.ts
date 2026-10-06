@@ -65,6 +65,9 @@ test("rejected quorum_append replies ok false", async () => {
     const stored = await append(port, "open", "kept");
     expect(stored.ok).toBe(true);
     expect(broker.queues.get(broker.key("/", "open"))?.ready.length).toBe(1);
+    const dropped = await drop(port, "open", "m-open");
+    expect(dropped.ok).toBe(true);
+    expect(broker.queues.get(broker.key("/", "open"))?.ready.length).toBe(0);
   } finally {
     cluster.stop();
     store.close();
@@ -97,6 +100,35 @@ function append(port: number, queue: string, body: string): Promise<{ ok?: boole
       clearTimeout(timer);
       sock.end();
       resolve(JSON.parse(buf.slice(0, idx)) as { ok?: boolean; id?: number });
+    });
+    sock.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    sock.on("connect", () => sock.write(`${line}\n`));
+  });
+}
+
+function drop(port: number, queue: string, messageId: string): Promise<{ ok?: boolean }> {
+  const line = JSON.stringify({
+    op: "quorum_drop",
+    id: 8,
+    payload: { vhost: "/", queue, message_id: messageId },
+  });
+  return new Promise((resolve, reject) => {
+    const sock = connect({ host: "127.0.0.1", port });
+    let buf = "";
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error("quorum_drop reply timed out"));
+    }, 2000);
+    sock.on("data", (chunk) => {
+      buf += chunk.toString();
+      const idx = buf.indexOf("\n");
+      if (idx < 0) return;
+      clearTimeout(timer);
+      sock.end();
+      resolve(JSON.parse(buf.slice(0, idx)) as { ok?: boolean });
     });
     sock.on("error", (err) => {
       clearTimeout(timer);

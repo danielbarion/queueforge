@@ -36,7 +36,7 @@ The management listener also serves the shared SPA from `rust/ui/dist` when that
 
 `[data].fsync_policy` accepts `never`, `every_n_ms`, and `always`. The example uses `every_n_ms` with `fsync_interval_ms` of 100.
 
-`every_n_ms` returns a durable publisher confirm after the row is staged. One timer transaction then runs `PRAGMA synchronous=FULL`. `always` waits for that flush before the confirm. A crash before the interval flush can drop a confirm that already returned.
+`every_n_ms` stages durable rows and returns the publisher confirm after the timer transaction runs `PRAGMA synchronous=FULL`. `always` and `every_n_messages` also wait for that flush. A confirmed durable publish is in the SQLite file.
 
 ## Cluster
 
@@ -44,4 +44,4 @@ Leave `[cluster].members` empty for a single node. Otherwise every process uses 
 
 Classic queues have one home node. Peers forward operations there.
 
-A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members hold the body in memory. This process records the body in its local store before it acks the peer. With `every_n_ms` that record is staged until the interval flush writes SQLite. Rust members of the same list append their copy to their write-ahead log before the interval fsync. Once a majority is reachable, the live leader is the lowest member id among the reachable members. Publishing to any member is enough. The [repository README](../README.md) shows a three-member list.
+A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have fsynced the body into their own store. This process records the body and waits for the flush before it acks the peer. Rust members of the same list fsync their write-ahead log before the copy counts. Once a majority is reachable, the live leader is the lowest member id among the reachable members. Publishing to any member is enough. `POST /api/nodes` adds a member and `DELETE /api/nodes/{id}` removes one that homes no classic queue. The [repository README](../README.md) shows a three-member list.

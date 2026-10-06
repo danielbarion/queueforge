@@ -51,7 +51,7 @@ test("health, login, and amqp publish/consume", async () => {
     expect(login.status).toBe(200);
     const conn = await amqp.connect("amqp://admin:devpassword12@127.0.0.1:25672/%2f");
     const ch = await conn.createChannel();
-    await ch.assertQueue("smoke", { durable: false });
+    await ch.assertQueue("smoke", { durable: true });
     ch.sendToQueue("smoke", Buffer.from("hello"));
     const msg = await new Promise<amqp.ConsumeMessage | null>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("no delivery")), 3000);

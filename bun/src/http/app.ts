@@ -7,7 +7,8 @@
 import { Elysia } from "elysia";
 import { join } from "node:path";
 import { statfsSync } from "node:fs";
-import { addFederationPolicy, addFederationUpstream, policyFromBody, policyItem, type Broker } from "../broker/index.ts";
+import { addFederationPolicy, addFederationUpstream, addFederationUri, fedUris, policyFromBody, policyItem, type Broker } from "../broker/index.ts";
+import { exchangeFromPattern, runFederation, runShovel } from "../bridge.ts";
 import { metricsText } from "./metrics.ts";
 import { cookieNameFromHost, requireUser, sessions, tokenOf } from "./session.ts";
 
@@ -457,7 +458,16 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "bad_request", reason: `${JSON.stringify(unknown)} are not recognised policy settings` };
       }
-      if (str("federation-upstream-set")) addFederationPolicy(decodeURIComponent(params.vhost), b.pattern);
+      if (str("federation-upstream-set")) {
+        const downstream = decodeURIComponent(params.vhost);
+        addFederationPolicy(downstream, b.pattern);
+        const exchange = exchangeFromPattern(b.pattern);
+        if (exchange) {
+          for (const link of fedUris) {
+            if (link.downstream === downstream) void runFederation(link.uri, downstream, exchange, broker).catch((err) => console.error("federation", err));
+          }
+        }
+      }
       try {
         broker.upsertPolicy({
           vhost: decodeURIComponent(params.vhost),
@@ -495,6 +505,13 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "src-queue and dest-queue are required" };
       }
+      const srcUri = value["src-uri"];
+      const destUri = value["dest-uri"];
+      if (srcUri && destUri) {
+        void runShovel(srcUri, destUri, src, dest).catch((err) => console.error("shovel", err));
+        set.status = 201;
+        return { name: src };
+      }
       setInterval(async () => {
         try {
           const msg = await broker.get("/", src, true);
@@ -526,7 +543,9 @@ export function managementApp(broker: Broker, spaDir: string) {
       const slash = uri.indexOf("/", uri.indexOf("://") + 3);
       let upstream = slash >= 0 ? uri.slice(slash + 1) : "/";
       if (upstream === "" || upstream === "%2F" || upstream === "%2f") upstream = "/";
-      addFederationUpstream(decodeURIComponent(params.vhost), upstream);
+      const downstream = decodeURIComponent(params.vhost);
+      addFederationUpstream(downstream, upstream);
+      if (uri.includes("://")) addFederationUri(downstream, uri);
       set.status = 201;
       return { uri };
     })
@@ -981,6 +1000,63 @@ export function managementApp(broker: Broker, spaDir: string) {
           peers: broker.cfg.members.map((m) => ({ name: m.id })),
         }],
       };
+    })
+    .post("/api/nodes", async ({ body, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const row = (body ?? {}) as { id?: string; addr?: string };
+      const id = String(row.id ?? "").trim();
+      const addr = String(row.addr ?? "").trim();
+      if (!id || !addr.includes(":")) {
+        set.status = 400;
+        return { error: "id and addr are required" };
+      }
+      if (broker.cfg.members.length === 0 || !broker.cluster) {
+        set.status = 400;
+        return { error: "cluster membership is not configured" };
+      }
+      const members = broker.cfg.members.filter((member) => member.id !== id);
+      members.push({ id, addr });
+      broker.cluster.installMembers(members);
+      for (const member of broker.cfg.members) {
+        if (member.id === broker.cfg.nodeId) continue;
+        await broker.cluster.call(member.id, "apply", { kind: "members", body: broker.cfg.members }).catch(() => null);
+      }
+      set.status = 201;
+      return { members: broker.cfg.members };
+    })
+    .delete("/api/nodes/:name", async ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const name = decodeURIComponent(params.name);
+      if (name === broker.cfg.nodeId) {
+        set.status = 400;
+        return { error: "a node cannot forget itself" };
+      }
+      if ([...broker.queues.values()].some((queue) => queue.home === name)) {
+        set.status = 400;
+        return { error: `member ${name} still homes a classic queue` };
+      }
+      if (!broker.cluster) {
+        set.status = 400;
+        return { error: "cluster membership is not configured" };
+      }
+      const members = broker.cfg.members.filter((member) => member.id !== name);
+      if (members.length === 0) {
+        set.status = 400;
+        return { error: "the member list cannot become empty" };
+      }
+      broker.cluster.installMembers(members);
+      for (const member of broker.cfg.members) {
+        if (member.id === broker.cfg.nodeId) continue;
+        await broker.cluster.call(member.id, "apply", { kind: "members", body: broker.cfg.members }).catch(() => null);
+      }
+      set.status = 204;
+      return "";
     })
     .get("/api/cluster-name", ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"))) {

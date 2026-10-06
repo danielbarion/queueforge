@@ -16,10 +16,12 @@ export type Pub = { exchange: string; routingKey: string; mandatory: boolean; im
 export type Ch = {
   confirm: boolean;
   tx: boolean;
-  txBatch: Array<() => Promise<unknown>>;
+  txBatch: Array<() => Promise<unknown> | void>;
   nextPub: number;
   nextDel: number;
   deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string }>;
+  /** Deliveries held until this channel has prefetch credit again. */
+  parked: Array<{ channel: number; tag: string; queue: string; msg: LiveMsg; release?: () => void }>;
   byConsumer: Map<string, number>;
   prefetch: number;
   globalPrefetch: number | null;
@@ -63,6 +65,10 @@ export class Conn {
   heartbeat = 0;
   timer: Timer | null = null;
   writeChain: Promise<unknown> = Promise.resolve();
+  /** Slow-path writes still queued on `writeChain`. The idle path writes directly. */
+  writesPending = 0;
+  /** Index of the first unsent frame in `outbound`. */
+  outHead = 0;
   connClosed = false;
   metricsOpened = false;
   /** Set once so a double close does not decrement the connection gauge twice. */
@@ -71,6 +77,29 @@ export class Conn {
   mgmtName = "";
   /** Frames waiting for the socket to accept more bytes. */
   outbound: Uint8Array[] = [];
+  /**
+   * Frames gathered for one socket write. A microtask flushes them so a burst
+   * shares one write without waiting a timer tick.
+   */
+  staged: Uint8Array[] = [];
+  /** Byte length of `staged`. A full buffer is written before the microtask. */
+  stagedBytes = 0;
+  /** True while a microtask is already queued to flush `staged`. */
+  coalesceScheduled = false;
+  /** Bytes that arrived while a burst of publishes was being parsed. */
+  fresh: Uint8Array[] = [];
+  /**
+   * Persistent confirms staged by the frame parser. They run after ack frames
+   * already in the buffer, and in groups when the ready queue is ahead of consumers.
+   */
+  deferredPublish: Array<() => Promise<unknown>> = [];
+  inboundRunning = false;
+  inboundDone: Promise<void> = Promise.resolve();
+  /**
+   * Resolves the publish hold when more socket bytes arrive.
+   * `driveInbound` sets this while consumers on this connection are behind.
+   */
+  wakeInbound: (() => void) | null = null;
 
   constructor(
     readonly socket: AmqpSocket,
@@ -85,10 +114,10 @@ export interface Conn {
   push(data: Uint8Array): Promise<void>;
   ch(id: number): Ch;
   onMethod(channel: number, payload: Uint8Array): Promise<void>;
-  onHeader(channel: number, payload: Uint8Array): Promise<void>;
-  onBody(channel: number, payload: Uint8Array): Promise<void>;
+  onHeader(channel: number, payload: Uint8Array): Promise<unknown> | void;
+  onBody(channel: number, payload: Uint8Array): Promise<unknown> | void;
   beginPublish(c: Ch, payload: Uint8Array): void;
-  finishPublish(channel: number, c: Ch): Promise<void>;
+  finishPublish(channel: number, c: Ch): Promise<unknown> | void;
   txCommit(channel: number, c: Ch): Promise<void>;
   exDeclare(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   exDelete(channel: number, payload: Uint8Array): Promise<void>;
@@ -102,12 +131,14 @@ export interface Conn {
   qos(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   creditOk(c: Ch, tag: string): boolean;
   consume(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
-  deliver(channel: number, tag: string, dtag: number, msg: LiveMsg): Promise<void>;
+  handOff(channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg): void;
+  flushParked(c: Ch): void;
+  deliver(channel: number, tag: string, dtag: number, msg: LiveMsg): void;
   cancel(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
-  ack(c: Ch, payload: Uint8Array): Promise<void>;
+  ack(c: Ch, payload: Uint8Array): Promise<void> | void;
   reject(c: Ch, payload: Uint8Array, fromNack: boolean): Promise<void>;
   nack(c: Ch, payload: Uint8Array): Promise<void>;
-  settle(c: Ch, tag: number, multiple: boolean, negative: boolean, requeue: boolean): Promise<void>;
+  settle(c: Ch, tag: number, multiple: boolean, negative: boolean, requeue: boolean): Promise<void> | void;
   get(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   recover(channel: number, c: Ch, payload: Uint8Array, methodId: number): Promise<void>;
   requeueChannel(c: Ch): Promise<void>;
@@ -141,6 +172,7 @@ export function startAmqp(host: string, port: number, broker: Broker) {
     port,
     socket: {
       open(socket) {
+        socket.setNoDelay(true);
         const conn = new Conn(socket, broker);
         socket.data = conn;
       },
@@ -202,6 +234,7 @@ export function ch(this: Conn, id: number): Ch {
       nextPub: 1,
       nextDel: 1,
       deliveries: new Map(),
+      parked: [],
       byConsumer: new Map(),
       prefetch: 0,
       globalPrefetch: null,

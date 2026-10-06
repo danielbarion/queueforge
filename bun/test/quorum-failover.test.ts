@@ -28,6 +28,20 @@ async function waitReady(mgmt: number) {
   throw new Error(`not ready ${mgmt}`);
 }
 
+/** Open a channel as soon as AMQP accepts, which can be before `/readyz`. */
+async function openChannel(amqpPort: number) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      const conn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${amqpPort}/%2f`);
+      const ch = await conn.createChannel();
+      return { conn, ch };
+    } catch {
+      await Bun.sleep(20);
+    }
+  }
+  throw new Error(`amqp not up ${amqpPort}`);
+}
+
 async function writeCfg(dir: string, amqpPort: number, mgmt: number, metrics: number, clusterPort: number, node: string, members: string, policy: string) {
   const cfg = join(dir, "qf.toml");
   await Bun.write(
@@ -89,9 +103,11 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
       await Bun.sleep(200);
       const pub = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${ports[0]!.amqp}/%2f`);
       const pch = await pub.createConfirmChannel();
-      await new Promise<void>((resolve, reject) => {
-        pch.sendToQueue("qq-durable", Buffer.from("kept-body"), { persistent: true }, (err) => (err ? reject(err) : resolve()));
-      });
+      for (const body of ["kept-body", "still-body"]) {
+        await new Promise<void>((resolve, reject) => {
+          pch.sendToQueue("qq-durable", Buffer.from(body), { persistent: true }, (err) => (err ? reject(err) : resolve()));
+        });
+      }
       await pub.close();
       console.log(`${shape.label} confirm ack`);
       kids[0]!.kill("SIGKILL");
@@ -107,8 +123,6 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
             if (msg) {
               got = { body: msg.content.toString(), key: msg.fields.routingKey };
               ch.ack(msg);
-              const second = await ch.get("qq-durable", { noAck: false });
-              expect(second).toBe(false);
             }
             await conn.close();
           } catch {
@@ -118,20 +132,34 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
         }
         if (!got) await Bun.sleep(100);
       }
-      expect(got?.body).toBe("kept-body");
+      expect(got?.body === "kept-body" || got?.body === "still-body").toBe(true);
       expect(got?.key).toBe("qq-durable");
-      console.log(`${shape.label} survivor delivered once`);
+      const acked = got!.body;
+      console.log(`${shape.label} survivor delivered ${acked}`);
       const dir = dirs[0]!;
       const cfg = join(dir, "qf.toml");
       kids[0] = spawnNode(shape.kinds[0]!, cfg);
       await waitReady(ports[0]!.mgmt);
-      await Bun.sleep(300);
-      const conn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${ports[0]!.amqp}/%2f`);
-      const ch = await conn.createChannel();
-      const again = await ch.get("qq-durable", { noAck: false });
-      expect(again).toBe(false);
-      await conn.close();
-      console.log(`${shape.label} restart did not duplicate`);
+      const opened = await openChannel(ports[0]!.amqp);
+      const again = await opened.ch.get("qq-durable", { noAck: false });
+      expect(again).not.toBe(false);
+      const returned = again && again.content.toString();
+      expect(returned).not.toBe(acked);
+      expect(returned === "kept-body" || returned === "still-body").toBe(true);
+      if (again) opened.ch.ack(again);
+      const duplicate = await opened.ch.get("qq-durable", { noAck: false });
+      expect(duplicate).toBe(false);
+      await opened.conn.close();
+      console.log(`${shape.label} restart returned ${returned} and not ${acked}`);
+      kids[0]!.kill("SIGKILL");
+      await new Promise((resolve) => kids[0]!.on("exit", resolve));
+      kids[0] = spawnNode(shape.kinds[0]!, cfg);
+      await waitReady(ports[0]!.mgmt);
+      const opened2 = await openChannel(ports[0]!.amqp);
+      const third = await opened2.ch.get("qq-durable", { noAck: false });
+      expect(third).toBe(false);
+      await opened2.conn.close();
+      console.log(`${shape.label} second restart did not duplicate`);
     } finally {
       for (const kid of kids) {
         if (kid.exitCode == null && !kid.killed) kid.kill("SIGKILL");
@@ -140,7 +168,7 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
   }
 }, 120000);
 
-test("classic every_n_ms confirms before the interval and always waits for fsync", async () => {
+test("classic confirms wait until the fsync that covers the publish", async () => {
   for (const policy of ["every_n_ms", "always", "every_n_messages"] as const) {
     const dir = mkdtempSync(join(tmpdir(), `qf-classic-${policy}-`));
     const amqpPort = policy === "every_n_ms" ? 49420 : policy === "always" ? 49430 : 49440;
@@ -164,32 +192,30 @@ enabled = false
     const kid = spawnNode("bun", cfg);
     try {
       await waitReady(mgmt);
-      const started = Date.now();
       const conn = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${amqpPort}/%2f`);
       const ch = await conn.createConfirmChannel();
       await ch.assertQueue("classic-q", { durable: true });
+      const started = Date.now();
       await new Promise<void>((resolve, reject) => {
         ch.sendToQueue("classic-q", Buffer.from("classic"), { persistent: true }, (err) => (err ? reject(err) : resolve()));
       });
       const elapsed = Date.now() - started;
       console.log(`bun classic ${policy} elapsed_ms=${elapsed}`);
-      if (policy === "every_n_ms") expect(elapsed).toBeLessThan(250);
+      if (policy === "every_n_ms") expect(elapsed).toBeLessThan(10);
       await conn.close();
-      if (policy !== "every_n_ms") {
-        kid.kill("SIGKILL");
-        await new Promise((resolve) => kid.on("exit", resolve));
-        const again = spawnNode("bun", cfg);
-        try {
-          await waitReady(mgmt);
-          const conn2 = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${amqpPort}/%2f`);
-          const ch2 = await conn2.createChannel();
-          const msg = await ch2.get("classic-q", { noAck: true });
-          expect(msg && msg.content.toString()).toBe("classic");
-          console.log(`bun classic ${policy} survived kill`);
-          await conn2.close();
-        } finally {
-          again.kill("SIGKILL");
-        }
+      kid.kill("SIGKILL");
+      await new Promise((resolve) => kid.on("exit", resolve));
+      const again = spawnNode("bun", cfg);
+      try {
+        await waitReady(mgmt);
+        const conn2 = await amqp.connect(`amqp://admin:devpassword12@127.0.0.1:${amqpPort}/%2f`);
+        const ch2 = await conn2.createChannel();
+        const msg = await ch2.get("classic-q", { noAck: true });
+        expect(msg && msg.content.toString()).toBe("classic");
+        console.log(`bun classic ${policy} survived kill`);
+        await conn2.close();
+      } finally {
+        again.kill("SIGKILL");
       }
     } finally {
       if (kid.exitCode == null && !kid.killed) kid.kill("SIGKILL");

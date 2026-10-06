@@ -7,7 +7,8 @@
 import type { Broker } from "../broker/index.ts";
 import { pull, push } from "./queue.ts";
 
-type StompSub = { destination: string; id: string; write: (frame: string) => void };
+type StompSub = { destination: string; id: string; conn: number; write: (frame: string) => void };
+let stompConn = 1;
 const stompHub: StompSub[] = [];
 
 function stompQueue(dest: string): string {
@@ -32,12 +33,12 @@ function stompFanout(dest: string, body: string) {
  * @returns Nothing. The listener stays open until the process exits.
  */
 export function startStomp(host: string, port: number, broker: Broker) {
-  Bun.listen<{ buf: Uint8Array }>({
+  Bun.listen<{ buf: Uint8Array; conn: number }>({
     hostname: host,
     port,
     socket: {
       open(socket) {
-        socket.data = { buf: new Uint8Array() };
+        socket.data = { buf: new Uint8Array(), conn: stompConn++ };
       },
       async data(socket, data) {
         const state = socket.data as { buf: Uint8Array };
@@ -82,6 +83,7 @@ export function startStomp(host: string, port: number, broker: Broker) {
             stompHub.push({
               destination: dest,
               id,
+              conn: (socket.data as { conn?: number }).conn ?? 0,
               write: (frame) => {
                 try {
                   socket.write(frame);
@@ -94,6 +96,13 @@ export function startStomp(host: string, port: number, broker: Broker) {
             if (queued) {
               const textBody = new TextDecoder().decode(queued);
               socket.write(`MESSAGE\nsubscription:${id}\ndestination:${dest}\ncontent-length:${textBody.length}\n\n${textBody}\0`);
+            }
+          } else if (cmd === "UNSUBSCRIBE") {
+            const id = headers.get("id") ?? "";
+            const conn = (socket.data as { conn?: number }).conn ?? 0;
+            for (let i = stompHub.length - 1; i >= 0; i--) {
+              const sub = stompHub[i];
+              if (sub && sub.id === id && sub.conn === conn) stompHub.splice(i, 1);
             }
           } else if (cmd === "DISCONNECT") socket.end();
           nul = text.indexOf("\0", consumed);

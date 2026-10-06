@@ -6,6 +6,8 @@ type FedLink = { upstream: string; downstream: string; pattern: string };
 export const fedLinks: FedLink[] = [];
 /** Upstreams recorded by addFederationUpstream. */
 export const fedUpstreams: { downstream: string; upstream: string }[] = [];
+/** AMQP URIs recorded by addFederationUri. Publish does not dial these; the management handler does. */
+export const fedUris: { downstream: string; uri: string }[] = [];
 
 /**
  * Record a federation upstream. Nothing is dialed.
@@ -16,6 +18,17 @@ export const fedUpstreams: { downstream: string; upstream: string }[] = [];
  */
 export function addFederationUpstream(downstream: string, upstream: string) {
   fedUpstreams.push({ downstream, upstream });
+}
+
+/**
+ * Record an AMQP URI for `downstream`. The management handler dials it.
+ *
+ * @param downstream Local vhost that will receive republished messages.
+ * @param uri Upstream AMQP URI, including the scheme. A duplicate is stored again.
+ * @returns Nothing.
+ */
+export function addFederationUri(downstream: string, uri: string) {
+  fedUris.push({ downstream, uri });
 }
 
 /**

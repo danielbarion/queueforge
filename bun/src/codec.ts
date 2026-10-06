@@ -393,3 +393,103 @@ export function emptyProps(): Uint8Array {
   w.u16(0);
   return w.concat();
 }
+
+const EMPTY_PROPS = emptyProps();
+
+function putU16(b: Uint8Array, o: number, v: number) {
+  b[o] = (v >>> 8) & 0xff;
+  b[o + 1] = v & 0xff;
+}
+
+function putU32(b: Uint8Array, o: number, v: number) {
+  b[o] = (v >>> 24) & 0xff;
+  b[o + 1] = (v >>> 16) & 0xff;
+  b[o + 2] = (v >>> 8) & 0xff;
+  b[o + 3] = v & 0xff;
+}
+
+function putU64(b: Uint8Array, o: number, v: number) {
+  putU32(b, o, Math.floor(v / 0x100000000));
+  putU32(b, o + 4, v >>> 0);
+}
+
+/** basic.ack or basic.nack with multiple and requeue clear. Same bytes as the generic frame builder. */
+export function encodeSettle(channel: number, deliveryTag: number, nack: boolean): Uint8Array {
+  const b = new Uint8Array(21);
+  b[0] = 1;
+  putU16(b, 1, channel);
+  putU32(b, 3, 13);
+  putU16(b, 7, 60);
+  putU16(b, 9, nack ? 120 : 80);
+  putU64(b, 11, deliveryTag);
+  b[20] = 0xce;
+  return b;
+}
+
+/**
+ * basic.deliver, content header, and body as one buffer.
+ * Returns null when a shortstr would not fit, so the caller uses the generic builder.
+ */
+export function encodeDeliver(
+  channel: number,
+  tag: string,
+  deliveryTag: number,
+  msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array },
+): Uint8Array | null {
+  const tagB = enc.encode(tag);
+  const exB = enc.encode(msg.exchange);
+  const rkB = enc.encode(msg.routingKey);
+  if (tagB.length > 255 || exB.length > 255 || rkB.length > 255) return null;
+  const prop = msg.propRaw.length ? msg.propRaw : EMPTY_PROPS;
+  const methodLen = 16 + tagB.length + exB.length + rkB.length;
+  const headerLen = 12 + prop.length;
+  const b = new Uint8Array(8 + methodLen + 8 + headerLen + 8 + msg.body.length);
+  let o = 0;
+  b[o++] = 1;
+  putU16(b, o, channel);
+  o += 2;
+  putU32(b, o, methodLen);
+  o += 4;
+  putU16(b, o, 60);
+  o += 2;
+  putU16(b, o, 60);
+  o += 2;
+  b[o++] = tagB.length;
+  b.set(tagB, o);
+  o += tagB.length;
+  putU64(b, o, deliveryTag);
+  o += 8;
+  b[o++] = msg.redelivered ? 1 : 0;
+  b[o++] = exB.length;
+  b.set(exB, o);
+  o += exB.length;
+  b[o++] = rkB.length;
+  b.set(rkB, o);
+  o += rkB.length;
+  b[o++] = 0xce;
+
+  b[o++] = 2;
+  putU16(b, o, channel);
+  o += 2;
+  putU32(b, o, headerLen);
+  o += 4;
+  putU16(b, o, 60);
+  o += 2;
+  putU16(b, o, 0);
+  o += 2;
+  putU64(b, o, msg.body.length);
+  o += 8;
+  b.set(prop, o);
+  o += prop.length;
+  b[o++] = 0xce;
+
+  b[o++] = 3;
+  putU16(b, o, channel);
+  o += 2;
+  putU32(b, o, msg.body.length);
+  o += 4;
+  b.set(msg.body, o);
+  o += msg.body.length;
+  b[o++] = 0xce;
+  return b;
+}

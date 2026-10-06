@@ -4,7 +4,8 @@
  * A publish is stored on the channel until the header and body arrive.
  * Immediate publishes are rejected. Confirms and returns are sent from here.
  */
-import { bodyFrame, contentHeaderFrame, emptyProps, method, methodFrame, R, readContentHeader } from "../codec.ts";
+import { ChanError } from "../broker/index.ts";
+import { bodyFrame, contentHeaderFrame, emptyProps, encodeSettle, method, methodFrame, R, readContentHeader } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
 
 /** Join body chunks into one buffer, in arrival order. */
@@ -41,7 +42,7 @@ export function beginPublish(this: Conn, c: Ch, payload: Uint8Array) {
  * @param channel Channel the header arrived on.
  * @param payload Content-header payload. Properties are kept raw for redelivery.
  */
-export async function onHeader(this: Conn, channel: number, payload: Uint8Array) {
+export function onHeader(this: Conn, channel: number, payload: Uint8Array): Promise<unknown> | void {
   const c = this.ch(channel);
   const parsed = readContentHeader(payload);
   c.bodySize = parsed.bodySize;
@@ -52,7 +53,7 @@ export async function onHeader(this: Conn, channel: number, payload: Uint8Array)
   c.expiration = parsed.props.expiration;
   c.got = 0;
   c.chunks = [];
-  if (c.bodySize === 0) await this.finishPublish(channel, c);
+  if (c.bodySize === 0) return this.finishPublish(channel, c);
 }
 
 /**
@@ -61,11 +62,11 @@ export async function onHeader(this: Conn, channel: number, payload: Uint8Array)
  * @param channel Channel the body arrived on.
  * @param payload Body bytes for this frame, not including the frame header.
  */
-export async function onBody(this: Conn, channel: number, payload: Uint8Array) {
+export function onBody(this: Conn, channel: number, payload: Uint8Array): Promise<unknown> | void {
   const c = this.ch(channel);
   c.chunks.push(payload);
   c.got += payload.length;
-  if (c.got >= c.bodySize) await this.finishPublish(channel, c);
+  if (c.got >= c.bodySize) return this.finishPublish(channel, c);
 }
 
 /**
@@ -79,7 +80,7 @@ export async function onBody(this: Conn, channel: number, payload: Uint8Array) {
  * Mandatory no-route sends basic.return. Confirms send ack, or nack when the
  * broker returns `"nack"`.
  */
-export async function finishPublish(this: Conn, channel: number, c: Ch) {
+export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unknown> | void {
   const pub = c.publish;
   if (!pub) return;
   if (!c.flow) {
@@ -94,15 +95,21 @@ export async function finishPublish(this: Conn, channel: number, c: Ch) {
   const expiration = c.expiration;
   c.publish = null;
   if (pub.immediate) {
-    await this.chanClose(channel, 540, "NOT_IMPLEMENTED - immediate=true", 60, 40);
-    return;
+    return this.chanClose(channel, 540, "NOT_IMPLEMENTED - immediate=true", 60, 40);
   }
   if (!this.broker.topicWriteAllowed(this.user, this.vhost, pub.exchange, pub.routingKey)) {
-    await this.chanClose(channel, 403, "ACCESS_REFUSED - write access to topic refused", 60, 40);
-    return;
+    return this.chanClose(channel, 403, "ACCESS_REFUSED - write access to topic refused", 60, 40);
   }
-  const op = async () => {
-    const result = await this.broker.publish({
+  // Outside a transaction the tag is the arrival order, before the fsync wait.
+  // Inside a transaction the tag is assigned when the op runs, at commit.
+  const confirm = c.confirm;
+  const tag = confirm && !c.tx ? c.nextPub++ : 0;
+  // Not an async function. An async wrapper allocates a promise per publish
+  // before the durable wait, and `await` on an already-resolved send yields
+  // again. The durable wait is the only promise on this path.
+  const run = (): Promise<unknown> | void => {
+    const pubTag = c.tx && confirm ? c.nextPub++ : tag;
+    const pending = this.broker.publish({
       vhost: this.vhost,
       exchange: pub.exchange,
       routingKey: pub.routingKey,
@@ -112,40 +119,59 @@ export async function finishPublish(this: Conn, channel: number, c: Ch) {
       persistent,
       priority,
       expiration,
-      confirm: c.confirm,
+      confirm,
       mandatory: pub.mandatory,
     });
-    if (result === "return" && pub.mandatory) {
-      await this.sendMany([
-        methodFrame(
-          channel,
-          method(60, 50, (w) => {
-            w.u16(312);
-            w.shortstr("NO_ROUTE");
-            w.shortstr(pub.exchange);
-            w.shortstr(pub.routingKey);
-          }),
-        ),
-        contentHeaderFrame(channel, body.length, propRaw),
-        bodyFrame(channel, body),
-      ]);
-    }
-    if (c.confirm) {
-      const tag = c.nextPub++;
-      const nack = result === "nack";
-      await this.send(
-        methodFrame(
-          channel,
-          method(60, nack ? 120 : 80, (w) => {
-            w.u64(tag);
-            w.bits(nack ? [false, false] : [false]);
-          }),
-        ),
-      );
-    }
+    const finish = (result: "ack" | "nack" | "return"): Promise<unknown> | void => {
+      if (result === "return" && pub.mandatory) {
+        const returned = this.sendMany([
+          methodFrame(
+            channel,
+            method(60, 50, (w) => {
+              w.u16(312);
+              w.shortstr("NO_ROUTE");
+              w.shortstr(pub.exchange);
+              w.shortstr(pub.routingKey);
+            }),
+          ),
+          contentHeaderFrame(channel, body.length, propRaw),
+          bodyFrame(channel, body),
+        ]);
+        if (!confirm) return returned;
+        return returned.then(() => this.send(encodeSettle(channel, pubTag, false)));
+      }
+      if (!confirm) return;
+      return this.send(encodeSettle(channel, pubTag, result === "nack"));
+    };
+    if (typeof pending === "string") return finish(pending);
+    return pending.then(finish);
   };
-  if (c.tx) c.txBatch.push(op);
-  else await op();
+  const fail = (err: unknown) => {
+    const code = err instanceof ChanError ? err.code : 541;
+    const text = err instanceof ChanError ? err.message : "INTERNAL_ERROR";
+    console.error("publish confirm failed", err);
+    return this.chanClose(channel, code, text, 60, 40);
+  };
+  if (c.tx) {
+    c.txBatch.push(run);
+    return;
+  }
+  // A persistent confirm waits on the group-commit flush. Parking it lets the
+  // parser reach basic.ack frames before this body is enqueued, so one prefetch
+  // window can turn over inside a publish burst. `driveInbound` starts the batch.
+  if (confirm && persistent) {
+    this.deferredPublish.push(() => {
+      try {
+        const pending = run();
+        if (!pending) return Promise.resolve();
+        return Promise.resolve(pending).catch(fail);
+      } catch (err) {
+        return fail(err);
+      }
+    });
+    return;
+  }
+  return run();
 }
 
 Conn.prototype.beginPublish = beginPublish;

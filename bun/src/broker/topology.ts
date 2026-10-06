@@ -108,12 +108,17 @@ export async function declareQueue(this: Broker, opts: {
     args,
     home,
   };
-  if (!this.isLocalHome(home)) {
+  if (queueType === "quorum") {
+    // Every member stores a quorum queue. Waiting on the classic-hash node
+    // fails the declare when that node is the other implementation or slow.
+    row.home = this.cfg.nodeId;
+  }
+  if (queueType !== "quorum" && !this.isLocalHome(row.home)) {
     try {
-      await this.cluster!.call(home!, "declare_queue", row);
+      await this.cluster!.call(row.home!, "declare_queue", row);
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
-      if (!text.includes("exists")) throw new ChanError(541, `INTERNAL_ERROR - declare ${home}: ${text}`);
+      if (!text.includes("exists")) throw new ChanError(541, `INTERNAL_ERROR - declare ${row.home}: ${text}`);
     }
   }
   const live = this.makeQueue(row, !this.isLocalHome(home));
@@ -204,6 +209,9 @@ export async function unbind(this: Broker, vhost: string, exchange: string, queu
  * @returns Destination queue names, without duplicates. A cycle in exchange links is visited once.
  */
 export function route(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
+  if (exchange === "" && this.e2e.length === 0 && this.queues.has(this.key(vhost, routingKey))) {
+    return [routingKey];
+  }
   const seen = new Set<string>();
   const pending = [exchange];
   const out: string[] = [];

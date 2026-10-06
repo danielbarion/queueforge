@@ -91,38 +91,46 @@ export async function handleConnectionClose(this: Conn) {
 }
 
 /**
- * Send connection.close and end the socket after a short delay.
+ * Send connection.close and shut the socket down.
  *
  * @param code AMQP reply code, such as 403 or 541.
  * @param text Reply text. It is truncated to 200 bytes on the wire.
  * Calling this twice still sends one close; the connection is marked closed
- * before the write. The delay lets the peer read the close frame.
+ * before the write. The frame is written and the socket is ended before this
+ * returns, so the peer observes the TCP close.
  */
 export async function connClose(this: Conn, code: number, text: string) {
+  if (this.connClosed) return;
   this.connClosed = true;
+  this.closed = true;
   this.noteMetricsClosed();
   const bytes = new TextEncoder().encode(text);
   const reply = bytes.length > 200 ? bytes.subarray(0, 200) : bytes;
-  await this.send(
-    methodFrame(
-      0,
-      method(10, 50, (w) => {
-        w.u16(code);
-        w.u8(reply.length);
-        w.bytes(reply);
-        w.u16(0);
-        w.u16(0);
-      }),
-    ),
+  const frame = methodFrame(
+    0,
+    method(10, 50, (w) => {
+      w.u16(code);
+      w.u8(reply.length);
+      w.bytes(reply);
+      w.u16(0);
+      w.u16(0);
+    }),
   );
-  const socket = this.socket;
-  setTimeout(() => {
+  // The close frame and the FIN go out before this stack yields. A socket.end()
+  // deferred to a timer never ran, so the peer kept the TCP connection open.
+  this.staged.push(frame);
+  this.stagedBytes += frame.length;
+  try {
+    this.flush();
+    this.socket.flush?.();
+    this.socket.end();
+  } catch {
     try {
-      socket.end();
+      this.socket.end();
     } catch {
-      /* the peer already closed after connection.close */
+      /* this connection is already gone */
     }
-  }, 50);
+  }
 }
 
 /**

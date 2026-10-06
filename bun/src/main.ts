@@ -6,6 +6,7 @@ import { parseConfig, splitHost } from "./config.ts";
 import { managementApp, metricsText } from "./http/index.ts";
 import { Store } from "./store.ts";
 import { join } from "node:path";
+import { hashRabbitPassword } from "./broker/auth.ts";
 
 const args = process.argv.slice(2);
 let configPath = "";
@@ -22,7 +23,7 @@ const cfg = parseConfig(await Bun.file(configPath).text());
 const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs, cfg.fsyncEveryN);
 const broker = new Broker(cfg, store);
 if (dev && store.listUsers().length === 0) {
-  const hash = await Bun.password.hash("devpassword12", { algorithm: "argon2id" });
+  const hash = hashRabbitPassword("devpassword12");
   store.putUser({ name: "admin", hash, tags: ["administrator"] });
   store.putPerm({ user: "admin", vhost: "/", configure: ".*", write: ".*", read: ".*" });
 }

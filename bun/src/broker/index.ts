@@ -17,7 +17,7 @@ import "./accounts.ts";
 
 export { ChanError } from "../errors.ts";
 export { Broker };
-export { addFederationUpstream, addFederationPolicy } from "./federation.ts";
+export { addFederationUpstream, addFederationPolicy, addFederationUri, fedUris } from "./federation.ts";
 export { topicMatches, headersMatch, queueHome } from "./routing.ts";
 export { propsWithDeath, argsFromFields } from "./args.ts";
 export { policyItem, policyFromBody } from "./policy-data.ts";

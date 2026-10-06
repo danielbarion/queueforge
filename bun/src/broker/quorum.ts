@@ -9,7 +9,7 @@ import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
-import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
+import { durableMajority, selectQuorumPeers, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
@@ -53,26 +53,72 @@ export async function enqueueQuorum(this: Broker,
   });
   const acked: string[] = [];
   const copies: MemberCopy[] = [];
-  if (this.cluster) {
-    for (const id of peers) {
-      try {
-        await this.cluster.call(id, "quorum_append", payload);
-        acked.push(id);
-        copies.push("durable");
-      } catch {
-        copies.push("memory");
-      }
+  const neededFromPeers = Math.max(0, majority - 1);
+  // A peer the majority does not need stays out of this publish once it is
+  // already holding EXTRA_APPEND_CAP appends. The confirm does not wait for
+  // that peer, and the skipped call is not counted as a durable copy.
+  const chosen = selectQuorumPeers(peers, this.appendInflight, neededFromPeers);
+  for (const id of chosen) this.appendInflight.set(id, (this.appendInflight.get(id) ?? 0) + 1);
+  const release = (id: string) => {
+    const left = (this.appendInflight.get(id) ?? 1) - 1;
+    if (left <= 0) this.appendInflight.delete(id);
+    else this.appendInflight.set(id, left);
+  };
+  // Peer fsync and the local fsync cover the same append. Waiting for the
+  // peers to finish before starting the local one added a second group-commit
+  // interval to every quorum confirm.
+  const peersDone = new Promise<void>((resolve) => {
+    if (!this.cluster || chosen.length === 0 || neededFromPeers === 0) {
+      for (const id of chosen) release(id);
+      resolve();
+      return;
     }
-  }
-  const ok = this.enqueueLocal(q, { ...src, id: qid }, 0);
-  if (ok) this.store.noteQuorumConfirm();
-  if (ok) await this.store.whenDurable();
+    const cluster = this.cluster;
+    let settled = 0;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      if (acked.length >= neededFromPeers || settled >= chosen.length) {
+        finished = true;
+        resolve();
+      }
+    };
+    for (const id of chosen) {
+      cluster.call(id, "quorum_append", payload).then(
+        () => {
+          acked.push(id);
+          copies.push("durable");
+          settled++;
+          release(id);
+          finish();
+        },
+        () => {
+          copies.push("memory");
+          settled++;
+          release(id);
+          finish();
+        },
+      );
+    }
+  });
+  // The body stays at the head until both fsyncs finish, so a consumer cannot
+  // take it before the peer copy exists.
+  const confirmGate = { hold: true };
+  const localTask = (async () => {
+    const stored = this.enqueueLocal(q, { ...src, id: qid, confirmGate }, 0);
+    if (stored) await this.store.whenDurable();
+    return stored;
+  })();
+  const [, ok] = await Promise.all([peersDone, localTask]);
   copies.push(ok ? "durable" : "memory");
   if (!ok || !durableMajority(members, copies)) {
     await Promise.all(acked.map((id) => this.cluster!.call(id, "quorum_drop", { vhost: q.vhost, queue: q.name, id: qid }).catch(() => null)));
     if (ok) this.dropLocal(q.vhost, q.name, qid);
+    this.pump(q);
     return false;
   }
+  confirmGate.hold = false;
+  this.pump(q);
   return true;
 }
 
@@ -85,8 +131,9 @@ export function quorumLeader(this: Broker): string {
   const ids = this.cfg.members.map((member) => member.id);
   if (!ids.length) return this.cfg.nodeId;
   ids.sort();
+  const known = new Set(ids);
   const up = new Set<string>([this.cfg.nodeId]);
-  for (const id of this.cluster?.peerIds() ?? []) up.add(id);
+  for (const id of this.cluster?.peerIds() ?? []) if (known.has(id)) up.add(id);
   const live = ids.filter((id) => up.has(id));
   const majority = Math.floor(ids.length / 2) + 1;
   if (live.length < majority) return ids[0]!;
@@ -110,13 +157,69 @@ export function isQuorumLeader(this: Broker): boolean {
  * @returns Nothing. A follower returns immediately and leaves `replicas` in place. Each promoted queue is pumped.
  */
 export function promoteIfLeader(this: Broker) {
-  if (!this.isQuorumLeader()) return;
+  if (this.quorumHold || !this.isQuorumLeader()) return;
   for (const q of this.queues.values()) {
-    if (q.argsParsed.queueType !== "quorum" || q.replicas.length === 0) continue;
-    q.ready.push(...q.replicas);
-    q.replicas = [];
+    if (q.argsParsed.queueType !== "quorum" || q.replicas.size === 0) continue;
+    for (const replica of q.replicas.values()) q.ready.push(replica);
+    q.replicas.clear();
     this.pump(q);
   }
+}
+
+const UNREACHABLE_STRIKES = 5;
+
+/**
+ * End the hold once every other member is heard or has refused five dials.
+ *
+ * @returns Nothing. Unconsumed replicas are promoted and `/readyz` flips when the hold ends.
+ */
+export function releaseQuorumHold(this: Broker) {
+  if (!this.quorumHold) return;
+  const others = this.cfg.members.filter((member) => member.id !== this.cfg.nodeId);
+  const done = others.every((member) => this.heardPeers.has(member.id) || this.downPeers.has(member.id));
+  if (others.length > 0 && !done) return;
+  this.quorumHold = false;
+  this.promoteIfLeader();
+  this.ready = true;
+}
+
+/**
+ * Count one peer hello toward quorum catchup.
+ *
+ * @param id Peer node id. Empty and self are ignored. The hold ends when every other member is heard or down, then unconsumed replicas are promoted and `/readyz` flips.
+ * @returns Nothing.
+ */
+export function noteQuorumPeer(this: Broker, id: string) {
+  if (!this.quorumHold || !id || id === this.cfg.nodeId) return;
+  this.heardPeers.add(id);
+  this.downStrikes.delete(id);
+  this.releaseQuorumHold();
+}
+
+/**
+ * Count one refused dial toward quorum catchup.
+ *
+ * @param id Peer node id. A peer already heard is ignored. The fifth refusal marks it down.
+ * @returns Nothing.
+ */
+export function noteQuorumDown(this: Broker, id: string) {
+  if (!this.quorumHold || !id || id === this.cfg.nodeId) return;
+  if (this.heardPeers.has(id) || this.downPeers.has(id)) return;
+  const n = (this.downStrikes.get(id) ?? 0) + 1;
+  this.downStrikes.set(id, n);
+  if (n < UNREACHABLE_STRIKES) return;
+  this.downPeers.add(id);
+  this.releaseQuorumHold();
+}
+
+/**
+ * Forget refused dials after a successful connect.
+ *
+ * @param id Peer node id. The peer stays required until its hello arrives.
+ * @returns Nothing.
+ */
+export function clearQuorumStrikes(this: Broker, id: string) {
+  if (id) this.downStrikes.delete(id);
 }
 
 /**
@@ -124,11 +227,20 @@ export function promoteIfLeader(this: Broker) {
  *
  * @param q Queue whose vhost and name identify the message.
  * @param id Message id to drop. This process is not dropped here.
- * @returns Nothing. A peer error is ignored. The caller drops the local copy separately.
+ * @returns True when every peer accepted the drop. A peer error returns false so the caller can retry. No peers returns true.
  */
-export async function quorumDrop(this: Broker, q: QueueLive, id: string) {
+export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promise<boolean> {
   const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId) ?? [];
-  await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost: q.vhost, queue: q.name, id }).catch(() => null)));
+  if (peers.length === 0) return true;
+  const results = await Promise.all(
+    peers.map((peer) =>
+      this.cluster!.call(peer, "quorum_drop", { vhost: q.vhost, queue: q.name, id }).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+  return results.every(Boolean);
 }
 
 /**
@@ -143,11 +255,11 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
   this.noteConsumed(vhost, queue, id);
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
-  const ready = q.ready.filter((m) => m.id === id);
-  q.ready = q.ready.filter((m) => m.id !== id);
-  const replicas = q.replicas.filter((m) => m.id === id);
-  q.replicas = q.replicas.filter((m) => m.id !== id);
-  for (const m of ready.concat(replicas)) if (m.rowId != null) this.store.deleteMessage(m.rowId);
+  // Follower copies live in `replicas`. An empty ready set has nothing to scan.
+  const ready = q.ready.length === 0 ? [] : q.ready.extract((m) => m.id === id);
+  const replica = q.replicas.get(id);
+  if (replica) q.replicas.delete(id);
+  for (const m of replica ? ready.concat(replica) : ready) if (m.rowId != null) this.store.deleteMessage(m.rowId);
   const held = q.unacked.get(id);
   if (held) {
     q.unacked.delete(id);
@@ -164,8 +276,8 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
  * @returns Nothing. The list is what a later snapshot asks peers to drop.
  */
 export function noteConsumed(this: Broker, vhost: string, queue: string, id: string) {
-  if (!id || this.consumed.some((item) => item.vhost === vhost && item.queue === queue && item.id === id)) return;
-  this.consumed.push({ vhost, queue, id });
+  if (!id) return;
+  this.consumedIds.add(vhost, queue, id);
 }
 
 /**
@@ -189,6 +301,10 @@ Broker.prototype.enqueueQuorum = enqueueQuorum;
 Broker.prototype.quorumLeader = quorumLeader;
 Broker.prototype.isQuorumLeader = isQuorumLeader;
 Broker.prototype.promoteIfLeader = promoteIfLeader;
+Broker.prototype.noteQuorumPeer = noteQuorumPeer;
+Broker.prototype.releaseQuorumHold = releaseQuorumHold;
+Broker.prototype.noteQuorumDown = noteQuorumDown;
+Broker.prototype.clearQuorumStrikes = clearQuorumStrikes;
 Broker.prototype.quorumDrop = quorumDrop;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
@@ -200,6 +316,10 @@ declare module "./class.ts" {
     quorumLeader: typeof quorumLeader;
     isQuorumLeader: typeof isQuorumLeader;
     promoteIfLeader: typeof promoteIfLeader;
+    noteQuorumPeer: typeof noteQuorumPeer;
+    releaseQuorumHold: typeof releaseQuorumHold;
+    noteQuorumDown: typeof noteQuorumDown;
+    clearQuorumStrikes: typeof clearQuorumStrikes;
     quorumDrop: typeof quorumDrop;
     dropLocal: typeof dropLocal;
     noteConsumed: typeof noteConsumed;

@@ -24,6 +24,49 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  * @param payload Fields for that kind. A queue or exchange that is already present is not replaced, except a durable row is still stored.
  * @returns Nothing. The caller must not apply a message body with this method.
  */
+/** Turn a Rust or Bun queue record into the local row. Rust sends `queue_type` and `auto_delete`. */
+function queueFromWire(payload: Record<string, unknown>): QueueRow {
+  const argsIn = (payload.args ?? {}) as Record<string, unknown>;
+  const args: Record<string, string | number> = {};
+  const take = (from: string, to: string) => {
+    const value = argsIn[from];
+    if (typeof value === "string" || typeof value === "number") args[to] = value;
+  };
+  take("x-message-ttl", "x-message-ttl");
+  take("message_ttl_ms", "x-message-ttl");
+  take("x-expires", "x-expires");
+  take("expires_ms", "x-expires");
+  take("x-max-length", "x-max-length");
+  take("max_length", "x-max-length");
+  take("x-max-length-bytes", "x-max-length-bytes");
+  take("max_length_bytes", "x-max-length-bytes");
+  take("x-overflow", "x-overflow");
+  take("overflow", "x-overflow");
+  take("x-dead-letter-exchange", "x-dead-letter-exchange");
+  take("dead_letter_exchange", "x-dead-letter-exchange");
+  take("x-dead-letter-routing-key", "x-dead-letter-routing-key");
+  take("dead_letter_routing_key", "x-dead-letter-routing-key");
+  take("x-max-priority", "x-max-priority");
+  take("max_priority", "x-max-priority");
+  take("x-delivery-limit", "x-delivery-limit");
+  take("delivery_limit", "x-delivery-limit");
+  const qtype = String(argsIn["x-queue-type"] ?? argsIn.queue_type ?? "").toLowerCase();
+  if (qtype === "quorum" || qtype === "classic") args["x-queue-type"] = qtype;
+  for (const [key, value] of Object.entries(argsIn)) {
+    if (key.startsWith("x-") && (typeof value === "string" || typeof value === "number") && args[key] == null) args[key] = value;
+  }
+  const home = payload.home == null || payload.home === "" ? null : String(payload.home);
+  return {
+    vhost: String(payload.vhost ?? "/"),
+    name: String(payload.name ?? payload.queue ?? ""),
+    durable: payload.durable !== false,
+    exclusive: payload.exclusive === true,
+    autoDelete: payload.autoDelete === true || payload.auto_delete === true,
+    args,
+    home,
+  };
+}
+
 export function applyRemote(this: Broker, kind: string, payload: Record<string, unknown>) {
   if (kind === "exchange") {
     const e = payload as ExRow;
@@ -36,7 +79,7 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
     this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.exchange === name));
     this.store.deleteExchange(vhost, name);
   } else if (kind === "queue" || kind === "declare_queue") {
-    const row = payload as QueueRow;
+    const row = queueFromWire(payload);
     if (!this.queues.has(this.key(row.vhost, row.name))) {
       this.queues.set(this.key(row.vhost, row.name), this.makeQueue(row, !this.isLocalHome(row.home)));
     }
@@ -138,9 +181,12 @@ export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]>
     this.exchanges.set(this.key(e.vhost, e.name), e);
     if (e.durable) this.store.putExchange(e);
   }
-  for (const q of snap.queues ?? []) if (!this.queues.has(this.key(q.vhost, q.name))) {
-    this.queues.set(this.key(q.vhost, q.name), this.makeQueue(q, !this.isLocalHome(q.home)));
-    if (q.durable) this.store.putQueue(q);
+  for (const q of snap.queues ?? []) {
+    const row = queueFromWire(q as unknown as Record<string, unknown>);
+    if (!this.queues.has(this.key(row.vhost, row.name))) {
+      this.queues.set(this.key(row.vhost, row.name), this.makeQueue(row, !this.isLocalHome(row.home)));
+      if (row.durable) this.store.putQueue(row);
+    }
   }
   this.applyConsumed(snap.consumed);
   for (const b of snap.bindings ?? []) {
