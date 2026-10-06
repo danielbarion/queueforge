@@ -1,6 +1,6 @@
-# Three brokers, one CPU and 512 MiB each, distinct host AMQP ports.
-# RabbitMQ 35672, Rust QueueForge 35673, Bun QueueForge 35674.
-# Management UIs on localhost: RabbitMQ 36672, Rust 36673, Bun 36674.
+# Four brokers, one CPU and 512 MiB each, distinct host AMQP ports.
+# RabbitMQ 35672, Rust QueueForge 35673, Bun QueueForge 35674, PHP QueueForge 35675.
+# Management UIs on localhost: RabbitMQ 36672, Rust 36673, Bun 36674, PHP 36675.
 
 name: queueforge-bench
 
@@ -49,3 +49,19 @@ services:
       - "127.0.0.1:36674:15672"
     volumes:
       - ./rust/ui/dist:/rust/ui/dist:ro
+
+  php:
+    build:
+      context: ./php
+      dockerfile: Dockerfile
+    image: queueforge-php:bench
+    container_name: qf-bench-php
+    cpus: 1.0
+    mem_limit: 512m
+    ports:
+      - "35675:5672"
+      - "127.0.0.1:36675:15672"
+    volumes:
+      # Extras resolves the SPA root as dirname(__DIR__, 2) . '/rust/ui/dist',
+      # which is /opt/rust/ui/dist for sources under /opt/queueforge/src.
+      - ./rust/ui/dist:/opt/rust/ui/dist:ro

@@ -5,5 +5,5 @@ COPY src /opt/queueforge/src
 COPY bin /opt/queueforge/bin
 COPY config.docker.toml /opt/queueforge/config.docker.toml
 RUN mkdir -p /var/lib/queueforge
-EXPOSE 5672
+EXPOSE 5672 15672
 ENTRYPOINT ["php", "bin/queueforge", "--config", "/opt/queueforge/config.docker.toml", "--dev-bootstrap"]

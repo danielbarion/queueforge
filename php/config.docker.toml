@@ -1,8 +1,10 @@
 # Inside the bench container the load client connects to port 5672.
 # fsync_interval_ms matches the Rust and Bun bench images.
+# Management is on so the container matches the Rust and Bun bench images.
 
 [listeners]
 amqp = "0.0.0.0:5672"
+management = "0.0.0.0:15672"
 
 [data]
 dir = "/var/lib/queueforge"
