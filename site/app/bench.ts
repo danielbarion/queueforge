@@ -13,7 +13,7 @@ export const paced: Bar[] = [
   { name: "RabbitMQ", rate: 13139.01, tone: "mq" },
   { name: "Rust", rate: 19230.1, tone: "rust" },
   { name: "Bun", rate: 18396.86, tone: "bun" },
-  { name: "PHP", rate: 6324.0, tone: "php" },
+  { name: "PHP", rate: 6114.63, tone: "php" },
 ];
 
 export const scale: Bar[] = [

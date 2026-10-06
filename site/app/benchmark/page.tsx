@@ -25,12 +25,14 @@ export default function BenchmarkPage() {
         <div className="wrap split-proof">
           <div>
             <h2>
-              {formatTimes(paced[1].rate, rabbit)}× Rust. {formatTimes(paced[2].rate, rabbit)}× Bun.
+              {formatTimes(paced[1].rate, rabbit)}× Rust. {formatTimes(paced[2].rate, rabbit)}× Bun.{" "}
+              {formatTimes(paced[3].rate, rabbit)}× PHP.
             </h2>
             <p className="section-lead">
               Paced messages/s that stayed kept. Durable 256-byte body, 128 confirms in flight, 1
-              CPU / 512 MiB, Mac client through the published port, 2026-10-05T09:03:42Z. A step
-              counts only when confirms and acks both reach 95% of the offer.
+              CPU / 512 MiB, Mac client through the published port. RabbitMQ, Rust and Bun are from
+              2026-10-05T09:03:42Z; PHP is the parity build from 2026-10-06T18:17:14Z, same client
+              and limits. A step counts only when confirms and acks both reach 95% of the offer.
             </p>
           </div>
           <div className="chart">
@@ -51,8 +53,8 @@ export default function BenchmarkPage() {
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ here. Bun is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}×. PHP is{" "}
               {formatTimes(scale[3].rate, scale[0].rate)}× and does not gain from the extra cores.
-              Same CPU count with more RAM did not raise the rate. PHP was not in the paced ladder
-              above. The login column has no PHP cell.
+              Same CPU count with more RAM did not raise the rate. The PHP load cells predate the
+              parity build and the small-batch flush. The login column has no PHP cell.
             </p>
           </div>
           <div className="chart">

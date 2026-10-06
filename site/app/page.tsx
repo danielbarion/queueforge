@@ -47,8 +47,8 @@ export default function Page() {
           <p className="caption">
             128 confirms in flight. Durable 256-byte body. Mac client through the published port.
             RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only when
-            confirms and acks both reach 95% of the offer. The PHP bar is the 2026-10-06 image,
-            before the parity work that followed it; that later build has not been paced.
+            confirms and acks both reach 95% of the offer. The PHP bar is the parity build,
+            measured 2026-10-06T18:17Z.
           </p>
         </div>
       </section>

@@ -8,9 +8,9 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result for RabbitMQ, Rust and Bun; the PHP rows in those tables come from [PHP paced](#php-paced-2026-10-06t161324z), a later session with a matching client and limits but a newer image. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
+The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result for RabbitMQ, Rust and Bun; the PHP rows in those tables come from [PHP parity paced](#php-parity-paced-2026-10-06t181520z), a later session with a matching client and limits but a newer image. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
 
-PHP was later brought to client-visible parity with Bun and Rust. That build is **not** in the paced tables, because `queueforge-compare` is no longer on the host; see [PHP parity build](#php-parity-build-2026-10-06-not-paced) for what was measured instead and why the PHP paced rows still describe the older image.
+The PHP rows are the parity build, the one with client-visible parity with Bun and Rust. The earlier PHP image is kept in [PHP paced](#php-paced-2026-10-06t161324z) for comparison.
 
 ## Load (2026-10-05T21:29:06Z)
 
@@ -168,7 +168,7 @@ QueueForge disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commi
 | RabbitMQ | 0.46 | 0.83 | 1678.69 | 4000 |
 | Rust | 0.28 | 0.61 | 2229.28 | 4000 |
 | Bun | 0.20 | 0.60 | 2710.94 | 8000 |
-| PHP | 0.33 | 1.59 | 1938.15 | 4000 |
+| PHP | 0.31 | 1.57 | 2027.72 | 4000 |
 
 Rust and Bun p50 are under 0.42 ms and under this session's 0.46 ms. p99 is under 0.88 ms and under this session's 0.83 ms. messages/s is over 1616.44 and over this session's 1678.69. The 01:06:02Z row in the [session table](#one-confirm-across-paced-sessions) is the floor this run replaced: Rust 3.18 / 5.43 / 304.33 and Bun 3.67 / 10.72 / 241.77.
 
@@ -179,25 +179,25 @@ Rust and Bun p50 are under 0.42 ms and under this session's 0.46 ms. p99 is unde
 | durable-256 | RabbitMQ | 13139.01 | | 3.19 | 8.58 | 32000 | 20.93 |
 | durable-256 | Rust | 19230.10 | 1.464× (1.46359) | 2.03 | 11.15 | 48000 | 20.19 |
 | durable-256 | Bun | 18396.86 | 1.400× (1.40017) | 2.18 | 11.25 | 48000 | 20.17 |
-| durable-256 | PHP | 6324.00 | 0.481× (0.48131) | 12.02 | 16.44 | 16000 | 20.19 |
+| durable-256 | PHP | 6114.63 | 0.465× (0.46538) | 12.47 | 27.77 | 16000 | 20.20 |
 | fan-2x2 | RabbitMQ | 14512.22 | | 6.81 | 16.77 | 32000 | 20.14 |
 | fan-2x2 | Rust | 24005.72 | 1.654× (1.65417) | 2.41 | 11.56 | 96000 | 20.25 |
 | fan-2x2 | Bun | 23744.97 | 1.636× (1.63621) | 2.46 | 11.25 | 96000 | 20.15 |
-| fan-2x2 | PHP | 10396.62 | 0.716× (0.71641) | 11.24 | 16.46 | 32000 | 20.18 |
+| fan-2x2 | PHP | 9974.63 | 0.687× (0.68733) | 11.41 | 26.69 | 32000 | 20.24 |
 
 The 1.3× bars are 17080.71 (durable) and 18865.89 (fan). Both brokers clear those bars, and they clear the 01:06 floors: durable 16936.46 (Rust) and 17813.55 (Bun), fan 23372.78 (Rust) and 23203.75 (Bun). Durable p50 is inside 2.58 ms (Rust) and 2.32 ms (Bun). Fan p50 is inside 3.01 ms (Rust) and 2.98 ms (Bun). Offer-by-offer rates are in [Step rates](#step-rates-128-confirms). On the durable steps cited there, confirms match consumed.
 
 ### Short scenarios
 
-All four brokers score the same `messages/s` and the same kept saturation.
+All four brokers keep the same top saturation, and all four score the same `messages/s` with one exception: PHP's `size-64` on the one-confirm ladder scored 597.25 against 600.00, with a top step of 975.76. On the 128 ladder the same scenario scored 600.00 with a top step of 999.18. The PHP column is the one-confirm ladder.
 
 | Scenario | messages/s | Saturation | Rabbit top step | Rust top step | Bun top step | PHP top step |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| size-64 | 600.00 | 1000 kept | 1000.0 | 996.3 | 995.2 | 999.4 |
+| size-64 | 600.00 | 1000 kept | 1000.0 | 996.3 | 995.2 | 975.8 |
 | prefetch-1 | 600.00 | 1000 kept | 999.3 | 998.8 | 996.7 | 1000.0 |
-| prefetch-128 | 600.00 | 1000 kept | 999.5 | 998.5 | 999.1 | 999.8 |
+| prefetch-128 | 600.00 | 1000 kept | 999.5 | 998.5 | 999.1 | 1000.0 |
 | size-4096 | 250.00 | 400 kept | 400.0 | 400.0 | 399.6 | 400.0 |
-| transient-256 | 1250.00 | 2000 kept | 2000.0 | 2000.0 | 1998.8 | 1997.5 |
+| transient-256 | 1250.00 | 2000 kept | 2000.0 | 2000.0 | 1998.8 | 1999.4 |
 
 ### Remote one confirm
 
@@ -212,31 +212,88 @@ Rust attempt 1 had the home on the client (`client_fsync_delta=25571`, `peer_fsy
 
 Trust for this image is the 09:03 rows in [Trust](#trust).
 
-## PHP parity build (2026-10-06, not paced)
+## PHP parity paced (2026-10-06T18:15:20Z)
 
 The PHP broker was brought to client-visible parity with Bun and Rust after the
-16:13:24Z paced run: policy resolution into queue arguments, alternate
-exchanges, `x-death`, `x-expires` and a TTL sweep, consumer priority and
+16:13:24Z run: policy resolution into queue arguments, alternate exchanges,
+`x-death`, `x-expires` and a TTL sweep, consumer priority and
 single-active-consumer, `x-delivery-limit`, CC/BCC routing, exclusive
 consumers, the five permission refusals, the full Prometheus series, classic
 queue home forwarding, the quorum confirm gate, the consumed set, the
 remaining management routes, and the MQTT, STOMP, stream and AMQP 1.0 gaps.
 
-**The paced ladder was not re-run.** The `queueforge-compare` binary is no
-longer on the benchmark host, so there is no way to produce a number
-comparable to the tables above. The PHP paced rows in
-[Latest](#latest-2026-10-05t090342z) and in
-[PHP paced](#php-paced-2026-10-06t161324z) continue to describe image
-`sha256:8b51cf8f616f90eb4ef6e71b82c583a7ffdaa42c8f16f7b0b6af6f418cdebf90`, not
-the parity build.
+PHP `queueforge-php:bench`
+`sha256:bedc046ae885f0226775e48789761147622b163fb59046ab1b22a9a2aaf9c62a`
+(2026-10-06T17:19:37Z, commit `bca7560`). A freshly created container for each
+ladder, host ports 35675 and 36675, 1 CPU and 512 MiB. Same client,
+`rust/target/release/queueforge-compare`, binary mtime
+2026-10-04T16:16:23-0300, not rebuilt. `QUEUEFORGE_COMPARE_RATES` unset. Docker
+Desktop at 2 CPUs and 8320565248 bytes. The one-confirm ladder started at
+18:15:20Z and the 128 ladder at 18:17:14Z. Every scenario is
+`declare=ok publish=ok consume=ok ack=ok confirms=ok`, and
+`queueforge_confirm_before_fsync_total` was 0 after the 128 ladder.
 
-What was measured instead is a regression check: whether the added work on the
-publish path costs throughput. A small confirm-rate probe
-(`php/test/probe.php`) was run against the parity image
-`sha256:bedc046ae885f0226775e48789761147622b163fb59046ab1b22a9a2aaf9c62a` and
-against the pre-parity image built from commit `4cad540`, in freshly created
-containers at the same 1 CPU and 512 MiB limits, alternating, 256-byte
-persistent bodies, 6 s per run.
+These rows replace the 16:13 rows in [Latest](#latest-2026-10-05t090342z).
+
+### One confirm in flight
+
+| Scenario | messages/s | First miss / kept | p50 ms | p99 ms | Wall s |
+| --- | ---: | --- | ---: | ---: | ---: |
+| durable-256 | 2027.72 | 4000 miss | 0.31 | 1.57 | 12.26 |
+| size-64 | 597.25 | 1000 kept | 0.50 | 2.61 | 4.09 |
+| size-4096 | 250.00 | 400 kept | 1.03 | 4.80 | 4.04 |
+| transient-256 | 1250.00 | 2000 kept | 0.28 | 1.21 | 3.05 |
+| prefetch-1 | 600.00 | 1000 kept | 0.50 | 5.37 | 4.05 |
+| prefetch-128 | 600.00 | 1000 kept | 0.53 | 3.55 | 4.05 |
+| fan-2x2 | 2004.22 | 3200 miss | 0.52 | 2.58 | 12.10 |
+
+### 128 confirms in flight
+
+| Scenario | messages/s | First miss / kept | p50 ms | p99 ms | Wall s |
+| --- | ---: | --- | ---: | ---: | ---: |
+| durable-256 | 6114.63 | 16000 miss | 12.47 | 27.77 | 20.20 |
+| size-64 | 600.00 | 1000 kept | 2.41 | 17.87 | 4.05 |
+| size-4096 | 250.00 | 400 kept | 2.38 | 21.78 | 4.05 |
+| transient-256 | 1250.00 | 2000 kept | 1.77 | 21.11 | 3.05 |
+| prefetch-1 | 600.00 | 1000 kept | 2.27 | 37.52 | 4.05 |
+| prefetch-128 | 600.00 | 1000 kept | 2.13 | 28.35 | 4.05 |
+| fan-2x2 | 9974.63 | 32000 miss | 11.41 | 26.69 | 20.24 |
+
+### Against the 16:13 image
+
+| Ladder | Scenario | 16:13 | Parity | Repeat | × Rabbit (parity) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 in flight | durable-256 | 1938.15 | 2027.72 | 1847.96 | 1.208× (1.20792) |
+| 1 in flight | fan-2x2 | 2233.16 | 2004.22 | 2354.13 | |
+| 128 in flight | durable-256 | 6324.00 | 6114.63 | 6194.60 | 0.465× (0.46538) |
+| 128 in flight | fan-2x2 | 10396.62 | 9974.63 | 9413.85 | 0.687× (0.68733) |
+
+`Repeat` is a second run of only the two laddered scenarios
+(`QUEUEFORGE_COMPARE_ONLY=durable-256,fan-2x2`), each ladder on another fresh
+container. It is not a score; it shows the spread. At one in flight the two
+parity runs straddle the 16:13 value on both scenarios: durable-256 moved by
+180 messages/s between runs, and fan-2x2's first miss was 3200 in one run and
+6400 in the other. The 16:13 numbers are single runs inside that spread, so no
+change is claimed there.
+
+At 128 in flight both parity runs came in below the 16:13 value: durable-256 by
+2–3% and fan-2x2 by 4–9%. Two samples are too few to call that a regression,
+and the 16:13 image had only one, but the direction was the same both times.
+p99 is also higher, 27.77 ms against 16.44 ms on durable-256. The parity build
+does more on the publish path: counters, a CC/BCC header scan, the alternate
+and internal exchange checks, and a guarded expiry check per destination.
+
+The relative picture is unchanged. At one confirm in flight PHP is ahead of
+RabbitMQ and behind Rust and Bun. At 128 it is a little under half of RabbitMQ
+on durable and about seven tenths on fan, where Rust and Bun are 1.4× to 1.65×.
+
+### Same-probe check
+
+Before the paced ladder was run, the publish path was also checked with a small
+confirm-rate probe (`php/test/probe.php`). It ran against the parity image and
+against an image built from the pre-parity commit `4cad540`, each in a freshly
+created container at the same limits, alternating, 256-byte persistent bodies,
+6 s per run.
 
 | Build | In flight | messages/s | p50 ms | p99 ms |
 | --- | ---: | ---: | ---: | ---: |
@@ -245,27 +302,21 @@ persistent bodies, 6 s per run.
 | pre-parity `4cad540` | 128 | 8504.9 | 15.10 | 21.05 |
 | parity | 128 | 8716.2 | 14.79 | 19.01 |
 
-No regression: identical at one confirm in flight and 2.5% ahead at 128, which
-is inside run-to-run noise. `queueforge_confirm_before_fsync_total` stayed at 0
-across roughly 52,000 durable confirms, so the durability invariant holds, and
-the SIGKILL round trip in `php/test/roundtrip.php` still passes.
+The probe saw no difference. Its numbers are **not** comparable to the paced
+ladder: it is a single-threaded PHP client that fills a fixed confirm window
+and never consumes, while `queueforge-compare` paces offered load and consumes.
 
-These probe numbers are **not** comparable to the paced ladder: the probe is a
-single-threaded PHP client that fills a fixed confirm window and never
-consumes, where `queueforge-compare` paces offered load and consumes. It is
-useful only as the same measurement taken twice.
-
-One limit the probe exposed, present in both builds: with no consumer attached
-the broker holds every message in memory, and log compaction transiently needs
-a second copy, so an unbounded queue exhausts PHP's 128 MiB `memory_limit` at
-roughly 100,000 queued 256-byte messages. Bounding the queue with
-`x-max-length` keeps it flat.
+The probe exposed one limit, present in both builds: with no consumer attached
+the broker holds every message in memory, and log compaction briefly needs a
+second copy. An unbounded queue therefore exhausts PHP's 128 MiB `memory_limit`
+at about 100,000 queued 256-byte messages. Bounding the queue with
+`x-max-length` keeps memory flat.
 
 ## PHP paced (2026-10-06T16:13:24Z)
 
 PHP `queueforge-php:bench` `sha256:8b51cf8f616f90eb4ef6e71b82c583a7ffdaa42c8f16f7b0b6af6f418cdebf90` (2026-10-06T16:09:36Z), one container at a time on host ports 35675 and 36675, 1 CPU and 512 MiB, the same `docker-compose.bench.yml` limits as the other three. Same client, `queueforge-compare`, same binary mtime 2026-10-04T16:16:23-0300, `QUEUEFORGE_COMPARE_RATES` unset. Docker Desktop was at 2 CPUs and 8320565248 bytes. Every scenario is `declare=ok publish=ok consume=ok ack=ok confirms=ok`. Disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync`.
 
-This image is newer than the 09:03:42Z Rust and Bun images, so the PHP rows are not from the same session as the other three. They are placed in the 09:03 tables because the client, the offers, the container limits, and the host settings match; the images do not.
+This image is newer than the 09:03:42Z Rust and Bun images, so the PHP rows are not from the same session as the other three. They were placed in the 09:03 tables because the client, the offers, the container limits, and the host settings match; the images do not. They have since been replaced there by [PHP parity paced](#php-parity-paced-2026-10-06t181520z) and are kept here as the pre-parity record.
 
 PHP matches the other three exactly on all five short scenarios. It differs on the two laddered ones, and the direction depends on the ladder:
 
