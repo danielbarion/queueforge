@@ -1,0 +1,12 @@
+# QueueForge PHP broker. Classic durable AMQP 0-9-1 for the same load
+# client as Rust and Bun. Not cluster, quorum, or the management UI.
+# Run from this directory:
+#   php bin/queueforge --config config.example.toml --dev-bootstrap
+
+[listeners]
+amqp = "127.0.0.1:5675"
+
+[data]
+dir = "./data"
+fsync_policy = "every_n_ms"
+fsync_interval_ms = 10

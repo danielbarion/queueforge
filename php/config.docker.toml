@@ -1,0 +1,10 @@
+# Inside the bench container the load client connects to port 5672.
+# fsync_interval_ms matches the Rust and Bun bench images.
+
+[listeners]
+amqp = "0.0.0.0:5672"
+
+[data]
+dir = "/var/lib/queueforge"
+fsync_policy = "every_n_ms"
+fsync_interval_ms = 10

@@ -1,0 +1,130 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/src/Routing.php';
+require dirname(__DIR__) . '/src/Features.php';
+require dirname(__DIR__) . '/src/Codec.php';
+require dirname(__DIR__) . '/src/Auth.php';
+require dirname(__DIR__) . '/src/Store.php';
+require dirname(__DIR__) . '/src/Cluster.php';
+require dirname(__DIR__) . '/src/Broker.php';
+require dirname(__DIR__) . '/src/Http.php';
+require dirname(__DIR__) . '/src/Protocols.php';
+require dirname(__DIR__) . '/src/Extras.php';
+require dirname(__DIR__) . '/src/Server.php';
+
+$args = array_slice($argv, 1);
+$configPath = '';
+$dev = false;
+for ($i = 0; $i < count($args); $i++) {
+    if ($args[$i] === '--config') {
+        $configPath = $args[++$i] ?? '';
+    }
+    if ($args[$i] === '--dev-bootstrap') {
+        $dev = true;
+    }
+}
+if ($configPath === '' || !is_file($configPath)) {
+    fwrite(STDERR, "usage: queueforge --config <file> [--dev-bootstrap]\n");
+    exit(2);
+}
+
+$cfg = [
+    'amqp' => '127.0.0.1:5675',
+    'dir' => './data',
+    'fsync_ms' => 10,
+    'management' => '',
+    'metrics' => '',
+    'mqtt' => '',
+    'stomp' => '',
+    'stream' => '',
+    'cluster' => '',
+    'node_id' => 'queueforge',
+    'members' => [],
+    'tls' => false,
+    'cert' => '',
+    'key' => '',
+];
+$section = '';
+$memberId = '';
+foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
+    $line = trim($line);
+    if ($line === '' || str_starts_with($line, '#')) {
+        continue;
+    }
+    if (preg_match('/^\[(.+)\]$/', $line, $m) === 1) {
+        $section = $m[1];
+        continue;
+    }
+    if (preg_match('/^id\s*=\s*"([^"]+)"/', $line, $m) === 1 && $section === 'cluster') {
+        $memberId = $m[1];
+        continue;
+    }
+    if (preg_match('/^addr\s*=\s*"([^"]+)"/', $line, $m) === 1 && $section === 'cluster' && $memberId !== '') {
+        $cfg['members'][] = ['id' => $memberId, 'addr' => $m[1]];
+        $memberId = '';
+        continue;
+    }
+    if (!str_contains($line, '=')) {
+        continue;
+    }
+    [$key, $value] = array_map(trim(...), explode('=', $line, 2));
+    $value = trim($value, "\"'");
+    if ($section === 'listeners' && isset($cfg[$key]) && is_string($cfg[$key])) {
+        $cfg[$key] = $value;
+    }
+    if ($section === 'data' && $key === 'dir') {
+        $cfg['dir'] = $value;
+    }
+    if ($section === 'data' && $key === 'fsync_interval_ms') {
+        $cfg['fsync_ms'] = max(1, (int) $value);
+    }
+    if ($section === 'cluster' && $key === 'node_id') {
+        $cfg['node_id'] = $value;
+    }
+    if ($section === 'cluster' && $key === 'listen') {
+        $cfg['cluster'] = $value;
+    }
+    if ($section === 'tls' && $key === 'enabled') {
+        $cfg['tls'] = $value === 'true';
+    }
+    if ($section === 'tls' && $key === 'cert_path') {
+        $cfg['cert'] = $value;
+    }
+    if ($section === 'tls' && $key === 'key_path') {
+        $cfg['key'] = $value;
+    }
+}
+
+$dir = $cfg['dir'];
+if (!str_starts_with($dir, '/')) {
+    $dir = dirname($configPath) . '/' . $dir;
+}
+$store = new Store($dir . '/messages.log');
+$broker = new Broker($store, $dir . '/users.json');
+if ($dev) {
+    $broker->bootstrap('devpassword12');
+}
+
+$addr = $cfg['amqp'];
+$context = stream_context_create([]);
+$scheme = 'tcp';
+if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
+    $scheme = 'tls';
+    $context = stream_context_create(['ssl' => [
+        'local_cert' => $cfg['cert'],
+        'local_pk' => $cfg['key'],
+        'verify_peer' => false,
+        'allow_self_signed' => true,
+    ]]);
+}
+$listen = stream_socket_server("$scheme://$addr", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $context);
+if ($listen === false) {
+    fwrite(STDERR, "listen $addr: $errstr\n");
+    exit(1);
+}
+stream_set_blocking($listen, false);
+$extras = new Extras($broker, $cfg);
+fwrite(STDOUT, "queueforge-php amqp=$addr fsync_ms={$cfg['fsync_ms']}\n");
+(new Server($listen, $broker, $cfg['fsync_ms'], $extras))->run();
