@@ -1,5 +1,5 @@
-# QueueForge PHP broker. Classic durable AMQP 0-9-1 for the same load
-# client as Rust and Bun. Not cluster, quorum, or the management UI.
+# QueueForge PHP broker. Same client-visible AMQP path as Rust and Bun:
+# quorum queues, cluster protocol v1, and the management API. One thread.
 # Run from this directory:
 #   php bin/queueforge --config config.example.toml --dev-bootstrap
 
