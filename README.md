@@ -1,12 +1,12 @@
 # QueueForge
 
-Two AMQP 0-9-1 brokers, and a PHP process for the classic durable path, live in this folder. A Rust process and a Bun process can also be members of one cluster. The PHP process cannot.
+Three AMQP 0-9-1 brokers live in this folder: Rust, Bun, and PHP. All three can be members of one cluster.
 
 | Tree | What it is |
 |------|------------|
 | [`rust/`](rust/) | The Rust broker (Tokio, redb metadata, write-ahead log, management HTTP, SPA, bench). The repository root is not a Cargo workspace. |
 | [`bun/`](bun/) | The Bun broker. Messages live in SQLite. Management HTTP is Elysia. AMQP is a Bun TCP listener. |
-| [`php/`](php/) | PHP broker for the single-node classic path: default, direct, fanout, and topic exchanges, bindings, confirms after `fsync`, manual ack, and `basic.nack` requeue. Not a cluster member. No quorum, management UI, or TLS. |
+| [`php/`](php/) | The PHP broker. One process, one `stream_select()` loop, no Composer and no dependencies beyond `ext-sockets`. Messages live in an append-only log. Classic and quorum queues, management HTTP, Prometheus, TLS, MQTT, STOMP, and streams. A cluster member. |
 
 Build and test the Rust broker from its subdirectory:
 
@@ -22,21 +22,36 @@ Run the Bun broker from its subdirectory:
 ```bash
 cd bun
 bun install
-bun test
 bun run start -- --config config.example.toml --dev-bootstrap
 ```
 
-Both listen on AMQP `127.0.0.1:5672` and management `127.0.0.1:15672` unless the config says otherwise. Bootstrap user with `--dev-bootstrap` is `admin` / `devpassword12`. Give every process its own AMQP, management, metrics, and cluster ports, and its own data directory.
+Run the PHP broker from its subdirectory. It has no install step:
 
-`GET /healthz` returns `ok`. `GET /readyz` returns `ready` once the process can serve traffic. Management login sets the `queueforge_session` cookie. See [`rust/README.md`](rust/README.md) and [`bun/README.md`](bun/README.md).
+```bash
+cd php
+php bin/queueforge --config config.example.toml --dev-bootstrap
+```
+
+Rust and Bun listen on AMQP `127.0.0.1:5672` and management `127.0.0.1:15672` unless the config says otherwise; the PHP example config uses `127.0.0.1:5675` so it can run alongside them. Bootstrap user with `--dev-bootstrap` is `admin` / `devpassword12`. Give every process its own AMQP, management, metrics, and cluster ports, and its own data directory.
+
+`GET /healthz` returns `ok`. `GET /readyz` returns `ready` once the process can serve traffic. Management login sets the `queueforge_session` cookie. See [`rust/README.md`](rust/README.md), [`bun/README.md`](bun/README.md), and [`php/README.md`](php/README.md).
+
+Tests: `cargo test --workspace` in `rust/`, `bun test` in `bun/`, and for PHP a container run with the test directory mounted, so the host needs no PHP:
+
+```bash
+docker compose -f docker-compose.bench.yml build php
+docker compose -f docker-compose.bench.yml run --rm --no-deps \
+  --entrypoint php -v ./php/test:/opt/queueforge/test \
+  php test/run.php
+```
 
 ## Cluster
 
 Leave `[cluster].members` empty for a single node. For several processes, put the same member list on every node, including itself. Membership is that static list.
 
-Classic queues have one home node, chosen by a hash of the vhost and queue name. Peers forward operations there, and the messages stay in that node's local engine.
+Classic queues have one home node, chosen by a hash of the vhost and queue name. Peers forward operations there, and the messages stay in that node's local engine. Rust hashes bytes with a 64-bit FNV; Bun and PHP use a 32-bit FNV-1a, so a mixed list does not agree on classic homes. Quorum queues are unaffected, being homed where they are declared.
 
-A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have the body in their own durable store and that copy has been fsynced. The client can publish to whichever member is up. Each member writes the body into its own engine: the Rust write-ahead log, or Bun SQLite. A node keeps its own data directory. Rust and Bun encode and decode cluster protocol version 1, so a member list can mix both binaries. Once a majority is reachable, the live leader is the lowest member id among those peers.
+A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have the body in their own durable store and that copy has been fsynced. The client can publish to whichever member is up. Each member writes the body into its own engine: the Rust write-ahead log, Bun SQLite, or the PHP append-only log. A node keeps its own data directory. All three encode and decode cluster protocol version 1, so a member list can mix the binaries. Once a majority is reachable, the live leader is the lowest member id among those peers.
 
 With `fsync_policy = "every_n_ms"` a classic durable confirm returns when the interval fsync covers that append (`fsync_interval_ms` in the example configs is 100). `always` and `every_n_messages` also wait for the fsync. A confirmed durable publish is on disk.
 
