@@ -6,7 +6,7 @@ final class Extras
 {
     /** @var array<int, array{kind:string,fp:mixed}> */
     public array $listens = [];
-    /** @var array<int, array{kind:string,fp:mixed,buf:string,conn:int}> */
+    /** @var array<int, array{kind:string,fp:mixed,buf:string,conn:int,peer:string,state:array<string, mixed>}> */
     public array $conns = [];
     public Cluster $cluster;
     public Http $http;
@@ -68,7 +68,7 @@ final class Extras
             stream_set_blocking($client, false);
             $kind = $this->listens[$id]['kind'];
             $conn = $kind === 'mqtt' ? $this->protocols->nextMqtt() : ($kind === 'stomp' ? $this->protocols->nextStomp() : 0);
-            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn];
+            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => []];
             return;
         }
         $row = $this->conns[$id] ?? null;
@@ -79,8 +79,7 @@ final class Extras
         if ($chunk === false || $chunk === '') {
             $meta = stream_get_meta_data($fp);
             if ($meta['eof'] ?? false) {
-                unset($this->conns[$id]);
-                fclose($fp);
+                $this->close($id);
             }
             return;
         }
@@ -110,7 +109,27 @@ final class Extras
             if (is_string($hello)) {
                 fwrite($fp, $hello . "\n");
             }
-            $this->conns[(int) $fp] = ['kind' => 'cluster', 'fp' => $fp, 'buf' => '', 'conn' => 0];
+            $this->conns[(int) $fp] = ['kind' => 'cluster', 'fp' => $fp, 'buf' => '', 'conn' => 0, 'peer' => $member['id'], 'state' => []];
+        }
+    }
+
+    /**
+     * Drops a connection. A cluster peer is detached as well, so a partition
+     * shrinks the peer set instead of leaving it to grow and skew the
+     * majority that Broker::isLeader() derives from it.
+     */
+    private function close(int $id): void
+    {
+        $row = $this->conns[$id] ?? null;
+        if ($row === null) {
+            return;
+        }
+        unset($this->conns[$id]);
+        if ($row['kind'] === 'cluster' && ($row['peer'] ?? '') !== '') {
+            $this->cluster->detach($row['peer']);
+        }
+        if (is_resource($row['fp'])) {
+            fclose($row['fp']);
         }
     }
 
@@ -131,9 +150,8 @@ final class Extras
             if (strlen($raw) < strlen((string) $head) + 4 + $length) {
                 return;
             }
-            fwrite($fp, $this->http->handle($raw));
-            unset($this->conns[$id]);
-            fclose($fp);
+            self::writeAll($fp, $this->http->handle($raw));
+            $this->close($id);
             return;
         }
         if ($row['kind'] === 'cluster') {
@@ -145,6 +163,7 @@ final class Extras
                     $payload = is_array($decoded['payload'] ?? null) ? $decoded['payload'] : [];
                     $peer = (string) ($decoded['nodeId'] ?? $payload['node'] ?? '');
                     if ($peer !== '') {
+                        $this->conns[$id]['peer'] = $peer;
                         $this->cluster->attach($peer, static function (string $out) use ($fp): void {
                             @fwrite($fp, $out);
                         });
@@ -170,8 +189,41 @@ final class Extras
             $out = $this->protocols->stomp($this->conns[$id]['buf'], $fp, $row['conn']);
             $this->conns[$id]['buf'] = '';
             if ($out !== '') {
-                fwrite($fp, $out);
+                self::writeAll($fp, $out);
             }
+            return;
+        }
+        if ($row['kind'] === 'stream') {
+            // Protocols::stream() takes the buffer and the per-connection
+            // state by reference and consumes whole frames only, so the
+            // remainder stays buffered for the next read.
+            $buf = $this->conns[$id]['buf'];
+            $state = $this->conns[$id]['state'];
+            $out = $this->protocols->stream($buf, $state);
+            $this->conns[$id]['buf'] = $buf;
+            $this->conns[$id]['state'] = $state;
+            if ($out !== '') {
+                self::writeAll($fp, $out);
+            }
+        }
+    }
+
+    /**
+     * Writes every byte. A bare fwrite() can short-write on a full socket
+     * buffer, which truncated larger management responses.
+     *
+     * @param resource $fp
+     */
+    private static function writeAll($fp, string $data): void
+    {
+        $at = 0;
+        $total = strlen($data);
+        while ($at < $total) {
+            $n = @fwrite($fp, substr($data, $at));
+            if ($n === false || $n === 0) {
+                return;
+            }
+            $at += $n;
         }
     }
 

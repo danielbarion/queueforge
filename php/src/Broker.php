@@ -61,6 +61,7 @@ final class Broker
                 'redelivered' => false,
                 'exchange' => '',
                 'key' => $msg['queue'],
+                'propRaw' => $msg['propRaw'] ?? null,
             ];
             $this->declareQueue($msg['queue']);
             $this->queues[$msg['queue']]['ready'][] = $msg['id'];
@@ -172,8 +173,9 @@ final class Broker
     }
 
     /** @param list<array{0:string,1:string}> $headers
+     *  @param ?string $propRaw raw publisher property bytes, replayed to consumers verbatim
      *  @return 'wait'|'return'|'nack' */
-    public function publish(int $conn, int $ch, int $tag, string $exchange, string $key, string $body, int $mode, int $priority = 0, array $headers = [], ?int $expirationMs = null): string
+    public function publish(int $conn, int $ch, int $tag, string $exchange, string $key, string $body, int $mode, int $priority = 0, array $headers = [], ?int $expirationMs = null, ?string $propRaw = null): string
     {
         $dests = $this->route($exchange, $key, $headers);
         if ($dests === []) {
@@ -227,12 +229,13 @@ final class Broker
                 'priority' => $priority,
                 'expires' => $expires,
                 'headers' => $headers,
+                'propRaw' => $propRaw,
             ];
             $ids[] = $id;
             $qids[] = (string) $id;
             $this->prom['received']++;
             if ($mode === 2) {
-                $end = $this->store->appendPublish($id, $queue, $body, $mode);
+                $end = $this->store->appendPublish($id, $queue, $body, $mode, $propRaw);
             } else {
                 $this->hold($queue, $id);
             }

@@ -26,7 +26,7 @@ final class Store
         $this->synced = $this->end;
     }
 
-    /** @return list<array{id:int,queue:string,body:string,mode:int}> */
+    /** @return list<array{id:int,queue:string,body:string,mode:int,propRaw:?string}> */
     public function replay(): array
     {
         rewind($this->fp);
@@ -55,8 +55,19 @@ final class Store
                 $bodyLen = unpack('N', substr($payload, $o, 4))[1];
                 $o += 4;
                 $body = substr($payload, $o, $bodyLen);
-                $mode = $o + $bodyLen < strlen($payload) ? ord($payload[$o + $bodyLen]) : 2;
-                $live[$id] = ['id' => $id, 'queue' => $queue, 'body' => $body, 'mode' => $mode];
+                $o += $bodyLen;
+                $mode = $o < strlen($payload) ? ord($payload[$o]) : 2;
+                $o += 1;
+                // Records written before properties were persisted stop here.
+                $propRaw = null;
+                if ($o + 4 <= strlen($payload)) {
+                    $propLen = unpack('N', substr($payload, $o, 4))[1];
+                    $o += 4;
+                    if ($propLen > 0) {
+                        $propRaw = substr($payload, $o, $propLen);
+                    }
+                }
+                $live[$id] = ['id' => $id, 'queue' => $queue, 'body' => $body, 'mode' => $mode, 'propRaw' => $propRaw];
             } elseif ($type === 2 && strlen($payload) >= 8) {
                 $id = Codec::readU64($payload, 0);
                 unset($live[$id]);
@@ -66,9 +77,19 @@ final class Store
         return array_values($live);
     }
 
-    public function appendPublish(int $id, string $queue, string $body, int $mode): int
+    /**
+     * Publish record: u64 id, shortstr queue, u32+body, mode byte, then
+     * u32+propRaw. The trailing property field was added later, so replay
+     * treats its absence as "no properties" and older logs still load.
+     */
+    public function appendPublish(int $id, string $queue, string $body, int $mode, ?string $propRaw = null): int
     {
-        $payload = Codec::u64($id) . Codec::shortstr($queue) . pack('N', strlen($body)) . $body . chr($mode);
+        $props = $propRaw ?? '';
+        $payload = Codec::u64($id)
+            . Codec::shortstr($queue)
+            . pack('N', strlen($body)) . $body
+            . chr($mode)
+            . pack('N', strlen($props)) . $props;
         return $this->append(1, $payload);
     }
 

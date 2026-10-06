@@ -55,15 +55,21 @@ final class Server
 {
     /** @var array<int, Sock> */
     public array $conns = [];
+    /** @var array<int, int> stream resource id to connection id */
+    private array $byFp = [];
     private int $nextConn = 1;
     private int $rr = 0;
 
     private float $nextSync = 0;
+    private float $nextBeat = 0;
+    /** Seconds between server heartbeats; half the 60 the tune frame offers. */
+    private const BEAT_SECONDS = 30.0;
 
     /** @param resource $listen */
     public function __construct(private $listen, private Broker $broker, private int $fsyncMs, public ?Extras $extras = null)
     {
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
+        $this->nextBeat = microtime(true) + self::BEAT_SECONDS;
     }
 
     public function run(): void
@@ -103,8 +109,10 @@ final class Server
                     if ($client !== false) {
                         stream_set_blocking($client, false);
                         $this->tune($client);
-                        $this->conns[$this->nextConn++] = new Sock($client);
-                    $this->broker->prom['connections']++;
+                        $id = $this->nextConn++;
+                        $this->conns[$id] = new Sock($client);
+                        $this->byFp[(int) $client] = $id;
+                        $this->broker->prom['connections']++;
                     }
                     continue;
                 }
@@ -129,6 +137,7 @@ final class Server
                 }
             }
             $this->commit();
+            $this->beat();
             if ($this->extras !== null) {
                 $this->extras->tick();
             }
@@ -147,15 +156,40 @@ final class Server
         }
     }
 
-    /** @param resource $fp */
+    /**
+     * Looks up a connection by stream. This was a linear scan over every
+     * connection, run once per readable stream, which made the select loop
+     * quadratic in connection count.
+     *
+     * @param resource $fp
+     */
     private function idOf($fp): ?int
     {
-        foreach ($this->conns as $id => $sock) {
-            if ($sock->fp === $fp) {
-                return $id;
-            }
+        return $this->byFp[(int) $fp] ?? null;
+    }
+
+    /**
+     * Emits a heartbeat frame on idle connections. The tune frame advertises
+     * 60 seconds, so a client that enforces it used to time out against a
+     * server that never sent one.
+     */
+    private function beat(): void
+    {
+        $now = microtime(true);
+        if ($now < $this->nextBeat) {
+            return;
         }
-        return null;
+        $this->nextBeat = $now + self::BEAT_SECONDS;
+        foreach ($this->conns as $sock) {
+            if ($sock->gone || $sock->stage !== 'frames') {
+                continue;
+            }
+            if ($sock->out !== '') {
+                continue;
+            }
+            $sock->send(Codec::heartbeat());
+            $sock->flush();
+        }
     }
 
     private function drop(int $id): void
@@ -165,6 +199,7 @@ final class Server
         }
         $sock = $this->conns[$id];
         $sock->gone = true;
+        unset($this->byFp[(int) $sock->fp]);
         @fclose($sock->fp);
         foreach ($this->broker->queues as $name => $q) {
             $this->broker->queues[$name]['consumers'] = array_values(array_filter(
@@ -223,6 +258,9 @@ final class Server
         $ch = $sock->channels[$channel] ?? null;
         if ($type === 2 && $ch !== null && $ch->pub !== null && strlen($payload) >= 12) {
             $ch->pub['need'] = Codec::readU64($payload, 4);
+            // Keep the property bytes from the flag word on so they can be
+            // replayed to consumers verbatim, the way Bun preserves propRaw.
+            $ch->pub['propRaw'] = substr($payload, 12);
             $flags = unpack('n', substr($payload, 12, 2))[1];
             $at = 14;
             if (($flags & 0x8000) !== 0) {
@@ -340,7 +378,9 @@ final class Server
         $o += 2;
         $name = Codec::readShortstr($payload, $o);
         if ($name === '') {
-            $name = 'amq.gen';
+            // A server-generated name has to be unique; the old fixed
+            // 'amq.gen' made every anonymous queue collide.
+            $name = 'amq.gen-' . bin2hex(random_bytes(8));
         }
         $args = [];
         if (isset($payload[$o])) {
@@ -382,6 +422,7 @@ final class Server
             'priority' => 0,
             'headers' => [],
             'expiration' => null,
+            'propRaw' => null,
             'need' => 0,
             'got' => '',
         ];
@@ -406,11 +447,12 @@ final class Server
             $pub['priority'] ?? 0,
             $pub['headers'] ?? [],
             $pub['expiration'] ?? null,
+            $pub['propRaw'] ?? null,
         );
         $ch->pub = null;
         if ($result === 'return' && $pub['mandatory']) {
             $ret = Codec::method($channel, 60, 50, pack('n', 312) . Codec::shortstr('NO_ROUTE') . Codec::shortstr($pub['exchange']) . Codec::shortstr($pub['key']));
-            $header = pack('nn', 60, 0) . Codec::u64(strlen($pub['got'])) . pack('n', 0x1000) . chr($pub['mode']);
+            $header = Codec::contentHeader(strlen($pub['got']), $pub['mode'], $pub['propRaw'] ?? null);
             $this->conns[$id]->send($ret . Codec::frame(2, $channel, $header) . Codec::frame(3, $channel, $pub['got']));
         }
         if ($result === 'return' && $tag > 0) {
@@ -539,6 +581,7 @@ final class Server
                     $msg['body'],
                     $msg['redelivered'] ?? false,
                     $msg['exchange'] ?? '',
+                    $msg['propRaw'] ?? null,
                 ));
                 $sock->flush();
                 $this->broker->prom['delivered']++;

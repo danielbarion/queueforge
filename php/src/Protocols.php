@@ -78,7 +78,7 @@ final class Protocols
                     $codes .= "\x00";
                 }
                 $rest = $id0 . $id1 . $codes;
-                $out .= "\x90" . chr(strlen($rest)) . $rest;
+                $out .= "\x90" . self::mqttLen(strlen($rest)) . $rest;
                 if ($last !== '') {
                     $queued = $this->broker->pullBody($last);
                     if ($queued !== null) {
@@ -173,10 +173,26 @@ final class Protocols
         return ['text' => substr($buf, $at + 2, $n), 'next' => $end];
     }
 
+    /**
+     * MQTT remaining length: seven bits per byte, low group first, with 0x80
+     * set on every byte but the last. A single chr() only works below 128,
+     * which silently corrupted any larger packet.
+     */
+    private static function mqttLen(int $n): string
+    {
+        $out = '';
+        do {
+            $byte = $n % 128;
+            $n = intdiv($n, 128);
+            $out .= chr($n > 0 ? $byte | 0x80 : $byte);
+        } while ($n > 0);
+        return $out;
+    }
+
     private function mqttPublish(string $topic, string $payload): string
     {
         $rest = pack('n', strlen($topic)) . $topic . $payload;
-        return "\x30" . chr(strlen($rest)) . $rest;
+        return "\x30" . self::mqttLen(strlen($rest)) . $rest;
     }
 
     /** @param array<string, mixed> $state */
