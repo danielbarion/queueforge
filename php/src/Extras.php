@@ -103,6 +103,17 @@ final class Extras
         $port = self::port((string) ($cfg['management'] ?? '127.0.0.1:15672'));
         $ui = dirname(__DIR__, 2) . '/rust/ui/dist';
         $this->http = new Http($broker, $ui, $port, !empty($cfg['tls']));
+        // A membership change made through the management API is persisted and
+        // broadcast as an apply op, which is how Bun propagates it.
+        $this->http->onMembers = function (): void {
+            $this->saveMembers();
+            foreach ($this->cluster->peerIds() as $peer) {
+                $this->cluster->request($peer, 'apply', [
+                    'kind' => 'members',
+                    'body' => $this->broker->members,
+                ]);
+            }
+        };
         $this->protocols = new Protocols($broker);
         foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream'] as $kind) {
             $addr = $cfg[$kind] ?? null;

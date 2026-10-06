@@ -15,6 +15,42 @@ final class Broker
     public array $waiting = [];
     /** @var array<string, string> */
     public array $users = [];
+    /**
+     * Tags per user. An untagged user loaded from the original file format is
+     * treated as an administrator so an existing deployment keeps working.
+     *
+     * @var array<string, list<string>>
+     */
+    public array $tags = [];
+    /**
+     * Regex permissions per user and vhost.
+     *
+     * @var array<string, array<string, array{configure:string,write:string,read:string}>>
+     */
+    public array $permissions = [];
+    /** @var array<string, array<string, array<string, mixed>>> vhost to name to body */
+    public array $policies = [];
+    /** @var array<string, array<string, array<string, mixed>>> */
+    public array $operatorPolicies = [];
+    /** @var array<string, array<string, array{write:string,read:string}>> user to exchange */
+    public array $topicPermissions = [];
+    /** @var array<string, array<string, int>> */
+    public array $userLimits = [];
+    /** @var array<string, array<string, int>> */
+    public array $vhostLimits = [];
+    /** @var list<string> */
+    public array $vhosts = ['/'];
+    /**
+     * Feature flags. Named after Bun's set so the management UI sees the same
+     * shape; this broker has no code paths keyed off them.
+     *
+     * @var array<string, bool>
+     */
+    public array $featureFlags = [
+        'quorum_queue' => true,
+        'publisher_confirms' => true,
+        'classic_queue_type' => true,
+    ];
     /** @var array<string, string> */
     public array $exchanges = [
         '' => 'direct',
@@ -53,9 +89,29 @@ final class Broker
         if (is_file($userFile)) {
             $decoded = json_decode((string) file_get_contents($userFile), true);
             if (is_array($decoded)) {
-                foreach ($decoded as $name => $hash) {
-                    if (is_string($name) && is_string($hash)) {
-                        $this->users[$name] = $hash;
+                foreach ($decoded as $name => $row) {
+                    if (!is_string($name)) {
+                        continue;
+                    }
+                    // A bare string is the original format: a hash with no
+                    // tags, which is treated as an administrator.
+                    if (is_string($row)) {
+                        $this->users[$name] = $row;
+                        $this->tags[$name] = ['administrator'];
+                        continue;
+                    }
+                    if (is_array($row) && is_string($row['hash'] ?? null)) {
+                        $this->users[$name] = $row['hash'];
+                        $tags = [];
+                        foreach ((array) ($row['tags'] ?? []) as $tag) {
+                            if (is_string($tag)) {
+                                $tags[] = $tag;
+                            }
+                        }
+                        $this->tags[$name] = $tags === [] ? ['administrator'] : $tags;
+                        if (is_array($row['permissions'] ?? null)) {
+                            $this->permissions[$name] = $row['permissions'];
+                        }
                     }
                 }
             }
@@ -84,7 +140,90 @@ final class Broker
             return;
         }
         $this->users['admin'] = Auth::hash($password);
-        file_put_contents($this->userFile, json_encode($this->users));
+        $this->tags['admin'] = ['administrator'];
+        $this->permissions['admin'] = ['/' => ['configure' => '.*', 'write' => '.*', 'read' => '.*']];
+        $this->saveUsers();
+    }
+
+    /** Writes users, tags and permissions back to the user file. */
+    public function saveUsers(): void
+    {
+        $out = [];
+        foreach ($this->users as $name => $hash) {
+            $out[$name] = [
+                'hash' => $hash,
+                'tags' => $this->tags[$name] ?? ['administrator'],
+                'permissions' => $this->permissions[$name] ?? [],
+            ];
+        }
+        @file_put_contents($this->userFile, json_encode($out));
+    }
+
+    /**
+     * Creates or replaces a user. A password hash can be supplied directly,
+     * which is how the management API accepts an already-hashed password.
+     *
+     * @param list<string> $tags
+     */
+    public function putUser(string $name, string $password, array $tags, string $hash = ''): void
+    {
+        if ($name === '') {
+            throw new RuntimeException('a user needs a name');
+        }
+        if ($hash === '') {
+            Auth::check($password);
+            $hash = Auth::hash($password);
+        }
+        $this->users[$name] = $hash;
+        $this->tags[$name] = $tags === [] ? ['management'] : $tags;
+        $this->saveUsers();
+    }
+
+    public function deleteUser(string $name): bool
+    {
+        if (!isset($this->users[$name])) {
+            return false;
+        }
+        unset($this->users[$name], $this->tags[$name], $this->permissions[$name], $this->topicPermissions[$name]);
+        $this->saveUsers();
+        return true;
+    }
+
+    /** True when the user carries a tag that may reach the management API. */
+    public function canManage(string $name): bool
+    {
+        $tags = $this->tags[$name] ?? [];
+        foreach (['administrator', 'management', 'monitoring'] as $tag) {
+            if (in_array($tag, $tags, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public function isAdmin(string $name): bool
+    {
+        return in_array('administrator', $this->tags[$name] ?? [], true);
+    }
+
+    public function setPermissions(string $user, string $vhost, string $configure, string $write, string $read): void
+    {
+        $this->permissions[$user][$vhost] = [
+            'configure' => $configure,
+            'write' => $write,
+            'read' => $read,
+        ];
+        $this->saveUsers();
+    }
+
+    public function clearPermissions(string $user, string $vhost): bool
+    {
+        if (!isset($this->permissions[$user][$vhost])) {
+            return false;
+        }
+        unset($this->permissions[$user][$vhost]);
+        $this->saveUsers();
+        return true;
     }
 
     public function verify(string $user, string $pass): bool
@@ -650,6 +789,41 @@ final class Broker
         $this->dlxDepth++;
         $this->publish(0, 0, 0, $dlx, $args['dlxKey'] ?? $key, $body, 1);
         $this->dlxDepth--;
+    }
+
+    /**
+     * Rewrites the log when it is mostly dead records. Only safe while no
+     * confirm is outstanding, because compaction resets the byte offsets the
+     * waiting entries are gated on.
+     */
+    public function maybeCompact(): bool
+    {
+        if ($this->waiting !== [] || $this->store->sinceCompact < 256) {
+            return false;
+        }
+        $this->store->sinceCompact = 0;
+        $live = [];
+        $bytes = 0;
+        foreach ($this->queues as $name => $queue) {
+            foreach (array_merge($queue['ready'], $queue['replicas']) as $id) {
+                $msg = $this->msgs[$id] ?? null;
+                if ($msg === null || ($msg['mode'] ?? 1) !== 2) {
+                    continue;
+                }
+                $live[] = [
+                    'id' => $id,
+                    'queue' => $name,
+                    'body' => $msg['body'],
+                    'mode' => 2,
+                    'propRaw' => $msg['propRaw'] ?? null,
+                ];
+                $bytes += strlen($msg['body']) + 32;
+            }
+        }
+        if (!$this->store->shouldCompact($bytes)) {
+            return false;
+        }
+        return $this->store->compact($live);
     }
 
     public function expired(int $id): bool

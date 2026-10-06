@@ -6,10 +6,15 @@ declare(strict_types=1);
  */
 final class Store
 {
+    /** A log smaller than this is never rewritten; the work is not worth it. */
+    public const COMPACT_MIN_BYTES = 8 * 1024 * 1024;
+
     /** @var resource */
     public $fp;
     public int $end = 0;
     public int $synced = 0;
+    /** Syncs since the last rewrite, used to rate-limit the size check. */
+    public int $sinceCompact = 0;
 
     public function __construct(public string $path)
     {
@@ -108,6 +113,81 @@ final class Store
             throw new RuntimeException('fsync failed');
         }
         $this->synced = $this->end;
+        $this->sinceCompact++;
+    }
+
+    /**
+     * Rewrites the log with only the records still live. The log is otherwise
+     * append-only and grows without bound, so a long-running broker keeps
+     * every ack record for every message it ever handled.
+     *
+     * Returns true when a rewrite happened. Callers should only invoke this
+     * when nothing is waiting on a confirm, because it resets the byte
+     * offsets those confirms are gated on.
+     *
+     * @param list<array{id:int,queue:string,body:string,mode:int,propRaw:?string}> $live
+     */
+    public function compact(array $live): bool
+    {
+        $temp = $this->path . '.compact';
+        $fp = fopen($temp, 'w+b');
+        if ($fp === false) {
+            return false;
+        }
+        // Writes only inserts, so a delete can never be replayed after the
+        // insert it was meant to cancel. Bun needs an equivalent rule for its
+        // batches (bun/src/store.ts:504-515); compaction gives it for free by
+        // dropping the acks entirely.
+        foreach ($live as $msg) {
+            $props = $msg['propRaw'] ?? '';
+            $payload = Codec::u64($msg['id'])
+                . Codec::shortstr($msg['queue'])
+                . pack('N', strlen($msg['body'])) . $msg['body']
+                . chr($msg['mode'])
+                . pack('N', strlen($props)) . $props;
+            $record = chr(1) . pack('N', strlen($payload)) . $payload;
+            if (fwrite($fp, $record) !== strlen($record)) {
+                fclose($fp);
+                @unlink($temp);
+                return false;
+            }
+        }
+        fflush($fp);
+        if (!fsync($fp)) {
+            fclose($fp);
+            @unlink($temp);
+            return false;
+        }
+        fclose($fp);
+        // Replace only after the replacement is durable, so a crash mid-way
+        // leaves the original log intact.
+        if (!@rename($temp, $this->path)) {
+            @unlink($temp);
+            return false;
+        }
+        fclose($this->fp);
+        $fp = fopen($this->path, 'c+b');
+        if ($fp === false) {
+            throw new RuntimeException('cannot reopen ' . $this->path);
+        }
+        $this->fp = $fp;
+        $this->end = (int) filesize($this->path);
+        $this->synced = $this->end;
+        fseek($this->fp, $this->end);
+        $this->sinceCompact = 0;
+        return true;
+    }
+
+    /**
+     * Whether the log has grown enough to be worth rewriting: at least the
+     * threshold in bytes, and mostly dead weight.
+     */
+    public function shouldCompact(int $liveBytes): bool
+    {
+        if ($this->end < self::COMPACT_MIN_BYTES) {
+            return false;
+        }
+        return $liveBytes * 2 < $this->end;
     }
 
     private function append(int $type, string $payload): int

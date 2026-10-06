@@ -138,6 +138,7 @@ final class Server
             }
             $this->commit();
             $this->beat();
+            $this->broker->maybeCompact();
             if ($this->extras !== null) {
                 $this->extras->tick();
             }
