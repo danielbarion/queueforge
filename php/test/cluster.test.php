@@ -12,6 +12,7 @@ require_once __DIR__ . '/lib/Harness.php';
 $root = dirname(__DIR__);
 require_once $root . '/src/Routing.php';
 require_once $root . '/src/Features.php';
+require_once $root . '/src/Policy.php';
 require_once $root . '/src/Codec.php';
 require_once $root . '/src/Auth.php';
 require_once $root . '/src/Store.php';
@@ -293,6 +294,71 @@ Harness::guard('deliver inbound', static function (): void {
         ],
     ]));
     Harness::eq('the pushed message is queued', 1, $broker->readyCount('inbound'));
+});
+
+// The consumed set stops a quorum body being handed out twice after a peer
+// replays its log.
+Harness::guard('consumed set', static function (): void {
+    $members = [
+        ['id' => 'a', 'addr' => '127.0.0.1:1'],
+        ['id' => 'b', 'addr' => '127.0.0.1:2'],
+        ['id' => 'c', 'addr' => '127.0.0.1:3'],
+    ];
+    $n = node('a', $members);
+    $broker = $n['broker'];
+
+    Harness::ok('an unknown id is not consumed', !$broker->wasConsumed('q', 'q-x-1-aa'));
+    $broker->noteConsumed('q', 'q-x-1-aa');
+    Harness::ok('noting it records it', $broker->wasConsumed('q', 'q-x-1-aa'));
+    Harness::eq('an empty id is ignored', false, $broker->wasConsumed('q', ''));
+
+    $list = $broker->consumedList();
+    Harness::eq('the wire list has one entry', 1, count($list));
+    Harness::eq('it names the queue', 'q', $list[0][0]);
+    Harness::eq('and the id', 'q-x-1-aa', $list[0][1]);
+
+    // Applying a peer's set drops the matching local message.
+    $broker->declareQueue('qq', ['x-queue-type' => 'quorum']);
+    $broker->publish(0, 0, 0, '', 'qq', 'body', 1);
+    $id = array_key_last($broker->msgs);
+    $qid = (string) $broker->msgs[$id]['qid'];
+    Harness::ok('the quorum message has a cluster id', str_starts_with($qid, 'q-'));
+    $before = count($broker->msgs);
+    $broker->applyConsumed([['qq', $qid]]);
+    Harness::eq('applying the peer set dropped it', $before - 1, count($broker->msgs));
+    Harness::ok('and recorded it as consumed', $broker->wasConsumed('qq', $qid));
+    Harness::eq('the queue is empty', 0, $broker->readyCount('qq'));
+
+    // A hello carries the set in both directions.
+    $hello = $n['cluster']->hello();
+    Harness::ok('hello carries the consumed set', $hello['payload']['consumed'] !== []);
+});
+
+// Session ids are namespaced by node, so two nodes never issue the same one.
+Harness::guard('session ids', static function (): void {
+    $members = [
+        ['id' => 'a', 'addr' => '127.0.0.1:1'],
+        ['id' => 'b', 'addr' => '127.0.0.1:2'],
+    ];
+    $a = node('a', $members)['broker'];
+    $b = node('b', $members)['broker'];
+    // Node a has no node id of its own in this fixture, so set it the way
+    // the entrypoint does.
+    $a->nodeId = 'a';
+    $b->nodeId = 'b';
+
+    $first = $a->nextSession();
+    $second = $a->nextSession();
+    Harness::ok('ids advance', $second > $first);
+    Harness::eq('the low word is the counter', 1, $first & 0xffffffff);
+    Harness::eq('a is slot one', 1, intdiv($first, 0x100000000));
+    Harness::eq('b is slot two', 2, intdiv($b->nextSession(), 0x100000000));
+    Harness::ok('so the two nodes never collide', $a->nextSession() !== $b->nextSession());
+
+    // With no membership the raw counter is used.
+    $solo = node('solo')['broker'];
+    $solo->nodeId = 'solo';
+    Harness::eq('a single node uses slot zero', 0, intdiv($solo->nextSession(), 0x100000000));
 });
 
 Harness::done();

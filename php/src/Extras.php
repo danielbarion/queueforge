@@ -114,6 +114,16 @@ final class Extras
                 ]);
             }
         };
+        // A user, permission or topology change made through this node's
+        // management API is pushed to the peers as a snapshot apply.
+        $this->http->onTopology = function (): void {
+            foreach ($this->cluster->peerIds() as $peer) {
+                $this->cluster->request($peer, 'apply', [
+                    'kind' => 'snapshot',
+                    'body' => $this->cluster->snapshot(),
+                ]);
+            }
+        };
         $this->protocols = new Protocols($broker);
         foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream'] as $kind) {
             $addr = $cfg[$kind] ?? null;
@@ -230,6 +240,14 @@ final class Extras
         if ($row['kind'] === 'cluster' && ($row['peer'] ?? '') !== '') {
             $this->cluster->detach($row['peer']);
         }
+        // Subscriptions belong to the connection, so a dropped socket must
+        // not leave entries pointing at a closed handle.
+        if ($row['kind'] === 'mqtt') {
+            $this->protocols->dropMqtt((int) ($row['conn'] ?? 0));
+        }
+        if ($row['kind'] === 'stomp') {
+            $this->protocols->dropStomp((int) ($row['conn'] ?? 0));
+        }
         if (is_resource($row['fp'])) {
             fclose($row['fp']);
         }
@@ -287,6 +305,11 @@ final class Extras
             if ($out !== '') {
                 self::writeAll($fp, $out);
             }
+            // A DISCONNECT closes the socket rather than leaving it open.
+            if ($this->protocols->mqttClosing) {
+                $this->protocols->mqttClosing = false;
+                $this->close($id);
+            }
             return;
         }
         if ($row['kind'] === 'stomp') {
@@ -295,6 +318,10 @@ final class Extras
             $this->conns[$id]['buf'] = $buf;
             if ($out !== '') {
                 self::writeAll($fp, $out);
+            }
+            if ($this->protocols->stompClosing) {
+                $this->protocols->stompClosing = false;
+                $this->close($id);
             }
             return;
         }
@@ -309,6 +336,10 @@ final class Extras
             $this->conns[$id]['state'] = $state;
             if ($out !== '') {
                 self::writeAll($fp, $out);
+            }
+            if ($this->protocols->streamClosing) {
+                $this->protocols->streamClosing = false;
+                $this->close($id);
             }
         }
     }

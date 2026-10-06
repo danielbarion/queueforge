@@ -59,7 +59,7 @@ final class Cluster
             'nodeId' => $this->nodeId,
             'from' => $this->nodeId,
             'kind' => '',
-            'payload' => ['v' => 1, 'node' => $this->nodeId, 'snapshot' => $this->snapshot(), 'consumed' => []],
+            'payload' => ['v' => 1, 'node' => $this->nodeId, 'snapshot' => $this->snapshot(), 'consumed' => $this->broker->consumedList()],
         ];
     }
 
@@ -113,6 +113,11 @@ final class Cluster
             if ($row['qid'] !== '') {
                 $this->timedOut[] = $row['qid'];
             }
+            // A waiting caller is told the request failed rather than being
+            // left with a client that never gets an answer.
+            if (($row['onReply'] ?? null) !== null) {
+                ($row['onReply'])(null);
+            }
         }
     }
 
@@ -157,9 +162,22 @@ final class Cluster
      *
      * @param array<string, mixed> $payload
      */
-    public function request(string $peer, string $op, array $payload, string $qid = ''): int
+    /**
+     * Sends a request to a peer.
+     *
+     * An optional callback is invoked with the reply payload once it lands,
+     * or with null if the request times out. That is what lets a forwarded
+     * basic.get answer the client later without blocking the select loop.
+     *
+     * @param array<string, mixed> $payload
+     * @param ?callable(?array<string, mixed>):void $onReply
+     */
+    public function request(string $peer, string $op, array $payload, string $qid = '', ?callable $onReply = null): int
     {
         if (!isset($this->peers[$peer])) {
+            if ($onReply !== null) {
+                $onReply(null);
+            }
             return 0;
         }
         $correlation = $this->seq++;
@@ -168,6 +186,7 @@ final class Cluster
             'qid' => $qid,
             'deadline' => microtime(true) + self::REQUEST_TIMEOUT,
             'peer' => $peer,
+            'onReply' => $onReply,
         ];
         $this->send($peer, [
             'v' => 1,
@@ -277,11 +296,17 @@ final class Cluster
             if (is_array($payload['snapshot'] ?? null)) {
                 $this->broker->applySnapshot($payload['snapshot']);
             }
+            // A peer's consumed set names quorum bodies it already handed
+            // out, so anything we recovered for those ids is discarded
+            // rather than delivered a second time.
+            if (is_array($payload['consumed'] ?? null)) {
+                $this->broker->applyConsumed($payload['consumed']);
+            }
             return $this->reply((int) ($msg['id'] ?? 0), true, [
                 'v' => 1,
                 'node' => $this->nodeId,
                 'snapshot' => $this->snapshot(),
-                'consumed' => [],
+                'consumed' => $this->broker->consumedList(),
             ]);
         }
         if ($op === 'reply') {
@@ -292,8 +317,14 @@ final class Cluster
             if (is_array($payload['snapshot'] ?? null)) {
                 $this->broker->applySnapshot($payload['snapshot']);
             }
+            if (is_array($payload['consumed'] ?? null)) {
+                $this->broker->applyConsumed($payload['consumed']);
+            }
             if ($row !== null && ($msg['ok'] ?? false) === true && $row['qid'] !== '') {
                 $this->broker->noteCopy($row['qid']);
+            }
+            if ($row !== null && ($row['onReply'] ?? null) !== null) {
+                ($row['onReply'])(($msg['ok'] ?? false) === true ? $payload : null);
             }
             return null;
         }
@@ -342,7 +373,10 @@ final class Cluster
             return $this->broker->purge($queueOf($payload));
         }
         if ($op === 'quorum_drop') {
-            $this->broker->dropReplica($queueOf($payload), (string) ($payload['id'] ?? $payload['message_id'] ?? $payload['qid'] ?? ''));
+            $queue = $queueOf($payload);
+            $qid = (string) ($payload['id'] ?? $payload['message_id'] ?? $payload['qid'] ?? '');
+            $this->broker->noteConsumed($queue, $qid);
+            $this->broker->dropReplica($queue, $qid);
             return true;
         }
         if ($op === 'ack' || $op === 'nack') {
@@ -358,6 +392,7 @@ final class Cluster
             if ($requeue) {
                 $this->broker->requeue($local);
             } else {
+                $this->broker->noteConsumed($queue, (string) ($this->broker->msgs[$local]['qid'] ?? ''));
                 $this->broker->ack($local);
             }
             return true;

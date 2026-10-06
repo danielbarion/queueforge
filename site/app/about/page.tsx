@@ -73,7 +73,9 @@ export default function AboutPage() {
           <p className="section-lead">
             Leave <code>[cluster].members</code> empty for a single node. For several processes,
             put the same list on every node, including itself. All three speak cluster protocol
-            version 1, so a member list can mix Rust, Bun and PHP.
+            version 1, so a member list can mix Rust, Bun and PHP. A classic queue is homed on
+            one node by hash and operations reaching any other node are forwarded there; a quorum
+            queue confirms only once a durable majority has the message.
           </p>
           <ol className="members">
             <li>

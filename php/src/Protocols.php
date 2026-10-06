@@ -94,8 +94,33 @@ final class Protocols
                         $out .= $this->mqttPublish($last, $queued);
                     }
                 }
+            } elseif ($kind === 10 && strlen($body) >= 2) {
+                // UNSUBSCRIBE. Removal is scoped to this connection, so one
+                // client cannot cancel another's subscription.
+                $at = 2;
+                $drop = [];
+                while ($at < strlen($body)) {
+                    $filter = $this->mqttStr($body, $at);
+                    if ($filter === null) {
+                        break;
+                    }
+                    $at = $filter['next'];
+                    $drop[] = $filter['text'];
+                }
+                $this->mqttSubs = array_values(array_filter(
+                    $this->mqttSubs,
+                    static fn (array $sub): bool => $sub['conn'] !== $conn || !in_array($sub['filter'], $drop, true),
+                ));
+                $out .= "\xb0\x02" . $body[0] . $body[1];
             } elseif ($kind === 12) {
                 $out .= "\xd0\x00";
+            } elseif ($kind === 14) {
+                // DISCONNECT. The subscriptions go with the connection and
+                // the caller closes the socket on an empty buffer.
+                $this->dropMqtt($conn);
+                $buf = '';
+                $this->mqttClosing = true;
+                return $out;
             }
         }
         return $out;
@@ -109,6 +134,31 @@ final class Protocols
     public function nextStomp(): int
     {
         return $this->stompConn++;
+    }
+
+    /**
+     * Set when a client sent DISCONNECT, so the caller closes the socket
+     * instead of leaving it open.
+     */
+    public bool $mqttClosing = false;
+    public bool $stompClosing = false;
+
+    /** Forgets every MQTT subscription for a connection. */
+    public function dropMqtt(int $conn): void
+    {
+        $this->mqttSubs = array_values(array_filter(
+            $this->mqttSubs,
+            static fn (array $sub): bool => $sub['conn'] !== $conn,
+        ));
+    }
+
+    /** Forgets every STOMP subscription for a connection. */
+    public function dropStomp(int $conn): void
+    {
+        $this->stompSubs = array_values(array_filter(
+            $this->stompSubs,
+            static fn (array $sub): bool => $sub['conn'] !== $conn,
+        ));
     }
 
     /**
@@ -141,6 +191,12 @@ final class Protocols
                 }
             }
             $body = implode("\n", array_slice($lines, $bodyAt));
+            // content-length is authoritative when present, so a body that
+            // contains a newline or a NUL is not truncated at the frame scan.
+            $declared = $headers['content-length'] ?? null;
+            if ($declared !== null && is_numeric(trim($declared))) {
+                $body = substr($body, 0, (int) trim($declared));
+            }
             if ($cmd === 'CONNECT' || $cmd === 'STOMP') {
                 $out .= "CONNECTED\nversion:1.2\nheart-beat:0,0\n\n\0";
             } elseif ($cmd === 'SEND') {
@@ -168,9 +224,32 @@ final class Protocols
                 if ($queued !== null) {
                     $out .= "MESSAGE\nsubscription:{$id}\ndestination:{$dest}\ncontent-length:" . strlen($queued) . "\n\n{$queued}\0";
                 }
+            } elseif ($cmd === 'UNSUBSCRIBE') {
+                // Matched on id and connection, so one client cannot cancel
+                // another's subscription.
+                $id = $headers['id'] ?? '0';
+                $this->stompSubs = array_values(array_filter(
+                    $this->stompSubs,
+                    static fn (array $sub): bool => $sub['conn'] !== $conn || $sub['id'] !== $id,
+                ));
+                if (isset($headers['receipt'])) {
+                    $out .= "RECEIPT\nreceipt-id:{$headers['receipt']}\n\n\0";
+                }
             } elseif ($cmd === 'DISCONNECT') {
+                if (isset($headers['receipt'])) {
+                    $out .= "RECEIPT\nreceipt-id:{$headers['receipt']}\n\n\0";
+                }
+                $this->dropStomp($conn);
+                $this->stompClosing = true;
                 $buf = '';
                 return $out;
+            } elseif ($cmd !== '') {
+                // An unknown command gets an ERROR frame rather than being
+                // dropped in silence.
+                $out .= "ERROR\nmessage:unknown command " . $cmd . "\n\n\0";
+            }
+            if (isset($headers['receipt']) && $cmd !== 'DISCONNECT' && $cmd !== 'UNSUBSCRIBE') {
+                $out .= "RECEIPT\nreceipt-id:{$headers['receipt']}\n\n\0";
             }
         }
         $buf = substr($buf, $consumed);
@@ -213,7 +292,16 @@ final class Protocols
         return "\x30" . self::mqttLen(strlen($rest)) . $rest;
     }
 
-    /** @param array<string, mixed> $state */
+    /**
+     * The RabbitMQ stream command set.
+     *
+     * Chunks are kept per stream as raw length-prefixed entries so a
+     * subscribe can concatenate them into a chunk body without re-framing.
+     * Offsets are not tracked: a subscribe always replays from the start,
+     * which is what Bun does.
+     *
+     * @param array<string, mixed> $state
+     */
     public function stream(string &$buf, array &$state): string
     {
         $out = '';
@@ -230,18 +318,159 @@ final class Protocols
             $key = unpack('n', substr($frame, 0, 2))[1];
             $rest = substr($frame, 4);
             $corr = strlen($rest) >= 4 ? unpack('N', substr($rest, 0, 4))[1] : 0;
-            if ($key === 0x0015) {
+            if ($key === 0x0011) {
+                // PeerProperties. A client reads the map back, so an empty
+                // body leaves it parsing past the end of the frame.
+                $props = pack('N', 2)
+                    . self::streamString('product') . self::streamString('RabbitMQ')
+                    . self::streamString('version') . self::streamString('4.3.6');
+                $out .= $this->streamResp(0x8011, $corr, $props);
+            } elseif ($key === 0x0012) {
+                // SaslHandshake. The mechanism list is what lets a client
+                // choose PLAIN.
+                $out .= $this->streamResp(0x8012, $corr, pack('N', 1) . self::streamString('PLAIN'));
+            } elseif ($key === 0x0013) {
+                // SaslAuthenticate, then an unsolicited Tune so frame-max and
+                // the heartbeat interval are negotiated.
+                $out .= $this->streamResp(0x8013, $corr, '');
+                $tune = pack('n', 0x0014) . pack('n', 1) . pack('N', 1048576) . pack('N', 60);
+                $out .= pack('N', strlen($tune)) . $tune;
+            } elseif ($key === 0x0015) {
                 $out .= $this->streamResp(0x8015, $corr, pack('N', 0));
             } elseif ($key === 0x000d) {
                 $name = $this->streamStr($rest, 4)['text'] ?? 'stream';
                 $this->streams[$name] = $this->streams[$name] ?? [];
                 $this->broker->declareQueue($name);
                 $out .= $this->streamResp(0x800d, $corr, '');
+            } elseif ($key === 0x0001) {
+                // DeclarePublisher. The publisher id has to be remembered so a
+                // later Publish can be routed to its stream.
+                $at = 4;
+                $pid = isset($rest[$at]) ? ord($rest[$at]) : 0;
+                $at++;
+                $ref = $this->streamStr($rest, $at);
+                $at = $ref['next'] ?? $at;
+                $name = $this->streamStr($rest, $at);
+                $stream = $name['text'] ?? 'stream';
+                $state['publishers'] = $state['publishers'] ?? [];
+                $state['publishers'][$pid] = $stream;
+                $this->streams[$stream] = $this->streams[$stream] ?? [];
+                $out .= $this->streamResp(0x8001, $corr, '');
+            } elseif ($key === 0x0002) {
+                $out .= $this->streamPublish($rest, $state);
+            } elseif ($key === 0x0007) {
+                // Subscribe, then one Deliver carrying everything stored.
+                $at = 4;
+                $sub = isset($rest[$at]) ? ord($rest[$at]) : 0;
+                $at++;
+                $name = $this->streamStr($rest, $at);
+                $stream = $name['text'] ?? 'stream';
+                $out .= $this->streamResp(0x8007, $corr, '');
+                $queued = $this->streams[$stream] ?? [];
+                if ($queued !== []) {
+                    $out .= $this->streamDeliver($sub, $queued);
+                }
+            } elseif ($key === 0x0016) {
+                $out .= $this->streamResp(0x8016, $corr, '');
+                $this->streamClosing = true;
+                return $out;
+            } elseif ($key === 0x0014 || $key === 0x0017) {
+                // The client's Tune response and its heartbeats carry no
+                // reply; echoing them would look like a spurious response.
+                continue;
             } elseif (($key & 0x8000) === 0) {
                 $out .= $this->streamResp($key | 0x8000, $corr, '');
             }
         }
         return $out;
+    }
+
+    /** Set when a client sent Close, so the caller ends the socket. */
+    public bool $streamClosing = false;
+
+    /**
+     * Publish: a publisher id then a count, then that many entries of an
+     * 8-byte publishing id and an i32-length payload. Each entry is stored
+     * raw and its payload pushed to the broker, then one PublishConfirm
+     * (0x0003, not 0x8002) carries the ids back.
+     *
+     * @param array<string, mixed> $state
+     */
+    private function streamPublish(string $rest, array &$state): string
+    {
+        $at = 4;
+        if (!isset($rest[$at])) {
+            return '';
+        }
+        $pid = ord($rest[$at]);
+        $at++;
+        $stream = (string) (($state['publishers'] ?? [])[$pid] ?? 'stream');
+        if ($at + 4 > strlen($rest)) {
+            return '';
+        }
+        $count = unpack('N', substr($rest, $at, 4))[1];
+        $at += 4;
+        $ids = '';
+        $sent = 0;
+        $this->streams[$stream] = $this->streams[$stream] ?? [];
+        for ($i = 0; $i < $count; $i++) {
+            if ($at + 12 > strlen($rest)) {
+                break;
+            }
+            // The publishing id is 8 bytes; only the low 32 bits are kept,
+            // which is the same truncation Bun applies.
+            $low = unpack('N', substr($rest, $at + 4, 4))[1];
+            $at += 8;
+            $len = unpack('N', substr($rest, $at, 4))[1];
+            $at += 4;
+            if ($at + $len > strlen($rest)) {
+                break;
+            }
+            $payload = substr($rest, $at, $len);
+            $raw = pack('N', $len) . $payload;
+            $at += $len;
+            $this->streams[$stream][] = $raw;
+            $this->broker->declareQueue($stream);
+            $this->broker->publish(0, 0, 0, '', $stream, $payload, 1);
+            $ids .= pack('N', 0) . pack('N', $low);
+            $sent++;
+        }
+        if ($sent === 0) {
+            return '';
+        }
+        $payload = pack('n', 0x0003) . pack('n', 1) . chr($pid) . pack('N', $sent) . $ids;
+        return pack('N', strlen($payload)) . $payload;
+    }
+
+    /**
+     * A Deliver frame (0x0008) with a chunk header. The header fields that
+     * need real bookkeeping — timestamp, CRC, first offset — are zero, since
+     * offsets are not tracked.
+     *
+     * @param list<string> $queued
+     */
+    private function streamDeliver(int $sub, array $queued): string
+    {
+        $data = implode('', $queued);
+        $n = count($queued);
+        $chunk = "\x50\x00"                     // magic and version
+            . pack('n', $n)                     // entry count
+            . pack('N', $n)                     // record count
+            . str_repeat("\x00", 8)             // timestamp
+            . pack('N', 0) . pack('N', 1)       // epoch
+            . str_repeat("\x00", 8)             // first offset
+            . pack('N', 0)                      // crc
+            . pack('N', strlen($data))
+            . pack('N', 0) . pack('N', 0)
+            . $data;
+        $payload = pack('n', 0x0008) . pack('n', 1) . chr($sub) . $chunk;
+        return pack('N', strlen($payload)) . $payload;
+    }
+
+    /** A stream-protocol string: u16 length then the bytes. */
+    private static function streamString(string $s): string
+    {
+        return pack('n', strlen($s)) . $s;
     }
 
     /** @return array{text:string,next:int}|null */

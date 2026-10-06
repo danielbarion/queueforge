@@ -31,7 +31,7 @@ final class Store
         $this->synced = $this->end;
     }
 
-    /** @return list<array{id:int,queue:string,body:string,mode:int,propRaw:?string}> */
+    /** @return list<array{id:int,queue:string,body:string,mode:int,propRaw:?string,meta:array<string, mixed>}> */
     public function replay(): array
     {
         rewind($this->fp);
@@ -71,8 +71,27 @@ final class Store
                     if ($propLen > 0) {
                         $propRaw = substr($payload, $o, $propLen);
                     }
+                    $o += $propLen;
                 }
-                $live[$id] = ['id' => $id, 'queue' => $queue, 'body' => $body, 'mode' => $mode, 'propRaw' => $propRaw];
+                // The metadata field was added after that, so its absence is
+                // also tolerated.
+                $meta = [];
+                if ($o + 4 <= strlen($payload)) {
+                    $metaLen = unpack('N', substr($payload, $o, 4))[1];
+                    $o += 4;
+                    if ($metaLen > 0) {
+                        $decoded = json_decode(substr($payload, $o, $metaLen), true);
+                        $meta = is_array($decoded) ? $decoded : [];
+                    }
+                }
+                $live[$id] = [
+                    'id' => $id,
+                    'queue' => $queue,
+                    'body' => $body,
+                    'mode' => $mode,
+                    'propRaw' => $propRaw,
+                    'meta' => $meta,
+                ];
             } elseif ($type === 2 && strlen($payload) >= 8) {
                 $id = Codec::readU64($payload, 0);
                 unset($live[$id]);
@@ -84,17 +103,21 @@ final class Store
 
     /**
      * Publish record: u64 id, shortstr queue, u32+body, mode byte, then
-     * u32+propRaw. The trailing property field was added later, so replay
-     * treats its absence as "no properties" and older logs still load.
+     * u32+propRaw and u32+meta JSON. Both trailing fields were added later,
+     * so replay treats an absent one as empty and older logs still load.
+     *
+     * @param array<string, mixed> $meta
      */
-    public function appendPublish(int $id, string $queue, string $body, int $mode, ?string $propRaw = null): int
+    public function appendPublish(int $id, string $queue, string $body, int $mode, ?string $propRaw = null, array $meta = []): int
     {
         $props = $propRaw ?? '';
+        $encoded = $meta === [] ? '' : (string) json_encode($meta);
         $payload = Codec::u64($id)
             . Codec::shortstr($queue)
             . pack('N', strlen($body)) . $body
             . chr($mode)
-            . pack('N', strlen($props)) . $props;
+            . pack('N', strlen($props)) . $props
+            . pack('N', strlen($encoded)) . $encoded;
         return $this->append(1, $payload);
     }
 
@@ -103,15 +126,31 @@ final class Store
         return $this->append(2, Codec::u64($id));
     }
 
+    /** How many fsync calls have run, for the metrics histogram. */
+    public int $fsyncCount = 0;
+    /** Total wall time spent in fsync, in seconds. */
+    public float $fsyncSeconds = 0.0;
+    /**
+     * Confirms released before the fsync that covered them. This must stay
+     * zero: a non-zero value means the durability invariant was broken.
+     */
+    public int $confirmsBeforeFsync = 0;
+    /** How many times the whole log was flushed rather than a tail. */
+    public int $fullFlushes = 0;
+
     public function sync(): void
     {
         if ($this->synced === $this->end) {
             return;
         }
+        $started = microtime(true);
         fflush($this->fp);
         if (!fsync($this->fp)) {
             throw new RuntimeException('fsync failed');
         }
+        $this->fsyncCount++;
+        $this->fsyncSeconds += microtime(true) - $started;
+        $this->fullFlushes++;
         $this->synced = $this->end;
         $this->sinceCompact++;
     }
@@ -125,7 +164,7 @@ final class Store
      * when nothing is waiting on a confirm, because it resets the byte
      * offsets those confirms are gated on.
      *
-     * @param list<array{id:int,queue:string,body:string,mode:int,propRaw:?string}> $live
+     * @param list<array{id:int,queue:string,body:string,mode:int,propRaw:?string,meta:array<string, mixed>}> $live
      */
     public function compact(array $live): bool
     {
@@ -140,11 +179,14 @@ final class Store
         // dropping the acks entirely.
         foreach ($live as $msg) {
             $props = $msg['propRaw'] ?? '';
+            $meta = $msg['meta'] ?? [];
+            $encoded = $meta === [] ? '' : (string) json_encode($meta);
             $payload = Codec::u64($msg['id'])
                 . Codec::shortstr($msg['queue'])
                 . pack('N', strlen($msg['body'])) . $msg['body']
                 . chr($msg['mode'])
-                . pack('N', strlen($props)) . $props;
+                . pack('N', strlen($props)) . $props
+                . pack('N', strlen($encoded)) . $encoded;
             $record = chr(1) . pack('N', strlen($payload)) . $payload;
             if (fwrite($fp, $record) !== strlen($record)) {
                 fclose($fp);

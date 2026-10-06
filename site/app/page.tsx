@@ -47,7 +47,8 @@ export default function Page() {
           <p className="caption">
             128 confirms in flight. Durable 256-byte body. Mac client through the published port.
             RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only when
-            confirms and acks both reach 95% of the offer.
+            confirms and acks both reach 95% of the offer. The PHP bar is the 2026-10-06 image,
+            before the parity work that followed it; that later build has not been paced.
           </p>
         </div>
       </section>
@@ -85,7 +86,8 @@ export default function Page() {
             <p>
               The Rust broker keeps messages in a write-ahead log. The Bun broker keeps them in
               SQLite. The PHP broker keeps them in an append-only log. A client speaks AMQP 0-9-1
-              to any of them, and the same member list can mix the binaries.
+              to any of them, and the same member list can mix the binaries. The storage layers
+              differ on purpose; what a client, a peer, or the management UI can observe does not.
             </p>
             <p>
               <Link href="/about">About QueueForge</Link>

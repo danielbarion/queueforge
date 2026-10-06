@@ -11,6 +11,7 @@ require_once __DIR__ . '/lib/Harness.php';
 $root = dirname(__DIR__);
 require_once $root . '/src/Routing.php';
 require_once $root . '/src/Features.php';
+require_once $root . '/src/Policy.php';
 require_once $root . '/src/Codec.php';
 require_once $root . '/src/Auth.php';
 require_once $root . '/src/Store.php';

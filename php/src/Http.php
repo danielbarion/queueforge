@@ -13,6 +13,14 @@ final class Http
      * @var ?callable():void
      */
     public $onMembers = null;
+    /**
+     * Called after a change to users, permissions or topology so the owner
+     * can replicate it. Without this a user added through one node's
+     * management API was invisible to its peers until they restarted.
+     *
+     * @var ?callable():void
+     */
+    public $onTopology = null;
 
     public function __construct(public Broker $broker, public string $uiRoot, public int $port, public bool $secure)
     {
@@ -48,13 +56,27 @@ final class Http
             return $this->login($body);
         }
         if ($method === 'POST' && $path === '/api/logout') {
+            // The token is invalidated server side, not just cleared in the
+            // browser, so a captured cookie stops working at logout.
+            $token = $this->tokenFromCookie($cookie);
+            if ($token !== null) {
+                unset($this->sessions[$token]);
+            }
             return $this->status(200, '', 'application/json', ['Set-Cookie: ' . $this->cookieName() . '=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0']);
         }
         if ($user === null && str_starts_with($path, '/api/')) {
             return $this->json(401, ['error' => 'unauthorized']);
         }
         if (str_starts_with($path, '/api/')) {
-            return $this->api($method, $path, $body, $user ?? '');
+            $response = $this->api($method, $path, $body, $user ?? '');
+            // Any mutation that succeeded is replicated, so a user or a
+            // queue created through one node reaches its peers. Replication
+            // sends a whole snapshot, so doing it once here rather than per
+            // route is equivalent and far harder to forget.
+            if ($method !== 'GET' && str_starts_with($response, 'HTTP/1.1 2')) {
+                $this->onTopologyChanged();
+            }
+            return $response;
         }
         return $this->file($path);
     }
@@ -90,11 +112,18 @@ final class Http
 
     private function userFromCookie(string $header): ?string
     {
+        $token = $this->tokenFromCookie($header);
+        return $token === null ? null : ($this->sessions[$token] ?? null);
+    }
+
+    /** The session token carried by a Cookie header, if any. */
+    private function tokenFromCookie(string $header): ?string
+    {
         $name = $this->cookieName();
         foreach (explode(';', $header) as $part) {
             $part = trim($part);
             if (str_starts_with($part, $name . '=')) {
-                return $this->sessions[substr($part, strlen($name) + 1)] ?? null;
+                return substr($part, strlen($name) + 1);
             }
         }
         return null;
@@ -103,7 +132,7 @@ final class Http
     private function api(string $method, string $path, string $body, string $user): string
     {
         if ($method === 'GET' && $path === '/api/whoami') {
-            return $this->json(200, ['name' => $user, 'tags' => ['administrator']]);
+            return $this->json(200, ['name' => $user, 'tags' => $this->broker->tags[$user] ?? ['administrator']]);
         }
         if ($method === 'GET' && $path === '/api/overview') {
             return $this->json(200, $this->overview());
@@ -242,8 +271,10 @@ final class Http
             if (!isset($this->broker->queues[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
-            $this->broker->purge($name);
-            return $this->status(204, '', 'application/json');
+            $n = $this->broker->purge($name);
+            // RabbitMQ answers 200 with the count, which management clients
+            // display; a bare 204 leaves them with nothing to show.
+            return $this->json(200, ['message_count' => $n]);
         }
         if ($method === 'POST' && preg_match('#^/api/queues/([^/]+)/([^/]+)/get$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
@@ -451,16 +482,19 @@ final class Http
                 if (!$this->broker->isAdmin($user)) {
                     return $this->json(403, ['error' => 'forbidden']);
                 }
-                $definition = is_array($json['definition'] ?? null) ? $json['definition'] : null;
-                if ($definition === null) {
-                    return $this->json(400, ['reason' => 'a policy needs a definition']);
+                $error = Policy::validate($json);
+                if ($error !== null) {
+                    return $this->json(400, ['reason' => $error]);
                 }
+                $definition = is_array($json['definition'] ?? null) ? $json['definition'] : [];
                 $this->broker->{$field}[rawurldecode($m[1])][rawurldecode($m[2])] = [
                     'pattern' => (string) ($json['pattern'] ?? '.*'),
                     'definition' => $definition,
                     'priority' => (int) ($json['priority'] ?? 0),
                     'apply-to' => (string) ($json['apply-to'] ?? 'all'),
                 ];
+                // A policy edit reaches queues that already exist.
+                $this->broker->applyPolicies();
                 return $this->status(201, '', 'application/json');
             }
             if ($method === 'DELETE' && preg_match('#^/api/' . $segment . '/([^/]+)/([^/]+)$#', $path, $m) === 1) {
@@ -519,8 +553,8 @@ final class Http
         }
         if ($method === 'GET' && $path === '/api/limits') {
             return $this->json(200, [
-                'users' => $this->broker->userLimits,
-                'vhosts' => $this->broker->vhostLimits,
+                'user_limits' => $this->broker->userLimits,
+                'vhost_limits' => $this->broker->vhostLimits,
             ]);
         }
 
@@ -556,7 +590,11 @@ final class Http
         if ($method === 'GET' && $path === '/api/feature-flags') {
             $items = [];
             foreach ($this->broker->featureFlags as $name => $on) {
-                $items[] = ['name' => $name, 'state' => $on ? 'enabled' : 'disabled'];
+                $items[] = [
+                    'name' => $name,
+                    'state' => $on ? 'enabled' : 'disabled',
+                    'stability' => 'stable',
+                ];
             }
             return $this->json(200, $items);
         }
@@ -567,6 +605,10 @@ final class Http
             $name = rawurldecode($m[1]);
             if (!isset($this->broker->featureFlags[$name])) {
                 return $this->json(404, ['error' => 'not found']);
+            }
+            // A required flag cannot be turned off once it is on.
+            if ($m[2] === 'disable' && $name === 'quorum_queues') {
+                return $this->json(400, ['reason' => 'feature flag quorum_queues cannot be disabled']);
             }
             $this->broker->featureFlags[$name] = $m[2] === 'enable';
             return $this->status(204, '', 'application/json');
@@ -665,6 +707,36 @@ final class Http
         if ($method === 'GET' && $path === '/api/deprecated-features') {
             return $this->json(200, []);
         }
+        if ($method === 'DELETE' && preg_match('#^/api/deprecated-features/([^/]+)$#', $path) === 1) {
+            if (!$this->broker->isAdmin($user)) {
+                return $this->json(403, ['error' => 'forbidden']);
+            }
+            // Nothing is gated on a deprecated feature, so acknowledging one
+            // has no further effect.
+            return $this->status(204, '', 'application/json');
+        }
+        if ($method === 'DELETE' && preg_match('#^/api/connections/([^/]+)$#', $path) === 1) {
+            if (!$this->broker->isAdmin($user)) {
+                return $this->json(403, ['error' => 'forbidden']);
+            }
+            // Connections are not tracked by name in the management view, so
+            // there is never a match to close.
+            return $this->json(404, ['error' => 'not found']);
+        }
+        if ($method === 'PUT' && preg_match('#^/api/parameters/(shovel|federation-upstream)/([^/]+)/([^/]+)$#', $path, $m) === 1) {
+            if (!$this->broker->isAdmin($user)) {
+                return $this->json(403, ['error' => 'forbidden']);
+            }
+            $value = is_array($json['value'] ?? null) ? $json['value'] : [];
+            $this->broker->parameters[$m[1]][rawurldecode($m[2])][rawurldecode($m[3])] = $value;
+            if ($m[1] === 'federation-upstream') {
+                $uri = (string) ($value['uri'] ?? '');
+                if ($uri !== '') {
+                    $this->broker->fedUpstreams[rawurldecode($m[3])] = $uri;
+                }
+            }
+            return $this->status(201, '', 'application/json');
+        }
         return $this->json(404, ['error' => 'not found']);
     }
 
@@ -673,6 +745,14 @@ final class Http
     {
         if ($this->onMembers !== null) {
             ($this->onMembers)();
+        }
+    }
+
+    /** Replicates a change to users, permissions or topology. */
+    private function onTopologyChanged(): void
+    {
+        if ($this->onTopology !== null) {
+            ($this->onTopology)();
         }
     }
 
@@ -734,43 +814,136 @@ final class Http
         ];
     }
 
+    /**
+     * The Prometheus exposition. The series set matches Bun's so one
+     * dashboard reads either broker, including the per-queue gauges.
+     */
     private function metrics(): string
     {
         $p = $this->broker->prom;
+        $gauge = static fn (string $name, int|float $value): array => ["# TYPE $name gauge", "$name $value"];
+        $counter = static fn (string $name, int|float $value): array => ["# TYPE $name counter", "$name $value"];
         $lines = [
-            '# TYPE rabbitmq_up gauge',
-            'rabbitmq_up 1',
-            '# TYPE rabbitmq_ready gauge',
-            'rabbitmq_ready ' . ($this->broker->ready ? 1 : 0),
-            '# TYPE rabbitmq_connections gauge',
-            'rabbitmq_connections ' . $p['connections'],
-            '# TYPE rabbitmq_queues gauge',
-            'rabbitmq_queues ' . count($this->broker->queues),
-            '# TYPE rabbitmq_global_messages_received_total counter',
-            'rabbitmq_global_messages_received_total ' . $p['received'],
-            '# TYPE rabbitmq_global_messages_delivered_total counter',
-            'rabbitmq_global_messages_delivered_total ' . $p['delivered'],
-            '# TYPE rabbitmq_global_messages_acknowledged_total counter',
-            'rabbitmq_global_messages_acknowledged_total ' . $p['acknowledged'],
-            '# TYPE queueforge_confirm_before_fsync_total counter',
-            'queueforge_confirm_before_fsync_total 0',
-            '# TYPE rabbitmq_build_info gauge',
-            'rabbitmq_build_info{rabbitmq_version="0.1.0"} 1',
+            ...$gauge('rabbitmq_up', 1),
+            ...$gauge('rabbitmq_ready', $this->broker->ready ? 1 : 0),
+            ...$gauge('rabbitmq_connections', $p['connections']),
+            ...$counter('rabbitmq_connections_opened_total', $p['connectionsOpened']),
+            ...$counter('rabbitmq_connections_closed_total', $p['connectionsClosed']),
+            ...$gauge('rabbitmq_channels', $p['channels']),
+            ...$counter('rabbitmq_channels_opened_total', $p['channelsOpened']),
+            ...$counter('rabbitmq_channels_closed_total', $p['channelsClosed']),
+            ...$gauge('rabbitmq_queues', count($this->broker->queues)),
+            ...$counter('rabbitmq_queues_declared_total', $p['queuesDeclared']),
+            ...$counter('rabbitmq_queues_created_total', $p['queuesCreated']),
+            ...$counter('rabbitmq_queues_deleted_total', $p['queuesDeleted']),
+            ...$gauge('rabbitmq_consumers', $p['consumers']),
+            ...$gauge('rabbitmq_global_consumers', $p['consumers']),
+            ...$gauge('rabbitmq_global_publishers', 0),
+            ...$counter('rabbitmq_global_messages_received_total', $p['received']),
+            ...$counter('rabbitmq_global_messages_received_confirm_total', $p['receivedConfirm']),
+            ...$counter('rabbitmq_global_messages_confirmed_total', $p['confirmed']),
+            ...$counter('rabbitmq_global_messages_routed_total', $p['routed']),
+            ...$counter('rabbitmq_global_messages_unroutable_dropped_total', $p['unroutableDropped']),
+            ...$counter('rabbitmq_global_messages_unroutable_returned_total', $p['unroutableReturned']),
+            ...$counter('rabbitmq_global_messages_delivered_total', $p['delivered']),
+            ...$counter('rabbitmq_global_messages_delivered_consume_manual_ack_total', $p['deliveredConsumeManual']),
+            ...$counter('rabbitmq_global_messages_delivered_consume_auto_ack_total', $p['deliveredConsumeAuto']),
+            ...$counter('rabbitmq_global_messages_delivered_get_manual_ack_total', $p['deliveredGetManual']),
+            ...$counter('rabbitmq_global_messages_delivered_get_auto_ack_total', $p['deliveredGetAuto']),
+            ...$counter('rabbitmq_global_messages_get_empty_total', $p['getEmpty']),
+            ...$counter('rabbitmq_global_messages_acknowledged_total', $p['acknowledged']),
+            ...$counter('rabbitmq_global_messages_redelivered_total', $p['redelivered']),
+            ...$counter('rabbitmq_global_messages_dead_lettered_expired_total', $p['dlxExpired']),
+            ...$counter('rabbitmq_global_messages_dead_lettered_rejected_total', $p['dlxRejected']),
+            ...$counter('rabbitmq_global_messages_dead_lettered_maxlen_total', $p['dlxMaxlen']),
+            ...$counter('rabbitmq_global_messages_dead_lettered_delivery_limit_total', $p['dlxDeliveryLimit']),
+            ...$counter('rabbitmq_global_messages_dead_lettered_confirmed_total', 0),
+            ...$gauge('rabbitmq_alarms_memory_used_watermark', 0),
+            ...$gauge('rabbitmq_alarms_free_disk_space_watermark', 0),
+            ...$gauge('rabbitmq_disk_space_available_bytes', 0),
+            ...$gauge('rabbitmq_unreachable_cluster_peers_count', 0),
+        ];
+        // Per-queue gauges. Names are escaped because a queue name may
+        // legitimately contain a quote or a backslash.
+        $ready = ['# TYPE rabbitmq_queue_messages_ready gauge'];
+        $unacked = ['# TYPE rabbitmq_queue_messages_unacked gauge'];
+        $total = ['# TYPE rabbitmq_queue_messages gauge'];
+        $consumers = ['# TYPE rabbitmq_queue_consumers gauge'];
+        foreach ($this->broker->queues as $name => $queue) {
+            $labels = '{vhost="/",queue="' . self::promLabel((string) $name) . '"}';
+            $readyN = count($queue['ready']);
+            $unackedN = $this->broker->depth((string) $name) - $readyN;
+            $ready[] = 'rabbitmq_queue_messages_ready' . $labels . ' ' . $readyN;
+            $unacked[] = 'rabbitmq_queue_messages_unacked' . $labels . ' ' . max(0, $unackedN);
+            $total[] = 'rabbitmq_queue_messages' . $labels . ' ' . $this->broker->depth((string) $name);
+            $consumers[] = 'rabbitmq_queue_consumers' . $labels . ' ' . count($queue['consumers']);
+        }
+        $lines = [
+            ...$lines,
+            ...$ready,
+            ...$unacked,
+            ...$total,
+            ...$consumers,
+            '# TYPE queueforge_wal_fsync_seconds histogram',
+            'queueforge_wal_fsync_seconds_count ' . $this->broker->store->fsyncCount,
+            'queueforge_wal_fsync_seconds_sum ' . $this->broker->store->fsyncSeconds,
+            ...$counter('queueforge_confirm_before_fsync_total', $this->broker->store->confirmsBeforeFsync),
+            ...$counter('queueforge_full_flush_total', $this->broker->store->fullFlushes),
+            ...$gauge('rabbitmq_identity_info{rabbitmq_node="' . self::promLabel($this->broker->nodeId) . '",rabbitmq_cluster="queueforge"}', 1),
+            ...$gauge('rabbitmq_build_info{rabbitmq_version="0.1.0"}', 1),
             '',
         ];
         return implode("\n", $lines);
     }
 
+    /** Escapes a Prometheus label value. */
+    private static function promLabel(string $value): string
+    {
+        return str_replace(['\\', "\n", '"'], ['\\\\', '\\n', '\\"'], $value);
+    }
+
+    /**
+     * Serves the built SPA. A path that is not a real file falls back to
+     * index.html so a client-side route survives a reload, except for the
+     * asset extensions, where a miss should stay a 404 rather than return
+     * HTML a script tag would choke on.
+     */
     private function file(string $path): string
     {
-        $rel = $path === '/' ? '/index.html' : $path;
-        $full = $this->uiRoot . $rel;
-        $root = realpath($this->uiRoot);
-        $file = realpath($full);
-        if ($root === false || $file === false || !str_starts_with($file, $root) || !is_file($file)) {
+        // The reserved paths must never reach the static handler. Without
+        // this the history fallback below would answer a mistyped /healthz
+        // with the SPA shell, which reads as a healthy broker.
+        if (in_array($path, ['/healthz', '/readyz', '/metrics', '/api'], true)
+            || str_starts_with($path, '/api/')) {
             return $this->status(404, "not found\n", 'text/plain');
         }
-        $type = str_ends_with($file, '.js') ? 'text/javascript' : (str_ends_with($file, '.css') ? 'text/css' : 'text/html');
+        $rel = $path === '/' ? '/index.html' : $path;
+        $root = realpath($this->uiRoot);
+        if ($root === false) {
+            return $this->status(404, "not found\n", 'text/plain');
+        }
+        $file = realpath($this->uiRoot . $rel);
+        if ($file === false || !str_starts_with($file, $root) || !is_file($file)) {
+            $asset = preg_match('/\.(js|mjs|css|map|json|png|jpg|jpeg|gif|svg|ico|webp|woff2?|ttf|eot)$/i', $rel) === 1;
+            if ($asset) {
+                return $this->status(404, "not found\n", 'text/plain');
+            }
+            $index = realpath($root . '/index.html');
+            if ($index === false || !is_file($index)) {
+                return $this->status(404, "not found\n", 'text/plain');
+            }
+            return $this->status(200, (string) file_get_contents($index), 'text/html');
+        }
+        $type = match (true) {
+            str_ends_with($file, '.js'), str_ends_with($file, '.mjs') => 'text/javascript',
+            str_ends_with($file, '.css') => 'text/css',
+            str_ends_with($file, '.json'), str_ends_with($file, '.map') => 'application/json',
+            str_ends_with($file, '.svg') => 'image/svg+xml',
+            str_ends_with($file, '.png') => 'image/png',
+            str_ends_with($file, '.ico') => 'image/x-icon',
+            str_ends_with($file, '.woff2') => 'font/woff2',
+            default => 'text/html',
+        };
         return $this->status(200, (string) file_get_contents($file), $type);
     }
 

@@ -13,6 +13,7 @@ require_once __DIR__ . '/lib/Harness.php';
 $root = dirname(__DIR__);
 require_once $root . '/src/Routing.php';
 require_once $root . '/src/Features.php';
+require_once $root . '/src/Policy.php';
 require_once $root . '/src/Codec.php';
 require_once $root . '/src/Auth.php';
 require_once $root . '/src/Store.php';
@@ -220,7 +221,9 @@ Harness::guard('management routes', static function () use ($port): void {
     Harness::eq('get returns the message', 200, $got['status']);
     Harness::eq('with the payload', 'via-http', $got['json'][0]['payload'] ?? '');
 
-    Harness::eq('purge', 204, http($port, 'POST', '/api/queues/%2F/mq/purge', null, $cookie)['status']);
+    $purged = http($port, 'POST', '/api/queues/%2F/mq/purge', null, $cookie);
+    Harness::eq('purge', 200, $purged['status']);
+    Harness::ok('purge reports the count', isset($purged['json']['message_count']));
     Harness::eq('delete the queue', 204, http($port, 'DELETE', '/api/queues/%2F/mq', null, $cookie)['status']);
     Harness::eq('deleting it twice is 404', 404, http($port, 'DELETE', '/api/queues/%2F/mq', null, $cookie)['status']);
 
@@ -279,12 +282,12 @@ Harness::guard('policies, limits and flags', static function () use ($port): voi
     Harness::eq('set a user limit', 204, http($port, 'PUT', '/api/user-limits/admin/max-connections', ['value' => 10], $cookie)['status']);
     Harness::eq('an unknown limit is refused', 400, http($port, 'PUT', '/api/user-limits/admin/max-nonsense', ['value' => 1], $cookie)['status']);
     $limits = http($port, 'GET', '/api/limits', null, $cookie);
-    Harness::eq('the limit is reported', 10, $limits['json']['users']['admin']['max-connections'] ?? 0);
+    Harness::eq('the limit is reported', 10, $limits['json']['user_limits']['admin']['max-connections'] ?? 0);
     Harness::eq('clear the limit', 204, http($port, 'DELETE', '/api/user-limits/admin/max-connections', null, $cookie)['status']);
 
     $flags = http($port, 'GET', '/api/feature-flags', null, $cookie);
     Harness::ok('feature flags are listed', is_array($flags['json']) && $flags['json'] !== []);
-    Harness::eq('disable a flag', 204, http($port, 'POST', '/api/feature-flags/quorum_queue/disable', null, $cookie)['status']);
+    Harness::eq('disable a flag', 204, http($port, 'POST', '/api/feature-flags/classic_queue_type/disable', null, $cookie)['status']);
     Harness::eq('an unknown flag is 404', 404, http($port, 'POST', '/api/feature-flags/nope/enable', null, $cookie)['status']);
 
     Harness::eq('cluster name', 200, http($port, 'GET', '/api/cluster-name', null, $cookie)['status']);
@@ -305,6 +308,105 @@ Harness::guard('definitions import', static function () use ($port): void {
     Harness::ok('the imported queue exists', in_array('imported', $names, true));
     $exported = http($port, 'GET', '/api/definitions', null, $cookie);
     Harness::eq('definitions export', 200, $exported['status']);
+});
+
+Harness::guard('parity additions', static function () use ($port): void {
+    $cookie = session($port);
+
+    // whoami reports the user's real tags rather than a fixed value.
+    $who = http($port, 'GET', '/api/whoami', null, $cookie);
+    Harness::eq('whoami names the user', 'admin', $who['json']['name'] ?? '');
+    Harness::ok('and reports tags', is_array($who['json']['tags'] ?? null) && $who['json']['tags'] !== []);
+
+    // A required feature flag cannot be turned off.
+    Harness::eq(
+        'disabling quorum_queues is refused',
+        400,
+        http($port, 'POST', '/api/feature-flags/quorum_queues/disable', null, $cookie)['status'],
+    );
+    $flags = http($port, 'GET', '/api/feature-flags', null, $cookie);
+    Harness::ok('flags carry a stability field', isset($flags['json'][0]['stability']));
+
+    // Policy validation happens at the API boundary.
+    Harness::eq('a policy without a definition is refused', 400, http($port, 'PUT', '/api/policies/%2F/p1', [
+        'pattern' => '.*',
+    ], $cookie)['status']);
+    Harness::eq('an unknown definition key is refused', 400, http($port, 'PUT', '/api/policies/%2F/p1', [
+        'pattern' => '.*',
+        'definition' => ['nonsense' => 1],
+    ], $cookie)['status']);
+    Harness::eq('a bad apply-to is refused', 400, http($port, 'PUT', '/api/policies/%2F/p1', [
+        'pattern' => '.*',
+        'apply-to' => 'wat',
+        'definition' => [],
+    ], $cookie)['status']);
+
+    // A policy reaches a queue that already exists.
+    Harness::eq('declare a queue to be policed', 201, http($port, 'PUT', '/api/queues/%2Fpolicy-target', [], $cookie)['status'] === 201 ? 201 : http($port, 'PUT', '/api/queues/%2F/policy-target', [], $cookie)['status']);
+    Harness::eq('set a policy', 201, http($port, 'PUT', '/api/policies/%2F/ttl-all', [
+        'pattern' => '^policy-target$',
+        'definition' => ['message-ttl' => 1234],
+        'priority' => 1,
+        'apply-to' => 'queues',
+    ], $cookie)['status']);
+    $listed = http($port, 'GET', '/api/policies/%2F', null, $cookie);
+    Harness::eq('the policy is listed', 200, $listed['status']);
+
+    // The routes that were missing.
+    Harness::eq('a shovel parameter is accepted', 201, http($port, 'PUT', '/api/parameters/shovel/%2F/s1', [
+        'value' => ['src-queue' => 'a', 'dest-queue' => 'b'],
+    ], $cookie)['status']);
+    Harness::eq('a federation upstream is accepted', 201, http($port, 'PUT', '/api/parameters/federation-upstream/%2F/u1', [
+        'value' => ['uri' => 'amqp://elsewhere'],
+    ], $cookie)['status']);
+    Harness::eq('a deprecated feature can be dismissed', 204, http($port, 'DELETE', '/api/deprecated-features/anything', null, $cookie)['status']);
+    Harness::eq('closing an untracked connection is 404', 404, http($port, 'DELETE', '/api/connections/nope', null, $cookie)['status']);
+
+    // Logout invalidates the token server side.
+    Harness::eq('logout succeeds', 200, http($port, 'POST', '/api/logout', null, $cookie)['status']);
+    Harness::eq('the old cookie no longer authenticates', 401, http($port, 'GET', '/api/overview', null, $cookie)['status']);
+});
+
+Harness::guard('prometheus series', static function () use ($port): void {
+    $raw = http($port, 'GET', '/metrics');
+    Harness::eq('metrics are served', 200, $raw['status']);
+    $body = $raw['body'];
+    foreach ([
+        'rabbitmq_connections_opened_total',
+        'rabbitmq_connections_closed_total',
+        'rabbitmq_channels',
+        'rabbitmq_channels_opened_total',
+        'rabbitmq_queues_declared_total',
+        'rabbitmq_queues_created_total',
+        'rabbitmq_queues_deleted_total',
+        'rabbitmq_consumers',
+        'rabbitmq_global_messages_received_confirm_total',
+        'rabbitmq_global_messages_routed_total',
+        'rabbitmq_global_messages_unroutable_dropped_total',
+        'rabbitmq_global_messages_unroutable_returned_total',
+        'rabbitmq_global_messages_delivered_consume_manual_ack_total',
+        'rabbitmq_global_messages_delivered_get_auto_ack_total',
+        'rabbitmq_global_messages_get_empty_total',
+        'rabbitmq_global_messages_redelivered_total',
+        'rabbitmq_global_messages_dead_lettered_expired_total',
+        'rabbitmq_global_messages_dead_lettered_maxlen_total',
+        'rabbitmq_global_messages_dead_lettered_delivery_limit_total',
+        'rabbitmq_disk_space_available_bytes',
+        'rabbitmq_queue_messages_ready',
+        'rabbitmq_queue_consumers',
+        'queueforge_wal_fsync_seconds_count',
+        'queueforge_full_flush_total',
+        'rabbitmq_identity_info',
+    ] as $series) {
+        Harness::ok("$series is exposed", str_contains($body, $series));
+    }
+    // The per-queue gauges carry labels.
+    Harness::ok('per-queue gauges are labelled', str_contains($body, 'rabbitmq_queue_messages_ready{vhost="/"'));
+    // The durability invariant: no confirm may be released before its fsync.
+    Harness::ok(
+        'no confirm preceded its fsync',
+        str_contains($body, 'queueforge_confirm_before_fsync_total 0'),
+    );
 });
 
 Harness::stop($broker);

@@ -58,6 +58,7 @@ Harness::ok('the peers linked and the snapshot crossed', $linked, 'b never learn
 // counting sockets, which varies by environment.
 Harness::guard('dial rule', static function (): void {
     require_once dirname(__DIR__) . '/src/Features.php';
+    require_once dirname(__DIR__) . '/src/Policy.php';
     Harness::eq('a dials b', true, Features::shouldDial('a', 'b'));
     Harness::eq('b does not dial a', false, Features::shouldDial('b', 'a'));
     Harness::eq('a node never dials itself', false, Features::shouldDial('a', 'a'));

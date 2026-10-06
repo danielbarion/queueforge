@@ -27,7 +27,7 @@ final class Features
         if ($checks === []) {
             return !$any;
         }
-        $hit = static function (string $k, string $v) use ($headers): bool {
+        $hit = static function (string $k, mixed $v) use ($headers): bool {
             foreach ($headers as $header) {
                 if ($header[0] === $k && $header[1] === $v) {
                     return true;
@@ -76,6 +76,13 @@ final class Features
         if ($type === 'quorum' && $delivery === null) {
             $delivery = 20;
         }
+        $strategy = $str('x-dead-letter-strategy');
+        if ($strategy !== 'at-least-once') {
+            $strategy = 'at-most-once';
+        }
+        // x-single-active-consumer is accepted as the string "true" or as 1,
+        // which is how Bun reads it (bun/src/broker/args.ts:33).
+        $single = $raw['x-single-active-consumer'] ?? null;
         return [
             'messageTtl' => $num('x-message-ttl'),
             'maxLength' => $num('x-max-length'),
@@ -83,10 +90,54 @@ final class Features
             'overflow' => $overflow,
             'dlx' => $str('x-dead-letter-exchange'),
             'dlxKey' => $str('x-dead-letter-routing-key'),
+            'dlxStrategy' => $strategy,
             'maxPriority' => $maxPriority !== null && $maxPriority > 0 ? $maxPriority : null,
             'queueType' => $type,
             'deliveryLimit' => $delivery,
+            'expiresMs' => $num('x-expires'),
+            'singleActive' => $single === 'true' || $single === 1 || $single === true,
         ];
+    }
+
+    /**
+     * Whether an x-queue-type value is one this broker serves. Anything else
+     * is a 406 rather than being silently coerced to classic.
+     */
+    public static function knownQueueType(string $type): bool
+    {
+        return $type === '' || $type === 'classic' || $type === 'quorum';
+    }
+
+    /**
+     * Builds the x-death header set for a dead-lettered message, matching
+     * Bun's layout (bun/src/broker/args.ts:49-70): one entry with queue,
+     * reason, count of 1, exchange and a single-element routing-keys array,
+     * plus x-first-death-reason and x-first-death-queue. Any prior x-death is
+     * replaced rather than accumulated, so count never exceeds 1.
+     *
+     * @param list<array{0:string,1:mixed}> $headers
+     * @return list<array{0:string,1:mixed}>
+     */
+    public static function deathHeaders(array $headers, string $queue, string $reason, string $exchange, string $routingKey): array
+    {
+        $rest = array_values(array_filter(
+            $headers,
+            static fn (array $pair): bool => !in_array(
+                $pair[0],
+                ['x-death', 'x-first-death-reason', 'x-first-death-queue'],
+                true,
+            ),
+        ));
+        $rest[] = ['x-death', [
+            'queue' => $queue,
+            'reason' => $reason,
+            'count' => 1,
+            'exchange' => $exchange,
+            'routing-keys' => [$routingKey],
+        ]];
+        $rest[] = ['x-first-death-reason', $reason];
+        $rest[] = ['x-first-death-queue', $queue];
+        return $rest;
     }
 
     /** A quorum publish confirms only after this many durable copies. */

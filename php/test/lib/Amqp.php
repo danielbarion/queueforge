@@ -19,6 +19,7 @@ final class Amqp
         int $port = 5672,
         private string $user = 'admin',
         private string $pass = 'devpassword12',
+        bool $open = true,
         private float $timeout = 5.0,
     ) {
         $fp = @stream_socket_client("tcp://$host:$port", $errno, $errstr, $this->timeout);
@@ -27,7 +28,19 @@ final class Amqp
         }
         $this->fp = $fp;
         stream_set_blocking($fp, false);
-        $this->handshake();
+        if ($open) {
+            $this->handshake();
+        }
+    }
+
+    /**
+     * Sends only the protocol header and returns the raw connection.start
+     * arguments, so a test can inspect the server-properties table.
+     */
+    public function rawStart(): string
+    {
+        $this->write("AMQP\x00\x00\x09\x01");
+        return $this->expect(10, 10)['args'];
     }
 
     private function handshake(): void
@@ -61,9 +74,9 @@ final class Amqp
     }
 
     /** @param array<string, string|int> $args */
-    public function declareQueue(string $name, bool $durable = true, array $args = [], int $ch = 1): array
+    public function declareQueue(string $name, bool $durable = true, array $args = [], int $ch = 1, bool $passive = false, bool $exclusive = false, bool $autoDelete = false): array
     {
-        $bits = ($durable ? 2 : 0);
+        $bits = ($passive ? 1 : 0) | ($durable ? 2 : 0) | ($exclusive ? 4 : 0) | ($autoDelete ? 8 : 0);
         $payload = pack('n', 0) . Codec::shortstr($name) . chr($bits) . self::table($args);
         $this->method($ch, 50, 10, $payload);
         $frame = $this->expect(50, 11);
@@ -74,9 +87,10 @@ final class Amqp
         return ['queue' => $queue, 'messages' => $messages, 'consumers' => $consumers];
     }
 
-    public function declareExchange(string $name, string $kind, int $ch = 1): void
+    public function declareExchange(string $name, string $kind, int $ch = 1, array $args = [], bool $internal = false, bool $passive = false): void
     {
-        $this->method($ch, 40, 10, pack('n', 0) . Codec::shortstr($name) . Codec::shortstr($kind) . chr(2) . self::table([]));
+        $bits = ($passive ? 1 : 0) | 2 | ($internal ? 8 : 0);
+        $this->method($ch, 40, 10, pack('n', 0) . Codec::shortstr($name) . Codec::shortstr($kind) . chr($bits) . self::table($args));
         $this->expect(40, 11);
     }
 
@@ -125,10 +139,11 @@ final class Amqp
         return unpack('N', substr($frame['args'], 0, 4))[1];
     }
 
-    public function consume(string $queue, string $tag = '', bool $noAck = false, int $ch = 1): string
+    public function consume(string $queue, string $tag = '', bool $noAck = false, int $ch = 1, bool $exclusive = false, ?int $priority = null): string
     {
-        $bits = $noAck ? 2 : 0;
-        $this->method($ch, 60, 20, pack('n', 0) . Codec::shortstr($queue) . Codec::shortstr($tag) . chr($bits) . self::table([]));
+        $bits = ($noAck ? 2 : 0) | ($exclusive ? 4 : 0);
+        $args = $priority === null ? [] : ['x-priority' => $priority];
+        $this->method($ch, 60, 20, pack('n', 0) . Codec::shortstr($queue) . Codec::shortstr($tag) . chr($bits) . self::table($args));
         $frame = $this->expect(60, 21);
         $o = 0;
         return Codec::readShortstr($frame['args'], $o);
@@ -167,16 +182,23 @@ final class Amqp
             throw new RuntimeException('basic.get: no reply');
         }
         if ($frame['class'] === 60 && $frame['method'] === 72) {
-            return ['delivered' => false, 'body' => null, 'messages' => 0];
+            return ['delivered' => false, 'body' => null, 'messages' => 0, 'tag' => 0, 'propRaw' => null];
         }
         if ($frame['class'] !== 60 || $frame['method'] !== 71) {
             throw new RuntimeException("basic.get: unexpected {$frame['class']}.{$frame['method']}");
         }
+        $tag = Codec::readU64($frame['args'], 0);
         $o = 8 + 1;
         Codec::readShortstr($frame['args'], $o);
         Codec::readShortstr($frame['args'], $o);
         $messages = unpack('N', substr($frame['args'], $o, 4))[1];
-        return ['delivered' => true, 'body' => $frame['body'], 'messages' => $messages];
+        return [
+            'delivered' => true,
+            'body' => $frame['body'],
+            'messages' => $messages,
+            'tag' => $tag,
+            'propRaw' => $frame['propRaw'],
+        ];
     }
 
     public function ack(int $tag, int $ch = 1): void
@@ -304,6 +326,9 @@ final class Amqp
                 return [
                     'code' => unpack('n', substr($frame['args'], 0, 2))[1],
                     'text' => self::closeText($frame['args']),
+                    // 10 for a connection close, 20 for a channel close, so a
+                    // test can assert which scope was torn down.
+                    'class' => $frame['class'],
                 ];
             }
         }
@@ -418,11 +443,44 @@ final class Amqp
             $inner .= Codec::shortstr((string) $name);
             if (is_int($value)) {
                 $inner .= 'I' . pack('N', $value & 0xffffffff);
+            } elseif (is_array($value)) {
+                // A field array, which is how a CC or BCC header carries
+                // more than one routing key.
+                $items = '';
+                foreach ($value as $item) {
+                    $items .= 'S' . Codec::longstr((string) $item);
+                }
+                $inner .= 'A' . pack('N', strlen($items)) . $items;
             } else {
                 $inner .= 'S' . Codec::longstr((string) $value);
             }
         }
         return pack('N', strlen($inner)) . $inner;
+    }
+
+    /**
+     * Decodes the headers table out of a raw property block, so a test can
+     * assert on headers the broker attached, such as x-death.
+     *
+     * @return array<string, mixed>
+     */
+    public static function headersOf(?string $propRaw): array
+    {
+        if ($propRaw === null || strlen($propRaw) < 2) {
+            return [];
+        }
+        $flags = unpack('n', substr($propRaw, 0, 2))[1];
+        $at = 2;
+        if (($flags & 0x8000) !== 0) {
+            Codec::readShortstr($propRaw, $at);
+        }
+        if (($flags & 0x4000) !== 0) {
+            Codec::readShortstr($propRaw, $at);
+        }
+        if (($flags & 0x2000) === 0) {
+            return [];
+        }
+        return Codec::readTable($propRaw, $at);
     }
 
     public function close(): void

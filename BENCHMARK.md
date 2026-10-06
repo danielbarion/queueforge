@@ -10,6 +10,8 @@ RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z o
 
 The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result for RabbitMQ, Rust and Bun; the PHP rows in those tables come from [PHP paced](#php-paced-2026-10-06t161324z), a later session with a matching client and limits but a newer image. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
 
+PHP was later brought to client-visible parity with Bun and Rust. That build is **not** in the paced tables, because `queueforge-compare` is no longer on the host; see [PHP parity build](#php-parity-build-2026-10-06-not-paced) for what was measured instead and why the PHP paced rows still describe the older image.
+
 ## Load (2026-10-05T21:29:06Z)
 
 Unpaced messages per second. This is a different client and a different definition from the paced ladder in [Latest](#latest-2026-10-05t090342z): the publisher fills a fixed confirm window, and `confirm/s` is confirms over the 8 s measure. The 09:03 paced rows stay the `queueforge-compare` score.
@@ -209,6 +211,55 @@ Home is the peer: the peer's `queueforge_wal_fsync_seconds_count` moved, and the
 Rust attempt 1 had the home on the client (`client_fsync_delta=25571`, `peer_fsync_delta=0`, p50 0.29, p99 0.65). Caps for this check are Rust p50 3.23 / p99 4.29 and Bun p50 1.71 / p99 3.34.
 
 Trust for this image is the 09:03 rows in [Trust](#trust).
+
+## PHP parity build (2026-10-06, not paced)
+
+The PHP broker was brought to client-visible parity with Bun and Rust after the
+16:13:24Z paced run: policy resolution into queue arguments, alternate
+exchanges, `x-death`, `x-expires` and a TTL sweep, consumer priority and
+single-active-consumer, `x-delivery-limit`, CC/BCC routing, exclusive
+consumers, the five permission refusals, the full Prometheus series, classic
+queue home forwarding, the quorum confirm gate, the consumed set, the
+remaining management routes, and the MQTT, STOMP, stream and AMQP 1.0 gaps.
+
+**The paced ladder was not re-run.** The `queueforge-compare` binary is no
+longer on the benchmark host, so there is no way to produce a number
+comparable to the tables above. The PHP paced rows in
+[Latest](#latest-2026-10-05t090342z) and in
+[PHP paced](#php-paced-2026-10-06t161324z) continue to describe image
+`sha256:8b51cf8f616f90eb4ef6e71b82c583a7ffdaa42c8f16f7b0b6af6f418cdebf90`, not
+the parity build.
+
+What was measured instead is a regression check: whether the added work on the
+publish path costs throughput. A small confirm-rate probe
+(`php/test/probe.php`) was run against the parity image
+`sha256:bedc046ae885f0226775e48789761147622b163fb59046ab1b22a9a2aaf9c62a` and
+against the pre-parity image built from commit `4cad540`, in freshly created
+containers at the same 1 CPU and 512 MiB limits, alternating, 256-byte
+persistent bodies, 6 s per run.
+
+| Build | In flight | messages/s | p50 ms | p99 ms |
+| --- | ---: | ---: | ---: | ---: |
+| pre-parity `4cad540` | 1 | 3221.7 | 0.27 | 0.53 |
+| parity | 1 | 3221.6 | 0.27 | 0.53 |
+| pre-parity `4cad540` | 128 | 8504.9 | 15.10 | 21.05 |
+| parity | 128 | 8716.2 | 14.79 | 19.01 |
+
+No regression: identical at one confirm in flight and 2.5% ahead at 128, which
+is inside run-to-run noise. `queueforge_confirm_before_fsync_total` stayed at 0
+across roughly 52,000 durable confirms, so the durability invariant holds, and
+the SIGKILL round trip in `php/test/roundtrip.php` still passes.
+
+These probe numbers are **not** comparable to the paced ladder: the probe is a
+single-threaded PHP client that fills a fixed confirm window and never
+consumes, where `queueforge-compare` paces offered load and consumes. It is
+useful only as the same measurement taken twice.
+
+One limit the probe exposed, present in both builds: with no consumer attached
+the broker holds every message in memory, and log compaction transiently needs
+a second copy, so an unbounded queue exhausts PHP's 128 MiB `memory_limit` at
+roughly 100,000 queued 256-byte messages. Bounding the queue with
+`x-max-length` keeps it flat.
 
 ## PHP paced (2026-10-06T16:13:24Z)
 

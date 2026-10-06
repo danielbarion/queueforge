@@ -11,6 +11,7 @@ require_once __DIR__ . '/lib/Harness.php';
 $root = dirname(__DIR__);
 require_once $root . '/src/Routing.php';
 require_once $root . '/src/Features.php';
+require_once $root . '/src/Policy.php';
 
 // MQTT topic filter matching.
 Harness::guard('mqtt filters', static function (): void {
@@ -193,12 +194,13 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     $recv = static function ($fp): array {
         $head = fread($fp, 4);
         if (strlen((string) $head) < 4) {
-            return ['key' => 0, 'corr' => 0];
+            return ['key' => 0, 'corr' => 0, 'body' => ''];
         }
         $body = (string) fread($fp, unpack('N', $head)[1]);
         return [
             'key' => unpack('n', substr($body, 0, 2))[1],
             'corr' => strlen($body) >= 8 ? unpack('N', substr($body, 4, 4))[1] : 0,
+            'body' => $body,
         ];
     };
 
@@ -211,9 +213,154 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     $reply = $recv($fp);
     Harness::eq('create is answered', 0x800d, $reply['key']);
 
-    $send($fp, 0x0011, 13); // PeerProperties
+    // PeerProperties now carries a real properties map.
+    $send($fp, 0x0011, 13);
     $reply = $recv($fp);
-    Harness::eq('an unhandled command still answers', 0x8011, $reply['key']);
+    Harness::eq('peer properties is answered', 0x8011, $reply['key']);
+    Harness::ok('and names the product', str_contains($reply['body'], 'RabbitMQ'));
+
+    // SaslHandshake lists PLAIN so a client can choose it.
+    $send($fp, 0x0012, 14);
+    $reply = $recv($fp);
+    Harness::eq('sasl handshake is answered', 0x8012, $reply['key']);
+    Harness::ok('PLAIN is offered', str_contains($reply['body'], 'PLAIN'));
+
+    // SaslAuthenticate is followed by an unsolicited Tune.
+    $send($fp, 0x0013, 15);
+    $reply = $recv($fp);
+    Harness::eq('sasl authenticate is answered', 0x8013, $reply['key']);
+    $tune = $recv($fp);
+    Harness::eq('a tune frame follows', 0x0014, $tune['key']);
+
+    // DeclarePublisher, then Publish, which must come back as a 0x0003
+    // PublishConfirm rather than a generic echo.
+    $send($fp, 0x0001, 16, chr(7) . pack('n', 3) . 'ref' . pack('n', 6) . 'stream');
+    $reply = $recv($fp);
+    Harness::eq('declare publisher is answered', 0x8001, $reply['key']);
+
+    $entry = pack('N', 0) . pack('N', 42) . pack('N', 5) . 'hello';
+    $send($fp, 0x0002, 17, chr(7) . pack('N', 1) . $entry);
+    $reply = $recv($fp);
+    Harness::eq('publish is confirmed', 0x0003, $reply['key']);
+    Harness::eq('the publisher id comes back', 7, ord($reply['body'][4]));
+    Harness::eq('one id is confirmed', 1, unpack('N', substr($reply['body'], 5, 4))[1]);
+    Harness::eq('and it is the one sent', 42, unpack('N', substr($reply['body'], 13, 4))[1]);
+
+    // Subscribe replays the stored chunk as a 0x0008 Deliver.
+    $send($fp, 0x0007, 18, chr(3) . pack('n', 6) . 'stream');
+    $reply = $recv($fp);
+    Harness::eq('subscribe is answered', 0x8007, $reply['key']);
+    $deliver = $recv($fp);
+    Harness::eq('a deliver frame follows', 0x0008, $deliver['key']);
+    Harness::eq('for the right subscription', 3, ord($deliver['body'][4]));
+    Harness::ok('and carries the payload', str_contains($deliver['body'], 'hello'));
+
+    // A client Tune response and a heartbeat get no reply at all.
+    $send($fp, 0x0014, 19, pack('N', 1048576) . pack('N', 60));
+    $send($fp, 0x0016, 20); // Close, so there is something to read next.
+    $reply = $recv($fp);
+    Harness::eq('tune is not echoed and close is answered', 0x8016, $reply['key']);
+    fclose($fp);
+});
+
+Harness::guard('mqtt unsubscribe and disconnect', static function () use ($mqttPort): void {
+    $fp = stream_socket_client("tcp://127.0.0.1:$mqttPort", $errno, $errstr, 5.0);
+    if ($fp === false) {
+        throw new RuntimeException("mqtt connect failed: $errstr");
+    }
+    stream_set_timeout($fp, 3);
+    $payload = mqttString('MQTT') . chr(4) . chr(2) . pack('n', 60) . mqttString('c1');
+    fwrite($fp, chr(0x10) . chr(strlen($payload)) . $payload);
+    fread($fp, 4);
+
+    // Subscribe, then unsubscribe the same filter.
+    $sub = pack('n', 1) . mqttString('uns/topic') . chr(0);
+    fwrite($fp, "\x82" . chr(strlen($sub)) . $sub);
+    $suback = (string) fread($fp, 5);
+    Harness::eq('suback arrives', 0x90, ord($suback[0]));
+
+    $uns = pack('n', 2) . mqttString('uns/topic');
+    fwrite($fp, "\xa2" . chr(strlen($uns)) . $uns);
+    $unsuback = (string) fread($fp, 4);
+    Harness::eq('unsuback arrives', 0xb0, ord($unsuback[0]));
+    Harness::eq('with the packet id echoed', 2, unpack('n', substr($unsuback, 2, 2))[1]);
+
+    // A publish after unsubscribing must not come back.
+    $pub = mqttString('uns/topic') . 'after';
+    fwrite($fp, "\x30" . chr(strlen($pub)) . $pub);
+    stream_set_timeout($fp, 1);
+    $echo = fread($fp, 64);
+    Harness::eq('nothing is delivered after unsubscribe', '', (string) $echo);
+
+    // DISCONNECT closes the socket.
+    fwrite($fp, "\xe0\x00");
+    stream_set_timeout($fp, 2);
+    $after = fread($fp, 16);
+    Harness::ok('the socket is closed on disconnect', $after === '' || $after === false);
+    fclose($fp);
+});
+
+Harness::guard('stomp unsubscribe, content-length and disconnect', static function () use ($stompPort): void {
+    $fp = stream_socket_client("tcp://127.0.0.1:$stompPort", $errno, $errstr, 5.0);
+    if ($fp === false) {
+        throw new RuntimeException("stomp connect failed: $errstr");
+    }
+    stream_set_timeout($fp, 3);
+    fwrite($fp, "CONNECT\naccept-version:1.2\n\n\0");
+    $connected = (string) fread($fp, 64);
+    Harness::ok('connected arrives', str_starts_with($connected, 'CONNECTED'));
+
+    fwrite($fp, "SUBSCRIBE\nid:s1\ndestination:/queue/su\n\n\0");
+    // content-length is honoured, so the trailing byte is not part of the body.
+    $body = "five!";
+    fwrite($fp, "SEND\ndestination:/queue/su\ncontent-length:5\n\n" . $body . "\0");
+    $message = (string) fread($fp, 512);
+    Harness::ok('the message is echoed', str_contains($message, 'MESSAGE'));
+    Harness::ok('with the exact body', str_contains($message, "\n\nfive!"));
+
+    fwrite($fp, "UNSUBSCRIBE\nid:s1\n\n\0");
+    fwrite($fp, "SEND\ndestination:/queue/su\ncontent-length:3\n\nbye\0");
+    stream_set_timeout($fp, 1);
+    $after = (string) fread($fp, 256);
+    Harness::ok('nothing is echoed after unsubscribe', !str_contains($after, 'MESSAGE'));
+
+    fwrite($fp, "DISCONNECT\n\n\0");
+    stream_set_timeout($fp, 2);
+    $closed = fread($fp, 16);
+    Harness::ok('the socket is closed on disconnect', $closed === '' || $closed === false);
+    fclose($fp);
+});
+
+Harness::guard('amqp 1.0 shim', static function () use ($broker): void {
+    $fp = stream_socket_client("tcp://127.0.0.1:{$broker['port']}", $errno, $errstr, 5.0);
+    if ($fp === false) {
+        throw new RuntimeException("amqp connect failed: $errstr");
+    }
+    stream_set_timeout($fp, 3);
+
+    // The SASL header is answered with the matching header plus a
+    // sasl-mechanisms frame, instead of the connection being dropped.
+    fwrite($fp, "AMQP\x03\x01\x00\x00");
+    $head = (string) fread($fp, 8);
+    Harness::eq('the sasl header is echoed', "AMQP\x03\x01\x00\x00", $head);
+    $frame = (string) fread($fp, 64);
+    Harness::ok('mechanisms are offered', str_contains($frame, 'PLAIN'));
+
+    // sasl-init draws a sasl-outcome.
+    $init = "\x00\x53\x41\xc0\x04\x01\xa3\x00";
+    fwrite($fp, pack('N', strlen($init) + 8) . chr(2) . chr(1) . "\x00\x00" . $init);
+    $outcome = (string) fread($fp, 64);
+    Harness::ok('a sasl outcome comes back', str_contains($outcome, "\x00\x53\x44"));
+
+    // The plain header follows, then open and begin.
+    fwrite($fp, "AMQP\x00\x01\x00\x00");
+    $head = (string) fread($fp, 8);
+    Harness::eq('the plain header is echoed', "AMQP\x00\x01\x00\x00", $head);
+
+    $open = "\x00\x53\x10\x45";
+    fwrite($fp, pack('N', strlen($open) + 8) . chr(2) . chr(0) . "\x00\x00" . $open);
+    $reply = (string) fread($fp, 64);
+    Harness::ok('open is answered', str_contains($reply, "\x00\x53\x10"));
     fclose($fp);
 });
 

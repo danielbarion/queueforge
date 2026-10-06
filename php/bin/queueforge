@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/src/Routing.php';
 require dirname(__DIR__) . '/src/Features.php';
+require dirname(__DIR__) . '/src/Policy.php';
 require dirname(__DIR__) . '/src/Codec.php';
 require dirname(__DIR__) . '/src/Auth.php';
 require dirname(__DIR__) . '/src/Store.php';
@@ -11,6 +12,7 @@ require dirname(__DIR__) . '/src/Cluster.php';
 require dirname(__DIR__) . '/src/Broker.php';
 require dirname(__DIR__) . '/src/Http.php';
 require dirname(__DIR__) . '/src/Protocols.php';
+require dirname(__DIR__) . '/src/Amqp10.php';
 require dirname(__DIR__) . '/src/Extras.php';
 require dirname(__DIR__) . '/src/Server.php';
 
