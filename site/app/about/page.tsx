@@ -4,7 +4,7 @@ import { CopyCommand } from "../copy-command";
 export const metadata: Metadata = {
   title: "About",
   description:
-    "QueueForge is an open source AMQP 0-9-1 broker. Rust and Bun processes share one client protocol and can sit in the same cluster.",
+    "QueueForge is an open source AMQP 0-9-1 broker. Rust, Bun and PHP processes share one client protocol and can sit in the same cluster.",
 };
 
 const RUST = `cd rust
@@ -69,11 +69,11 @@ export default function AboutPage() {
 
       <section className="rule">
         <div className="wrap">
-          <h2>One member list. Either binary.</h2>
+          <h2>One member list. Any binary.</h2>
           <p className="section-lead">
             Leave <code>[cluster].members</code> empty for a single node. For several processes,
-            put the same list on every node, including itself. Both sides speak cluster protocol
-            version 1, so a member list can mix Rust and Bun.
+            put the same list on every node, including itself. All three speak cluster protocol
+            version 1, so a member list can mix Rust, Bun and PHP.
           </p>
           <ol className="members">
             <li>

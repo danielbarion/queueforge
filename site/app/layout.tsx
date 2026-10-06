@@ -18,11 +18,11 @@ const mono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "QueueForge — AMQP 0-9-1, Rust and Bun",
+    default: "QueueForge — AMQP 0-9-1, Rust, Bun and PHP",
     template: "%s — QueueForge",
   },
   description:
-    "Open source AMQP 0-9-1 broker in Rust and Bun. A durable classic confirm returns after the covering fsync.",
+    "Open source AMQP 0-9-1 broker in Rust, Bun and PHP. A durable classic confirm returns after the covering fsync.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

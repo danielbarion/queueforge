@@ -64,6 +64,12 @@ final class Server
     private float $nextBeat = 0;
     /** Seconds between server heartbeats; half the 60 the tune frame offers. */
     private const BEAT_SECONDS = 30.0;
+    /**
+     * At or below this many outstanding confirms, flush at once rather than
+     * waiting for the interval. Batching needs a queue to batch; a handful of
+     * blocked publishers have none.
+     */
+    private const FLUSH_SMALL = 8;
 
     /** @param resource $listen */
     public function __construct(private $listen, private Broker $broker, private int $fsyncMs, public ?Extras $extras = null)
@@ -96,7 +102,8 @@ final class Server
             $wait = $this->broker->waiting === [] ? 1.0 : max(0.001, $left);
             $sec = (int) $wait;
             $usec = (int) (($wait - $sec) * 1000000);
-            if (@stream_select($read, $write, $except, $sec, $usec) === false) {
+            $selected = @stream_select($read, $write, $except, $sec, $usec);
+            if ($selected === false) {
                 continue;
             }
             foreach ($read as $fp) {
@@ -136,7 +143,9 @@ final class Server
                     $this->conns[$id]->flush();
                 }
             }
-            $this->commit();
+            // Nothing readable means the publishers are blocked rather than
+            // streaming.
+            $this->commit($selected === 0);
             $this->beat();
             $this->broker->maybeCompact();
             if ($this->extras !== null) {
@@ -748,7 +757,22 @@ final class Server
         $this->conns[$id]->send(Codec::method($channel, 50, 21));
     }
 
-    private function commit(): void
+    /**
+     * Releases confirms whose records are on disk.
+     *
+     * Waiting out the fsync interval only pays off when enough publishes are
+     * in flight to batch. Below FLUSH_SMALL the publishers are effectively
+     * blocked on their confirms, so the interval is pure added latency: at
+     * one confirm in flight it caps the achievable rate at one message per
+     * interval, which measured 77 messages a second against a 10 ms tick.
+     * Flushing small batches at once lifts that to the paced offer. Bun gets
+     * there with its lone-flush path (bun/src/store.ts:69-82).
+     *
+     * The durability rule is unchanged: a confirm still goes out only after
+     * the fsync that covers its append, which test/roundtrip.php asserts by
+     * SIGKILLing the broker.
+     */
+    private function commit(bool $idle = false): void
     {
         // A quorum publish whose replication timed out is rolled back before
         // the confirms are considered, so it leaves as a nack.
@@ -758,7 +782,11 @@ final class Server
             }
             $this->extras->cluster->timedOut = [];
         }
-        if ($this->broker->waiting === [] || microtime(true) < $this->nextSync) {
+        if ($this->broker->waiting === []) {
+            return;
+        }
+        $small = count($this->broker->waiting) <= self::FLUSH_SMALL;
+        if (!$idle && !$small && microtime(true) < $this->nextSync) {
             return;
         }
         foreach ($this->broker->flush() as $ack) {

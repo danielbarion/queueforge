@@ -1,6 +1,6 @@
 # QueueForge vs RabbitMQ 4
 
-One client, `queueforge-compare`. Each container is 1 CPU and 512 MiB (`docker_ncpu=2` on the host). Ports are 35672 (RabbitMQ 4.3), 35673 (Rust), and 35674 (Bun), one container at a time. From 2026-10-04T21:30:56Z on, the compare binary mtime is 2026-10-04T16:16:23-0300, `QUEUEFORGE_COMPARE_RATES` is unset, and the slot wait stays on.
+One client, `queueforge-compare`. Each container is 1 CPU and 512 MiB (`docker_ncpu=2` on the host). Ports are 35672 (RabbitMQ 4.3), 35673 (Rust), 35674 (Bun), and 35675 (PHP), one container at a time. From 2026-10-04T21:30:56Z on, the compare binary mtime is 2026-10-04T16:16:23-0300, `QUEUEFORGE_COMPARE_RATES` is unset, and the slot wait stays on.
 
 Message k is published at `k/rate`. In `fan-2x2`, two producers run together, each at half the labeled rate. A step is kept when confirms and acks both reach 95% of the offer. `messages/s` equals `pace_messages_per_sec`: acked deliveries over the counted windows. The report line is `throughput=paced`.
 
@@ -8,7 +8,7 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
+The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result for RabbitMQ, Rust and Bun; the PHP rows in those tables come from [PHP paced](#php-paced-2026-10-06t161324z), a later session with a matching client and limits but a newer image. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
 
 ## Load (2026-10-05T21:29:06Z)
 
@@ -28,7 +28,7 @@ Shapes:
 | shared | 16 | 16 | 1 | 512 | 1024 | 8192 |
 | spread | 16 | 16 | 16 | 512 | 1024 | 8192 |
 
-All 45 cells from 2026-10-05T21:29:06Z are `ok=1`, `oom=false`, `blocked=0`, `nacks=0`, `missed=0`, `returns=0`. Inflight ended on the window cap except Rust at 4 CPU / 8 GiB single, which ended at 117. PHP was measured on 2026-10-06T12:05:24Z with the same client, shapes, sizes, and pins. Those 15 cells are also `ok=1`, with no OOM, blocked connections, nacks, misses, or returns. Image `queueforge-php:bench` `sha256:f3113acd45996ecb624cc32c5d4b252ddf8f957d44f70a3737613d0c6f7d4cc1`. Docker Desktop was raised to 8 CPUs and 24576 MiB for that run, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again. PHP does not expose `queueforge_confirm_before_fsync_total`. A durable confirm is released only after the 10 ms fsync tick. The paced ladder was not rerun for PHP.
+All 45 cells from 2026-10-05T21:29:06Z are `ok=1`, `oom=false`, `blocked=0`, `nacks=0`, `missed=0`, `returns=0`. Inflight ended on the window cap except Rust at 4 CPU / 8 GiB single, which ended at 117. PHP was measured on 2026-10-06T12:05:24Z with the same client, shapes, sizes, and pins. Those 15 cells are also `ok=1`, with no OOM, blocked connections, nacks, misses, or returns. Image `queueforge-php:bench` `sha256:f3113acd45996ecb624cc32c5d4b252ddf8f957d44f70a3737613d0c6f7d4cc1`. Docker Desktop was raised to 8 CPUs and 24576 MiB for that run, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again. PHP does not expose `queueforge_confirm_before_fsync_total`. A durable confirm is released only after the covering fsync. These 15 cells predate the small-batch flush described in [PHP paced](#php-paced-2026-10-06t161324z), which only changes behaviour below 8 outstanding confirms; the single shape holds a 128 window, so it is the least affected.
 
 `MiB` is cgroup `memory.current` during a 2 s sample that starts 0.5 s after the measure mark. It includes page cache. `CPU` is cgroup `usage_usec` over that same 2 s, in percent of one core. The client sat at 97–98 on every cell because the measure loop spins. p50 and p99 are the high edge of a 100 µs bucket. A printed 200.00 ms is the overflow bucket, so that sample is at least 200 ms.
 
@@ -166,6 +166,7 @@ QueueForge disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commi
 | RabbitMQ | 0.46 | 0.83 | 1678.69 | 4000 |
 | Rust | 0.28 | 0.61 | 2229.28 | 4000 |
 | Bun | 0.20 | 0.60 | 2710.94 | 8000 |
+| PHP | 0.33 | 1.59 | 1938.15 | 4000 |
 
 Rust and Bun p50 are under 0.42 ms and under this session's 0.46 ms. p99 is under 0.88 ms and under this session's 0.83 ms. messages/s is over 1616.44 and over this session's 1678.69. The 01:06:02Z row in the [session table](#one-confirm-across-paced-sessions) is the floor this run replaced: Rust 3.18 / 5.43 / 304.33 and Bun 3.67 / 10.72 / 241.77.
 
@@ -176,23 +177,25 @@ Rust and Bun p50 are under 0.42 ms and under this session's 0.46 ms. p99 is unde
 | durable-256 | RabbitMQ | 13139.01 | | 3.19 | 8.58 | 32000 | 20.93 |
 | durable-256 | Rust | 19230.10 | 1.464× (1.46359) | 2.03 | 11.15 | 48000 | 20.19 |
 | durable-256 | Bun | 18396.86 | 1.400× (1.40017) | 2.18 | 11.25 | 48000 | 20.17 |
+| durable-256 | PHP | 6324.00 | 0.481× (0.48131) | 12.02 | 16.44 | 16000 | 20.19 |
 | fan-2x2 | RabbitMQ | 14512.22 | | 6.81 | 16.77 | 32000 | 20.14 |
 | fan-2x2 | Rust | 24005.72 | 1.654× (1.65417) | 2.41 | 11.56 | 96000 | 20.25 |
 | fan-2x2 | Bun | 23744.97 | 1.636× (1.63621) | 2.46 | 11.25 | 96000 | 20.15 |
+| fan-2x2 | PHP | 10396.62 | 0.716× (0.71641) | 11.24 | 16.46 | 32000 | 20.18 |
 
 The 1.3× bars are 17080.71 (durable) and 18865.89 (fan). Both brokers clear those bars, and they clear the 01:06 floors: durable 16936.46 (Rust) and 17813.55 (Bun), fan 23372.78 (Rust) and 23203.75 (Bun). Durable p50 is inside 2.58 ms (Rust) and 2.32 ms (Bun). Fan p50 is inside 3.01 ms (Rust) and 2.98 ms (Bun). Offer-by-offer rates are in [Step rates](#step-rates-128-confirms). On the durable steps cited there, confirms match consumed.
 
 ### Short scenarios
 
-All three brokers score the same `messages/s` and the same kept saturation.
+All four brokers score the same `messages/s` and the same kept saturation.
 
-| Scenario | messages/s | Saturation | Rabbit top step | Rust top step | Bun top step |
-| --- | ---: | --- | ---: | ---: | ---: |
-| size-64 | 600.00 | 1000 kept | 1000.0 | 996.3 | 995.2 |
-| prefetch-1 | 600.00 | 1000 kept | 999.3 | 998.8 | 996.7 |
-| prefetch-128 | 600.00 | 1000 kept | 999.5 | 998.5 | 999.1 |
-| size-4096 | 250.00 | 400 kept | 400.0 | 400.0 | 399.6 |
-| transient-256 | 1250.00 | 2000 kept | 2000.0 | 2000.0 | 1998.8 |
+| Scenario | messages/s | Saturation | Rabbit top step | Rust top step | Bun top step | PHP top step |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| size-64 | 600.00 | 1000 kept | 1000.0 | 996.3 | 995.2 | 999.4 |
+| prefetch-1 | 600.00 | 1000 kept | 999.3 | 998.8 | 996.7 | 1000.0 |
+| prefetch-128 | 600.00 | 1000 kept | 999.5 | 998.5 | 999.1 | 999.8 |
+| size-4096 | 250.00 | 400 kept | 400.0 | 400.0 | 399.6 | 400.0 |
+| transient-256 | 1250.00 | 2000 kept | 2000.0 | 2000.0 | 1998.8 | 1997.5 |
 
 ### Remote one confirm
 
@@ -206,6 +209,31 @@ Home is the peer: the peer's `queueforge_wal_fsync_seconds_count` moved, and the
 Rust attempt 1 had the home on the client (`client_fsync_delta=25571`, `peer_fsync_delta=0`, p50 0.29, p99 0.65). Caps for this check are Rust p50 3.23 / p99 4.29 and Bun p50 1.71 / p99 3.34.
 
 Trust for this image is the 09:03 rows in [Trust](#trust).
+
+## PHP paced (2026-10-06T16:13:24Z)
+
+PHP `queueforge-php:bench` `sha256:8b51cf8f616f90eb4ef6e71b82c583a7ffdaa42c8f16f7b0b6af6f418cdebf90` (2026-10-06T16:09:36Z), one container at a time on host ports 35675 and 36675, 1 CPU and 512 MiB, the same `docker-compose.bench.yml` limits as the other three. Same client, `queueforge-compare`, same binary mtime 2026-10-04T16:16:23-0300, `QUEUEFORGE_COMPARE_RATES` unset. Docker Desktop was at 2 CPUs and 8320565248 bytes. Every scenario is `declare=ok publish=ok consume=ok ack=ok confirms=ok`. Disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync`.
+
+This image is newer than the 09:03:42Z Rust and Bun images, so the PHP rows are not from the same session as the other three. They are placed in the 09:03 tables because the client, the offers, the container limits, and the host settings match; the images do not.
+
+PHP matches the other three exactly on all five short scenarios. It differs on the two laddered ones, and the direction depends on the ladder:
+
+| Ladder | Scenario | PHP messages/s | × Rabbit | First miss | Rabbit first miss |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 in flight | durable-256 | 1938.15 | 1.155× | 4000 | 4000 |
+| 1 in flight | fan-2x2 | 2233.16 | | 6400 | |
+| 128 in flight | durable-256 | 6324.00 | 0.481× | 16000 | 32000 |
+| 128 in flight | fan-2x2 | 10396.62 | 0.716× | 32000 | 32000 |
+
+At one confirm in flight the score is latency-bound, and PHP sits between RabbitMQ and Rust while matching RabbitMQ's first miss. At 128 in flight the score is throughput-bound, and the single thread shows: roughly half of RabbitMQ on durable and about seven tenths on fan, against Rust and Bun at 1.4× to 1.65× of RabbitMQ.
+
+### The flush rule this run required
+
+The first paced attempt scored 77.36 messages a second on `size-64`, against 600.00 for the other three. That was not the broker: with one confirm in flight and a 10 ms group-commit timer, a publisher can complete at most one message per tick, which is 79 a second. The confirm path waited for the tick unconditionally while Bun flushes early for a lone waiter (`bun/src/store.ts:69-82`), so the ladder was measuring the timer rather than the broker.
+
+The fix flushes at once while eight or fewer confirms are outstanding, and keeps waiting for the tick above that, where there is a batch worth forming. Confirm p50 on `size-64` went from 12.66 ms to 0.56 ms and the score from 77.36 to 600.00, matching the other three. `fan-2x2` at one in flight went from 254.77 with a first miss at 200 to 2233.16 with a first miss at 6400.
+
+The durability rule is unchanged: a confirm is released only after the fsync that covers its append. `php/test/roundtrip.php` asserts this by `SIGKILL`ing the broker and requiring a confirmed but unacked durable message to come back, and it passes before and after.
 
 ## One confirm across paced sessions
 

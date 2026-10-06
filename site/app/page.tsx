@@ -9,9 +9,9 @@ export default function Page() {
       <section className="hero wrap">
         <div>
           <p className="kicker">Open source · AMQP 0-9-1</p>
-          <h1>An AMQP broker in Rust and Bun.</h1>
+          <h1>An AMQP broker in Rust, Bun, and PHP.</h1>
           <p className="lede">
-            Two processes, one client protocol. You run QueueForge yourself. There is no account
+            Three processes, one client protocol. You run QueueForge yourself. There is no account
             and no hosted broker.
           </p>
           <div className="figures" aria-label="Kept rate versus RabbitMQ">
@@ -22,6 +22,10 @@ export default function Page() {
             <div>
               <span>Bun</span>
               <strong>{formatTimes(paced[2].rate, rabbit)}×</strong>
+            </div>
+            <div>
+              <span>PHP</span>
+              <strong>{formatTimes(paced[3].rate, rabbit)}×</strong>
             </div>
           </div>
           <p className="note">
@@ -42,7 +46,8 @@ export default function Page() {
           <Bars rows={paced} unit="/s" />
           <p className="caption">
             128 confirms in flight. Durable 256-byte body. Mac client through the published port.
-            2026-10-05. A step counts only when confirms and acks both reach 95% of the offer.
+            RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only when
+            confirms and acks both reach 95% of the offer.
           </p>
         </div>
       </section>
@@ -74,13 +79,13 @@ export default function Page() {
         <div className="wrap about-tease">
           <div>
             <p className="kicker">The project</p>
-            <h2>Two processes. One protocol.</h2>
+            <h2>Three processes. One protocol.</h2>
           </div>
           <div>
             <p>
               The Rust broker keeps messages in a write-ahead log. The Bun broker keeps them in
-              SQLite. A client speaks AMQP 0-9-1 to either. The same member list can mix both
-              binaries.
+              SQLite. The PHP broker keeps them in an append-only log. A client speaks AMQP 0-9-1
+              to any of them, and the same member list can mix the binaries.
             </p>
             <p>
               <Link href="/about">About QueueForge</Link>
