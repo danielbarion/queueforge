@@ -7,6 +7,13 @@ final class Cluster
     /** How long a request waits for its reply, matching Bun's 3000 ms. */
     public const REQUEST_TIMEOUT = 3.0;
 
+    /**
+     * Beyond the peers a majority needs, a peer is only sent an extra append
+     * while it has fewer than this many requests in flight. Bun calls this
+     * EXTRA_APPEND_CAP.
+     */
+    public const EXTRA_APPEND_CAP = 32;
+
     /** @var array<string, array{buf:string,write:callable}> */
     public array $peers = [];
     /**
@@ -109,12 +116,38 @@ final class Cluster
         }
     }
 
-    /** @param array<string, mixed> $payload */
+    /**
+     * Replicates a quorum append. Peers are ordered by in-flight requests
+     * then by id, so the least busy are asked first. Everyone needed for a
+     * majority is always asked; beyond that a peer is only asked while its
+     * in-flight count is under the cap, which is Bun's EXTRA_APPEND_CAP of
+     * 32 (bun/src/quorum-confirm.ts:8,21-40).
+     *
+     * @param array<string, mixed> $payload
+     */
     public function replicate(array $payload): void
     {
         $qid = (string) ($payload['message_id'] ?? '');
-        foreach ($this->peers as $id => $peer) {
-            $this->request($id, 'quorum_append', $payload, $qid);
+        $peers = $this->peerIds();
+        if ($peers === []) {
+            return;
+        }
+        $inFlight = array_fill_keys($peers, 0);
+        foreach ($this->pending as $row) {
+            if (isset($inFlight[$row['peer']])) {
+                $inFlight[$row['peer']]++;
+            }
+        }
+        usort($peers, static function (string $x, string $y) use ($inFlight): int {
+            return $inFlight[$x] <=> $inFlight[$y] ?: strcmp($x, $y);
+        });
+        // One of the majority is this node's own copy.
+        $needed = max(0, Features::majority(max(1, count($this->broker->members))) - 1);
+        foreach ($peers as $i => $peer) {
+            if ($i >= $needed && $inFlight[$peer] >= self::EXTRA_APPEND_CAP) {
+                continue;
+            }
+            $this->request($peer, 'quorum_append', $payload, $qid);
         }
     }
 

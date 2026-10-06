@@ -13,6 +13,47 @@ final class Extras
     public Protocols $protocols;
     private float $nextDial = 0.0;
     private string $membersFile = '';
+    /**
+     * Failed dial attempts per member. After this many a peer is treated as
+     * unreachable rather than merely slow, so readiness is not held forever.
+     *
+     * @var array<string, int>
+     */
+    private array $strikes = [];
+    private const UNREACHABLE_STRIKES = 5;
+
+    /**
+     * Holds readiness while a quorum queue exists and a peer has neither
+     * been heard from nor refused enough dials to count as unreachable. A
+     * node that answered /readyz immediately could take a quorum publish it
+     * has no majority for. Bun gates the same way.
+     */
+    private function refreshReady(): void
+    {
+        $hasQuorum = false;
+        foreach ($this->broker->queues as $queue) {
+            if (($queue['args']['queueType'] ?? 'classic') === 'quorum') {
+                $hasQuorum = true;
+                break;
+            }
+        }
+        if (!$hasQuorum || count($this->broker->members) < 2) {
+            $this->broker->ready = true;
+            return;
+        }
+        foreach ($this->broker->members as $member) {
+            if ($member['id'] === $this->broker->nodeId) {
+                continue;
+            }
+            $heard = isset($this->cluster->peers[$member['id']]);
+            $unreachable = ($this->strikes[$member['id']] ?? 0) >= self::UNREACHABLE_STRIKES;
+            if (!$heard && !$unreachable) {
+                $this->broker->ready = false;
+                return;
+            }
+        }
+        $this->broker->ready = true;
+    }
 
     /**
      * Reads the stored member list, falling back to the config. The file wins
@@ -135,6 +176,7 @@ final class Extras
             return;
         }
         $this->nextDial = microtime(true) + 0.2;
+        $this->refreshReady();
         foreach ($this->broker->members as $member) {
             // Only the lower id dials, so a pair gets exactly one connection
             // instead of two. Bun uses the same rule.
@@ -146,8 +188,10 @@ final class Extras
             }
             $fp = @stream_socket_client('tcp://' . $member['addr'], $errno, $errstr, 0.05);
             if ($fp === false) {
+                $this->strikes[$member['id']] = ($this->strikes[$member['id']] ?? 0) + 1;
                 continue;
             }
+            $this->strikes[$member['id']] = 0;
             stream_set_blocking($fp, false);
             $this->cluster->attach($member['id'], static function (string $line) use ($fp): void {
                 @fwrite($fp, $line);

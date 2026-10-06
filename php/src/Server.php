@@ -594,12 +594,20 @@ final class Server
             // 'amq.gen' made every anonymous queue collide.
             $name = 'amq.gen-' . bin2hex(random_bytes(8));
         }
+        $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
+        $durable = ($bits & 2) === 2;
+        $exclusive = ($bits & 4) === 4;
         $args = [];
         if (isset($payload[$o])) {
             $o++;
             $args = Codec::readTable($payload, $o);
         }
-        $this->broker->declareQueue($name, $args);
+        try {
+            $this->broker->declareQueue($name, $args, $durable, $exclusive);
+        } catch (RuntimeException $err) {
+            $this->conns[$id]->send(Codec::channelClose($channel, 406, $err->getMessage(), 50, 10));
+            return;
+        }
         $this->conns[$id]->send(Codec::queueDeclareOk(
             $channel,
             $name,
@@ -741,15 +749,30 @@ final class Server
 
     private function commit(): void
     {
+        // A quorum publish whose replication timed out is rolled back before
+        // the confirms are considered, so it leaves as a nack.
+        if ($this->extras !== null && $this->extras->cluster->timedOut !== []) {
+            foreach ($this->extras->cluster->timedOut as $qid) {
+                $this->broker->failQuorum($qid);
+            }
+            $this->extras->cluster->timedOut = [];
+        }
         if ($this->broker->waiting === [] || microtime(true) < $this->nextSync) {
             return;
         }
         foreach ($this->broker->flush() as $ack) {
-            if ($ack['tag'] > 0 && isset($this->conns[$ack['conn']])) {
-                $this->conns[$ack['conn']]->send(Codec::basicAck($ack['ch'], $ack['tag']));
-                $this->conns[$ack['conn']]->flush();
-                $this->broker->prom['confirmed']++;
+            if ($ack['tag'] <= 0 || !isset($this->conns[$ack['conn']])) {
+                continue;
             }
+            $sock = $this->conns[$ack['conn']];
+            if (($ack['nack'] ?? false) === true) {
+                $sock->send(Codec::basicNack($ack['ch'], $ack['tag']));
+                $sock->flush();
+                continue;
+            }
+            $sock->send(Codec::basicAck($ack['ch'], $ack['tag']));
+            $sock->flush();
+            $this->broker->prom['confirmed']++;
         }
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
         $this->pump();

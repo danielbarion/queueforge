@@ -92,14 +92,32 @@ final class Broker
         return isset($this->users[$user]) && Auth::matches($pass, $this->users[$user]);
     }
 
-    public function declareQueue(string $name, array $rawArgs = []): void
+    /**
+     * Declares a queue. A quorum queue must be durable and non-exclusive, as
+     * in Bun and RabbitMQ; asking for one any other way is a channel error.
+     *
+     * @param array<string, string|int> $rawArgs
+     * @throws RuntimeException when a quorum queue is asked for transiently
+     */
+    public function declareQueue(string $name, array $rawArgs = [], bool $durable = true, bool $exclusive = false): void
     {
+        if (($rawArgs['x-queue-type'] ?? '') === 'quorum') {
+            if (!$durable) {
+                throw new RuntimeException('PRECONDITION_FAILED - a quorum queue must be durable');
+            }
+            if ($exclusive) {
+                throw new RuntimeException('PRECONDITION_FAILED - a quorum queue cannot be exclusive');
+            }
+        }
         if (!isset($this->queues[$name])) {
             $this->queues[$name] = [
                 'ready' => [],
                 'consumers' => [],
                 'replicas' => [],
                 'args' => Features::parseArgs($rawArgs),
+                // A quorum queue is homed where it was declared rather than
+                // by the classic hash, matching Bun.
+                'home' => ($rawArgs['x-queue-type'] ?? '') === 'quorum' ? $this->nodeId : '',
             ];
             return;
         }
@@ -265,6 +283,13 @@ final class Broker
                 $at = $now + $expirationMs;
                 $expires = $expires === null ? $at : min($expires, $at);
             }
+            // A quorum message carries the id its replicas are keyed by, in
+            // the q-<node>-<millis>-<random> shape Bun uses, so a later
+            // quorum_drop can name it. Classic messages keep the local id.
+            $isQuorum = ($args['queueType'] ?? 'classic') === 'quorum';
+            $qid = $isQuorum
+                ? 'q-' . $this->nodeId . '-' . $now . '-' . bin2hex(random_bytes(4))
+                : (string) $id;
             $this->msgs[$id] = [
                 'queue' => $queue,
                 'body' => $body,
@@ -276,9 +301,10 @@ final class Broker
                 'expires' => $expires,
                 'headers' => $headers,
                 'propRaw' => $propRaw,
+                'qid' => $qid,
             ];
             $ids[] = $id;
-            $qids[] = (string) $id;
+            $qids[] = $qid;
             $this->prom['received']++;
             if ($mode === 2) {
                 $end = $this->store->appendPublish($id, $queue, $body, $mode, $propRaw);
@@ -290,6 +316,7 @@ final class Broker
             return $rejected > 0 ? 'nack' : 'return';
         }
         $need = 0;
+        $copies = ['durable'];
         if ($this->quorumPublish($dests)) {
             $need = Features::majority(max(1, count($this->members)));
             if ($this->cluster !== null) {
@@ -308,6 +335,9 @@ final class Broker
             'qids' => $qids,
             'quorumNeed' => $need,
             'quorumHave' => 1,
+            // One entry per durable copy. The local append is already fsynced
+            // by the time the confirm is considered, so it counts as durable.
+            'copies' => $copies,
         ];
         return 'wait';
     }
@@ -406,7 +436,54 @@ final class Broker
         foreach ($this->waiting as $i => $w) {
             if (in_array($messageId, $w['qids'] ?? [], true)) {
                 $this->waiting[$i]['quorumHave']++;
+                // A peer only replies ok once its own append is fsynced, so
+                // an ok reply counts as a durable copy.
+                $this->waiting[$i]['copies'][] = 'durable';
             }
+        }
+    }
+
+    /**
+     * Abandons a quorum publish whose replication did not reach a majority.
+     * The replicas that did land are dropped on their peers and the local
+     * copy goes too, so a nacked publish leaves nothing behind.
+     */
+    public function failQuorum(string $messageId): void
+    {
+        foreach ($this->waiting as $i => $w) {
+            if (!in_array($messageId, $w['qids'] ?? [], true)) {
+                continue;
+            }
+            if (($w['quorumNeed'] ?? 0) === 0) {
+                return;
+            }
+            if ($this->cluster !== null) {
+                foreach ($w['ids'] as $slot => $id) {
+                    $queue = $this->msgs[$id]['queue'] ?? '';
+                    $qid = $w['qids'][$slot] ?? '';
+                    foreach ($this->cluster->peerIds() as $peer) {
+                        $this->cluster->request($peer, 'quorum_drop', [
+                            'vhost' => '/',
+                            'queue' => $queue,
+                            'id' => $qid,
+                        ]);
+                    }
+                }
+            }
+            foreach ($w['ids'] as $id) {
+                $queue = $this->msgs[$id]['queue'] ?? '';
+                if ($queue !== '' && isset($this->queues[$queue])) {
+                    foreach (['ready', 'replicas'] as $list) {
+                        $this->queues[$queue][$list] = array_values(array_filter(
+                            $this->queues[$queue][$list],
+                            static fn (int $held): bool => $held !== $id,
+                        ));
+                    }
+                }
+                $this->ack($id);
+            }
+            $this->waiting[$i]['failed'] = true;
+            return;
         }
     }
 
@@ -481,18 +558,26 @@ final class Broker
         return $body;
     }
 
-    /** @return list<array{conn:int,ch:int,tag:int}> */
+    /** @return list<array{conn:int,ch:int,tag:int,nack:bool}> */
     public function flush(): array
     {
         $this->store->sync();
         $ready = [];
         $still = [];
         foreach ($this->waiting as $w) {
+            // A quorum publish that could not reach a majority is nacked, so
+            // the publisher learns the message was not accepted.
+            if (($w['failed'] ?? false) === true) {
+                $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => true];
+                continue;
+            }
             if ($w['end'] > $this->store->synced) {
                 $still[] = $w;
                 continue;
             }
-            if (($w['quorumNeed'] ?? 0) > ($w['quorumHave'] ?? 1)) {
+            // A quorum confirm needs a durable majority, not just any replies.
+            if (($w['quorumNeed'] ?? 0) > 0
+                && !Features::durableMajority(max(1, count($this->members)), $w['copies'] ?? ['durable'])) {
                 $still[] = $w;
                 continue;
             }
@@ -503,7 +588,7 @@ final class Broker
                     }
                 }
             }
-            $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag']];
+            $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => false];
         }
         $this->waiting = $still;
         return $ready;
@@ -712,6 +797,11 @@ final class Broker
      */
     public function home(string $queue): string
     {
+        // A quorum queue keeps the node it was declared on.
+        $stored = $this->queues[$queue]['home'] ?? '';
+        if (is_string($stored) && $stored !== '') {
+            return $stored;
+        }
         if (count($this->members) < 2) {
             return $this->nodeId;
         }
