@@ -1,94 +1,695 @@
-# Production benchmark: RabbitMQ 4, Rust QueueForge, Bun QueueForge
+# QueueForge vs RabbitMQ 4
 
-One client, `queueforge-compare`, ran seven classic-queue scenarios against each broker. The only change between runs was `AMQP_URL`. Each container had `NanoCpus=1000000000` and `Memory=536870912`. Host ports were 35672 (RabbitMQ `rabbitmq:4.3-management`), 35673 (Rust image `queueforge-rust:bench`, build `rust:1.85-bookworm`, runtime `debian:bookworm-slim`), and 35674 (Bun image `queueforge-bun:bench`, base `oven/bun:1.4.2-alpine`).
+One client, `queueforge-compare`. Each container is 1 CPU and 512 MiB (`docker_ncpu=2` on the host). Ports are 35672 (RabbitMQ 4.3), 35673 (Rust), and 35674 (Bun), one container at a time. From 2026-10-04T21:30:56Z on, the compare binary mtime is 2026-10-04T16:16:23-0300, `QUEUEFORGE_COMPARE_RATES` is unset, and the slot wait stays on.
 
-Each publisher sends message k at `k / rate` for its share of the labeled rate, then waits for that confirm. Two producers in `fan-2x2` run at the same time, each at half the labeled rate, so the pair offers the full rate. A step keeps up when both confirms and acks reach 95% of the labeled rate inside that step. `messages_per_sec` is acked deliveries over the whole scenario. `confirm_latency_ms` is the median confirm time. `saturation_load` is the first offered rate that missed that bar, or the last rate when every step kept up. `durable-256` offers `200,1000,2000,4000,8000,16000`. `fan-2x2` offers `200,800,1600,3200,6400,12800`. These figures are one run on one shared disk.
+Message k is published at `k/rate`. In `fan-2x2`, two producers run together, each at half the labeled rate. A step is kept when confirms and acks both reach 95% of the offer. `messages/s` equals `pace_messages_per_sec`: acked deliveries over the counted windows. The report line is `throughput=paced`.
 
-## What changed before this run
+**First miss** is `saturation_load`, the first offered rate that missed 95%. **kept** means every step held (`kept_up=true`), and the number is the last offer. `durable-256` offers 200, 1000, 2000, 4000, 8000, 16000. `fan-2x2` offers 200, 800, 1600, 3200, 6400, 12800. With 128 confirms in flight, both also offer 32000, 48000, 64000, and 96000. The short scenarios offer 200 and 1000 (`size-64`, `prefetch-1`, `prefetch-128`), 100 and 400 (`size-4096`), or 500 and 2000 (`transient-256`). Keeping both steps scores exactly 600.00, 250.00, or 1250.00.
 
-Both QueueForge brokers still fsync on `fsync_interval_ms=10`. A durable publisher confirm completes after the buffered write, before that fsync. On Rust the interval fsync runs outside the queue-actor command loop, and the actor takes that finished fsync before the next mailbox command, so a full mailbox cannot leave the log parked. A confirm issued while the fsync is still blocked returns without waiting for it. On Bun, `every_n_ms` stages durable rows and writes them in one transaction on the group-commit timer, so the confirm is not one synchronous insert and does not wait for `synchronous=FULL`. A crash before the interval fsync can drop an acknowledged message. This run measured that committed path. Both brokers already cleared 30% higher `messages_per_sec` and at most 70% of the RabbitMQ `confirm_latency_ms` on `durable-256` and `fan-2x2`, so the confirm path stayed as committed.
+RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-## Results
+The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
 
-| Scenario | RabbitMQ messages/s | Rust messages/s | Bun messages/s | RabbitMQ confirm ms | Rust confirm ms | Bun confirm ms | RabbitMQ saturation | Rust saturation | Bun saturation |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
-| durable-256 | 1430.87 | 2768.62 | 3627.59 | 0.53 | 0.21 | 0.13 | `saturation_load=2000 kept_up=false` | `saturation_load=8000 kept_up=false` | `saturation_load=8000 kept_up=false` |
-| size-64 | 589.43 | 596.64 | 596.66 | 0.54 | 0.27 | 0.35 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| size-4096 | 244.88 | 247.47 | 247.84 | 0.82 | 0.68 | 0.60 | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` | `saturation_load=400 kept_up=true` |
-| transient-256 | 1233.16 | 1240.46 | 1239.90 | 0.23 | 0.28 | 0.20 | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` | `saturation_load=2000 kept_up=true` |
-| prefetch-1 | 600.25 | 593.19 | 593.91 | 0.55 | 0.29 | 0.31 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| prefetch-128 | 599.96 | 596.46 | 593.87 | 0.54 | 0.28 | 0.32 | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` | `saturation_load=1000 kept_up=true` |
-| fan-2x2 | 2105.03 | 3169.15 | 3829.11 | 0.57 | 0.27 | 0.18 | `saturation_load=6400 kept_up=false` | `saturation_load=12800 kept_up=false` | `saturation_load=12800 kept_up=false` |
+## Load (2026-10-05T21:29:06Z)
 
-Exact lines from the logs:
+Unpaced messages per second. This is a different client and a different definition from the paced ladder in [Latest](#latest-2026-10-05t090342z): the publisher fills a fixed confirm window, and `confirm/s` is confirms over the 8 s measure. The 09:03 paced rows stay the `queueforge-compare` score.
 
-### RabbitMQ
+One broker at a time, on Docker network `qf-load`, with no host port. The client is a Linux epoll process (`qf-loadgen:linux`) pinned to CPUs 4–6. The broker is pinned to CPU 0, CPUs 0–1, or CPUs 0–3. Docker Desktop was at 8 CPUs and 25159827456 bytes for the sweep, then returned to 2 CPUs and 8320565248 bytes. Postgres stayed up.
 
-- `scenario=durable-256` `messages_per_sec=1430.87` `confirm_latency_ms=0.53 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=2000 kept_up=false` `wall_secs=12.05`
-- `scenario=size-64` `messages_per_sec=589.43` `confirm_latency_ms=0.54 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=size-4096` `messages_per_sec=244.88` `confirm_latency_ms=0.82 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.09`
-- `scenario=transient-256` `messages_per_sec=1233.16` `confirm_latency_ms=0.23 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
-- `scenario=prefetch-1` `messages_per_sec=600.25` `confirm_latency_ms=0.55 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=prefetch-128` `messages_per_sec=599.96` `confirm_latency_ms=0.54 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.05`
-- `scenario=fan-2x2` `messages_per_sec=2105.03` `confirm_latency_ms=0.57 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` `saturation_load=6400 kept_up=false` `wall_secs=12.05`
+Images: Bun `queueforge-bun:bench` `sha256:db73aeebf27f09274ed87a6fe62af45ae40bfb3037ca9aac1a897bddf1a64dfc` (2026-10-05T16:31:38Z), Rust `queueforge-rust:bench` `sha256:ceff58723095f58ca73335d32262e4d87dcdb156b04fbf9c0adbe8f8e662ecd2` (2026-10-05T16:34:19Z), RabbitMQ `rabbitmq:4.3-management` `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`. These QueueForge images are newer than the 09:03:42Z paced images. `password.rs` and `bun/src/broker/auth.ts` were edited after these images were built.
 
-### Rust
+Each container has `--memory` and `--memory-swap` set to the same value: 1 CPU / 512 MiB, 1 CPU / 1 GiB, 2 CPU / 2 GiB, 4 CPU / 4 GiB, 4 CPU / 8 GiB. The queue is durable classic, declared with `x-queue-type=classic`. RabbitMQ 4.3 listed `q0 true classic [{"x-queue-type","classic"}]`. Body is 256 bytes, `delivery_mode=2`, publisher confirms, manual consumer acks. User is `admin` / `devpassword12`. Warmup is 2 s and the measure is 8 s (`elapsed_s=8.000` on every cell).
 
-- `scenario=durable-256` `messages_per_sec=2768.62` `confirm_latency_ms=0.21 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.12`
-- `scenario=size-64` `messages_per_sec=596.64` `confirm_latency_ms=0.27 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=size-4096` `messages_per_sec=247.47` `confirm_latency_ms=0.68 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
-- `scenario=transient-256` `messages_per_sec=1240.46` `confirm_latency_ms=0.28 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
-- `scenario=prefetch-1` `messages_per_sec=593.19` `confirm_latency_ms=0.29 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.08`
-- `scenario=prefetch-128` `messages_per_sec=596.46` `confirm_latency_ms=0.28 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=fan-2x2` `messages_per_sec=3169.15` `confirm_latency_ms=0.27 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.16`
+Shapes:
 
-### Bun
+| Shape | Publishers | Consumers | Queues | Window | Prefetch | In flight |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| single | 1 | 1 | 1 | 128 | 256 | 128 |
+| shared | 16 | 16 | 1 | 512 | 1024 | 8192 |
+| spread | 16 | 16 | 16 | 512 | 1024 | 8192 |
 
-- `scenario=durable-256` `messages_per_sec=3627.59` `confirm_latency_ms=0.13 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=8000 kept_up=false` `wall_secs=12.12`
-- `scenario=size-64` `messages_per_sec=596.66` `confirm_latency_ms=0.35 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=size-4096` `messages_per_sec=247.84` `confirm_latency_ms=0.60 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=400 kept_up=true` `wall_secs=4.07`
-- `scenario=transient-256` `messages_per_sec=1239.90` `confirm_latency_ms=0.20 disk_flush=not-durable` `saturation_load=2000 kept_up=true` `wall_secs=3.07`
-- `scenario=prefetch-1` `messages_per_sec=593.91` `confirm_latency_ms=0.31 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=prefetch-128` `messages_per_sec=593.87` `confirm_latency_ms=0.32 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=1000 kept_up=true` `wall_secs=4.07`
-- `scenario=fan-2x2` `messages_per_sec=3829.11` `confirm_latency_ms=0.18 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` `saturation_load=12800 kept_up=false` `wall_secs=12.14`
+All 45 cells from 2026-10-05T21:29:06Z are `ok=1`, `oom=false`, `blocked=0`, `nacks=0`, `missed=0`, `returns=0`. Inflight ended on the window cap except Rust at 4 CPU / 8 GiB single, which ended at 117. PHP was measured on 2026-10-06T12:05:24Z with the same client, shapes, sizes, and pins. Those 15 cells are also `ok=1`, with no OOM, blocked connections, nacks, misses, or returns. Image `queueforge-php:bench` `sha256:f3113acd45996ecb624cc32c5d4b252ddf8f957d44f70a3737613d0c6f7d4cc1`. Docker Desktop was raised to 8 CPUs and 24576 MiB for that run, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again. PHP does not expose `queueforge_confirm_before_fsync_total`. A durable confirm is released only after the 10 ms fsync tick. The paced ladder was not rerun for PHP.
 
-## Disk flush beside durable latency
+`MiB` is cgroup `memory.current` during a 2 s sample that starts 0.5 s after the measure mark. It includes page cache. `CPU` is cgroup `usage_usec` over that same 2 s, in percent of one core. The client sat at 97–98 on every cell because the measure loop spins. p50 and p99 are the high edge of a 100 µs bucket. A printed 200.00 ms is the overflow bucket, so that sample is at least 200 ms.
 
-| Broker | Flush path that ran |
+QueueForge bench images use `fsync_policy=every_n_ms` and `fsync_interval_ms=10`. A durable confirm returns after the covering fsync. `queueforge_confirm_before_fsync_total` was 0 on every Bun cell and on every Rust cell whose scrape returned. The Rust 1 CPU / 512 MiB shared scrape timed out while that queue was growing; the same binary returned 0 on the neighboring cells. RabbitMQ classic confirms before its flush.
+
+On the shared shape, Rust confirms run ahead of deliveries, so that queue is growing through the sample. The MiB there is early in the 8 s window. On the other shapes, confirms and deliveries stay together.
+
+### One publisher, one consumer
+
+| Container | Broker | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 51505.4 | 51507.2 | 2.40 | 5.10 | 97 | 219 |
+| 1 CPU / 512 MiB | Rust | 141278.2 | 141278.4 | 0.80 | 2.70 | 79 | 92 |
+| 1 CPU / 512 MiB | Bun | 140988.0 | 140980.0 | 0.60 | 3.40 | 83 | 427 |
+| 1 CPU / 512 MiB | PHP | 9968.0 | 9968.0 | 12.80 | 25.10 | 13 | 85 |
+| 1 CPU / 1 GiB | RabbitMQ | 53602.4 | 53602.4 | 2.30 | 3.90 | 97 | 149 |
+| 1 CPU / 1 GiB | Rust | 161930.6 | 161930.6 | 0.80 | 1.80 | 87 | 35 |
+| 1 CPU / 1 GiB | Bun | 135216.0 | 135208.0 | 0.60 | 4.30 | 85 | 371 |
+| 1 CPU / 1 GiB | PHP | 10000.0 | 10000.0 | 12.90 | 17.00 | 13 | 31 |
+| 2 CPU / 2 GiB | RabbitMQ | 71411.1 | 71407.0 | 1.70 | 4.90 | 161 | 168 |
+| 2 CPU / 2 GiB | Rust | 187547.9 | 187546.8 | 0.70 | 2.00 | 126 | 82 |
+| 2 CPU / 2 GiB | Bun | 165656.0 | 165648.0 | 0.60 | 2.70 | 97 | 430 |
+| 2 CPU / 2 GiB | PHP | 9824.0 | 9824.0 | 13.10 | 16.30 | 13 | 32 |
+| 4 CPU / 4 GiB | RabbitMQ | 78982.8 | 78993.9 | 1.60 | 2.80 | 202 | 173 |
+| 4 CPU / 4 GiB | Rust | 188426.8 | 188426.8 | 0.70 | 1.90 | 133 | 29 |
+| 4 CPU / 4 GiB | Bun | 170184.0 | 170192.0 | 0.60 | 2.40 | 111 | 459 |
+| 4 CPU / 4 GiB | PHP | 9744.0 | 9744.0 | 13.00 | 22.00 | 13 | 28 |
+| 4 CPU / 8 GiB | RabbitMQ | 77459.4 | 77448.5 | 1.60 | 3.00 | 202 | 164 |
+| 4 CPU / 8 GiB | Rust | 193370.8 | 193360.0 | 0.70 | 1.80 | 133 | 82 |
+| 4 CPU / 8 GiB | Bun | 170488.0 | 170496.0 | 0.60 | 2.40 | 112 | 458 |
+| 4 CPU / 8 GiB | PHP | 9776.0 | 9776.0 | 13.10 | 17.30 | 12 | 30 |
+
+### 16 connections, one queue
+
+| Container | Broker | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 36394.2 | 37190.1 | 200.00 | 200.00 | 97 | 235 |
+| 1 CPU / 512 MiB | Rust | 104653.0 | 60154.2 | 68.30 | 200.00 | 95 | 326 |
+| 1 CPU / 512 MiB | Bun | 118928.0 | 118944.0 | 68.50 | 106.80 | 86 | 413 |
+| 1 CPU / 512 MiB | PHP | 61680.1 | 61326.2 | 116.60 | 200.00 | 94 | 120 |
+| 1 CPU / 1 GiB | RabbitMQ | 39664.8 | 39660.9 | 200.00 | 200.00 | 96 | 256 |
+| 1 CPU / 1 GiB | Rust | 106388.5 | 62948.4 | 67.10 | 200.00 | 96 | 327 |
+| 1 CPU / 1 GiB | Bun | 120608.0 | 120592.5 | 67.50 | 115.00 | 84 | 389 |
+| 1 CPU / 1 GiB | PHP | 66711.9 | 66571.1 | 105.80 | 191.40 | 94 | 124 |
+| 2 CPU / 2 GiB | RabbitMQ | 66565.4 | 67480.6 | 120.50 | 163.10 | 167 | 244 |
+| 2 CPU / 2 GiB | Rust | 163821.6 | 78149.5 | 47.30 | 122.60 | 181 | 582 |
+| 2 CPU / 2 GiB | Bun | 131344.0 | 131344.0 | 59.10 | 153.50 | 92 | 430 |
+| 2 CPU / 2 GiB | PHP | 66775.0 | 66820.4 | 104.60 | 197.20 | 93 | 125 |
+| 4 CPU / 4 GiB | RabbitMQ | 66855.4 | 67820.9 | 117.40 | 200.00 | 220 | 253 |
+| 4 CPU / 4 GiB | Rust | 224816.2 | 110058.8 | 35.20 | 72.60 | 331 | 729 |
+| 4 CPU / 4 GiB | Bun | 136640.0 | 136616.0 | 56.40 | 149.20 | 104 | 448 |
+| 4 CPU / 4 GiB | PHP | 67678.0 | 67678.0 | 103.00 | 186.90 | 96 | 124 |
+| 4 CPU / 8 GiB | RabbitMQ | 71935.4 | 71467.6 | 112.60 | 179.50 | 221 | 265 |
+| 4 CPU / 8 GiB | Rust | 239222.9 | 120737.6 | 33.10 | 72.20 | 339 | 791 |
+| 4 CPU / 8 GiB | Bun | 140432.0 | 140456.0 | 58.50 | 99.30 | 105 | 472 |
+| 4 CPU / 8 GiB | PHP | 66009.9 | 65964.0 | 109.30 | 180.30 | 96 | 125 |
+
+### 16 queues
+
+| Container | Broker | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 40603.8 | 40825.0 | 198.70 | 200.00 | 97 | 187 |
+| 1 CPU / 512 MiB | Rust | 135840.6 | 135805.1 | 56.20 | 117.90 | 95 | 348 |
+| 1 CPU / 512 MiB | Bun | 148240.0 | 148256.0 | 53.60 | 99.50 | 81 | 384 |
+| 1 CPU / 512 MiB | PHP | 64600.5 | 64600.5 | 113.10 | 200.00 | 94 | 115 |
+| 1 CPU / 1 GiB | RabbitMQ | 41877.0 | 41937.1 | 192.20 | 200.00 | 97 | 190 |
+| 1 CPU / 1 GiB | Rust | 144892.1 | 144821.2 | 53.10 | 99.40 | 96 | 344 |
+| 1 CPU / 1 GiB | Bun | 147968.0 | 147976.0 | 55.50 | 95.60 | 85 | 447 |
+| 1 CPU / 1 GiB | PHP | 66739.4 | 66739.4 | 106.60 | 190.70 | 93 | 125 |
+| 2 CPU / 2 GiB | RabbitMQ | 86316.0 | 86039.0 | 96.80 | 144.10 | 193 | 216 |
+| 2 CPU / 2 GiB | Rust | 249498.5 | 249409.1 | 31.90 | 61.60 | 187 | 469 |
+| 2 CPU / 2 GiB | Bun | 165440.0 | 165440.0 | 47.50 | 97.30 | 93 | 491 |
+| 2 CPU / 2 GiB | PHP | 68165.4 | 68022.8 | 101.20 | 189.60 | 93 | 122 |
+| 4 CPU / 4 GiB | RabbitMQ | 159453.6 | 159438.0 | 51.00 | 99.50 | 379 | 262 |
+| 4 CPU / 4 GiB | Rust | 339656.9 | 339265.2 | 22.40 | 52.70 | 346 | 700 |
+| 4 CPU / 4 GiB | Bun | 169120.0 | 169144.0 | 48.70 | 93.90 | 104 | 505 |
+| 4 CPU / 4 GiB | PHP | 67594.8 | 67878.8 | 101.60 | 188.00 | 94 | 126 |
+| 4 CPU / 8 GiB | RabbitMQ | 151569.8 | 151802.4 | 52.50 | 118.30 | 372 | 240 |
+| 4 CPU / 8 GiB | Rust | 344963.6 | 345357.8 | 17.80 | 42.60 | 363 | 682 |
+| 4 CPU / 8 GiB | Bun | 174560.0 | 174584.0 | 47.10 | 82.90 | 106 | 535 |
+| 4 CPU / 8 GiB | PHP | 67545.8 | 67594.4 | 104.20 | 186.90 | 94 | 125 |
+
+Same CPU count with more RAM leaves confirm/s in the same band. Bun stays near one core (CPU 81–112). A second CPU lifts the single shape from about 141k to about 166k. Four CPUs stay near 170k. Rust on one connection uses about 0.8–1.3 cores and reaches about 141k–193k. On one shared queue the delivery rate is the rate that keeps the queue from growing: about 60k, 63k, 78k, 110k, and 121k. Across 16 queues Rust keeps up and follows the cores: about 136k, 145k, 249k, 340k, and 345k, at CPU 95, 96, 187, 346, and 363. RabbitMQ on one connection is about 52k–54k on 1 CPU and about 71k–79k with more CPUs. One queue with 16 connections stays near 36k–72k and about 1–2.2 cores. Sixteen queues use the cores: about 41k, 42k, 86k, 159k, and 152k, at CPU 97, 97, 193, 379, and 372. PHP does not follow the cores. One connection stays near 10k at every size, with p50 about 13 ms. Sixteen connections and sixteen queues stay near 62k–68k at about one core (CPU 93–96). Extra RAM does not move it. Confirms and deliveries stay together.
+
+Drained cgroup memory stays a few hundred MiB: Bun about 371–535, RabbitMQ about 149–265, Rust on one connection about 29–92. Rust across 16 queues is about 344–700. The shared Rust queue is the row that accumulates, from 326 MiB on 1 CPU to 791 MiB on 4 CPU / 8 GiB at the early sample. No cell approached its memory cap.
+
+The wide-row p50 is mostly wait inside the 8192-deep window. On one connection that wait is under a millisecond for Rust and Bun, 1.6–2.4 ms for RabbitMQ, and about 13 ms for PHP.
+
+The paced 09:03:42Z ladder, from the Mac through the published port, kept 13139.01 / 19230.10 / 18396.86 messages/s at 128 in flight on 1 CPU / 512 MiB (RabbitMQ / Rust / Bun). That ladder counts a step only when 95% of an offered rate is kept. The numbers in this section are the full-window push from inside the Docker network.
+
+### Load compare
+
+One row per broker and container. `1 conn` and `16 queues` are confirm/s. Confirms and deliveries stay together on those shapes. `16 conn` is consume/s on the one shared queue, the rate that does not grow it. Rust confirm/s on that shape, in the same size order, is 104653.0, 106388.5, 163821.6, 224816.2, and 239222.9. `MiB` is the 16-queue load sample.
+
+`Connections` and `Login memory` are a different run: simultaneous logins, client in a container, no swap, one broker at a time. The number is the last hold that stayed up and passed the probe. Message rates and that hold were not measured together. There is no 1 CPU / 1 GiB login cell. PHP has no login cell: that sweep was not repeated. Bun at 4 CPU held 160000; attempts of 320000 were cut by the login window at 171961 (4 GiB) and 174334 (8 GiB). Rust at 4 CPU / 8 GiB held 100000, and the probe was refused (`max_connections` is 100000); 95000 passed. RabbitMQ at 4 CPU / 8 GiB held 61562; larger asks stop at 65527 sockets.
+
+| App | Size | 1 conn msg/s | 16 conn msg/s | 16 queues msg/s | Connections | MiB | Login memory |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| RabbitMQ | 1 CPU / 512 MiB | 51505.4 | 37190.1 | 40603.8 | 3500 | 187 | 503.3 MiB |
+| Rust | 1 CPU / 512 MiB | 141278.2 | 60154.2 | 135840.6 | 9191 | 348 | 468.1 MiB |
+| Bun | 1 CPU / 512 MiB | 140988.0 | 118944.0 | 148240.0 | 43184 | 384 | 422.9 MiB |
+| PHP | 1 CPU / 512 MiB | 9968.0 | 61326.2 | 64600.5 | n/a | 115 | n/a |
+| RabbitMQ | 1 CPU / 1 GiB | 53602.4 | 39660.9 | 41877.0 | n/a | 190 | n/a |
+| Rust | 1 CPU / 1 GiB | 161930.6 | 62948.4 | 144892.1 | n/a | 344 | n/a |
+| Bun | 1 CPU / 1 GiB | 135216.0 | 120592.5 | 147968.0 | n/a | 447 | n/a |
+| PHP | 1 CPU / 1 GiB | 10000.0 | 66571.1 | 66739.4 | n/a | 125 | n/a |
+| RabbitMQ | 2 CPU / 2 GiB | 71411.1 | 67480.6 | 86316.0 | 18750 | 216 | 1.726 GiB |
+| Rust | 2 CPU / 2 GiB | 187547.9 | 78149.5 | 249498.5 | 37300 | 469 | 1.837 GiB |
+| Bun | 2 CPU / 2 GiB | 165656.0 | 131344.0 | 165440.0 | 170100 | 491 | 1.571 GiB |
+| PHP | 2 CPU / 2 GiB | 9824.0 | 66820.4 | 68165.4 | n/a | 122 | n/a |
+| RabbitMQ | 4 CPU / 4 GiB | 78982.8 | 67820.9 | 159453.6 | 37862 | 262 | 3.551 GiB |
+| Rust | 4 CPU / 4 GiB | 188426.8 | 110058.8 | 339656.9 | 73714 | 700 | 3.629 GiB |
+| Bun | 4 CPU / 4 GiB | 170184.0 | 136616.0 | 169120.0 | 160000 | 505 | 1.473 GiB |
+| PHP | 4 CPU / 4 GiB | 9744.0 | 67678.0 | 67594.8 | n/a | 126 | n/a |
+| RabbitMQ | 4 CPU / 8 GiB | 77459.4 | 71467.6 | 151569.8 | 61562 | 240 | 5.292 GiB |
+| Rust | 4 CPU / 8 GiB | 193370.8 | 120737.6 | 344963.6 | 95000 | 682 | 4.663 GiB |
+| Bun | 4 CPU / 8 GiB | 170488.0 | 140456.0 | 174560.0 | 160000 | 535 | 1.476 GiB |
+| PHP | 4 CPU / 8 GiB | 9776.0 | 65964.0 | 67545.8 | n/a | 125 | n/a |
+
+## Latest (2026-10-05T09:03:42Z)
+
+Rust `sha256:913d67ca03332153548bba73f06e82d842825a50993a98be529bda5858241418` (2026-10-05T07:51:31Z). Bun `sha256:002d75f424ccfa8d3aab05a90143e7b2b696d8c3ff3306564128fbe11611308b` (2026-10-05T09:01:45Z). RabbitMQ `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`, startup complete on the first start. RabbitMQ ran at 09:03:42Z, Rust at 09:05:31Z, Bun at 09:07:17Z. A pre-flush consume keeps the insert in the confirm's record. The delete is the next group commit: a crash after the confirm still has the body, and a clean shutdown does not replay it. Every local scenario is `declare=ok publish=ok consume=ok ack=ok confirms=ok`.
+
+QueueForge disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync`. RabbitMQ disk line: `publisher confirms before fsync`.
+
+| Ladder | Rust wal fsyncs | Bun wal fsyncs | Bun full flushes | confirm_before |
+| --- | ---: | ---: | ---: | ---: |
+| 1 in flight | 36339 | 43441 | 43441 | 0 |
+| 128 in flight | 11454 | 14224 | 14224 | 0 |
+
+### One confirm, durable-256
+
+| Broker | p50 ms | p99 ms | messages/s | First miss |
+| --- | ---: | ---: | ---: | ---: |
+| RabbitMQ | 0.46 | 0.83 | 1678.69 | 4000 |
+| Rust | 0.28 | 0.61 | 2229.28 | 4000 |
+| Bun | 0.20 | 0.60 | 2710.94 | 8000 |
+
+Rust and Bun p50 are under 0.42 ms and under this session's 0.46 ms. p99 is under 0.88 ms and under this session's 0.83 ms. messages/s is over 1616.44 and over this session's 1678.69. The 01:06:02Z row in the [session table](#one-confirm-across-paced-sessions) is the floor this run replaced: Rust 3.18 / 5.43 / 304.33 and Bun 3.67 / 10.72 / 241.77.
+
+### 128 confirms
+
+| Scenario | Broker | messages/s | × Rabbit | p50 ms | p99 ms | First miss | Wall s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| durable-256 | RabbitMQ | 13139.01 | | 3.19 | 8.58 | 32000 | 20.93 |
+| durable-256 | Rust | 19230.10 | 1.464× (1.46359) | 2.03 | 11.15 | 48000 | 20.19 |
+| durable-256 | Bun | 18396.86 | 1.400× (1.40017) | 2.18 | 11.25 | 48000 | 20.17 |
+| fan-2x2 | RabbitMQ | 14512.22 | | 6.81 | 16.77 | 32000 | 20.14 |
+| fan-2x2 | Rust | 24005.72 | 1.654× (1.65417) | 2.41 | 11.56 | 96000 | 20.25 |
+| fan-2x2 | Bun | 23744.97 | 1.636× (1.63621) | 2.46 | 11.25 | 96000 | 20.15 |
+
+The 1.3× bars are 17080.71 (durable) and 18865.89 (fan). Both brokers clear those bars, and they clear the 01:06 floors: durable 16936.46 (Rust) and 17813.55 (Bun), fan 23372.78 (Rust) and 23203.75 (Bun). Durable p50 is inside 2.58 ms (Rust) and 2.32 ms (Bun). Fan p50 is inside 3.01 ms (Rust) and 2.98 ms (Bun). Offer-by-offer rates are in [Step rates](#step-rates-128-confirms). On the durable steps cited there, confirms match consumed.
+
+### Short scenarios
+
+All three brokers score the same `messages/s` and the same kept saturation.
+
+| Scenario | messages/s | Saturation | Rabbit top step | Rust top step | Bun top step |
+| --- | ---: | --- | ---: | ---: | ---: |
+| size-64 | 600.00 | 1000 kept | 1000.0 | 996.3 | 995.2 |
+| prefetch-1 | 600.00 | 1000 kept | 999.3 | 998.8 | 996.7 |
+| prefetch-128 | 600.00 | 1000 kept | 999.5 | 998.5 | 999.1 |
+| size-4096 | 250.00 | 400 kept | 400.0 | 400.0 | 399.6 |
+| transient-256 | 1250.00 | 2000 kept | 2000.0 | 2000.0 | 1998.8 |
+
+### Remote one confirm
+
+Home is the peer: the peer's `queueforge_wal_fsync_seconds_count` moved, and the client's stayed at 0. `confirm_before_delta=0/0`. Disk line: `publisher confirm after that fsync`. Listeners are `172.30.220.10:25672` and `172.30.220.11:25672`. Client ports are 35773 (Rust) and 35774 (Bun). `REMOTE_DONE` is 2026-10-05T09:11:07Z. Three-node messages/s are off this score.
+
+| Path | p50 ms | p99 ms | Peer fsync | Client fsync | Accepted |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Rust client, Rust home | 0.32 | 0.62 | 24914 | 0 | attempt 2 at 09:10:39Z (`REMOTE_ACCEPT:rust:attempt=2`) |
+| Bun client, Bun home | 0.29 | 0.81 | 26870 | 0 | attempt 1 at 09:10:55Z (`REMOTE_ACCEPT:bun:attempt=1`) |
+
+Rust attempt 1 had the home on the client (`client_fsync_delta=25571`, `peer_fsync_delta=0`, p50 0.29, p99 0.65). Caps for this check are Rust p50 3.23 / p99 4.29 and Bun p50 1.71 / p99 3.34.
+
+Trust for this image is the 09:03 rows in [Trust](#trust).
+
+## One confirm across paced sessions
+
+Same `durable-256` ladder, one confirm in flight. From 21:30:56Z on, the Rust and Bun confirm is after the fsync.
+
+| Session | Broker | p50 ms | p99 ms | messages/s | First miss |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 21:30:56Z | RabbitMQ | 0.46 | 0.77 | 1646.12 | 4000 |
+| 21:30:56Z | Rust | 10.01 | 14.26 | 99.16 | 200 |
+| 21:30:56Z | Bun | 12.40 | 15.02 | 80.73 | 200 |
+| 01:06:02Z | RabbitMQ | 0.42 | 0.88 | 1616.44 | 4000 |
+| 01:06:02Z | Rust | 3.18 | 5.43 | 304.33 | 1000 |
+| 01:06:02Z | Bun | 3.67 | 10.72 | 241.77 | 1000 |
+| 04:59:08Z | RabbitMQ | 0.39 | 0.68 | 1725.53 | 4000 |
+| 04:59:08Z | Rust | 0.28 | 0.61 | 2279.90 | 4000 |
+| 04:59:08Z | Bun | 0.20 | 0.64 | 2661.80 | 8000 |
+| 07:55:31Z | RabbitMQ | 0.47 | 0.86 | 1580.97 | 4000 |
+| 07:55:31Z | Rust | 0.27 | 0.54 | 2286.57 | 4000 |
+| 07:55:31Z | Bun | 0.25 | 0.82 | 2214.40 | 8000 |
+| 09:03:42Z | RabbitMQ | 0.46 | 0.83 | 1678.69 | 4000 |
+| 09:03:42Z | Rust | 0.28 | 0.61 | 2229.28 | 4000 |
+| 09:03:42Z | Bun | 0.20 | 0.60 | 2710.94 | 8000 |
+
+On 21:30 each confirm waited out its own flush, so the paced rate stayed near 100 messages/s and the 200/s step is the first miss. p50 and p99 sit inside 15 ms and 25 ms. On 01:06, p50 and p99 sit inside 5 ms and 12 ms, and RabbitMQ's messages/s stays higher because that confirm returns before the flush. From 04:59 on, Rust and Bun are ahead of the same session's RabbitMQ on p50, p99, and messages/s.
+
+## 128 confirms across paced sessions
+
+`× Rabbit` is the ratio printed in that session (three decimals) and the exact quotient.
+
+### durable-256
+
+| Session | Broker | messages/s | × Rabbit | p50 ms | p99 ms | First miss | Wall s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 21:30:56Z | RabbitMQ | 12935.91 | | 3.23 | 8.83 | 32000 | 21.00 |
+| 21:30:56Z | Rust | 18013.42 | 1.393× (1.39251) | 2.35 | 11.45 | 48000 | 20.21 |
+| 21:30:56Z | Bun | 18728.37 | 1.448× (1.44778) | 2.09 | 10.74 | 48000 | 20.18 |
+| 01:06:02Z | RabbitMQ | 12799.52 | | 3.28 | 9.07 | 32000 | 21.01 |
+| 01:06:02Z | Rust | 16936.46 | 1.323× (1.32321) | 2.58 | 11.46 | 48000 | 20.19 |
+| 01:06:02Z | Bun | 17813.55 | 1.392× (1.39174) | 2.32 | 11.15 | 48000 | 20.20 |
+| 04:59:08Z | RabbitMQ | 12857.96 | | 3.45 | 8.50 | 32000 | 20.68 |
+| 04:59:08Z | Rust | 19239.16 | 1.496× (1.49628) | 2.02 | 11.45 | 48000 | 20.19 |
+| 04:59:08Z | Bun | 18941.29 | 1.473× (1.47312) | 2.03 | 10.87 | 48000 | 20.21 |
+| 07:55:31Z | RabbitMQ | 13063.30 | | 3.17 | 8.81 | 32000 | 21.10 |
+| 07:55:31Z | Rust | 19441.91 | 1.488× (1.48828) | 2.00 | 11.19 | 48000 | 20.16 |
+| 07:55:31Z | Bun | 18363.52 | 1.406× (1.40573) | 2.17 | 11.09 | 48000 | 20.17 |
+| 09:03:42Z | RabbitMQ | 13139.01 | | 3.19 | 8.58 | 32000 | 20.93 |
+| 09:03:42Z | Rust | 19230.10 | 1.464× (1.46359) | 2.03 | 11.15 | 48000 | 20.19 |
+| 09:03:42Z | Bun | 18396.86 | 1.400× (1.40017) | 2.18 | 11.25 | 48000 | 20.17 |
+
+### fan-2x2
+
+| Session | Broker | messages/s | × Rabbit | p50 ms | p99 ms | First miss | Wall s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 21:30:56Z | RabbitMQ | 14329.30 | | 6.93 | 17.32 | 48000 | 20.15 |
+| 21:30:56Z | Rust | 23786.62 | 1.660× (1.66000) | 2.86 | 11.48 | 96000 | 20.16 |
+| 21:30:56Z | Bun | 23932.61 | 1.670× (1.67019) | 2.50 | 11.02 | 96000 | 20.16 |
+| 01:06:02Z | RabbitMQ | 14331.58 | | 6.80 | 16.81 | 32000 | 20.14 |
+| 01:06:02Z | Rust | 23372.78 | 1.631× (1.63086) | 3.01 | 13.27 | 96000 | 20.15 |
+| 01:06:02Z | Bun | 23203.75 | 1.619× (1.61906) | 2.98 | 11.43 | 96000 | 20.17 |
+| 04:59:08Z | RabbitMQ | 14837.75 | | 6.64 | 16.96 | 48000 | 20.15 |
+| 04:59:08Z | Rust | 24002.12 | 1.618× (1.61764) | 2.39 | 11.79 | 96000 | 20.22 |
+| 04:59:08Z | Bun | 23410.67 | 1.578× (1.57778) | 2.64 | 11.34 | 96000 | 20.17 |
+| 07:55:31Z | RabbitMQ | 14465.24 | | 6.90 | 16.59 | 32000 | 20.14 |
+| 07:55:31Z | Rust | 23966.65 | 1.657× (1.65684) | 2.35 | 11.42 | 96000 | 20.22 |
+| 07:55:31Z | Bun | 23792.70 | 1.645× (1.64482) | 2.43 | 11.08 | 96000 | 20.13 |
+| 09:03:42Z | RabbitMQ | 14512.22 | | 6.81 | 16.77 | 32000 | 20.14 |
+| 09:03:42Z | Rust | 24005.72 | 1.654× (1.65417) | 2.41 | 11.56 | 96000 | 20.25 |
+| 09:03:42Z | Bun | 23744.97 | 1.636× (1.63621) | 2.46 | 11.25 | 96000 | 20.15 |
+
+| Session | durable 1.3× bar | fan 1.3× bar |
+| --- | ---: | ---: |
+| 21:30:56Z | 16816.68 | |
+| 01:06:02Z | 16639.38 | 18631.05 |
+| 04:59:08Z | 16715.35 | 19289.08 |
+| 07:55:31Z | 16982.29 | 18804.81 |
+| 09:03:42Z | 17080.71 | 18865.89 |
+
+The 21:30 section printed the durable 1.3× line and left the fan 1.3× line out. On 21:30 and 01:06, Rust and Bun p50 stay inside 15 ms. The 21:30 steps ran between 1.991 s and 2.275 s. Early absolute floors cited with 21:30 were durable Rust 2,800 and Bun 3,600, fan Rust 3,200 and Bun 3,800, against the historical file at Rust 2768.62 / 3169.15 and Bun 3627.59 / 3829.11.
+
+### Short scenarios
+
+From 21:30 through 09:03, all three brokers: `size-64`, `prefetch-1`, and `prefetch-128` at 600.00, saturation 1000 kept; `size-4096` at 250.00, saturation 400 kept; `transient-256` at 1250.00, saturation 2000 kept.
+
+Top-step consumed/s. 21:30 recorded the scores and the kept saturation, without a separate top-step line.
+
+| Session | Scenario | Rabbit | Rust | Bun |
+| --- | --- | ---: | ---: | ---: |
+| 01:06:02Z | size-64 | 1000.0 | 994.3 | 997.1 |
+| 01:06:02Z | prefetch-1 | 1000.0 | 997.9 | 998.6 |
+| 01:06:02Z | prefetch-128 | 999.1 | 997.3 | 996.4 |
+| 01:06:02Z | size-4096 | 400.0 | 399.8 | 399.8 |
+| 01:06:02Z | transient-256 | 1999.4 | 1999.0 | 1998.5 |
+| 04:59:08Z | size-64 | 999.9 | 995.4 | 995.7 |
+| 04:59:08Z | prefetch-1 | 999.4 | 996.7 | 999.5 |
+| 04:59:08Z | prefetch-128 | 999.9 | 996.3 | 995.8 |
+| 04:59:08Z | size-4096 | 400.0 | 400.0 | 400.0 |
+| 04:59:08Z | transient-256 | 1997.5 | 1999.8 | 1998.8 |
+| 07:55:31Z | size-64 | 1000.0 | 997.5 | 997.7 |
+| 07:55:31Z | prefetch-1 | 999.8 | 999.6 | 999.9 |
+| 07:55:31Z | prefetch-128 | 999.7 | 998.6 | 993.7 |
+| 07:55:31Z | size-4096 | 400.0 | 400.0 | 400.0 |
+| 07:55:31Z | transient-256 | 1998.4 | 1999.0 | 1998.7 |
+| 09:03:42Z | size-64 | 1000.0 | 996.3 | 995.2 |
+| 09:03:42Z | prefetch-1 | 999.3 | 998.8 | 996.7 |
+| 09:03:42Z | prefetch-128 | 999.5 | 998.5 | 999.1 |
+| 09:03:42Z | size-4096 | 400.0 | 400.0 | 399.6 |
+| 09:03:42Z | transient-256 | 2000.0 | 2000.0 | 1998.8 |
+
+## Step rates, 128 confirms
+
+Consumed messages/s. A rate under 95% is that broker's first miss. A blank cell has no rate in that session's write-up.
+
+### 21:30:56Z
+
+| Scenario | Offer | Rabbit | Rust | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 4000 | 3997.1 | 3969.2 | 3992.0 |
+| durable-256 | 8000 | 7853.5 (98.17%) | 7965.1 | 7972.6 |
+| durable-256 | 16000 | 15990.4 | 15924.3 | 15982.9 |
+| durable-256 | 32000 | 23129.4 | 31817.8 | 31944.2 |
+| durable-256 | 48000 | | 38433.1 | 41539.1 |
+| fan-2x2 | 6400 | 6395.8 | 6384.6 | 6376.6 |
+| fan-2x2 | 12800 | 12792.5 | 12707.0 | 12717.2 |
+| fan-2x2 | 32000 | 30774.3 (96.17%) | | |
+| fan-2x2 | 48000 | 27096.0 | | |
+| fan-2x2 | 64000 | | 63690.7 | 63761.9 |
+| fan-2x2 | 96000 | | 68486.8 | 69770.0 |
+
+RabbitMQ's durable 8000 step at 98.17% stayed kept. RabbitMQ's fan 32000 step at 96.17% stayed kept, so the fan first miss is 48000.
+
+### 01:06:02Z
+
+| Scenario | Offer | Rabbit | Rust | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 8000 | 7996.0 (99.95%) | 7981.5 | 7980.6 |
+| durable-256 | 16000 | 15987.3 | 15842.7 | 15932.8 |
+| durable-256 | 32000 | 23464.0 | 31766.6 | 31833.9 |
+| durable-256 | 48000 | | 33602.7 | 38197.1 |
+| fan-2x2 | 6400 | 6396.8 | 6362.5 | 6359.6 |
+| fan-2x2 | 12800 | 12791.8 | 12732.6 | 12741.5 |
+| fan-2x2 | 32000 | 29821.4 (93.19%) | | |
+| fan-2x2 | 64000 | | 63887.0 | 62418.3 |
+| fan-2x2 | 96000 | | 64177.6 | 63481.9 |
+
+### 04:59:08Z
+
+| Scenario | Offer | Rabbit | Rust | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 8000 | 7991.3 (99.89%) | 7953.4 (99.42%) | 7954.4 (99.43%) |
+| durable-256 | 16000 | 15988.9 | 15923.8 | 15944.4 |
+| durable-256 | 32000 | 23626.6 (73.83%) | 31943.2 (99.82%) | 31368.7 (98.03%) |
+| durable-256 | 48000 | | 42762.3 (89.09%) | 41609.2 (86.69%) |
+| fan-2x2 | 6400 | 6398.7 | 6376.3 | 6356.0 |
+| fan-2x2 | 12800 | 12792.7 (99.94%) | 12698.7 (99.21%) | 12756.8 (99.66%) |
+| fan-2x2 | 32000 | 31206.2 (97.52%) | | |
+| fan-2x2 | 48000 | 31180.3 (64.96%) | | |
+| fan-2x2 | 64000 | | 63629.7 (99.42%) | 63952.5 (99.93%) |
+| fan-2x2 | 96000 | | 69598.8 (72.50%) | 64718.0 (67.41%) |
+
+RabbitMQ's fan 32000 step at 97.52% stayed kept, so that fan first miss is 48000. On the durable 8000 step, confirms match consumed.
+
+### 07:55:31Z
+
+| Scenario | Offer | Rabbit | Rust | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 8000 | 7993.3 (99.92%) | 7979.3 (99.74%) | 7953.0 (99.41%) |
+| durable-256 | 16000 | 15991.4 | 15967.0 | 15952.1 |
+| durable-256 | 32000 | 23917.6 (74.74%) | 31837.7 (99.49%) | 31957.7 (99.87%) |
+| durable-256 | 48000 | | 43511.4 (90.65%) | 40094.3 (83.53%) |
+| fan-2x2 | 6400 | 6395.1 | 6391.8 | 6376.4 |
+| fan-2x2 | 12800 | 12792.7 (99.94%) | 12713.5 (99.32%) | 12757.2 (99.67%) |
+| fan-2x2 | 32000 | 30146.6 (94.21%) | | |
+| fan-2x2 | 64000 | | 63865.7 (99.79%) | 63888.3 (99.83%) |
+| fan-2x2 | 96000 | | 68894.1 (71.76%) | 68352.1 (71.20%) |
+
+On the durable 8000 step, confirms match consumed.
+
+### 09:03:42Z
+
+| Scenario | Offer | Rabbit | Rust | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 8000 | 7994.4 (99.93%) | 7982.6 (99.78%) | 7993.9 (99.92%) |
+| durable-256 | 16000 | 15993.0 (99.96%) | 15913.9 (99.46%) | 15963.5 (99.77%) |
+| durable-256 | 32000 | 23629.0 (73.84%) | 31964.8 (99.89%) | 31818.9 (99.43%) |
+| durable-256 | 48000 | | 42462.3 (88.46%) | 40059.3 (83.46%) |
+| fan-2x2 | 6400 | 6396.8 (99.95%) | 6357.8 (99.34%) | 6382.6 (99.73%) |
+| fan-2x2 | 12800 | 12792.1 (99.94%) | 12710.7 (99.30%) | 12710.9 (99.30%) |
+| fan-2x2 | 32000 | 30368.7 (94.90%) | | |
+| fan-2x2 | 64000 | | 63897.2 (99.84%) | 63803.0 (99.69%) |
+| fan-2x2 | 96000 | | 68643.1 (71.50%) | 67857.5 (70.68%) |
+
+On the durable 8000 step, confirms match consumed. The same match holds on each cited durable step in this session.
+
+## Remote one confirm across sessions
+
+Same implementation, client node `a`, home on the peer, 1 CPU and 512 MiB each. Disk line: `publisher confirm after that fsync`. `confirm_before` stayed 0. From 04:59 on, `confirm_before_delta=0/0` on the accepted attempt.
+
+Rust, client on `a`, home on the peer:
+
+| Session | p50 ms | p99 ms | Peer fsync | Client fsync | Accepted |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 01:06:02Z | 3.23 | 4.29 | 3553 | 0 | attempt 1 (`REMOTE_ACCEPT:rust:attempt=1`) |
+| 04:59:08Z | 0.28 | 1.62 | 26836 | 0 | attempt 1 at 05:26:20Z |
+| 07:55:31Z | 0.31 | 0.62 | 25158 | 0 | attempt 1 at 08:10:17Z |
+| 09:03:42Z | 0.32 | 0.62 | 24914 | 0 | attempt 2 at 09:10:39Z |
+
+Bun, client on `a`, home on the peer:
+
+| Session | p50 ms | p99 ms | Peer fsync | Client fsync | Accepted |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 01:06:02Z | 1.71 | 3.34 | 6931 | 1 | attempt 3 (`REMOTE_ACCEPT:bun:attempt=3`) |
+| 04:59:08Z | 0.25 | 1.23 | 30855 | 0 | attempt 2 at 05:26:48Z |
+| 07:55:31Z | 0.29 | 0.78 | 27060 | 0 | attempt 2 at 08:10:45Z |
+| 09:03:42Z | 0.29 | 0.81 | 26870 | 0 | attempt 1 at 09:10:55Z |
+
+Attempts where the home was the client:
+
+| Session | Broker | Client fsync | Peer fsync | p50 ms | p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 04:59:08Z | Bun attempt 1 | 37613 | 0 | | |
+| 07:55:31Z | Bun attempt 1 | 34416 | 0 | | |
+| 09:03:42Z | Rust attempt 1 | 25571 | 0 | 0.29 | 0.65 |
+
+`REMOTE_DONE` is 2026-10-05T05:27:01Z, 2026-10-05T08:10:57Z, and 2026-10-05T09:11:07Z. The 01:06 Rust pair listens on `172.30.220.10:25672` and `172.30.220.11:25672`, because that broker's cluster listen is a socket address. Later pairs use the same addresses, client ports 35773 and 35774. The 01:06 accepted rows are inside p50 15 ms and p99 25 ms. From 04:59 on, the caps are the 01:06 accepted latencies: Rust p50 3.23 / p99 4.29 and Bun p50 1.71 / p99 3.34. The 21:30 remote rows are in the [cluster smoke](#cluster-smoke-2026-10-04t215609z).
+
+## Fsync counters
+
+`confirm_before` is 0 on every row.
+
+| Session | After 1 in flight, Rust wal | Bun wal | Bun full flush | After 128, Rust wal | Bun wal | Bun full flush |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 21:30:56Z | 10704 | 11743 | 11743 | | | |
+| 01:06:02Z | | | | 19473 | 24324 | 24324 |
+| 04:59:08Z | 36952 | 41869 | 41869 | 11437 | 13221 | 13221 |
+| 07:55:31Z | 37012 | 37502 | 37502 | 11524 | 14413 | 14413 |
+| 09:03:42Z | 36339 | 43441 | 43441 | 11454 | 14224 | 14224 |
+
+21:30 counted fsyncs after the durable and fan run, so those counts sit in the inflight-1 columns. 01:06 published the counts after the 128 ladder.
+
+## Trust
+
+Kill -9 after the confirm, then a restart, delivers that body once. `confirm_before` stays 0 on every row.
+
+| When | Check | ms | Fsync | Result |
+| --- | --- | ---: | --- | --- |
+| 21:40:23Z | Rust classic every_n_ms | 404 | 0 → 1 | survived, `TRUST_RUST_EXIT:0`, 4 passed |
+| 21:40:23Z | Rust classic always | 9 | | survived |
+| 21:40:23Z | Rust classic every_n_messages | 9 | | survived |
+| 21:40:23Z | Rust forwarded home | 9 | 0 → 1 | survived |
+| 21:40:23Z | Bun classic every_n_ms | 402 | | survived, `consumed body=kill9-body`, `TRUST_BUN_EXIT:0`, 6 pass |
+| 21:40:23Z | Bun classic always | 1 | | survived |
+| 21:40:23Z | Bun classic every_n_messages | 1 | | survived |
+| 21:40:23Z | Bun forwarded home | 11 | 0 → 1 | survived kill of the home |
+| 21:42:14Z | Quorum second confirm | 254 | | inside the 2000 ms cap |
+| 21:42:14Z | Quorum second confirm | 79 | | inside the 2000 ms cap |
+| 21:42:14Z | bun-bun-rust | | | survivor delivered once, restart did not duplicate |
+| 21:42:14Z | rust-rust-bun | | | survivor delivered once, restart did not duplicate |
+| 21:42:14Z | quorum body | | | bun consumed `body-one` from the survivor, rust consumed `body-one` from the survivor, bun confirm before fsync stayed 0, rust confirm before fsync stayed 0, `CLUSTER_TRUST_DONE` |
+| 21:42:14Z | Stored home | | | `from-rust` from the Bun home, `from-bun` from the Rust home |
+| 21:42:14Z | Membership | | | HTTP 400 on `a node cannot forget itself`, `member b still homes a classic queue`, and `the member list cannot become empty` |
+| 21:42:14Z | URI shovel | | | `status=201 delivered shovel-body`, on Rust and on Bun |
+| 21:42:14Z | URI federation | | | `upstream=201 policy=201 delivered fed-body`, on Rust and on Bun |
+| 01:06:02Z | Rust classic always | 4.709 | 0 → 2 | survived, `CLASSIC_EXIT:0`, 4 passed |
+| 01:06:02Z | Rust classic every_n_messages | 5.089 | 0 → 2 | survived |
+| 01:06:02Z | Rust classic every_n_ms | 6.403 | 0 → 2 | survived |
+| 01:06:02Z | Rust forwarded home | 11 | 0 → 1 | survived |
+| 01:06:02Z | Rust 128-confirm batch | 11 | 0 → 1 | one fsync, `BATCH_EXIT:0` |
+| 01:06:02Z | Bun 128-confirm batch | 4 | 0 → 1 | one fsync |
+| 01:06:02Z | Bun classic and forwarded | under 10 | | each survived, `BUN_EXIT:0`, 14 pass |
+| 01:06:02Z | bun-bun-rust | | | survivor delivered once, restart did not duplicate, `BUN_QUORUM_EXIT:0` |
+| 01:06:02Z | rust-rust-bun | | | survivor delivered once, restart did not duplicate, `RUST_QUORUM_EXIT:0` |
+| 04:59:08Z | Rust classic always | 4.957 | 0 → 2 | survived, `CLASSIC_EXIT:0`, 5 passed |
+| 04:59:08Z | Rust classic every_n_messages | 5.352 | 0 → 2 | survived |
+| 04:59:08Z | Rust classic every_n_ms | 4.968 | 0 → 2 | survived |
+| 04:59:08Z | Rust forwarded home | 12 | 0 → 1 | survived |
+| 04:59:08Z | Rust forwarded home, second run | 15 | 0 → 1 | survived, `FORWARDED_EXIT:0`, 2 passed |
+| 04:59:08Z | Rust pipelined forwarded | 178 | 0 → 1 | survived |
+| 04:59:08Z | Rust 128-confirm batch | 13 | 0 → 1 | one fsync, delta 1, `BATCH_EXIT:0`, 2 passed |
+| 04:59:08Z | Rust 128-confirm batch | 81 | 0 → 1 | one fsync, delta 1 |
+| 04:59:08Z | Bun 128-confirm batch | 5 | 0 → 1 | one fsync, delta 1 |
+| 04:59:08Z | Bun 128-confirm batch | 81 | 0 → 1 | one fsync, delta 1 |
+| 04:59:08Z | Bun classic every_n_ms | 2 | | survived, `consumed body=kill9-body` |
+| 04:59:08Z | Bun classic always | 2 | | survived |
+| 04:59:08Z | Bun classic every_n_messages | 2 | | survived |
+| 04:59:08Z | Bun forwarded home | 3 | 0 → 1 | survived kill of the home |
+| 04:59:08Z | Bun 128-confirm batch, bun log | 83 | 0 → 1 | full_flush, 6 pass, 0 fail |
+| 04:59:08Z | rust-rust-bun | | | survivor delivered `kept-body`, restart returned `still-body`, second restart did not duplicate, 2 pass, 0 fail |
+| 04:59:08Z | bun-bun-rust | | | same three lines |
+| 04:59:08Z | quorum_majority | | | bun confirm before fsync stayed 0, bun consumed `body-one` from the survivor, bun fsync 2 → 6, rust confirm before fsync stayed 0, rust consumed `body-one` from the survivor, rust fsync 1 → 3, then `body-two` from the restarted node, 2 passed |
+| 07:55:31Z | Rust classic always | 4.122 | 0 → 2 | survived, `CARGO_CLASSIC_EXIT:0`, 5 passed, 0 failed |
+| 07:55:31Z | Rust classic every_n_messages | 4.375 | 0 → 2 | survived |
+| 07:55:31Z | Rust classic every_n_ms | 4.062 | 0 → 2 | survived |
+| 07:55:31Z | Rust forwarded home | 12 | 0 → 1 | survived |
+| 07:55:31Z | Rust 128-confirm batch | 12 | 0 → 1 | one fsync, delta 1, `CARGO_BATCH_EXIT:0`, 2 passed, 0 failed |
+| 07:55:31Z | Rust 128-confirm batch | 81 | 0 → 1 | one fsync, delta 1 |
+| 07:55:31Z | Bun 128-confirm batch | 4 | 0 → 1 | one fsync, delta 1 |
+| 07:55:31Z | Bun 128-confirm batch | 80 | 0 → 1 | one fsync, delta 1 |
+| 07:55:31Z | Bun classic every_n_ms | 2 | | survived, `consumed body=kill9-body` |
+| 07:55:31Z | Bun classic always | 2 | | survived |
+| 07:55:31Z | Bun classic every_n_messages | 2 | | survived |
+| 07:55:31Z | Bun forwarded home | 3 | 0 → 1 | survived kill of the home |
+| 07:55:31Z | Bun illegal frame | | | that connection closed, the process stayed up |
+| 07:55:31Z | Bun noAck | 3 | 0 → 1 | full_flush, `log_has_body=true`, `delivered=1`, survived kill -9 |
+| 07:55:31Z | Bun 128-confirm batch, bun log | 81 | 0 → 1 | full_flush, 9 pass, 0 fail, `TRUST_BUN_EXIT:0` |
+| 07:55:31Z | rust-rust-bun | | | survivor delivered `kept-body`, restart returned `still-body`, second restart did not duplicate |
+| 07:55:31Z | bun-bun-rust | | | same three lines |
+| 07:55:31Z | Bun quorum classic every_n_ms | 2 | | survived |
+| 07:55:31Z | Bun quorum classic always | 3 | | survived |
+| 07:55:31Z | Bun quorum classic every_n_messages | 3 | | survived, 2 pass, 0 fail, `QUORUM_EXIT:0` |
+| 09:03:42Z | Rust classic always | 4.279 | 0 → 2 | survived, `CARGO_CLASSIC_EXIT:0`, 5 passed, 0 failed |
+| 09:03:42Z | Rust classic every_n_messages | 4.425 | 0 → 2 | survived |
+| 09:03:42Z | Rust classic every_n_ms | 3.992 | 0 → 2 | survived |
+| 09:03:42Z | Rust forwarded home | 12 | 0 → 1 | survived |
+| 09:03:42Z | Rust 128-confirm batch | 13 | 0 → 1 | one fsync, delta 1, `CARGO_BATCH_EXIT:0`, 2 passed, 0 failed |
+| 09:03:42Z | Rust 128-confirm batch | 82 | 0 → 1 | one fsync, delta 1 |
+| 09:03:42Z | Bun 128-confirm batch | 5 | 0 → 1 | one fsync, delta 1 |
+| 09:03:42Z | Bun 128-confirm batch | 82 | 0 → 1 | one fsync, delta 1 |
+| 09:03:42Z | Bun classic every_n_ms | 2 | | survived, `consumed body=kill9-body` |
+| 09:03:42Z | Bun classic always | 2 | | survived |
+| 09:03:42Z | Bun classic every_n_messages | 2 | | survived |
+| 09:03:42Z | Bun forwarded home | 3 | 0 → 1 | survived kill of the home |
+| 09:03:42Z | Bun illegal frame | | | that connection closed, the process stayed up |
+| 09:03:42Z | Bun noAck | 2 | 0 → 1 | full_flush, `log_has_body=true`, `delivered=1`, survived kill -9 |
+| 09:03:42Z | Bun 128-confirm batch, bun log | 83 | 0 → 1 | full_flush, 9 pass, 0 fail, `TRUST_BUN_EXIT:0` |
+| 09:03:42Z | rust-rust-bun | | | survivor delivered `kept-body`, restart returned `still-body`, second restart did not duplicate |
+| 09:03:42Z | bun-bun-rust | | | same three lines |
+| 09:03:42Z | Bun quorum classic every_n_ms | 3 | | survived |
+| 09:03:42Z | Bun quorum classic always | 2 | | survived |
+| 09:03:42Z | Bun quorum classic every_n_messages | 3 | | survived, 2 pass, 0 fail, `QUORUM_EXIT:0` |
+
+## Builds
+
+RabbitMQ throughout is `rabbitmq:4.3-management` `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`.
+
+| Session | Rust image | Rust created | Bun image | Bun created |
+| --- | --- | --- | --- | --- |
+| 21:30:56Z | `sha256:be759722813fde142ab46cc669e2839efe6e5bb1b4ac85c8a59d19b6f39e3662` | 2026-10-04T21:30:42Z | `sha256:a8b506e5e01f84f66993ebcd0c6be0c4bc12df119a7c3bdcd4cbe69775169c73` | 2026-10-04T21:30:45Z |
+| 01:06:02Z | `sha256:9def1b9b8dcf4850874a66dc8eb03614e209b4989991143ad1f74a3fa6018ddf` | 2026-10-05T00:58:47Z | `sha256:49d069e3f46755d92bf66f672468f5e94ec45a70f3c5fd8b0782f005e5937ca7` | 2026-10-05T00:56:44Z |
+| 04:59:08Z | `sha256:09c41772d329340184f099fbf9b5becd026ec0665ceca5f12218bf8f4e875b97` | 2026-10-05T04:47:19Z | `sha256:a02efd67b25ad4743bf996effb37f52dcba0a8bf34a68c4e4e118fca3634bf6e` | 2026-10-05T05:20:18Z |
+| 07:55:31Z | `sha256:913d67ca03332153548bba73f06e82d842825a50993a98be529bda5858241418` | 2026-10-05T07:51:31Z | `sha256:619c7a5c2492ecc534d9590652aacf35b259cd5cd8831419c244c4bb8b7e5c7c` | 2026-10-05T08:06:47Z |
+| 09:03:42Z | `sha256:913d67ca03332153548bba73f06e82d842825a50993a98be529bda5858241418` | 2026-10-05T07:51:31Z | `sha256:002d75f424ccfa8d3aab05a90143e7b2b696d8c3ff3306564128fbe11611308b` | 2026-10-05T09:01:45Z |
+
+The 04:59 capture's image list names an earlier Bun image from 2026-10-05T04:42:21Z. The measured Bun id is the 05:20:18Z image, the line immediately before `===== bun =====`. Rust ran at 05:00:57Z and Bun at 05:22:08Z. RabbitMQ reached `Server startup complete` on the first start.
+
+The 01:06 RabbitMQ container first exited while reading `/var/lib/rabbitmq/.erlang.cookie` (`eacces`). Those RabbitMQ rows are the restart at 2026-10-05T01:21:41Z on a fresh volume, same image, same 1 CPU / 512 MiB limit, same `bench/rabbitmq.conf`. Rust ran at 01:08:10Z and Bun at 01:09:55Z, before that restart.
+
+The 07:55 and 09:03 captures record `rabbit startup complete` on the first start. 07:55 times: RabbitMQ 07:55:31Z, Rust 07:57:21Z, Bun 08:07:34Z.
+
+## Cluster smoke (2026-10-04T21:56:09Z)
+
+Same images as the 21:30 single-node run, same 1 CPU / 512 MiB cap, `fsync_interval_ms=10`. The host has 2 CPUs, so three-node messages/s stay smoke. 52 summaries (7 classic and 6 quorum on each of 4 layouts), each `consume=ok` and `confirms=ok`, `throughput=paced`, compare exit 0. Durable confirms print `publisher confirm after that fsync`.
+
+One confirm in flight, classic queue stored on the other node. Each path is inside p50 25 ms and p99 40 ms. The highest p50 is 11.78 ms. The highest p99 is 16.32 ms. The mixed rows consumed `remote-body`.
+
+| Path | p50 ms | p99 ms | consume |
+| --- | ---: | ---: | --- |
+| Rust client, Rust home | 9.92 | 14.25 | ok |
+| Bun client, Bun home | 10.93 | 16.32 | ok |
+| Bun client, Rust home | 10.08 | 13.93 | ok |
+| Rust client, Bun home | 11.78 | 15.17 | ok |
+
+| Layout | Classic durable msg/s | Durable first miss | Classic fan msg/s | Fan first miss | Quorum durable msg/s | Quorum fan msg/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| rust3 | 11659.52 | 32000 | 12805.03 | 32000 | 4619.06 | 4166.67 |
+| bun3 | 9035.20 | 16000 | 23849.34 | 96000 | 4512.95 | 4166.17 |
+| Rust-Rust-Bun | 11906.33 | 32000 | 13159.93 | 32000 | 4600.24 | 4166.67 |
+| Bun-Bun-Rust | 18776.39 | 48000 | 8151.36 | 32000 | 4597.22 | 4166.67 |
+
+Quorum `durable-256` first miss is 16000 on every layout. Quorum `fan-2x2` saturation is 12800 kept on every layout. The capture listed one wall per layout, in the order the layouts were printed, without repeating the layout name on the wall:
+
+| | 1 | 2 | 3 | 4 |
+| --- | ---: | ---: | ---: | ---: |
+| Quorum durable wall s | 12.11 | 12.15 | 12.14 | 12.11 |
+| Quorum fan wall s | 12.15 | 12.18 | 12.13 | 12.09 |
+
+Quorum durable confirm p50 runs from 9.04 ms to 9.39 ms. The single-node paced rates beside this smoke are the 21:30 rows: durable 12935.91 / 18013.42 (1.393×) / 18728.37 (1.448×) and fan 14329.30 / 23786.62 (1.660×) / 23932.61 (1.670×).
+
+Classic confirm p50, milliseconds:
+
+| Scenario | rust3 | bun3 | Rust-Rust-Bun | Bun-Bun-Rust |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 4.00 | 7.81 | 4.04 | 2.07 |
+| size-64 | 7.26 | 6.71 | 7.33 | 7.19 |
+| size-4096 | 7.84 | 6.67 | 7.15 | 7.97 |
+| transient-256 | 1.82 | 1.57 | 2.01 | 1.78 |
+| prefetch-1 | 7.60 | 7.08 | 7.36 | 6.87 |
+| prefetch-128 | 7.02 | 7.61 | 7.69 | 7.57 |
+| fan-2x2 | 6.96 | 2.56 | 5.72 | 16.69 |
+
+Classic confirm p99, milliseconds:
+
+| Scenario | rust3 | bun3 | Rust-Rust-Bun | Bun-Bun-Rust |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 12.61 | 17.20 | 11.35 | 10.81 |
+| size-64 | 34.74 | 23.22 | 16.12 | 27.79 |
+| size-4096 | 28.00 | 27.93 | 25.12 | 30.77 |
+| transient-256 | 8.86 | 3.09 | 12.08 | 10.82 |
+| prefetch-1 | 15.22 | 15.34 | 15.86 | 31.13 |
+| prefetch-128 | 17.09 | 28.67 | 27.10 | 33.57 |
+| fan-2x2 | 18.78 | 11.05 | 14.53 | 32.23 |
+
+Quorum confirm p50, milliseconds. Two members fsync before the confirm. The highest p99 in the 52 summaries is 36.70 ms, Bun-Bun-Rust quorum `prefetch-128`.
+
+| Scenario | rust3 | bun3 | Rust-Rust-Bun | Bun-Bun-Rust |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 9.39 | 9.04 | 9.39 | 9.23 |
+| size-64 | 9.17 | 7.67 | 7.67 | 7.51 |
+| size-4096 | 7.78 | 7.70 | 8.11 | 7.53 |
+| prefetch-1 | 7.68 | 6.87 | 7.97 | 6.68 |
+| prefetch-128 | 9.11 | 7.56 | 7.94 | 7.73 |
+| fan-2x2 | 9.23 | 9.08 | 9.14 | 9.38 |
+
+Quorum confirm p99, milliseconds:
+
+| Scenario | rust3 | bun3 | Rust-Rust-Bun | Bun-Bun-Rust |
+| --- | ---: | ---: | ---: | ---: |
+| durable-256 | 15.38 | 18.27 | 16.50 | 17.06 |
+| size-64 | 29.24 | 28.10 | 25.29 | 24.22 |
+| size-4096 | 17.46 | 20.36 | 19.00 | 34.85 |
+| prefetch-1 | 22.48 | 29.52 | 14.30 | 35.07 |
+| prefetch-128 | 20.17 | 21.76 | 13.35 | 36.70 |
+| fan-2x2 | 18.22 | 14.33 | 29.28 | 31.96 |
+
+`size-64`, `prefetch-1`, and `prefetch-128` are saturation 1000 kept at 600.00 on every layout. `size-4096` is 400 kept at 250.00. Classic `transient-256` is 2000 kept at 1250.00.
+
+## Captures that are not this score
+
+| Capture | What it printed | Why it is off the tables above |
+| --- | --- | --- |
+| 2026-10-04T19:16:30Z | durable 12762.92 / 16591.66 / 16356.08 (1.29999× and 1.28153×); fan 13927.56 / 19144.97 / 18681.61 (1.375× and 1.341×) | durable was under 1.3× |
+| 2026-10-04T06:27:09Z | sustained headline durable 15986.24 / 31802.97 / 31881.49, fan 12792.38 / 45983.97 / 31843.32; pace lines durable 12920.66 / 17136.55 / 16960.69, fan 13839.21 / 19838.45 / 19137.78 | `throughput=sustained` used the highest kept step |
+| 2026-10-04T06:10:15Z | durable 5191.00 / 5200.00 / 5200.00 (1.002×); fan 4166.67 on all three (1.000×) | historical ladder only, same window mean |
+| 2026-10-04T03:07:26Z | classic durable and fan as `throughput=consumer` | older compare build |
+
+Order in those triples is RabbitMQ / Rust / Bun.
+
+## Historical confirm before the fsync
+
+One run on one shared disk. Host ports 35672, 35673, and 35674. Images: RabbitMQ `rabbitmq:4.3-management`; Rust `queueforge-rust:bench` built `rust:1.85-bookworm`, runtime `debian:bookworm-slim`; Bun `queueforge-bun:bench` on `oven/bun:1.4.2-alpine`. Each container had `NanoCpus=1000000000` and `Memory=536870912`. The only change between runs was `AMQP_URL`.
+
+Both QueueForge brokers fsync on `fsync_interval_ms=10`. In this run a durable confirm completed after the buffered write and before that fsync. On Rust the interval fsync runs outside the queue-actor command loop, and the actor takes the finished fsync before the next mailbox command. A confirm issued while the fsync is still blocked returns without waiting. On Bun, `every_n_ms` stages durable rows and writes them in one transaction on the group-commit timer. A crash before the interval fsync can drop an acknowledged message. Confirm ms below is the median, `confirm_latency_ms`.
+
+| Scenario | Broker | messages/s | Confirm ms | Saturation | Wall s |
+| --- | --- | ---: | ---: | --- | ---: |
+| durable-256 | RabbitMQ | 1430.87 | 0.53 | miss 2000 | 12.05 |
+| durable-256 | Rust | 2768.62 | 0.21 | miss 8000 | 12.12 |
+| durable-256 | Bun | 3627.59 | 0.13 | miss 8000 | 12.12 |
+| fan-2x2 | RabbitMQ | 2105.03 | 0.57 | miss 6400 | 12.05 |
+| fan-2x2 | Rust | 3169.15 | 0.27 | miss 12800 | 12.16 |
+| fan-2x2 | Bun | 3829.11 | 0.18 | miss 12800 | 12.14 |
+| size-64 | RabbitMQ | 589.43 | 0.54 | 1000 kept | 4.05 |
+| size-64 | Rust | 596.64 | 0.27 | 1000 kept | 4.07 |
+| size-64 | Bun | 596.66 | 0.35 | 1000 kept | 4.07 |
+| size-4096 | RabbitMQ | 244.88 | 0.82 | 400 kept | 4.09 |
+| size-4096 | Rust | 247.47 | 0.68 | 400 kept | 4.07 |
+| size-4096 | Bun | 247.84 | 0.60 | 400 kept | 4.07 |
+| transient-256 | RabbitMQ | 1233.16 | 0.23 | 2000 kept | 3.07 |
+| transient-256 | Rust | 1240.46 | 0.28 | 2000 kept | 3.07 |
+| transient-256 | Bun | 1239.90 | 0.20 | 2000 kept | 3.07 |
+| prefetch-1 | RabbitMQ | 600.25 | 0.55 | 1000 kept | 4.05 |
+| prefetch-1 | Rust | 593.19 | 0.29 | 1000 kept | 4.08 |
+| prefetch-1 | Bun | 593.91 | 0.31 | 1000 kept | 4.07 |
+| prefetch-128 | RabbitMQ | 599.96 | 0.54 | 1000 kept | 4.05 |
+| prefetch-128 | Rust | 596.46 | 0.28 | 1000 kept | 4.07 |
+| prefetch-128 | Bun | 593.87 | 0.32 | 1000 kept | 4.07 |
+
+| Broker | Flush path |
 | --- | --- |
 | RabbitMQ | `classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync` |
 | Rust | `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` |
 | Bun | `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm before fsync` |
 
-Transient scenarios print `disk_flush=not-durable`. RabbitMQ classic queue v2 flushes its write buffer at least every 200 ms and sends the confirm before that fsync. On `durable-256` that confirm is `confirm_latency_ms=0.53`. Rust and Bun also confirm before the interval fsync: `confirm_latency_ms=0.21` and `confirm_latency_ms=0.13`. The 10 ms timer still fsyncs. A process crash inside that window can drop a message whose confirm already returned.
+Transient rows print `disk_flush=not-durable`.
 
-## Recommendation
+On `durable-256` and `fan-2x2`, Rust and Bun are at least 30% higher in messages/s than RabbitMQ and at most 70% of RabbitMQ's confirm time. Bun is the faster of the two on both (3627.59 and 3829.11). Rust clears the same 8000 and 12800 saturation steps. `transient-256` kept 2000/s on every broker.
 
-On this shared-disk run, both QueueForge brokers are at least 30% higher in `messages_per_sec` than RabbitMQ and at most 70% of RabbitMQ in `confirm_latency_ms` on `durable-256` and on `fan-2x2`.
+### Still outside this comparison
 
-`durable-256`: RabbitMQ `messages_per_sec=1430.87`, `confirm_latency_ms=0.53`, `saturation_load=2000 kept_up=false`. Rust `messages_per_sec=2768.62` is at least 30% higher than that rate, and Rust `confirm_latency_ms=0.21` is at most 70% of RabbitMQ `confirm_latency_ms=0.53`, with `saturation_load=8000 kept_up=false`. Bun `messages_per_sec=3627.59` is at least 30% higher than RabbitMQ `messages_per_sec=1430.87`, and Bun `confirm_latency_ms=0.13` is at most 70% of RabbitMQ `confirm_latency_ms=0.53`, with `saturation_load=8000 kept_up=false`.
-
-`fan-2x2`: RabbitMQ `messages_per_sec=2105.03`, `confirm_latency_ms=0.57`, `saturation_load=6400 kept_up=false`. Rust `messages_per_sec=3169.15` is at least 30% higher than that rate, and Rust `confirm_latency_ms=0.27` is at most 70% of RabbitMQ `confirm_latency_ms=0.57`, with `saturation_load=12800 kept_up=false`. Bun `messages_per_sec=3829.11` is at least 30% higher than RabbitMQ `messages_per_sec=2105.03`, and Bun `confirm_latency_ms=0.18` is at most 70% of RabbitMQ `confirm_latency_ms=0.57`, with `saturation_load=12800 kept_up=false`.
-
-`transient-256` kept up at 2000/s on every broker: RabbitMQ `messages_per_sec=1233.16`, Rust `messages_per_sec=1240.46`, Bun `messages_per_sec=1239.90`, each `saturation_load=2000 kept_up=true`. Confirm latency is `confirm_latency_ms=0.23`, `confirm_latency_ms=0.28`, and `confirm_latency_ms=0.20`.
-
-`size-4096` kept up at `saturation_load=400 kept_up=true` on all three: RabbitMQ `messages_per_sec=244.88`, Rust `messages_per_sec=247.47`, Bun `messages_per_sec=247.84`. The 1000 messages/s durable steps (`size-64`, `prefetch-1`, `prefetch-128`) kept up on all three, so `messages_per_sec` there is the paced rate.
-
-For a new single-node classic-queue deployment that can accept a confirm before the interval fsync, either QueueForge broker is at least 30% higher in `messages_per_sec` and at most 70% of RabbitMQ in `confirm_latency_ms` on both `durable-256` and `fan-2x2` in this run. Bun had the higher `durable-256` rate (`messages_per_sec=3627.59`) and the higher `fan-2x2` rate (`messages_per_sec=3829.11`). Rust cleared the same 8000 and 12800 saturation steps (`confirm_latency_ms=0.21` on `durable-256`). Stay on RabbitMQ 4 when the deployment needs any blocker below.
-
-## Production blockers
-
-These are outside this classic-queue comparison. A production move off RabbitMQ still has to account for them.
-
-| Blocker | Why it blocks a replacement |
+| Blocker | Why it still matters |
 | --- | --- |
-| Joining an existing RabbitMQ cluster | QueueForge nodes cluster only with the same implementation. They do not join an Erlang RabbitMQ cluster. |
-| Mixing Rust and Bun nodes | The two brokers do not replicate to each other. Data directories are not interchangeable. |
-| Classic queue mirroring | RabbitMQ 4 rejects `ha-mode` / `ha-params`. QueueForge does not implement mirroring either. Quorum queues are the replicated type, and only inside one implementation. |
-| LDAP, OAuth, x509 | Not implemented. Authentication is the local user table. |
-| Kubernetes operator and management-compatible automation | QueueForge management uses the `queueforge_session` cookie. RabbitMQ uses HTTP basic auth. Permission URLs are not the same shape. |
-| Crash before the interval fsync | A publisher confirm can return before the 10 ms fsync. A crash in that window can drop an acknowledged message. RabbitMQ classic queues have the same window, with a 200 ms flush. |
+| Joining an existing RabbitMQ cluster | QueueForge does not join an Erlang RabbitMQ cluster. |
+| Classic queue mirroring | RabbitMQ 4 rejects `ha-mode` / `ha-params`. QueueForge does not implement mirroring. Quorum is the replicated type. |
+| LDAP, OAuth, x509 | Authentication is the local user table. |
+| Kubernetes operator and management auth | QueueForge management uses the `queueforge_session` cookie. RabbitMQ uses HTTP basic auth. Permission URLs differ. |
+| Confirm before the flush | This historical run only. From 2026-10-04T21:30:56Z, QueueForge confirms after the covering fsync. RabbitMQ classic queues still confirm before a flush of at least 200 ms. |
 
-## Decision
-
-For this classic-queue run, both QueueForge brokers are at least 30% higher in `messages_per_sec` and at most 70% of RabbitMQ in `confirm_latency_ms` on `durable-256` (Rust `messages_per_sec=2768.62` `confirm_latency_ms=0.21`, Bun `messages_per_sec=3627.59` `confirm_latency_ms=0.13`, beside RabbitMQ `messages_per_sec=1430.87` `confirm_latency_ms=0.53`) and on `fan-2x2` (Rust `messages_per_sec=3169.15` `confirm_latency_ms=0.27`, Bun `messages_per_sec=3829.11` `confirm_latency_ms=0.18`, beside RabbitMQ `messages_per_sec=2105.03` `confirm_latency_ms=0.57`). `transient-256` kept up at `saturation_load=2000 kept_up=true` on Rust and Bun. Treat a confirm as “buffered, fsync still pending” on every broker here. Move off RabbitMQ only when the deployment does not join an Erlang RabbitMQ cluster, mix Rust with Bun, use classic mirroring, LDAP, OAuth, x509, or the Kubernetes operator.
+Mixed Rust and Bun quorum is the [21:56 smoke](#cluster-smoke-2026-10-04t215609z) on a 2 CPU host. Data directories are still not interchangeable, and a QueueForge node still does not join an Erlang cluster.
