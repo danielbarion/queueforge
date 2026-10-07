@@ -6,6 +6,7 @@ import { GITHUB } from "./bench";
 
 const LINKS = [
   { href: "/about", label: "About" },
+  { href: "/features", label: "Features" },
   { href: "/benchmark", label: "Benchmark" },
 ];
 
