@@ -291,12 +291,26 @@ export class Store {
     else write();
   }
   deleteQueue(vhost: string, name: string) {
+    // Rows already in the overwrite log need a delete record there too, or a
+    // restart replays them and their chunks are never removed.
+    const logged: number[] = [];
+    if (this.fastLog) {
+      const rows = this.db.query("SELECT id FROM messages WHERE vhost=? AND queue=?").all(vhost, name) as Array<{ id: number }>;
+      for (const row of rows) logged.push(Number(row.id));
+      for (const [id, row] of this.shadow) {
+        if (row && row.vhost === vhost && row.queue === name) logged.push(id);
+      }
+    }
     this.db.query("DELETE FROM queues WHERE vhost=? AND name=?").run(vhost, name);
     this.db.query("DELETE FROM bindings WHERE vhost=? AND queue=?").run(vhost, name);
     this.db.query("DELETE FROM messages WHERE vhost=? AND queue=?").run(vhost, name);
     this.pending = this.pending.filter((row) => row.vhost !== vhost || row.queue !== name);
     for (const [id, row] of this.shadow) {
       if (row && row.vhost === vhost && row.queue === name) this.shadow.delete(id);
+    }
+    if (logged.length > 0) {
+      for (const id of logged) this.pendingDeletes.push(id);
+      this.arm();
     }
   }
   listQueues(): QueueRow[] {
@@ -514,6 +528,7 @@ export class Store {
         this.pending = [];
         this.pendingDeletes = deleteNext;
         this.settledPending.clear();
+        this.relocate();
         // Unacked rows only. A catch-up runs if that index ever gets huge.
         if (this.shadow.size >= 80_000) this.applyShadow();
       } else {
@@ -547,6 +562,41 @@ export class Store {
       this.flushesSinceCheckpoint = 0;
       this.checkpointAside();
     }
+  }
+
+  /**
+   * Append the last live rows of an old log chunk again, so that chunk can be
+   * removed. Rows whose delete is already queued are left to that delete.
+   */
+  private relocate() {
+    const ids = this.fastLog?.relocationCandidates();
+    if (!ids || ids.length === 0) return;
+    const deleting = new Set(this.pendingDeletes);
+    let moved = 0;
+    for (const id of ids) {
+      if (deleting.has(id)) continue;
+      const row = this.readRow(id);
+      if (!row) continue;
+      this.pending.push(row);
+      moved++;
+    }
+    if (moved > 0) this.arm();
+  }
+
+  /** One stored row with its queue, from the synced index or sqlite. */
+  private readRow(id: number): { id: number; vhost: string; queue: string; body: Uint8Array; meta: string } | null {
+    const synced = this.shadow.get(id);
+    if (synced) return synced;
+    if (synced === null) return null;
+    const row = this.db.query("SELECT vhost, queue, body, meta FROM messages WHERE id=?").get(id) as {
+      vhost: string;
+      queue: string;
+      body: Uint8Array | ArrayBuffer;
+      meta: string;
+    } | null;
+    if (!row) return null;
+    const body = row.body instanceof Uint8Array ? row.body : new Uint8Array(row.body);
+    return { id, vhost: String(row.vhost), queue: String(row.queue), body, meta: String(row.meta ?? "") };
   }
 
   /** Write fsynced rows into sqlite. Not on the lone confirm path. */

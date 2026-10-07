@@ -7,12 +7,17 @@
  *
  * Each chunk is its own file. The next chunk is materialized on another
  * thread, so that work does not dirty the file the confirm is syncing.
+ *
+ * A rotated chunk is removed once every insert in it has a synced delete,
+ * oldest first. A delete record is always in the same or a later chunk than
+ * its insert, so dropping a prefix never brings an acked body back.
  */
 import {
   closeSync,
   constants,
   fdatasyncSync,
   fstatSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readSync,
@@ -31,6 +36,12 @@ const KICK_REMAINING = 2 * 1024 * 1024;
  * fsync tail. Later chunks are still built off to the side.
  */
 const START_CHUNKS = 8;
+/**
+ * Rotated chunks kept behind the active one before the oldest chunk's
+ * remaining live rows are written forward, so a few unacked messages do not
+ * pin every later chunk.
+ */
+const COMPACT_AFTER = 16;
 const MAX_NAME = 64 * 1024;
 const MAX_META = 1024 * 1024;
 const MAX_BODY = 64 * 1024 * 1024;
@@ -49,20 +60,9 @@ export type LogOp =
 
 type ActiveChunk = { id: number; fd: number; len: number; size: number };
 
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
+/** IEEE CRC-32, the same polynomial the table version used. Native, so replay and the group commit do not loop per byte in JS. */
 function crc32(buf: Uint8Array): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = (CRC_TABLE[(c ^ buf[i]!) & 0xff]! ^ (c >>> 8)) >>> 0;
-  return (c ^ 0xffffffff) >>> 0;
+  return Bun.hash.crc32(buf) >>> 0;
 }
 
 function chunkPath(dir: string, id: number): string {
@@ -129,53 +129,75 @@ function inspect(path: string): { logical: number; size: number } | null {
   }
 }
 
-function encodeRecord(
+/** Magic, type, id, the three length fields, body length, and crc. */
+const RECORD_FIXED = 4 + 1 + 8 + 2 + 2 + 4 + 4 + 4;
+const MAGIC = 0x4c4d4651; // "QFML" read as a little-endian u32
+
+/** Write one record at `o` and return the offset after it. Strings are encoded straight into `buf`. */
+function writeRecord(
+  buf: Buffer,
+  o: number,
   type: number,
   id: number,
   vhost: string,
+  vhostLen: number,
   queue: string,
+  queueLen: number,
   meta: string,
+  metaLen: number,
   body: Uint8Array,
-): Buffer {
-  const vhostBytes = Buffer.from(vhost);
-  const queueBytes = Buffer.from(queue);
-  const metaBytes = Buffer.from(meta);
-  const bodyBytes = Buffer.from(body);
-  const len =
-    4 + 1 + 8 + 2 + vhostBytes.length + 2 + queueBytes.length + 4 + metaBytes.length + 4 + bodyBytes.length + 4;
-  const buf = Buffer.allocUnsafe(len);
-  let o = 0;
-  buf.write("QFML", o, 4, "ascii");
-  o += 4;
-  buf.writeUInt8(type, o);
-  o += 1;
-  buf.writeBigUInt64LE(BigInt(id), o);
-  o += 8;
-  buf.writeUInt16LE(vhostBytes.length, o);
+): number {
+  const start = o;
+  buf.writeUInt32LE(MAGIC, o);
+  buf[o + 4] = type;
+  // Two halves instead of a BigInt per record. Ids stay below 2^53.
+  buf.writeUInt32LE(id >>> 0, o + 5);
+  buf.writeUInt32LE(Math.floor(id / 0x1_0000_0000), o + 9);
+  o += 13;
+  buf.writeUInt16LE(vhostLen, o);
   o += 2;
-  vhostBytes.copy(buf, o);
-  o += vhostBytes.length;
-  buf.writeUInt16LE(queueBytes.length, o);
+  if (vhostLen) o += buf.write(vhost, o, vhostLen, "utf8");
+  buf.writeUInt16LE(queueLen, o);
   o += 2;
-  queueBytes.copy(buf, o);
-  o += queueBytes.length;
-  buf.writeUInt32LE(metaBytes.length, o);
+  if (queueLen) o += buf.write(queue, o, queueLen, "utf8");
+  buf.writeUInt32LE(metaLen, o);
   o += 4;
-  metaBytes.copy(buf, o);
-  o += metaBytes.length;
-  buf.writeUInt32LE(bodyBytes.length, o);
+  if (metaLen) o += buf.write(meta, o, metaLen, "utf8");
+  buf.writeUInt32LE(body.length, o);
   o += 4;
-  bodyBytes.copy(buf, o);
-  o += bodyBytes.length;
-  buf.writeUInt32LE(crc32(buf.subarray(0, o)), o);
-  return buf;
+  buf.set(body, o);
+  o += body.length;
+  buf.writeUInt32LE(crc32(buf.subarray(start, o)), o);
+  return o + 4;
 }
 
+const EMPTY = new Uint8Array(0);
+
+/**
+ * One buffer for a whole group commit, sized first, then written in one pass.
+ * Deletes come first: a replay applies them before this group's inserts.
+ */
 function encodeRows(deletes: number[], inserts: LogInsert[]): Buffer {
-  const parts: Buffer[] = [];
-  for (const id of deletes) parts.push(encodeRecord(2, id, "", "", "", Buffer.alloc(0)));
-  for (const row of inserts) parts.push(encodeRecord(1, row.id, row.vhost, row.queue, row.meta, row.body));
-  return Buffer.concat(parts);
+  let total = deletes.length * RECORD_FIXED;
+  const lens = new Array<number>(inserts.length * 3);
+  for (let i = 0; i < inserts.length; i++) {
+    const row = inserts[i]!;
+    const v = Buffer.byteLength(row.vhost, "utf8");
+    const q = Buffer.byteLength(row.queue, "utf8");
+    const m = Buffer.byteLength(row.meta, "utf8");
+    lens[i * 3] = v;
+    lens[i * 3 + 1] = q;
+    lens[i * 3 + 2] = m;
+    total += RECORD_FIXED + v + q + m + row.body.length;
+  }
+  const buf = Buffer.allocUnsafe(total);
+  let o = 0;
+  for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY);
+  for (let i = 0; i < inserts.length; i++) {
+    const row = inserts[i]!;
+    o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body);
+  }
+  return buf;
 }
 
 function parseRecord(buf: Buffer, pos: number, limit: number): { next: number; op: LogOp } | null {
@@ -242,8 +264,32 @@ function scanFile(fd: number, logical: number, apply: (op: LogOp) => void): numb
   return pos;
 }
 
+/** Make unlinks in `dir` durable. */
+function syncDir(dir: string) {
+  let fd = -1;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch {
+    /* A lost unlink only replays a chunk whose rows are all deleted later. */
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
 export class FastLog {
   private active: ActiveChunk;
+  /** Lowest chunk id still on disk. */
+  private oldest: number;
+  /** Row id to the chunk holding its latest insert, for rows without a synced delete. */
+  private readonly liveChunk = new Map<number, number>();
+  /** Chunk id to the number of rows in `liveChunk` that point at it. */
+  private readonly liveCount = new Map<number, number>();
+  private retireQueued = false;
+  /** The oldest chunk whose rows were last handed out to be written forward, and when. */
+  private relocating = { chunk: 0, at: 0 };
+  /** Chunks removed since open. */
+  retiredChunks = 0;
   private worker: Worker | null = null;
   private preparingId = 0;
   private closed = false;
@@ -252,8 +298,9 @@ export class FastLog {
   private readonly state = new SharedArrayBuffer(8);
   private readonly view = new BigInt64Array(this.state);
 
-  private constructor(private readonly dir: string, active: ActiveChunk) {
+  private constructor(private readonly dir: string, active: ActiveChunk, oldest: number) {
     this.active = active;
+    this.oldest = Math.min(oldest, active.id);
     Atomics.store(this.view, 0, 0n);
   }
 
@@ -286,7 +333,7 @@ export class FastLog {
         if (id === 1) fd = created;
         else closeSync(created);
       }
-      const log = new FastLog(dir, { id: 1, fd, len: HEADER, size: CHUNK });
+      const log = new FastLog(dir, { id: 1, fd, len: HEADER, size: CHUNK }, 1);
       log.nextReady = true;
       return log;
     }
@@ -306,7 +353,7 @@ export class FastLog {
     }
     const pick = chosen ?? { id: ids[0]!, end: HEADER, size: CHUNK };
     const fd = openSync(chunkPath(dir, pick.id), constants.O_RDWR);
-    return new FastLog(dir, { id: pick.id, fd, len: pick.end, size: pick.size });
+    return new FastLog(dir, { id: pick.id, fd, len: pick.end, size: pick.size }, ids[0]!);
   }
 
   /** Apply every complete record. A torn tail rewinds the active chunk. */
@@ -317,7 +364,11 @@ export class FastLog {
       const fd = owned ? openSync(path, "r") : this.active.fd;
       try {
         const size = fstatSync(fd).size;
-        const good = scanFile(fd, size, apply);
+        const good = scanFile(fd, size, (op) => {
+          if (op.kind === "insert") this.track(op.id, id);
+          else this.untrack(op.id);
+          apply(op);
+        });
         if (id === this.active.id && good < this.active.len) {
           writeAllAt(fd, headerBuf(good), 0);
           fdatasyncSync(fd);
@@ -348,7 +399,80 @@ export class FastLog {
     writeAllAt(this.active.fd, buf, this.active.len);
     fdatasyncSync(this.active.fd);
     this.active.len = newLen;
+    for (const id of deletes) this.untrack(id);
+    for (const row of inserts) this.track(row.id, this.active.id);
     this.kick();
+    this.scheduleRetire();
+  }
+
+  /**
+   * Live rows that still hold the oldest chunk, once enough chunks sit behind
+   * it. The caller appends them again; that insert moves them to the active
+   * chunk and the old one can go. At most one chunk's worth of bytes is
+   * rewritten per call.
+   */
+  relocationCandidates(): number[] {
+    if (this.active.id - this.oldest <= COMPACT_AFTER) return [];
+    const live = this.liveCount.get(this.oldest) ?? 0;
+    if (live === 0) return [];
+    const { chunk, at } = this.relocating;
+    if (chunk === this.oldest && this.active.id - at < COMPACT_AFTER) return [];
+    this.relocating = { chunk: this.oldest, at: this.active.id };
+    const ids: number[] = [];
+    for (const [id, held] of this.liveChunk) {
+      if (held === this.oldest) ids.push(id);
+    }
+    return ids;
+  }
+
+  /** Remove rotated chunks from the front while none of their rows are live. */
+  retire() {
+    let removed = 0;
+    while (this.oldest < this.active.id && (this.liveCount.get(this.oldest) ?? 0) === 0) {
+      try {
+        unlinkSync(chunkPath(this.dir, this.oldest));
+      } catch (err) {
+        // A chunk left behind must keep every later delete, so stop here.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
+      }
+      this.liveCount.delete(this.oldest);
+      this.oldest++;
+      removed++;
+    }
+    if (removed === 0) return;
+    this.retiredChunks += removed;
+    syncDir(this.dir);
+  }
+
+  /** Chunk files on disk from the oldest kept through the active one. */
+  get keptChunks(): number {
+    return this.active.id - this.oldest + 1;
+  }
+
+  private track(id: number, chunk: number) {
+    this.untrack(id);
+    this.liveChunk.set(id, chunk);
+    this.liveCount.set(chunk, (this.liveCount.get(chunk) ?? 0) + 1);
+  }
+
+  private untrack(id: number) {
+    const chunk = this.liveChunk.get(id);
+    if (chunk === undefined) return;
+    this.liveChunk.delete(id);
+    const left = (this.liveCount.get(chunk) ?? 1) - 1;
+    if (left > 0) this.liveCount.set(chunk, left);
+    else this.liveCount.delete(chunk);
+  }
+
+  /** Unlink and the directory fsync run after the confirm callbacks, not inside them. */
+  private scheduleRetire() {
+    if (this.retireQueued || this.closed) return;
+    if (this.oldest >= this.active.id || (this.liveCount.get(this.oldest) ?? 0) > 0) return;
+    this.retireQueued = true;
+    setImmediate(() => {
+      this.retireQueued = false;
+      if (!this.closed) this.retire();
+    });
   }
 
   close() {
