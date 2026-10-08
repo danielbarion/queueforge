@@ -741,7 +741,7 @@ async fn cross_node_publish_consume_window() {
     setup
         .queue_declare(
             &queue_name,
-            QueueDeclareOptions::default(),
+            QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() },
             FieldTable::default(),
         )
         .await
@@ -832,7 +832,7 @@ async fn consumers_on_both_nodes_receive_from_one_queue() {
     setup
         .queue_declare(
             &queue_name,
-            QueueDeclareOptions::default(),
+            QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() },
             FieldTable::default(),
         )
         .await

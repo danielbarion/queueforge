@@ -15,7 +15,16 @@ pub const DEFAULT_VHOST: &str = "/";
 pub const DEFAULT_EXCHANGE_NAME: &str = "";
 
 /// Builtin exchange names created with every vhost.
-pub const BUILTIN_EXCHANGE_NAMES: &[&str] = &["", "amq.direct", "amq.fanout", "amq.topic"];
+pub const BUILTIN_EXCHANGE_NAMES: &[&str] = &[
+    "",
+    "amq.direct",
+    "amq.fanout",
+    "amq.topic",
+    "amq.headers",
+    "amq.match",
+    "amq.rabbitmq.event",
+    "amq.rabbitmq.trace",
+];
 
 /// A virtual host isolating exchanges, queues, and bindings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +56,15 @@ pub enum ExchangeType {
     Headers,
     /// The unnamed default exchange (`""`); routes when routing key equals queue name.
     Default,
+    /// One queue per routing key by consistent hashing; binding keys are weights.
+    #[serde(rename = "x-consistent-hash")]
+    ConsistentHash,
+    /// One random bound queue per message (RabbitMQ 4 built-in).
+    #[serde(rename = "x-local-random")]
+    LocalRandom,
+    /// Holds each message for its `x-delay` header, then routes as `delayed_type`.
+    #[serde(rename = "x-delayed-message")]
+    Delayed,
 }
 
 impl ExchangeType {
@@ -58,7 +76,24 @@ impl ExchangeType {
             Self::Topic => "topic",
             Self::Headers => "headers",
             Self::Default => "direct",
+            Self::ConsistentHash => "x-consistent-hash",
+            Self::LocalRandom => "x-local-random",
+            Self::Delayed => "x-delayed-message",
         }
+    }
+
+    /// Parse a declared type name. Returns `None` for an unknown type.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "direct" => Self::Direct,
+            "fanout" => Self::Fanout,
+            "topic" => Self::Topic,
+            "headers" => Self::Headers,
+            "x-consistent-hash" => Self::ConsistentHash,
+            "x-local-random" => Self::LocalRandom,
+            "x-delayed-message" => Self::Delayed,
+            _ => return None,
+        })
     }
 }
 
@@ -80,6 +115,20 @@ pub struct Exchange {
     /// Exchange named by the `alternate-exchange` argument, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternate: Option<CompactString>,
+    /// `x-delayed-type` of an `x-delayed-message` exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_type: Option<ExchangeType>,
+}
+
+impl Exchange {
+    /// The type bindings and routing use: a delayed exchange routes as its
+    /// `x-delayed-type` once the delay ends.
+    pub fn routing_kind(&self) -> ExchangeType {
+        match self.kind {
+            ExchangeType::Delayed => self.delayed_type.unwrap_or(ExchangeType::Direct),
+            other => other,
+        }
+    }
 }
 
 impl Exchange {
@@ -97,13 +146,16 @@ impl Exchange {
             auto_delete: false,
             internal: false,
             alternate: None,
+            delayed_type: None,
         }
     }
 
     /// Builtin exchanges inserted at vhost creation.
     ///
-    /// Returns `""` (default/internal direct), `amq.direct`, `amq.fanout`, `amq.topic`.
-    pub fn builtins_for(vhost: impl Into<CompactString>) -> [Exchange; 4] {
+    /// Returns `""` (default/internal direct), `amq.direct`, `amq.fanout`,
+    /// `amq.topic`, `amq.headers`, `amq.match`, and the internal topic
+    /// exchanges `amq.rabbitmq.event` and `amq.rabbitmq.trace`, as RabbitMQ has.
+    pub fn builtins_for(vhost: impl Into<CompactString>) -> [Exchange; 8] {
         let vhost = vhost.into();
         [
             Exchange {
@@ -114,6 +166,7 @@ impl Exchange {
                 auto_delete: false,
                 internal: true,
                 alternate: None,
+                delayed_type: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -123,6 +176,7 @@ impl Exchange {
                 auto_delete: false,
                 internal: false,
                 alternate: None,
+                delayed_type: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -132,15 +186,57 @@ impl Exchange {
                 auto_delete: false,
                 internal: false,
                 alternate: None,
+                delayed_type: None,
             },
             Exchange {
-                vhost,
+                vhost: vhost.clone(),
                 name: CompactString::from("amq.topic"),
                 kind: ExchangeType::Topic,
                 durable: true,
                 auto_delete: false,
                 internal: false,
                 alternate: None,
+                delayed_type: None,
+            },
+            Exchange {
+                vhost: vhost.clone(),
+                name: CompactString::from("amq.headers"),
+                kind: ExchangeType::Headers,
+                durable: true,
+                auto_delete: false,
+                internal: false,
+                alternate: None,
+                delayed_type: None,
+            },
+            Exchange {
+                vhost: vhost.clone(),
+                name: CompactString::from("amq.match"),
+                kind: ExchangeType::Headers,
+                durable: true,
+                auto_delete: false,
+                internal: false,
+                alternate: None,
+                delayed_type: None,
+            },
+            Exchange {
+                vhost: vhost.clone(),
+                name: CompactString::from("amq.rabbitmq.event"),
+                kind: ExchangeType::Topic,
+                durable: true,
+                auto_delete: false,
+                internal: true,
+                alternate: None,
+                delayed_type: None,
+            },
+            Exchange {
+                vhost,
+                name: CompactString::from("amq.rabbitmq.trace"),
+                kind: ExchangeType::Topic,
+                durable: true,
+                auto_delete: false,
+                internal: true,
+                alternate: None,
+                delayed_type: None,
             },
         ]
     }
@@ -395,7 +491,7 @@ mod tests {
     #[test]
     fn builtins_are_durable_and_named_correctly() {
         let builtins = Exchange::builtins_for("/");
-        assert_eq!(builtins.len(), 4);
+        assert_eq!(builtins.len(), 8);
         assert_eq!(builtins[0].name, "");
         assert_eq!(builtins[0].kind, ExchangeType::Default);
         assert!(builtins[0].internal);

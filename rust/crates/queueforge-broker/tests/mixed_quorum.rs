@@ -282,7 +282,9 @@ members = [
         if *kind != "rust" || i == 0 {
             continue;
         }
-        let persisted = dir_contains(&dirs[i], b"body-one");
+        // With Raft the durable copy is the Raft log entry, which holds the
+        // body base64-encoded; the queue log gets it when the commit applies.
+        let persisted = dir_contains(&dirs[i], b"body-one") || dir_contains(&dirs[i], b"Ym9keS1vbmU=");
         assert!(
             persisted,
             "{label} rust follower {i} did not append body-one to its log"
@@ -361,7 +363,8 @@ members = [
 
 #[tokio::test]
 async fn mixed_two_rust_one_bun() {
-    let base = 51000
+    // Ports sit below the macOS ephemeral range (49152+), so outbound dials cannot take them.
+    let base = 32000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -372,7 +375,7 @@ async fn mixed_two_rust_one_bun() {
 
 #[tokio::test]
 async fn mixed_two_bun_one_rust() {
-    let base = 53000
+    let base = 33000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -479,7 +482,7 @@ members = [
 
 #[tokio::test]
 async fn claim_once_rust_majority() {
-    let base = 55000
+    let base = 34000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -490,7 +493,7 @@ async fn claim_once_rust_majority() {
 
 #[tokio::test]
 async fn claim_once_bun_majority() {
-    let base = 57000
+    let base = 36000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -499,16 +502,16 @@ async fn claim_once_bun_majority() {
     claim_once("bun-majority", ["bun", "rust", "bun"], base).await;
 }
 
-/// 32-bit FNV-1a over UTF-16, matching `bun/src/broker/routing.ts` `queueHome`.
+/// The shared classic home hash (docs/raft.md, section 9), as Bun's `queueHome` computes it.
 fn bun_home(vhost: &str, name: &str, ids: &[&str]) -> String {
-    let mut hash: u32 = 0x811c9dc5;
-    for unit in format!("{vhost}\0{name}").encode_utf16() {
-        hash ^= u32::from(unit);
-        hash = hash.wrapping_mul(0x01000193);
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in vhost.bytes().chain(std::iter::once(0xff)).chain(name.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
     }
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();
-    sorted[(hash as usize) % sorted.len()].to_string()
+    sorted[(hash % sorted.len() as u64) as usize].to_string()
 }
 
 struct Attached {
@@ -590,7 +593,7 @@ async fn classic_consume_follows_the_stored_home_across_implementations() {
     use queueforge_broker::queue_home;
     use queueforge_core::ClusterMember;
 
-    let base = 59000
+    let base = 37000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -829,7 +832,7 @@ members = [
 
 #[tokio::test]
 async fn membership_delete_refuses_self_homed_member_and_empty_list() {
-    let base = 60100
+    let base = 38000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1011,7 +1014,7 @@ async fn uri_across(owner: &str, peer: &str, base: u16) {
 
 #[tokio::test]
 async fn uri_shovel_and_federation_move_one_body_across_processes() {
-    let base = 62100
+    let base = 39000
         + (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

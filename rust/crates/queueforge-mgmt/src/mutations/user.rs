@@ -19,9 +19,29 @@ pub struct PutUserBody {
     /// Plaintext password (required on create; optional on update).
     #[serde(default)]
     password: Option<String>,
-    /// Tags: administrator / management / monitoring.
-    #[serde(default)]
+    /// Tags: administrator / management / monitoring. RabbitMQ sends one
+    /// comma-separated string; the admin UI sends an array.
+    #[serde(default, deserialize_with = "tags_any")]
     tags: Vec<String>,
+}
+
+/// Read `tags` as an array of strings or as RabbitMQ's comma-separated string.
+fn tags_any<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Tags {
+        List(Vec<String>),
+        Text(String),
+    }
+    Ok(match Option::<Tags>::deserialize(d)? {
+        None => Vec::new(),
+        Some(Tags::List(list)) => list,
+        Some(Tags::Text(text)) => text
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    })
 }
 
 #[derive(Debug, Serialize)]

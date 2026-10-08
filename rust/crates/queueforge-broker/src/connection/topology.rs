@@ -41,12 +41,60 @@ where
         channel: u16,
         declare: exchange_method::Declare,
     ) -> Result<Step, ConnError> {
+        // A passive declare only checks existence. Type, arguments and
+        // permissions are not looked at, as in RabbitMQ.
+        if declare.passive {
+            let vhost = self.vhost.clone().unwrap_or_else(|| "/".into());
+            if declare.exchange.is_empty() {
+                if !declare.no_wait {
+                    self.send_method(channel, &Method::ExchangeDeclareOk(exchange_method::DeclareOk)).await?;
+                }
+                return Ok(Step::Continue);
+            }
+            let stored = {
+                let store = Arc::clone(&self.store);
+                let vhost_lookup = vhost.clone();
+                let name = declare.exchange.clone();
+                MetadataStore::blocking(store, move |s| s.get_exchange(&vhost_lookup, &name)).await
+            };
+            match self
+                .router
+                .get_exchange(&vhost, declare.exchange.as_str())
+                .or_else(|| stored.ok().flatten())
+            {
+                Some(_) => {
+                    if !declare.no_wait {
+                        self.send_method(
+                            channel,
+                            &Method::ExchangeDeclareOk(exchange_method::DeclareOk),
+                        )
+                        .await?;
+                    }
+                    return Ok(Step::Continue);
+                }
+                None => {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_NOT_FOUND,
+                        &format!(
+                            "NOT_FOUND - no exchange '{}' in vhost '{vhost}'",
+                            declare.exchange
+                        ),
+                        exchange_method::CLASS_ID,
+                        exchange_method::Declare::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
+            }
+        }
+
         let unknown: Vec<&str> = declare
             .arguments
             .entries
             .iter()
             .map(|(k, _)| k.as_str())
-            .filter(|k| *k != "alternate-exchange")
+            .filter(|k| *k != "alternate-exchange" && *k != "x-delayed-type")
             .collect();
         if !unknown.is_empty() {
             let keys = unknown;
@@ -76,12 +124,10 @@ where
             return Ok(Step::Continue);
         }
 
-        let kind = match declare.kind.as_str() {
-            "direct" => ExchangeType::Direct,
-            "fanout" => ExchangeType::Fanout,
-            "topic" => ExchangeType::Topic,
-            "headers" => ExchangeType::Headers,
-            other => {
+        let kind = match ExchangeType::parse(declare.kind.as_str()) {
+            Some(kind) => kind,
+            None => {
+                let other = declare.kind.as_str();
                 self.server_channel_close(
                     channel,
                     REPLY_PRECONDITION_FAILED,
@@ -150,45 +196,6 @@ where
             }
         }
 
-        if declare.passive {
-            let stored = {
-                let store = Arc::clone(&self.store);
-                let vhost_lookup = vhost.clone();
-                let name = declare.exchange.clone();
-                MetadataStore::blocking(store, move |s| s.get_exchange(&vhost_lookup, &name)).await
-            };
-            match self
-                .router
-                .get_exchange(&vhost, declare.exchange.as_str())
-                .or_else(|| stored.ok().flatten())
-            {
-                Some(_) => {
-                    if !declare.no_wait {
-                        self.send_method(
-                            channel,
-                            &Method::ExchangeDeclareOk(exchange_method::DeclareOk),
-                        )
-                        .await?;
-                    }
-                    return Ok(Step::Continue);
-                }
-                None => {
-                    self.server_channel_close(
-                        channel,
-                        REPLY_NOT_FOUND,
-                        &format!(
-                            "NOT_FOUND - no exchange '{}' in vhost '{vhost}'",
-                            declare.exchange
-                        ),
-                        exchange_method::CLASS_ID,
-                        exchange_method::Declare::METHOD_ID,
-                    )
-                    .await?;
-                    return Ok(Step::Continue);
-                }
-            }
-        }
-
         let new_ex = Exchange {
             vhost: CompactString::from(vhost.as_str()),
             name: CompactString::from(declare.exchange.as_str()),
@@ -197,7 +204,30 @@ where
             auto_delete: declare.auto_delete,
             internal: declare.internal,
             alternate: alternate_exchange_arg(&declare.arguments),
+            delayed_type: None,
         };
+        // x-delayed-message routes as its x-delayed-type once a delay ends.
+        let mut new_ex = new_ex;
+        if kind == ExchangeType::Delayed {
+            let delayed = match declare.arguments.get("x-delayed-type") {
+                Some(queueforge_amqp::FieldValue::LongString(s)) => ExchangeType::parse(&String::from_utf8_lossy(s)),
+                _ => None,
+            };
+            match delayed {
+                Some(t) if !matches!(t, ExchangeType::Delayed | ExchangeType::Default) => new_ex.delayed_type = Some(t),
+                _ => {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_PRECONDITION_FAILED,
+                        "PRECONDITION_FAILED - Invalid argument, 'x-delayed-type' must be an existing exchange type",
+                        exchange_method::CLASS_ID,
+                        exchange_method::Declare::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
+            }
+        }
 
         let stored_existing = {
             let store = Arc::clone(&self.store);
@@ -281,6 +311,16 @@ where
                 )
                 .await;
         }
+        self.emit_event(
+            "exchange.created",
+            &vhost,
+            vec![
+                ("name", queueforge_core::AppHeaderValue::Str(new_ex.name.to_string())),
+                ("type", queueforge_core::AppHeaderValue::Str(new_ex.kind.as_str().to_string())),
+                ("durable", queueforge_core::AppHeaderValue::Bool(new_ex.durable)),
+                ("internal", queueforge_core::AppHeaderValue::Bool(new_ex.internal)),
+            ],
+        );
         self.router.put_exchange(new_ex);
 
         if !declare.no_wait {

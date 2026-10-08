@@ -10,6 +10,17 @@
 //!
 //! Layout: [`reply`] (AMQP codes), [`helpers`] (pure helpers), this module (state machine).
 
+tokio::task_local! {
+    /// Common name of the verified client certificate on this connection's
+    /// TLS session, set by the listener around the connection task.
+    pub static PEER_CN: Option<String>;
+}
+
+/// The verified client certificate's common name, outside a TLS session `None`.
+pub(crate) fn peer_cn() -> Option<String> {
+    PEER_CN.try_with(Clone::clone).ok().flatten()
+}
+
 mod bind;
 mod close;
 mod confirm;
@@ -23,6 +34,7 @@ mod headers;
 mod helpers;
 mod open;
 mod publish;
+mod purge;
 mod queue;
 mod reply;
 mod returns;
@@ -176,6 +188,8 @@ pub async fn handle_connection<S>(
     let (confirm_tx, confirm_rx) = mpsc::unbounded_channel();
     let (handoff_tx, handoff_rx) = mpsc::unbounded_channel();
     let durable_tx = spawn_durable_confirms(confirm_tx.clone());
+    let alarm_rx = connections.alarm_rx();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
     let mut conn = Connection {
         stream: &mut stream,
         peer,
@@ -200,6 +214,12 @@ pub async fn handle_connection<S>(
         // Management connection tracker id (set after open-ok).
         conn_track_id: None,
         force_close_rx: None,
+        alarm_rx,
+        wants_blocked: false,
+        has_published: false,
+        reply_tx,
+        reply_rx,
+        reply_addrs: HashMap::new(),
         granted_credit: HashMap::new(),
         replay: VecDeque::new(),
         delivery_tx,
@@ -362,6 +382,18 @@ struct Connection<'a, S> {
     conn_track_id: Option<String>,
     /// Force-close signal from management API (set after open-ok).
     force_close_rx: Option<watch::Receiver<bool>>,
+    /// Broker-wide memory or disk alarm. `Some(reason)` holds publishes.
+    alarm_rx: watch::Receiver<Option<String>>,
+    /// The client advertised the `connection.blocked` capability.
+    wants_blocked: bool,
+    /// This connection has published. RabbitMQ stops reading only from
+    /// publishers while an alarm lasts, so consumers can drain.
+    has_published: bool,
+    /// Replies addressed to this connection's direct reply-to consumers.
+    reply_tx: mpsc::UnboundedSender<(u16, String, Arc<queueforge_core::Message>)>,
+    reply_rx: mpsc::UnboundedReceiver<(u16, String, Arc<queueforge_core::Message>)>,
+    /// Direct reply-to address per channel.
+    reply_addrs: HashMap<u16, (String, String)>,
     /// Unused credit already handed to each consumer. A channel-global cap counts
     /// this together with unacked deliveries on that channel.
     granted_credit: HashMap<ConsumerSessionId, u32>,
@@ -578,8 +610,52 @@ where
 
             let mut tmp = [0u8; 16 * 1024];
             let open = self.state == State::Open;
+            let held = self.has_published && self.alarm_rx.borrow().is_some();
             tokio::select! {
                 biased;
+
+                // A direct reply-to reply for one of this connection's channels.
+                Some((channel, consumer_tag, msg)) = self.reply_rx.recv() => {
+                    if self.channels.contains_key(&channel) {
+                        let tag = match self.channels.get_mut(&channel) {
+                            Some(ch) => {
+                                let tag = ch.next_delivery_tag;
+                                ch.next_delivery_tag = ch.next_delivery_tag.saturating_add(1);
+                                tag
+                            }
+                            None => 0,
+                        };
+                        let props = headers::message_to_properties(&msg);
+                        self.send_method(
+                            channel,
+                            &Method::BasicDeliver(basic_method::Deliver {
+                                consumer_tag,
+                                delivery_tag: tag,
+                                redelivered: false,
+                                exchange: String::new(),
+                                routing_key: msg.routing_key.to_string(),
+                            }),
+                        )
+                        .await?;
+                        self.send_content(channel, &props, &msg.body).await?;
+                    }
+                    continue;
+                }
+
+                // Memory or disk alarm raised or cleared.
+                changed = self.alarm_rx.changed() => {
+                    if changed.is_ok() && open && self.wants_blocked {
+                        let reason = self.alarm_rx.borrow_and_update().clone();
+                        let method = match reason {
+                            Some(reason) => Method::ConnectionBlocked(conn_method::Blocked { reason }),
+                            None => Method::ConnectionUnblocked(conn_method::Unblocked),
+                        };
+                        self.send_method(0, &method).await?;
+                    } else {
+                        self.alarm_rx.borrow_and_update();
+                    }
+                    continue;
+                }
 
                 // Process-wide graceful drain (SIGTERM): connection.close then exit.
                 changed = shutdown.changed() => {
@@ -623,7 +699,7 @@ where
                     }
                 }
 
-                result = self.stream.read(&mut tmp) => {
+                result = self.stream.read(&mut tmp), if !held => {
                     let n = result?;
                     if n == 0 {
                         debug!(peer = %self.peer, "peer closed TCP");
@@ -1289,6 +1365,9 @@ where
                 {
                     return Ok(Step::Continue);
                 }
+                if self.refuse_locked(channel, &bind.queue, queue_method::CLASS_ID, queue_method::Bind::METHOD_ID).await? {
+                    return Ok(Step::Continue);
+                }
                 self.handle_queue_bind(channel, bind).await
             }
             Method::QueueUnbind(unbind) => {
@@ -1302,7 +1381,29 @@ where
                 {
                     return Ok(Step::Continue);
                 }
+                if self.refuse_locked(channel, &unbind.queue, queue_method::CLASS_ID, queue_method::Unbind::METHOD_ID).await? {
+                    return Ok(Step::Continue);
+                }
                 self.handle_queue_unbind(channel, unbind).await
+            }
+            Method::QueuePurge(purge) => {
+                if !self
+                    .require_open_channel(
+                        channel,
+                        queue_method::CLASS_ID,
+                        queue_method::Purge::METHOD_ID,
+                    )
+                    .await?
+                {
+                    return Ok(Step::Continue);
+                }
+                if self
+                    .refuse_locked(channel, &purge.queue, queue_method::CLASS_ID, queue_method::Purge::METHOD_ID)
+                    .await?
+                {
+                    return Ok(Step::Continue);
+                }
+                self.handle_queue_purge(channel, purge).await
             }
             Method::QueueDelete(delete) => {
                 if !self
@@ -1313,6 +1414,9 @@ where
                     )
                     .await?
                 {
+                    return Ok(Step::Continue);
+                }
+                if self.refuse_locked(channel, &delete.queue, queue_method::CLASS_ID, queue_method::Delete::METHOD_ID).await? {
                     return Ok(Step::Continue);
                 }
                 self.handle_queue_delete(channel, delete).await
@@ -1339,6 +1443,9 @@ where
                     )
                     .await?
                 {
+                    return Ok(Step::Continue);
+                }
+                if self.refuse_locked(channel, &consume.queue, basic_method::CLASS_ID, basic_method::Consume::METHOD_ID).await? {
                     return Ok(Step::Continue);
                 }
                 self.handle_basic_consume(channel, consume).await
@@ -1378,6 +1485,9 @@ where
                     )
                     .await?
                 {
+                    return Ok(Step::Continue);
+                }
+                if self.refuse_locked(channel, &get.queue, basic_method::CLASS_ID, basic_method::Get::METHOD_ID).await? {
                     return Ok(Step::Continue);
                 }
                 self.handle_basic_get(channel, get).await

@@ -38,6 +38,13 @@ pub struct AuthService<'a> {
     store: &'a MetadataStore,
 }
 
+/// `queue.bind` for an OAuth or LDAP login: write on the queue, read on the exchange.
+fn external_bind(user: &str, vhost: &str, queue: &str, exchange: &str) -> bool {
+    let Some(p) = crate::external::principal(user) else { return false };
+    let exchange = crate::permission::normalize_resource_name(exchange, ResourceKind::Exchange);
+    p.allows(vhost, PermissionKind::Write, queue, None) && p.allows(vhost, PermissionKind::Read, &exchange, None)
+}
+
 impl<'a> AuthService<'a> {
     /// Borrow the metadata store for auth operations.
     pub fn new(store: &'a MetadataStore) -> Self {
@@ -125,6 +132,12 @@ impl<'a> AuthService<'a> {
         kind: PermissionKind,
     ) -> Result<bool> {
         let perm = self.store.get_permission(user, vhost)?;
+        if perm.is_none() {
+            if let Some(p) = crate::external::principal(user) {
+                let name = crate::permission::normalize_resource_name(resource, resource_kind);
+                return Ok(p.allows(vhost, kind, &name, None));
+            }
+        }
         check_user_permission(perm.as_ref(), resource, resource_kind, kind)
     }
 
@@ -137,7 +150,7 @@ impl<'a> AuthService<'a> {
         exchange: &str,
     ) -> Result<bool> {
         let Some(perm) = self.store.get_permission(user, vhost)? else {
-            return Ok(false);
+            return Ok(external_bind(user, vhost, queue, exchange));
         };
         check_queue_bind(&perm, queue, exchange)
     }
@@ -151,7 +164,7 @@ impl<'a> AuthService<'a> {
         exchange: &str,
     ) -> Result<bool> {
         let Some(perm) = self.store.get_permission(user, vhost)? else {
-            return Ok(false);
+            return Ok(external_bind(user, vhost, queue, exchange));
         };
         check_queue_unbind(&perm, queue, exchange)
     }

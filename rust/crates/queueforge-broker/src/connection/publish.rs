@@ -77,6 +77,7 @@ where
         let vhost = self.vhost.clone().unwrap_or_else(|| "/".into());
         let user = self.user.clone().unwrap_or_default();
         let exchange_name = publish.exchange.clone();
+        self.has_published = true;
 
         // Write permission on the exchange (default `""` → `amq.default`).
         let exchange_key = exchange_name.to_string();
@@ -120,6 +121,79 @@ where
                 channel,
                 REPLY_ACCESS_REFUSED,
                 "ACCESS_REFUSED - write access to exchange refused",
+                basic_method::CLASS_ID,
+                basic_method::Publish::METHOD_ID,
+            )
+            .await?;
+            return Ok(Step::Continue);
+        }
+
+        // RabbitMQ validates user-id against the login.
+        if let Some(uid) = properties.user_id.as_deref() {
+            if uid != user.as_str() {
+                self.server_channel_close(
+                    channel,
+                    REPLY_PRECONDITION_FAILED,
+                    &format!("PRECONDITION_FAILED - user_id property set to '{uid}' but authenticated user was '{user}'"),
+                    basic_method::CLASS_ID,
+                    basic_method::Publish::METHOD_ID,
+                )
+                .await?;
+                return Ok(Step::Continue);
+            }
+        }
+
+        // Direct reply-to: a reply goes straight to its requester; a request
+        // gets this channel's reply address written into reply-to.
+        let mut properties = properties;
+        if exchange_name.is_empty() && publish.routing_key.starts_with("amq.rabbitmq.reply-to.") {
+            let msg = Arc::new(queueforge_core::Message {
+                routing_key: CompactString::from(publish.routing_key.as_str()),
+                body: body.clone(),
+                content_type: properties.content_type.as_deref().map(CompactString::from),
+                correlation_id: properties.correlation_id.as_deref().map(CompactString::from),
+                message_id: properties.message_id.as_deref().map(CompactString::from),
+                headers: queueforge_core::MessageHeaders {
+                    app: properties.headers.as_ref().map(field_table_to_app_headers).unwrap_or_default(),
+                    ..queueforge_core::MessageHeaders::default()
+                },
+                ..queueforge_core::Message::blank()
+            });
+            let _ = self.connections.send_reply(publish.routing_key.as_str(), msg);
+            if let Some(seq) = confirm_seq {
+                self.send_publisher_confirm(channel, seq, true).await?;
+            }
+            return Ok(Step::Continue);
+        }
+        if properties.reply_to.as_deref() == Some(super::consume::REPLY_TO) {
+            match self.reply_addrs.get(&channel) {
+                Some((addr, _)) => properties.reply_to = Some(addr.clone()),
+                None => {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_PRECONDITION_FAILED,
+                        "PRECONDITION_FAILED - fast reply consumer does not exist",
+                        basic_method::CLASS_ID,
+                        basic_method::Publish::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
+            }
+        }
+
+        // A client may not publish to an internal exchange. Routing hops from
+        // other exchanges still reach it.
+        if !exchange_name.is_empty()
+            && self
+                .router
+                .get_exchange(&vhost, &exchange_name)
+                .is_some_and(|ex| ex.internal)
+        {
+            self.server_channel_close(
+                channel,
+                REPLY_ACCESS_REFUSED,
+                &format!("ACCESS_REFUSED - cannot publish to internal exchange '{exchange_name}' in vhost '{vhost}'"),
                 basic_method::CLASS_ID,
                 basic_method::Publish::METHOD_ID,
             )
@@ -341,6 +415,47 @@ where
             },
         });
 
+        if self.connections.tracing(&vhost) {
+            queueforge_core::events::trace_publish(
+                &self.router,
+                &self.queues,
+                &vhost,
+                exchange_name.as_str(),
+                publish.routing_key.as_str(),
+                &user,
+                "queueforge",
+                &msg.headers.app,
+                msg.body.clone(),
+            );
+        }
+
+        // x-delayed-message: hold the message for its x-delay, then route it.
+        // The publish is confirmed now, as the RabbitMQ plugin does. Delays
+        // are held in memory, so a restart loses messages still waiting.
+        if let Some(delay) = self.delay_for(&vhost, exchange_name.as_str(), &properties) {
+            let router = Arc::clone(&self.router);
+            let queues = Arc::clone(&self.queues);
+            let (v, ex, rk) = (vhost.clone(), exchange_name.to_string(), publish.routing_key.to_string());
+            let msg = Arc::clone(&msg);
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let Ok(route) = router.route_publish(&v, &ex, &rk, &header_args) else {
+                    return;
+                };
+                for key in route.destinations {
+                    let Some(handle) = queues.get(&key) else { continue };
+                    let (reply, done) = oneshot::channel();
+                    if handle.tx.send(QueueCmd::Enqueue { msg: Arc::clone(&msg), reply }).await.is_ok() {
+                        let _ = done.await;
+                    }
+                }
+            });
+            if let Some(seq) = confirm_seq {
+                self.send_publisher_confirm(channel, seq, true).await?;
+            }
+            return Ok(Step::Continue);
+        }
+
         let all_quorum = destinations.iter().all(|handle| {
             handle
                 .info
@@ -405,7 +520,8 @@ where
         if confirm_seq.is_some() && !self.tx_applying {
             let seq = confirm_seq.expect("confirm seq");
             let mut waits = Vec::with_capacity(destinations.len());
-            let mut send_failures = 0u32;
+            // A routed queue that was missing or unavailable already failed.
+            let mut send_failures = dest_failures;
             for handle in &destinations {
                 let (reply_tx, reply_rx) = oneshot::channel();
                 if handle
@@ -583,5 +699,50 @@ where
             self.send_publisher_confirm(channel, seq, true).await?;
         }
         Ok(Step::Continue)
+    }
+}
+
+impl<'a, S> Connection<'a, S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// The delay for a publish to an `x-delayed-message` exchange: its
+    /// positive `x-delay` header in milliseconds. `None` routes at once.
+    fn delay_for(&self, vhost: &str, exchange: &str, properties: &BasicProperties) -> Option<std::time::Duration> {
+        use queueforge_amqp::FieldValue as F;
+        if exchange.is_empty() {
+            return None;
+        }
+        let ex = self.router.get_exchange(vhost, exchange)?;
+        if ex.kind != ExchangeType::Delayed {
+            return None;
+        }
+        let ms: i64 = match properties.headers.as_ref()?.get("x-delay")? {
+            F::I8(n) => i64::from(*n),
+            F::U8(n) => i64::from(*n),
+            F::I16(n) => i64::from(*n),
+            F::U16(n) => i64::from(*n),
+            F::I32(n) => i64::from(*n),
+            F::U32(n) => i64::from(*n),
+            F::I64(n) => *n,
+            F::U64(n) => i64::try_from(*n).unwrap_or(i64::MAX),
+            _ => return None,
+        };
+        (ms > 0).then(|| std::time::Duration::from_millis(ms as u64))
+    }
+}
+
+impl<'a, S> Connection<'a, S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Publish an `amq.rabbitmq.event` message. A no-op when nothing is bound.
+    pub(in crate::connection) fn emit_event(
+        &self,
+        key: &str,
+        vhost: &str,
+        fields: Vec<(&str, queueforge_core::AppHeaderValue)>,
+    ) {
+        queueforge_core::events::emit_event(&self.router, &self.queues, key, vhost, fields);
     }
 }

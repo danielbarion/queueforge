@@ -64,6 +64,46 @@ pub fn load_server_config(
     Ok(Arc::new(config))
 }
 
+/// Like [`load_server_config`], and with `ca_path` the listener asks for a
+/// client certificate chaining to that CA. The certificate is optional, as
+/// RabbitMQ's `verify_peer` with `fail_if_no_peer_cert = false`; one that
+/// does not verify fails the handshake.
+pub fn load_server_config_with_client_ca(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_path: Option<&Path>,
+) -> Result<Arc<ServerConfig>, TlsError> {
+    let Some(ca_path) = ca_path else {
+        return load_server_config(cert_path, key_path);
+    };
+    ensure_crypto_provider();
+    let certs = load_certs(cert_path)?;
+    let key = load_private_key(key_path)?;
+    let mut roots = rustls::RootCertStore::empty();
+    for ca in load_certs(ca_path)? {
+        roots
+            .add(ca)
+            .map_err(|e| TlsError::Config(format!("invalid CA certificate: {e}")))?;
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
+        .build()
+        .map_err(|e| TlsError::Config(format!("client certificate verifier: {e}")))?;
+    let mut config = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)
+        .map_err(|e| TlsError::Config(format!("invalid cert/key pair: {e}")))?;
+    config.alpn_protocols = Vec::new();
+    Ok(Arc::new(config))
+}
+
+/// The subject common name of a DER certificate.
+pub fn common_name(der: &[u8]) -> Option<String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let cn = cert.subject().iter_common_name().next()?.as_str().ok()?.to_string();
+    Some(cn)
+}
+
 /// HTTP/2 ALPN identifier (`h2`).
 pub const ALPN_H2: &[u8] = b"h2";
 /// HTTP/1.1 ALPN identifier.

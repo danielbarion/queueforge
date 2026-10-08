@@ -73,7 +73,9 @@ impl BindingIndex {
                     }
                 }
             }
-            ExchangeType::Headers => {
+            // Consistent-hash weights and local-random members keep each
+            // binding's key, as headers bindings do.
+            ExchangeType::Headers | ExchangeType::ConsistentHash | ExchangeType::LocalRandom | ExchangeType::Delayed => {
                 self.headers
                     .retain(|(vh, ex), _| !(vh.as_str() == vhost && ex.as_str() == exchange));
                 for b in &self.bindings {
@@ -169,6 +171,41 @@ impl BindingIndex {
                         }
                     }
                 }
+            }
+            ExchangeType::ConsistentHash => {
+                if let Some(list) = self
+                    .headers
+                    .get(&(CompactString::from(vhost), CompactString::from(exchange)))
+                {
+                    // Each binding key is a weight: that many buckets for its queue.
+                    let mut buckets: Vec<&CompactString> = Vec::new();
+                    for (weight, queue, _) in list {
+                        let n = weight.parse::<u32>().unwrap_or(0).min(1000);
+                        for _ in 0..n {
+                            buckets.push(queue);
+                        }
+                    }
+                    if !buckets.is_empty() {
+                        let at = jump_hash(fnv1a(routing_key.as_bytes()), buckets.len());
+                        out.insert(buckets[at].clone());
+                    }
+                }
+            }
+            ExchangeType::LocalRandom => {
+                if let Some(list) = self
+                    .headers
+                    .get(&(CompactString::from(vhost), CompactString::from(exchange)))
+                {
+                    let mut queues: Vec<&CompactString> = list.iter().map(|(_, q, _)| q).collect();
+                    queues.sort();
+                    queues.dedup();
+                    if !queues.is_empty() {
+                        out.insert(queues[next_random() as usize % queues.len()].clone());
+                    }
+                }
+            }
+            ExchangeType::Delayed => {
+                // Routed by `routing_kind`; a delayed exchange never reaches here.
             }
         }
         let mut v: Vec<CompactString> = out.into_iter().collect();
@@ -345,4 +382,39 @@ pub(super) fn topic_match_parts(pat: &[&str], key: &[&str]) -> bool {
         (Some(p), Some(k)) if p == k => topic_match_parts(&pat[1..], &key[1..]),
         _ => false,
     }
+}
+
+/// FNV-1a over `bytes`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Lamping and Veach's jump consistent hash: a stable bucket for `key`.
+/// Adding a bucket moves only the keys that land on it.
+fn jump_hash(mut key: u64, buckets: usize) -> usize {
+    let mut b: i64 = -1;
+    let mut j: i64 = 0;
+    while j < buckets as i64 {
+        b = j;
+        key = key.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(1);
+        j = (((b + 1) as f64) * ((1u64 << 31) as f64 / (((key >> 33) + 1) as f64))) as i64;
+    }
+    b.max(0) as usize
+}
+
+/// A cheap per-process random number for `x-local-random`.
+fn next_random() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
+    let mut x = STATE.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }

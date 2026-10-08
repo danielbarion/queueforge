@@ -92,7 +92,7 @@ pub use permission::{delete_permission, list_permissions, put_permission};
 pub use policy::{delete_policy, list_policies, list_policies_vhost, put_policy};
 pub use publish::publish;
 pub use queue::{delete_queue, purge_queue, put_queue};
-pub use shovel::{put_federation_upstream, put_shovel};
+pub use shovel::{put_federation_upstream, put_shovel, delete_shovel};
 pub use user::{delete_user, list_users, put_user};
 pub use vhost::{delete_vhost, put_vhost};
 

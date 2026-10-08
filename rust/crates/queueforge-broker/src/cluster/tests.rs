@@ -178,3 +178,19 @@ fn lagging_extra_peer_is_skipped_once_a_majority_peer_is_available() {
         "the only peer is contacted even past the cap"
     );
 }
+
+/// The home hash is shared with Bun and PHP (docs/raft.md, section 9).
+#[test]
+fn home_hash_matches_the_shared_spec() {
+    let members: Vec<ClusterMember> = ["n3", "n1", "n2"]
+        .iter()
+        .map(|id| ClusterMember { id: (*id).into(), addr: "127.0.0.1:1".parse().unwrap() })
+        .collect();
+    assert_eq!(queue_home(&members, "/", "orders"), "n3");
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in "/".bytes().chain(std::iter::once(0xff)).chain("orders".bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    assert_eq!(hash, 0x58c6545457c80e72);
+}

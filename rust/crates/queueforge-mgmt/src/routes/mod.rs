@@ -35,6 +35,8 @@ pub fn router(state: MgmtState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_scrape))
+        .route("/api/identity", get(identity))
+        .route("/ws", get(crate::bridge::ws_handler))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/whoami", get(whoami))
@@ -50,6 +52,8 @@ pub fn router(state: MgmtState) -> Router {
         )
         .route("/api/queues/{vhost}", get(list_queues))
         .route("/api/queues/{vhost}/{name}/purge", post(purge_queue))
+        // RabbitMQ's purge route.
+        .route("/api/queues/{vhost}/{name}/contents", delete(purge_queue))
         .route("/api/queues/{vhost}/{name}/get", post(get_messages))
         .route(
             "/api/queues/{vhost}/{name}/bindings",
@@ -103,6 +107,8 @@ pub fn router(state: MgmtState) -> Router {
             delete(crate::console::delete_topic_permission),
         )
         .route("/api/limits", get(crate::console::list_limits))
+        .route("/api/vhost-limits/{vhost}", get(crate::compat::get_vhost_limits))
+        .route("/api/user-limits/{user}", get(crate::compat::get_user_limits))
         .route(
             "/api/user-limits/{user}/{kind}",
             put(crate::console::put_user_limit).delete(crate::console::delete_user_limit),
@@ -162,13 +168,14 @@ pub fn router(state: MgmtState) -> Router {
         )
         .route(
             "/api/parameters/shovel/{vhost}/{name}",
-            put(crate::mutations::put_shovel),
+            put(crate::mutations::put_shovel).delete(crate::mutations::delete_shovel),
         )
         .route(
             "/api/parameters/federation-upstream/{vhost}/{name}",
             put(crate::mutations::put_federation_upstream),
         )
         .fallback(crate::spa::static_handler)
+        .layer(axum::middleware::from_fn(crate::compat::unwrap_items))
         .with_state(state)
 }
 
@@ -287,7 +294,7 @@ mod session;
 use catalog::{
     delete_connection, get_exchange, list_connections, list_exchanges, list_queues, list_vhosts,
 };
-use health::{healthz, metrics_scrape, overview, readyz};
+use health::{healthz, identity, metrics_scrape, overview, readyz};
 use session::{login, logout, whoami};
 
 pub(crate) use catalog::query_stats;

@@ -21,9 +21,16 @@ pub fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
 ///
 /// Tags are reloaded from the user record on every request. A deleted user
 /// loses the session immediately. Demotion takes effect without a new login.
+///
+/// Without a session cookie, `Authorization: Basic` credentials are accepted,
+/// as RabbitMQ's management API and its tools (rabbitmqadmin, Terraform,
+/// monitoring agents) use them. The user must hold a management tag.
 pub async fn require_session(state: &MgmtState, headers: &HeaderMap) -> Result<Session, MgmtError> {
-    let token = session_token_from_headers(headers).ok_or(MgmtError::Unauthorized)?;
-    let mut session = state.sessions.get(&token).ok_or(MgmtError::Unauthorized)?;
+    let cookie = session_token_from_headers(headers)
+        .and_then(|token| state.sessions.get(&token).map(|session| (token, session)));
+    let Some((token, mut session)) = cookie else {
+        return basic_session(state, headers).await;
+    };
     let store = std::sync::Arc::clone(&state.store);
     let name = session.username.clone();
     let user = queueforge_store::MetadataStore::blocking(store, move |s| s.get_user(&name))
@@ -35,6 +42,71 @@ pub async fn require_session(state: &MgmtState, headers: &HeaderMap) -> Result<S
     };
     session.tags = user.tags;
     Ok(session)
+}
+
+/// Decode `Authorization: Basic` into a user name and password.
+fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let raw = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = raw.strip_prefix("Basic ").or_else(|| raw.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (user, password) = text.split_once(':')?;
+    if user.is_empty() {
+        return None;
+    }
+    Some((user.to_string(), password.to_string()))
+}
+
+/// Build a one-request session from Basic credentials. No cookie is set.
+async fn basic_session(state: &MgmtState, headers: &HeaderMap) -> Result<Session, MgmtError> {
+    let (name, password) = basic_credentials(headers).ok_or(MgmtError::Unauthorized)?;
+    let store = std::sync::Arc::clone(&state.store);
+    let lookup = name.clone();
+    let user = queueforge_store::MetadataStore::blocking(store, move |s| s.get_user(&lookup))
+        .await
+        .map_err(MgmtError::from)?;
+    let ok = match &user {
+        Some(u) => queueforge_auth::verify_password(&password, &u.password_hash).map_err(MgmtError::from)?,
+        None => {
+            // Same work as a real check, so a missing user is not faster.
+            let _ = queueforge_auth::verify_password(&password, queueforge_auth::dummy_password_hash());
+            false
+        }
+    };
+    let user = match (user, ok) {
+        (Some(u), true) => u,
+        // The next backends: OAuth 2.0, then LDAP. Tags come from the login.
+        (stored, _) => {
+            let Some(login) = queueforge_auth::external::login(&name, &password).await else {
+                return Err(MgmtError::Unauthorized);
+            };
+            let Some(p) = queueforge_auth::external::principal(&login) else {
+                return Err(MgmtError::Unauthorized);
+            };
+            if stored.is_some() {
+                return Err(MgmtError::Unauthorized);
+            }
+            let tags: Vec<UserTag> = p
+                .tags
+                .iter()
+                .filter_map(|t| [UserTag::Administrator, UserTag::Management, UserTag::Monitoring].into_iter().find(|k| k.as_str() == t))
+                .collect();
+            let mut u = queueforge_core::User::new(login.as_str(), String::new(), Vec::new());
+            u.tags = tags;
+            u
+        }
+    };
+    if !(user.has_management() || user.has_monitoring()) {
+        return Err(MgmtError::Forbidden);
+    }
+    let now = std::time::Instant::now();
+    Ok(Session {
+        username: name,
+        tags: user.tags,
+        created_at: now,
+        last_seen: now,
+    })
 }
 
 /// Resource mutations require `management` or `administrator` (not monitoring-only).

@@ -66,6 +66,63 @@ pub struct Config {
     pub tls: TlsConfig,
     /// Optional static cluster membership. Empty means a single node.
     pub cluster: ClusterConfig,
+    /// Authentication backends after the internal user store.
+    pub auth: AuthConfig,
+}
+
+/// Authentication backends tried after the internal store, in this order,
+/// as RabbitMQ's `auth_backends` chain them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// OAuth 2.0: a JWT access token as the password.
+    pub oauth2: Option<OAuth2Config>,
+    /// LDAP: a simple bind with the user's own password.
+    pub ldap: Option<LdapConfig>,
+}
+
+/// JWT validation, as RabbitMQ's `auth_oauth2` settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuth2Config {
+    /// Audience the token must name, and the prefix of its scopes.
+    #[serde(default = "default_resource_server_id")]
+    pub resource_server_id: String,
+    /// Where the signing keys are published (http or https).
+    pub jwks_url: String,
+    /// CA that the JWKS server's certificate must chain to.
+    #[serde(default)]
+    pub jwks_ca_path: Option<PathBuf>,
+}
+
+fn default_resource_server_id() -> String {
+    "rabbitmq".into()
+}
+
+/// An LDAP directory, as RabbitMQ's `auth_ldap` settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LdapConfig {
+    /// Directory host.
+    pub server: String,
+    /// Directory port (default 389).
+    #[serde(default = "default_ldap_port")]
+    pub port: u16,
+    /// DN to bind as; `${username}` is replaced with the login name.
+    pub user_dn_pattern: String,
+    /// Members of this group get the administrator tag.
+    #[serde(default)]
+    pub admin_group: Option<String>,
+    /// Identity for the group lookup (RabbitMQ's `other_bind`); unset binds as the user.
+    #[serde(default)]
+    pub bind_dn: Option<String>,
+    /// Password for `bind_dn`.
+    #[serde(default)]
+    pub bind_password: Option<String>,
+}
+
+fn default_ldap_port() -> u16 {
+    389
 }
 
 /// One process in a static cluster.
@@ -92,9 +149,42 @@ pub struct ClusterConfig {
     pub listen: Option<SocketAddr>,
     /// Full membership, including this node.
     pub members: Vec<ClusterMember>,
+    /// `"dns"` builds [`Self::members`] from the A and AAAA records of
+    /// [`Self::dns_name`] (docs/raft.md, section 10). Unset uses the list.
+    pub discovery: Option<String>,
+    /// Name whose addresses are the members, with `discovery = "dns"`.
+    pub dns_name: Option<String>,
+    /// Cluster port of every discovered member (default: this node's `listen` port).
+    pub dns_port: Option<u16>,
 }
 
 impl ClusterConfig {
+    /// With `discovery = "dns"`, resolve [`Self::dns_name`] into the member
+    /// list. Each member's id and address are `<ip>:<port>`; this node's id
+    /// is its `listen` address, and it is always a member.
+    pub fn resolve_discovery(&mut self) -> Result<(), Error> {
+        if self.discovery.as_deref() != Some("dns") {
+            return Ok(());
+        }
+        let listen = self
+            .listen
+            .ok_or_else(|| Error::Config("cluster.listen is required with discovery = \"dns\"".into()))?;
+        let name = self
+            .dns_name
+            .clone()
+            .ok_or_else(|| Error::Config("cluster.dns_name is required with discovery = \"dns\"".into()))?;
+        let port = self.dns_port.unwrap_or(listen.port());
+        self.members = dns_members(&name, port);
+        if self.node_id.is_empty() {
+            self.node_id = listen.to_string();
+        }
+        if !self.members.iter().any(|m| m.id == self.node_id) {
+            self.members.push(ClusterMember { id: self.node_id.clone(), addr: listen });
+        }
+        self.members.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(())
+    }
+
     /// Whether this process should peer with other nodes.
     pub fn is_enabled(&self) -> bool {
         !self.members.is_empty()
@@ -168,6 +258,9 @@ pub struct ListenersConfig {
     /// RabbitMQ stream listener. Unset leaves streams unbound.
     #[serde(default)]
     pub stream: Option<SocketAddr>,
+    /// A TLS AMQP listener next to the plain one, with the `[tls]` certificate.
+    #[serde(default)]
+    pub amqps: Option<SocketAddr>,
 }
 
 /// WAL fsync / group-commit policy.
@@ -277,6 +370,11 @@ pub struct TlsConfig {
     ///
     /// Required when `enabled` is `true`.
     pub key_path: Option<PathBuf>,
+    /// CA client certificates must chain to. Set, TLS listeners ask for a
+    /// certificate (optional, as RabbitMQ's `fail_if_no_peer_cert = false`)
+    /// and offer SASL EXTERNAL.
+    #[serde(default)]
+    pub ca_path: Option<PathBuf>,
 }
 
 impl Default for ListenersConfig {
@@ -288,6 +386,7 @@ impl Default for ListenersConfig {
             mqtt: None,
             stomp: None,
             stream: None,
+            amqps: None,
         }
     }
 }
@@ -460,8 +559,32 @@ impl Config {
         if let Ok(v) = std::env::var("QUEUEFORGE_TLS_KEY") {
             self.tls.key_path = Some(PathBuf::from(v));
         }
+        // Peer discovery by environment (docs/raft.md, section 10), as in Bun.
+        if let Ok(v) = std::env::var("QUEUEFORGE_NODE_ID") {
+            self.cluster.node_id = v;
+        }
+        if let Ok(v) = std::env::var("QUEUEFORGE_CLUSTER_LISTEN") {
+            self.cluster.listen = Some(parse_socket_override("QUEUEFORGE_CLUSTER_LISTEN", &v)?);
+        }
+        if let Ok(v) = std::env::var("QUEUEFORGE_MEMBERS") {
+            self.cluster.members = serde_json::from_str(&v)
+                .map_err(|e| Error::Config(format!("QUEUEFORGE_MEMBERS must be a JSON array of {{id, addr}}: {e}")))?;
+        }
         Ok(())
     }
+}
+
+/// Members from the addresses `name` resolves to, each `<ip>:<port>`. A
+/// failed lookup gives an empty list.
+pub fn dns_members(name: &str, port: u16) -> Vec<ClusterMember> {
+    use std::net::ToSocketAddrs;
+    let mut out: Vec<ClusterMember> = (name, port)
+        .to_socket_addrs()
+        .map(|addrs| addrs.map(|addr| ClusterMember { id: addr.to_string(), addr }).collect())
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    out
 }
 
 fn parse_bool_override(name: &str, value: &str) -> Result<bool, Error> {
@@ -687,11 +810,26 @@ enabled = true
     }
 
     #[test]
+    fn dns_discovery_resolves_members_and_keeps_this_node() {
+        let mut c = ClusterConfig {
+            listen: Some("127.0.0.1:25999".parse().unwrap()),
+            discovery: Some("dns".into()),
+            dns_name: Some("localhost".into()),
+            ..Default::default()
+        };
+        c.resolve_discovery().unwrap();
+        assert_eq!(c.node_id, "127.0.0.1:25999");
+        assert!(c.members.iter().any(|m| m.id == "127.0.0.1:25999"));
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
     fn tls_enabled_empty_paths_fails_validate() {
         let cfg = TlsConfig {
             enabled: true,
             cert_path: Some(PathBuf::from("")),
             key_path: Some(PathBuf::from("/tmp/key.pem")),
+            ca_path: None,
         };
         assert!(cfg.validate().is_err());
     }

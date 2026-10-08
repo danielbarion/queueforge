@@ -31,6 +31,12 @@ pub mod policy;
 /// Exchange federation between vhosts in one process.
 pub mod federation;
 
+/// Event exchange and firehose tracing.
+pub mod events;
+
+/// Cluster feature flags read by the management API.
+pub mod flags;
+
 /// Exchange routing: binding index, topic matching, multi-destination lookup.
 pub mod router;
 
@@ -67,5 +73,7 @@ pub use queue::{
     QueueRegistry, QueueStats, QueueType, Ready, SharedDurableLogFactory, ShutdownReport,
     DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
 };
+pub use queue::parse_age as queue_parse_age;
+pub use queue::StreamStart;
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};
 pub use sysinfo::{disk_free_bytes, system_total_memory_bytes};

@@ -26,12 +26,17 @@ pub async fn put_vhost(
     State(state): State<MgmtState>,
     headers: HeaderMap,
     Path(raw_vhost): Path<String>,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Response, MgmtError> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     let vhost = decode_vhost(&raw_vhost)?;
     if vhost.is_empty() {
         return Err(MgmtError::BadRequest("vhost name required".into()));
+    }
+    // RabbitMQ turns firehose tracing on and off with the vhost's `tracing` field.
+    if let Some(on) = body.as_ref().and_then(|b| b.get("tracing")).and_then(|t| t.as_bool()) {
+        state.connections.set_tracing(&vhost, on);
     }
     let created = {
         let name = vhost.clone();

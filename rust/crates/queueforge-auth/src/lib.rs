@@ -12,6 +12,8 @@
 
 /// Auth error types.
 pub mod error;
+/// OAuth 2.0 and LDAP backends after the internal store.
+pub mod external;
 /// Password hashing. Passwords are the RabbitMQ SHA-256 password-hash.
 pub mod password;
 /// Permission kinds and regex matching.

@@ -123,6 +123,10 @@ pub async fn start_amqp_listener_with_limits(
     let local_addr = listener.local_addr()?;
     let tls_enabled = tls.is_some();
     info!(%local_addr, tls = tls_enabled, "AMQP listening");
+    if !tls_enabled {
+        // Bridge sessions (MQTT, STOMP, AMQP 1.0) log in through a plain listener.
+        queueforge_mgmt::bridge::set_loopback_port(local_addr.port());
+    }
 
     let tracker = ConnectionTracker::new();
     let (stop_tx, stop_rx) = oneshot::channel();
@@ -228,8 +232,27 @@ async fn accept_loop(
                         tokio::spawn(async move {
                             match acceptor {
                                 Some(acceptor) => match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => {
-                                        handle_connection(
+                                    Ok(mut tls_stream) => {
+                                        // A TLS stream cannot be peeked: read the header, then replay it.
+                                        let mut head = [0u8; 8];
+                                        let n = read_header(&mut tls_stream, &mut head).await;
+                                        let local_port = tls_stream.get_ref().0.local_addr().map(|a| a.port()).unwrap_or(5671);
+                                        // rustls has verified any certificate the client sent.
+                                        let peer_cn = tls_stream
+                                            .get_ref()
+                                            .1
+                                            .peer_certificates()
+                                            .and_then(|c| c.first())
+                                            .and_then(|c| crate::tls::common_name(c.as_ref()));
+                                        let tls_stream = Prefixed { head, at: 0, len: n, inner: tls_stream };
+                                        if n == 8 && (head == *b"AMQP\x00\x01\x00\x00" || head == *b"AMQP\x03\x01\x00\x00") {
+                                            let port = queueforge_mgmt::bridge::loopback_port().unwrap_or(local_port);
+                                            queueforge_mgmt::bridge::amqp10::serve(tls_stream, port).await;
+                                            drop(guard);
+                                            drop(permit);
+                                            return;
+                                        }
+                                        crate::connection::PEER_CN.scope(peer_cn, handle_connection(
                                             tls_stream,
                                             peer,
                                             store,
@@ -240,7 +263,7 @@ async fn accept_loop(
                                             guard,
                                             shutdown,
                                             cluster,
-                                        )
+                                        ))
                                         .await;
                                     }
                                     Err(e) => {
@@ -248,14 +271,13 @@ async fn accept_loop(
                                     }
                                 },
                                 None => {
-                                    let queues_for_peek = Arc::clone(&queues);
                                     let mut peeked = [0u8; 8];
                                     let amqp10 = stream.peek(&mut peeked).await.ok() == Some(8)
                                         && (peeked == *b"AMQP\x00\x01\x00\x00" || peeked == *b"AMQP\x03\x01\x00\x00");
                                     if amqp10 {
-                                        if let Err(err) = crate::protocols::amqp10_conn(stream, queues_for_peek).await {
-                                            warn!(%peer, error = %err, "amqp 1.0 connection ended");
-                                        }
+                                        // AMQP 1.0 is a client of this listener, as RabbitMQ's 1.0 sessions sit on its core.
+                                        let port = stream.local_addr().map(|a| a.port()).unwrap_or(5672);
+                                        queueforge_mgmt::bridge::amqp10::serve(stream, port).await;
                                         drop(guard);
                                         drop(permit);
                                         return;
@@ -285,5 +307,73 @@ async fn accept_loop(
                 }
             }
         }
+    }
+}
+
+/// Read up to `head.len()` bytes; fewer means the peer closed first.
+async fn read_header<S: tokio::io::AsyncRead + Unpin>(io: &mut S, head: &mut [u8; 8]) -> usize {
+    use tokio::io::AsyncReadExt;
+    let mut n = 0;
+    while n < head.len() {
+        match io.read(&mut head[n..]).await {
+            Ok(0) | Err(_) => break,
+            Ok(got) => n += got,
+        }
+    }
+    n
+}
+
+/// A stream whose first bytes were already read; they are handed out again first.
+struct Prefixed<S> {
+    head: [u8; 8],
+    at: usize,
+    len: usize,
+    inner: S,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.at < self.len {
+            let n = (self.len - self.at).min(buf.remaining());
+            let (at, end) = (self.at, self.at + n);
+            buf.put_slice(&self.head[at..end]);
+            self.at = end;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }

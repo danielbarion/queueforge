@@ -144,6 +144,29 @@ pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
                 inner.router.put_exchange(exchange);
             }
         }
+        "delete_exchange" => {
+            let vhost = json_str(&body, "vhost");
+            let name = json_str(&body, "name");
+            let _ = MetadataStore::blocking(Arc::clone(&inner.store), {
+                let (vhost, name) = (vhost.clone(), name.clone());
+                move |store| {
+                    let _ = store.delete_exchange(&vhost, &name);
+                    for b in store.list_bindings_for_exchange(&vhost, &name).unwrap_or_default() {
+                        let args_key = queueforge_store::binding_args_key(&b.args);
+                        let _ = store.delete_binding(
+                            b.vhost.as_str(),
+                            b.exchange.as_str(),
+                            b.queue.as_str(),
+                            b.routing_key.as_str(),
+                            &args_key,
+                        );
+                    }
+                    Ok(())
+                }
+            })
+            .await;
+            let _ = inner.router.delete_exchange(&vhost, &name);
+        }
         "binding" => {
             if let Ok(binding) = serde_json::from_value::<Binding>(body.clone()) {
                 let _ = MetadataStore::blocking(Arc::clone(&inner.store), {

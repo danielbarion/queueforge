@@ -83,12 +83,14 @@ pub fn should_drop_for_cycle(headers: &MessageHeaders, _queue: &str, max_hops: u
     death_hop_count(headers) >= u64::from(max_hops)
 }
 
-/// Whether publishing into `dest_queue` would form a DLX cycle (queue already in `x-death`).
+/// Whether publishing into `dest_queue` would form a DLX cycle.
+///
+/// As in RabbitMQ, only a fully automatic cycle is dropped: `dest_queue` is
+/// already in `x-death` and no death in the chain was a client rejection.
+/// A consumer that rejects in a loop is in control, so the count keeps rising.
 pub fn is_cycle_destination(headers: &MessageHeaders, dest_queue: &str) -> bool {
-    headers
-        .deaths
-        .iter()
-        .any(|d| d.queue.as_str() == dest_queue)
+    headers.deaths.iter().any(|d| d.queue.as_str() == dest_queue)
+        && headers.deaths.iter().all(|d| d.reason != DeathReason::Rejected)
 }
 
 /// Append / update `x-death` on a clone of `msg` for dead-lettering from `queue`.
@@ -428,12 +430,18 @@ mod tests {
     #[test]
     fn cycle_destination_detection() {
         let msg = sample();
+        let PrepareDeath::Ready(expired) = prepare_dead_letter(&msg, "q1", DeathReason::Expired, 16)
+        else {
+            panic!();
+        };
+        assert!(is_cycle_destination(&expired.headers, "q1"));
+        assert!(!is_cycle_destination(&expired.headers, "q2"));
+        // A rejection in the chain means a client is in the loop: not a cycle.
         let PrepareDeath::Ready(m1) = prepare_dead_letter(&msg, "q1", DeathReason::Rejected, 16)
         else {
             panic!();
         };
-        assert!(is_cycle_destination(&m1.headers, "q1"));
-        assert!(!is_cycle_destination(&m1.headers, "q2"));
+        assert!(!is_cycle_destination(&m1.headers, "q1"));
         // Preparing another death from q1 still allowed (count++), hop guard separate.
         assert!(matches!(
             prepare_dead_letter(m1.as_ref(), "q1", DeathReason::Rejected, 16),

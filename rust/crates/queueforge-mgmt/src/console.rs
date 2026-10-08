@@ -189,7 +189,7 @@ pub async fn put_topic_permission(
 ) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let vhost = decode_vhost(&vhost)?;
+    let (user, vhost) = crate::compat::perm_target(&state, &user, &vhost).await?;
     if body.exchange.is_empty()
         || regex::Regex::new(&body.write).is_err()
         || regex::Regex::new(&body.read).is_err()
@@ -216,7 +216,7 @@ pub async fn delete_topic_permission(
 ) -> Result<StatusCode> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let vhost = decode_vhost(&vhost)?;
+    let (user, vhost) = crate::compat::perm_target(&state, &user, &vhost).await?;
     if !state
         .connections
         .delete_topic_permission(&user, &vhost, &exchange)
@@ -371,12 +371,21 @@ pub async fn list_feature_flags(
 ) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let transient = state.connections.transient_nonexcl_permitted();
-    Ok(Json(json!({
-        "items": [
-            { "name": "quorum_queues", "state": "enabled", "stability": "stable" },
-            { "name": "transient_nonexcl_queues", "state": if transient { "enabled" } else { "disabled" }, "stability": "experimental" }
-        ]
-    })))
+    let mut items = vec![
+        json!({ "name": "quorum_queues", "state": "enabled", "stability": "stable" }),
+        json!({ "name": "transient_nonexcl_queues", "state": if transient { "enabled" } else { "disabled" }, "stability": "experimental" }),
+    ];
+    // Raft turns itself on once every voter advertises it (docs/raft.md, section 8).
+    match queueforge_core::flags::raft() {
+        queueforge_core::flags::RaftFlag::Unsupported => {}
+        flag => items.push(json!({
+            "name": "raft",
+            "state": if flag == queueforge_core::flags::RaftFlag::Enabled { "enabled" } else { "disabled" },
+            "stability": "stable",
+            "desc": "Raft consensus for metadata and quorum queues",
+        })),
+    }
+    Ok(Json(json!({ "items": items })))
 }
 
 /// POST /api/feature-flags/{name}/enable
@@ -470,8 +479,8 @@ pub async fn list_nodes(State(state): State<MgmtState>, headers: HeaderMap) -> R
             "uptime": started().elapsed().as_millis() as u64,
             "mem_used": mem,
             "disk_free": disk,
-            "mem_alarm": false,
-            "disk_free_alarm": disk > 0 && disk < 50 * 1024 * 1024,
+            "mem_alarm": state.connections.alarm().as_deref() == Some("low on memory"),
+            "disk_free_alarm": state.connections.alarm().as_deref() == Some("low on disk"),
             "listeners": listeners,
             "peers": peers,
         }]

@@ -1656,10 +1656,15 @@ fn confirm_before_total() -> u64 {
     confirm_recorder().get("queueforge_confirm_before_fsync_total")
 }
 
+/// The counter is process-global. Tests that read it hold this lock so a
+/// parallel test cannot move it between their two reads.
+static CONFIRM_COUNTER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `never` completes the confirm after the buffered append. That is a confirm
 /// before fsync, so the counter moves. A non-persistent publish does not.
 #[tokio::test(flavor = "current_thread")]
 async fn never_policy_counts_a_confirm_that_skips_fsync() {
+    let _counter = CONFIRM_COUNTER.lock().await;
     let before = confirm_before_total();
     let key = QueueKey::new("/", "never-count");
     let memory = MemoryTracker::shared();
@@ -1700,6 +1705,7 @@ async fn never_policy_counts_a_confirm_that_skips_fsync() {
 /// A confirm that waited for the covering fsync does not move the counter.
 #[tokio::test(flavor = "current_thread")]
 async fn covered_every_n_ms_confirm_does_not_count_before_fsync() {
+    let _counter = CONFIRM_COUNTER.lock().await;
     let before = confirm_before_total();
     let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let key = QueueKey::new("/", "covered-count");

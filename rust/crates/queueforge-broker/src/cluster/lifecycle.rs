@@ -58,7 +58,11 @@ impl Cluster {
             dial_fails: std::sync::Mutex::new(HashMap::new()),
             down: std::sync::Mutex::new(std::collections::HashSet::new()),
             catchup: tokio::sync::Notify::new(),
+            raft: std::sync::OnceLock::new(),
+            raft_peers: std::sync::Mutex::new(std::collections::HashSet::new()),
+            quorum_live: Mutex::new(HashMap::new()),
         });
+        super::consensus::start(&inner);
         let cluster = Arc::new(Self {
             inner: Arc::clone(&inner),
         });

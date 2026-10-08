@@ -27,6 +27,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
     let mut inflight: Vec<JoinHandle<()>> = Vec::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            QueueCmd::StreamStart { .. } => {}
             QueueCmd::Enqueue { msg, reply } => {
                 let pending = cluster
                     .begin_call(
@@ -361,6 +362,9 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                         .and_then(|msg| msg.payload["purged"].as_u64())
                         .unwrap_or(0) as u32,
                 );
+            }
+            QueueCmd::StreamOffsets { reply } => {
+                let _ = reply.send(None);
             }
             QueueCmd::Stats { reply } => {
                 drain_forwarded(&mut inflight).await;

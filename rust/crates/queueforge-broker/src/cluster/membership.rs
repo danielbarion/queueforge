@@ -36,6 +36,7 @@ pub(super) fn install_members(inner: &Inner, members: Vec<ClusterMember>) {
     }
     save_members(&inner.store, &members);
     *inner.members.lock().unwrap_or_else(|err| err.into_inner()) = members;
+    super::consensus::members_changed(inner);
 }
 
 /// Add `id` at `addr`, or refresh its address. Returns the list peers should install.

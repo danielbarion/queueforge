@@ -14,6 +14,9 @@ where
     ///
     /// Returns when the cascade finishes. A second call is a no-op.
     pub(in crate::connection) async fn cleanup_on_close(&mut self) {
+        for (_, (addr, _)) in self.reply_addrs.drain() {
+            self.connections.remove_reply(&addr);
+        }
         if self.cleaned_up {
             return;
         }

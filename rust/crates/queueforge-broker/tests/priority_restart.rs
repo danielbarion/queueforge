@@ -132,7 +132,7 @@ async fn priority_order_p9_before_p0() {
         let ch = conn.create_channel().await.expect("channel");
         ch.queue_declare(
             "prio-q",
-            QueueDeclareOptions::default(),
+            QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() },
             max_priority_args(9),
         )
         .await

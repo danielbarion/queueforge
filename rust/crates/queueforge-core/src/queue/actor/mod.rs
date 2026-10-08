@@ -416,6 +416,7 @@ pub async fn run(
         };
 
         match cmd {
+            QueueCmd::StreamStart { .. } => {}
             QueueCmd::Enqueue { msg, reply } => {
                 if msg.persistent {
                     last_enqueue_at = Some(Instant::now());
@@ -530,6 +531,9 @@ pub async fn run(
             QueueCmd::Purge { reply } => {
                 let _ = reply.send(state.purge());
             }
+            QueueCmd::StreamOffsets { reply } => {
+                let _ = reply.send(None);
+            }
             QueueCmd::Stats { reply } => {
                 let _ = reply.send(state.stats());
             }
@@ -608,6 +612,9 @@ pub async fn run(
             QueueCmd::Purge { reply } => {
                 let _ = reply.send(0);
             }
+            QueueCmd::StreamOffsets { reply } => {
+                let _ = reply.send(None);
+            }
             QueueCmd::Stats { reply } => {
                 let _ = reply.send(state.stats());
             }
@@ -618,7 +625,8 @@ pub async fn run(
                 // Actor already flushed; late Shutdown is success.
                 let _ = reply.send(Ok(()));
             }
-            QueueCmd::Ack { .. }
+            QueueCmd::StreamStart { .. }
+            | QueueCmd::Ack { .. }
             | QueueCmd::AckReport { .. }
             | QueueCmd::Nack { .. }
             | QueueCmd::NackReport { .. }

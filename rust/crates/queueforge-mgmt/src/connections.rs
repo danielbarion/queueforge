@@ -105,6 +105,34 @@ pub struct ConnectionTracker {
     limits: Mutex<Limits>,
     topic_perms: Mutex<Vec<TopicPermission>>,
     transient_nonexcl: AtomicBool,
+    alarm: Alarm,
+    /// Vhosts with firehose tracing on. `any_traced` lets publish skip the lock.
+    traced: Mutex<std::collections::HashSet<String>>,
+    any_traced: AtomicBool,
+    /// Direct reply-to addresses, each the mailbox of one requester channel.
+    replies: Mutex<HashMap<String, ReplySink>>,
+}
+
+/// One direct reply-to requester: its channel and consumer tag, and the
+/// connection mailbox that writes the delivery.
+#[derive(Debug, Clone)]
+pub struct ReplySink {
+    /// Channel the reply consumer is on.
+    pub channel: u16,
+    /// Consumer tag the delivery carries.
+    pub consumer_tag: String,
+    /// The requester connection's reply mailbox.
+    pub tx: tokio::sync::mpsc::UnboundedSender<(u16, String, std::sync::Arc<queueforge_core::Message>)>,
+}
+
+/// The broker-wide memory or disk alarm. `None` is clear; `Some(reason)` holds publishes.
+#[derive(Debug)]
+struct Alarm(tokio::sync::watch::Sender<Option<String>>);
+
+impl Default for Alarm {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(None).0)
+    }
 }
 
 impl ConnectionTracker {
@@ -502,6 +530,82 @@ impl ConnectionTracker {
             return true;
         };
         regex::Regex::new(&perm.write).is_ok_and(|re| re.is_match(routing_key))
+    }
+
+    /// When a topic permission exists for this exchange, a binding key must
+    /// match `read`. RabbitMQ checks this on queue.bind to a topic exchange.
+    pub fn topic_read_allowed(
+        &self,
+        user: &str,
+        vhost: &str,
+        exchange: &str,
+        routing_key: &str,
+    ) -> bool {
+        let rows = self.topic_perms.lock().expect("topic perms poisoned");
+        let Some(perm) = rows
+            .iter()
+            .find(|p| p.user == user && p.vhost == vhost && p.exchange == exchange)
+        else {
+            return true;
+        };
+        regex::Regex::new(&perm.read).is_ok_and(|re| re.is_match(routing_key))
+    }
+
+    /// Raise or clear the resource alarm. Connections are told only on a change.
+    pub fn set_alarm(&self, reason: Option<String>) {
+        self.alarm.0.send_if_modified(|current| {
+            if *current == reason {
+                return false;
+            }
+            *current = reason;
+            true
+        });
+    }
+
+    /// The current alarm reason, or `None` when clear.
+    pub fn alarm(&self) -> Option<String> {
+        self.alarm.0.borrow().clone()
+    }
+
+    /// A receiver that wakes on every alarm change.
+    pub fn alarm_rx(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.alarm.0.subscribe()
+    }
+
+    /// Register a direct reply-to address.
+    pub fn add_reply(&self, address: String, sink: ReplySink) {
+        self.replies.lock().expect("replies poisoned").insert(address, sink);
+    }
+
+    /// Forget a direct reply-to address.
+    pub fn remove_reply(&self, address: &str) {
+        self.replies.lock().expect("replies poisoned").remove(address);
+    }
+
+    /// Hand a reply to its requester. Returns false when the address is unknown
+    /// or the requester has gone; RabbitMQ drops the reply then.
+    pub fn send_reply(&self, address: &str, msg: std::sync::Arc<queueforge_core::Message>) -> bool {
+        let sink = self.replies.lock().expect("replies poisoned").get(address).cloned();
+        match sink {
+            Some(sink) => sink.tx.send((sink.channel, sink.consumer_tag, msg)).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Turn firehose tracing on or off for `vhost`.
+    pub fn set_tracing(&self, vhost: &str, on: bool) {
+        let mut set = self.traced.lock().expect("traced poisoned");
+        if on {
+            set.insert(vhost.to_string());
+        } else {
+            set.remove(vhost);
+        }
+        self.any_traced.store(!set.is_empty(), Ordering::Relaxed);
+    }
+
+    /// Whether firehose tracing is on for `vhost`.
+    pub fn tracing(&self, vhost: &str) -> bool {
+        self.any_traced.load(Ordering::Relaxed) && self.traced.lock().expect("traced poisoned").contains(vhost)
     }
 
     /// Whether deprecated transient non-exclusive queues are permitted.

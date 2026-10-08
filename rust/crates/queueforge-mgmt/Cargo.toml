@@ -8,13 +8,14 @@ description = "Management HTTP API and embedded SPA for QueueForge (session auth
 rust-version.workspace = true
 
 [dependencies]
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 futures-lite = "2.6"
 lapin = "2.5"
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }
+crc32fast = { workspace = true }
 cookie = { workspace = true }
 hex = { workspace = true }
 mime_guess = { workspace = true }

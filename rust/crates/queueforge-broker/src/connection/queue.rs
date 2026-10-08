@@ -143,6 +143,26 @@ where
             .queues
             .get(&QueueKey::new(vhost.as_str(), queue_name.as_str()))
             .is_some();
+        // A vhost max-queues limit refuses a new queue, as RabbitMQ does.
+        if !declare.passive && !already {
+            let here = self
+                .queues
+                .list_keys()
+                .iter()
+                .filter(|k| k.vhost.as_str() == vhost.as_str())
+                .count();
+            if !self.connections.queue_allowed(vhost.as_str(), here) {
+                self.server_channel_close(
+                    channel,
+                    REPLY_PRECONDITION_FAILED,
+                    &format!("PRECONDITION_FAILED - cannot declare queue '{queue_name}': queue limit in vhost '{vhost}' is reached"),
+                    queue_method::CLASS_ID,
+                    queue_method::Declare::METHOD_ID,
+                )
+                .await?;
+                return Ok(Step::Continue);
+            }
+        }
         let opts = QueueDeclareOpts {
             declared_args: Some(declared_args),
             durable: declare.durable,
@@ -169,6 +189,18 @@ where
         match declared {
             Ok(result) => {
                 queueforge_core::prom::queue_declared(!declare.passive && !already);
+                if !declare.passive && !already {
+                    self.emit_event(
+                        "queue.created",
+                        &vhost,
+                        vec![
+                            ("name", queueforge_core::AppHeaderValue::Str(result.handle.info.key.name.to_string())),
+                            ("durable", queueforge_core::AppHeaderValue::Bool(declare.durable)),
+                            ("auto_delete", queueforge_core::AppHeaderValue::Bool(declare.auto_delete)),
+                            ("exclusive", queueforge_core::AppHeaderValue::Bool(declare.exclusive)),
+                        ],
+                    );
+                }
                 let key = result.handle.info.key.clone();
                 if !self.declared_queues.iter().any(|k| k == &key) {
                     self.declared_queues.push(key);
@@ -257,6 +289,7 @@ where
         {
             Ok(message_count) => {
                 queueforge_core::prom::queue_deleted();
+                self.emit_event("queue.deleted", &vhost, vec![("name", queueforge_core::AppHeaderValue::Str(delete.queue.to_string()))]);
                 if delete.no_wait {
                     return Ok(Step::Continue);
                 }
@@ -265,6 +298,14 @@ where
                     &Method::QueueDeleteOk(queue_method::DeleteOk { message_count }),
                 )
                 .await?;
+                Ok(Step::Continue)
+            }
+            // RabbitMQ answers delete-ok with 0 messages for a missing queue.
+            Err(CoreError::NotFound(_)) => {
+                if !delete.no_wait {
+                    self.send_method(channel, &Method::QueueDeleteOk(queue_method::DeleteOk { message_count: 0 }))
+                        .await?;
+                }
                 Ok(Step::Continue)
             }
             Err(err) => {

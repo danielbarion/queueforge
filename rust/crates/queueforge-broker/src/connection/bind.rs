@@ -68,6 +68,33 @@ where
             }
         }
 
+        // Topic read permission on the binding key, for a topic exchange.
+        let is_topic = self
+            .router
+            .get_exchange(&vhost, bind.exchange.as_str())
+            .is_some_and(|ex| ex.kind == queueforge_core::ExchangeType::Topic);
+        if is_topic
+            && !self.connections.topic_read_allowed(
+                user.as_str(),
+                vhost.as_str(),
+                bind.exchange.as_str(),
+                bind.routing_key.as_str(),
+            )
+        {
+            self.server_channel_close(
+                channel,
+                REPLY_ACCESS_REFUSED,
+                &format!(
+                    "ACCESS_REFUSED - read access to topic '{}' in exchange '{}' in vhost '{vhost}' refused for user '{user}'",
+                    bind.routing_key, bind.exchange
+                ),
+                queue_method::CLASS_ID,
+                queue_method::Bind::METHOD_ID,
+            )
+            .await?;
+            return Ok(Step::Continue);
+        }
+
         // Exchange must exist in router or store.
         if self
             .router
@@ -154,6 +181,13 @@ where
                         )
                         .await;
                 }
+                self.emit_event("binding.created", &vhost, vec![
+                        ("source_name", queueforge_core::AppHeaderValue::Str(bind.exchange.to_string())),
+                        ("source_kind", queueforge_core::AppHeaderValue::Str("exchange".into())),
+                        ("destination_name", queueforge_core::AppHeaderValue::Str(bind.queue.to_string())),
+                        ("destination_kind", queueforge_core::AppHeaderValue::Str("queue".into())),
+                        ("routing_key", queueforge_core::AppHeaderValue::Str(bind.routing_key.to_string())),
+                    ]);
                 if !bind.no_wait {
                     self.send_method(channel, &Method::QueueBindOk(queue_method::BindOk))
                         .await?;
@@ -256,6 +290,17 @@ where
                 .await;
         }
 
+        self.emit_event(
+            "binding.deleted",
+            &vhost,
+            vec![
+                ("source_name", queueforge_core::AppHeaderValue::Str(unbind.exchange.to_string())),
+                ("source_kind", queueforge_core::AppHeaderValue::Str("exchange".into())),
+                ("destination_name", queueforge_core::AppHeaderValue::Str(unbind.queue.to_string())),
+                ("destination_kind", queueforge_core::AppHeaderValue::Str("queue".into())),
+                ("routing_key", queueforge_core::AppHeaderValue::Str(unbind.routing_key.to_string())),
+            ],
+        );
         self.send_method(channel, &Method::QueueUnbindOk(queue_method::UnbindOk))
             .await?;
         Ok(Step::Continue)

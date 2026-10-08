@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, getOverview, type Overview, type Whoami } from "../api";
+import { Link } from "react-router-dom";
+import { ApiError, getOverview, listQueues, type Overview, type QueueItem, type Whoami } from "../api";
 import Layout from "../components/Layout";
 import Spark from "../components/Spark";
 import { chartSeries, trafficRates, type ChartPoint, type TrafficSample } from "../rates";
@@ -9,19 +10,67 @@ type Props = {
   onLoggedOut: () => void;
 };
 
+type Probe = "ok" | "down" | "unknown";
+
+type Activity = { at: number; text: string };
+
 export default function OverviewPage({ user, onLoggedOut }: Props) {
   const [data, setData] = useState<Overview | null>(null);
+  const [queues, setQueues] = useState<QueueItem[]>([]);
+  const [health, setHealth] = useState<Probe>("unknown");
+  const [ready, setReady] = useState<Probe>("unknown");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [rates, setRates] = useState({ publish: 0, deliver: 0, ack: 0, ready: 0, unacked: 0 });
   const [history, setHistory] = useState<ChartPoint[]>([]);
+  const [activity, setActivity] = useState<Activity[]>([]);
   const samples = useRef<{ at: number; sample: TrafficSample }[]>([]);
+  const previousQueues = useRef<Map<string, QueueItem>>(new Map());
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const ov = await getOverview();
+      const [ov, page, healthRes, readyRes] = await Promise.all([
+        getOverview(),
+        listQueues("/").catch(() => ({ items: [] as QueueItem[] })),
+        fetch("/healthz", { credentials: "same-origin" }),
+        fetch("/readyz", { credentials: "same-origin" }),
+      ]);
       setData(ov);
+      setHealth(healthRes.ok ? "ok" : "down");
+      setReady(readyRes.ok ? "ok" : "down");
+      const listed = [...(page.items ?? [])].sort((a, b) => b.messages - a.messages);
+      setQueues(listed);
+      const notes: Activity[] = [];
+      const now = Date.now();
+      const seen = new Set<string>();
+      for (const queue of listed) {
+        const key = `${queue.vhost}/${queue.name}`;
+        seen.add(key);
+        const prior = previousQueues.current.get(key);
+        if (!prior) {
+          if (previousQueues.current.size > 0) notes.push({ at: now, text: `${queue.name} appeared` });
+          continue;
+        }
+        if (prior.messages_ready !== queue.messages_ready) {
+          notes.push({
+            at: now,
+            text: `${queue.name} ready ${prior.messages_ready.toLocaleString()} → ${queue.messages_ready.toLocaleString()}`,
+          });
+        }
+        if (prior.consumers !== queue.consumers) {
+          notes.push({
+            at: now,
+            text: `${queue.name} consumers ${prior.consumers} → ${queue.consumers}`,
+          });
+        }
+      }
+      for (const [key, prior] of previousQueues.current) {
+        if (!seen.has(key)) notes.push({ at: now, text: `${prior.name} is gone` });
+      }
+      previousQueues.current = new Map(listed.map((queue) => [`${queue.vhost}/${queue.name}`, queue]));
+      if (notes.length) setActivity((current) => [...notes, ...current].slice(0, 12));
+
       const sample: TrafficSample = {
         publish: ov.message_stats?.publish ?? 0,
         deliver: ov.message_stats?.deliver ?? 0,
@@ -33,7 +82,6 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
         confirmBeforeFsync: 0,
         fsync: 0,
       };
-      const now = Date.now();
       const series = [...samples.current, { at: now, sample }].slice(-40);
       samples.current = series;
       const prior = series.length > 1 ? series[series.length - 2] : null;
@@ -83,34 +131,19 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
 
       {data && (
         <>
-          <section className="card meta">
-            <div>
-              <span className="label">Product</span>
+          <section className="status-row">
+            <ProbeMark label="Health" state={health} />
+            <ProbeMark label="Ready" state={ready} />
+            <div className="card status-product">
+              <span className="label">Broker</span>
               <strong>
                 {data.product_name} {data.product_version}
               </strong>
-            </div>
-            <div>
-              <span className="label">Management</span>
-              <strong>{data.management_version}</strong>
-            </div>
-            <div>
-              <span className="label">AMQP compat</span>
-              <strong>{data.rabbitmq_version_compat}</strong>
+              <span className="muted">AMQP {data.rabbitmq_version_compat}</span>
             </div>
           </section>
 
-          <h2>Object totals</h2>
-          <div className="stat-grid">
-            <Stat label="Connections" value={data.object_totals.connections} />
-            <Stat label="Channels" value={data.object_totals.channels} />
-            <Stat label="Queues" value={data.object_totals.queues} />
-            <Stat label="Exchanges" value={data.object_totals.exchanges} />
-            <Stat label="Consumers" value={data.object_totals.consumers} />
-            <Stat label="Vhosts" value={data.object_totals.vhosts} />
-          </div>
-
-          <h2>Message rates</h2>
+          <h2>Throughput</h2>
           <div className="card spark-card">
             <Spark points={history} magnitudes={rates} />
           </div>
@@ -120,20 +153,76 @@ export default function OverviewPage({ user, onLoggedOut }: Props) {
             <Stat label="Ack /s" value={rates.ack} />
             <Stat label="Ready" value={rates.ready} />
             <Stat label="Unacked" value={rates.unacked} />
+            <Stat label="Connections" value={data.object_totals.connections} />
+            <Stat label="Channels" value={data.object_totals.channels} />
+            <Stat label="Consumers" value={data.object_totals.consumers} />
           </div>
 
-          <h2>Queue totals</h2>
-          <div className="stat-grid">
-            <Stat label="Messages" value={data.queue_totals.messages} />
-            <Stat label="Ready" value={data.queue_totals.messages_ready} />
-            <Stat
-              label="Unacked"
-              value={data.queue_totals.messages_unacknowledged}
-            />
+          <div className="dash-split">
+            <section>
+              <h2>Queues</h2>
+              <div className="table-wrap card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Ready</th>
+                      <th>Unacked</th>
+                      <th>Consumers</th>
+                      <th>State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queues.slice(0, 8).map((queue) => (
+                      <tr key={`${queue.vhost}/${queue.name}`}>
+                        <td>
+                          <Link to={`/queues/${encodeURIComponent(queue.vhost)}/${encodeURIComponent(queue.name)}`}>
+                            <code>{queue.name}</code>
+                          </Link>
+                        </td>
+                        <td>{queue.messages_ready.toLocaleString()}</td>
+                        <td>{queue.messages_unacknowledged.toLocaleString()}</td>
+                        <td>{queue.consumers}</td>
+                        <td>{queue.state || "running"}</td>
+                      </tr>
+                    ))}
+                    {queues.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="muted">
+                          No queues in /.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            <section>
+              <h2>Activity</h2>
+              <ul className="activity card">
+                {activity.length === 0 && <li className="muted">Waiting for a queue to change.</li>}
+                {activity.map((line, index) => (
+                  <li key={`${line.at}-${index}`}>
+                    <time>{new Date(line.at).toLocaleTimeString()}</time>
+                    {line.text}
+                  </li>
+                ))}
+              </ul>
+            </section>
           </div>
         </>
       )}
     </Layout>
+  );
+}
+
+function ProbeMark({ label, state }: { label: string; state: Probe }) {
+  const text = state === "ok" ? "ok" : state === "down" ? "down" : "…";
+  return (
+    <div className={`card probe is-${state}`}>
+      <span className="label">{label}</span>
+      <strong>{text}</strong>
+    </div>
   );
 }
 

@@ -42,6 +42,12 @@ impl Method {
             (connection::CLASS_ID, connection::CloseOk::METHOD_ID) => Ok(Self::ConnectionCloseOk(
                 connection::CloseOk::decode_args(dec)?,
             )),
+            (connection::CLASS_ID, connection::Blocked::METHOD_ID) => {
+                Ok(Self::ConnectionBlocked(connection::Blocked::decode_args(dec)?))
+            }
+            (connection::CLASS_ID, connection::Unblocked::METHOD_ID) => {
+                Ok(Self::ConnectionUnblocked(connection::Unblocked::decode_args(dec)?))
+            }
 
             (channel::CLASS_ID, channel::Open::METHOD_ID) => {
                 Ok(Self::ChannelOpen(channel::Open::decode_args(dec)?))

@@ -63,7 +63,7 @@ pub async fn put_permission(
 ) -> Result<StatusCode, MgmtError> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let vhost = decode_vhost(&raw_vhost)?;
+    let (user, vhost) = crate::compat::perm_target(&state, &user, &raw_vhost).await?;
     let user_lookup = user.clone();
     if db(&state, move |s| s.get_user(&user_lookup))
         .await?
@@ -113,7 +113,7 @@ pub async fn delete_permission(
 ) -> Result<StatusCode, MgmtError> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
-    let vhost = decode_vhost(&raw_vhost)?;
+    let (user, vhost) = crate::compat::perm_target(&state, &user, &raw_vhost).await?;
     let user_d = user.clone();
     let vhost_d = vhost.clone();
     if !db(&state, move |s| s.delete_permission(&user_d, &vhost_d)).await? {

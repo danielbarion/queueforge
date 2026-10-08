@@ -160,6 +160,13 @@ impl QueueRegistry {
             }
         }
 
+        if opts.args.queue_type == Some(crate::queue::QueueType::Stream)
+            && (!opts.durable || opts.exclusive || opts.auto_delete)
+        {
+            return Err(Error::PreconditionFailed(
+                "a stream queue must be durable, non-exclusive and not auto-delete".into(),
+            ));
+        }
         let info = Arc::new(QueueInfo::new(key.clone(), &opts));
         let bootstrap = self.bootstrap_for_declare(&key, &opts)?;
         let tx = spawn_supervised_actor(

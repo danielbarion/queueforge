@@ -85,6 +85,20 @@ async fn post_login(app: Router, body: Body) -> Response {
 }
 
 #[tokio::test]
+async fn identity_is_public() {
+    let (_dir, state) = test_state().await;
+    let app = test_app(state, peer([127, 0, 0, 1], 10001));
+    let res = app
+        .oneshot(Request::builder().uri("/api/identity").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["product_name"], "QueueForge");
+    assert_eq!(body["kind"], "rust");
+}
+
+#[tokio::test]
 async fn login_sets_session_cookie_and_whoami() {
     let (_dir, state) = test_state().await;
     let app = test_app(state, peer([127, 0, 0, 1], 10001));
@@ -973,7 +987,7 @@ async fn put_queue_accepts_arguments_and_rejects_unknown() {
                 .uri("/api/queues/%2F/bad.args")
                 .header(header::COOKIE, &cookie)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"arguments":{"x-unknown":1}}"#))
+                .body(Body::from(r#"{"durable":true,"arguments":{"x-unknown":1}}"#))
                 .unwrap(),
         )
         .await
@@ -991,12 +1005,13 @@ async fn put_queue_accepts_arguments_and_rejects_unknown() {
                 .uri("/api/queues/%2F/bad.plain")
                 .header(header::COOKIE, &cookie)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"arguments":{"not-an-x-arg":1}}"#))
+                .body(Body::from(r#"{"durable":true,"arguments":{"not-an-x-arg":1}}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::PRECONDITION_FAILED);
+    // RabbitMQ 4.3 answers 201 and keeps the argument.
+    assert_eq!(res.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -1027,7 +1042,7 @@ async fn delete_binding_uses_properties_key_for_header_args() {
                 .uri("/api/queues/%2F/hq")
                 .header(header::COOKIE, &cookie)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"durable":false}"#))
+                .body(Body::from(r#"{"durable":true}"#))
                 .unwrap(),
         )
         .await
@@ -1257,8 +1272,9 @@ async fn console_operator_actions() {
         .iter()
         .find(|q| q["name"] == "pol.op.q")
         .unwrap();
+    // RabbitMQ applies an operator policy as a cap: the lower TTL (the user policy's 1000) wins.
     assert_eq!(
-        q["arguments"]["message_ttl_ms"], 2500,
+        q["arguments"]["message_ttl_ms"], 1000,
         "args={}",
         q["arguments"]
     );

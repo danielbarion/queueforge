@@ -384,6 +384,17 @@ pub async fn export_definitions(
         }
     }
 
+    for (vhost, source, destination, routing_key) in state.router.list_exchange_links() {
+        bindings.push(DefBinding {
+            source,
+            vhost,
+            destination,
+            destination_type: "exchange".into(),
+            routing_key,
+            arguments: args_to_json(&[]),
+        });
+    }
+
     let policies = state
         .router
         .list_policies(None)
@@ -545,12 +556,10 @@ pub async fn import_definitions(
             // Skip default/builtin — already present after vhost create.
             continue;
         }
-        let kind = match ex.kind.to_ascii_lowercase().as_str() {
-            "direct" => ExchangeType::Direct,
-            "fanout" => ExchangeType::Fanout,
-            "topic" => ExchangeType::Topic,
-            "headers" => ExchangeType::Headers,
-            other => {
+        let kind = match ExchangeType::parse(&ex.kind.to_ascii_lowercase()) {
+            Some(kind) => kind,
+            None => {
+                let other = ex.kind.as_str();
                 return Err(MgmtError::BadRequest(format!(
                     "invalid exchange type '{other}'"
                 )));
@@ -564,6 +573,7 @@ pub async fn import_definitions(
             auto_delete: ex.auto_delete,
             internal: ex.internal,
             alternate: None,
+            delayed_type: None,
         };
         if exchange.durable {
             let stored = exchange.clone();
@@ -626,6 +636,34 @@ pub async fn import_definitions(
 
     // 7. Bindings
     for b in &body.bindings {
+        if b.destination_type == "exchange" && !b.source.is_empty() {
+            for name in [&b.source, &b.destination] {
+                if state.router.get_exchange(&b.vhost, name).is_some() {
+                    continue;
+                }
+                let (vhost_name, ex_name) = (b.vhost.clone(), name.clone());
+                if let Some(ex) = queueforge_store::MetadataStore::blocking(Arc::clone(&state.store), move |s| {
+                    s.get_exchange(&vhost_name, &ex_name)
+                })
+                .await?
+                {
+                    state.router.put_exchange(ex);
+                }
+            }
+            state
+                .router
+                .bind_exchange(&b.vhost, &b.source, &b.destination, &b.routing_key)
+                .map_err(|e| MgmtError::BadRequest(format!("exchange binding: {e}")))?;
+            let durable = |n: &str| state.router.get_exchange(&b.vhost, n).is_some_and(|ex| ex.durable);
+            if durable(&b.source) && durable(&b.destination) {
+                let (v, src, dst, rk) = (b.vhost.clone(), b.source.clone(), b.destination.clone(), b.routing_key.clone());
+                queueforge_store::MetadataStore::blocking(Arc::clone(&state.store), move |s| {
+                    s.put_exchange_binding(&v, &src, &dst, &rk)
+                })
+                .await?;
+            }
+            continue;
+        }
         if b.destination_type != "queue" {
             continue;
         }

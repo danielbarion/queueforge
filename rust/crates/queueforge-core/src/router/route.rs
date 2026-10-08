@@ -37,7 +37,8 @@ impl ExchangeRouter {
     /// - Default exchange `""`: routing key is the queue name (single dest if present is
     ///   **not** checked here — callers still need the queue registry).
     /// - Named exchanges: use the binding index; missing exchange → `NotFound`.
-    /// - Internal exchanges (except default) refuse publish.
+    /// - Internal exchanges route like any other; the AMQP publish path refuses a
+    ///   client publish to one before routing.
     ///
     /// Follow `alternate-exchange` while the result has no queue. A cycle stops
     /// and returns no destinations. The message body is not modified.
@@ -111,16 +112,10 @@ impl ExchangeRouter {
         let Some(ex) = map.get(&(CompactString::from(vhost), CompactString::from(exchange))) else {
             return Err(Error::NotFound(format!("exchange {vhost}/{exchange}")));
         };
-        if ex.internal {
-            return Err(Error::PreconditionFailed(format!(
-                "exchange {exchange} is internal"
-            )));
-        }
-
         let names = self
             .index
             .load()
-            .route_named(vhost, exchange, ex.kind, routing_key, headers);
+            .route_named(vhost, exchange, ex.routing_kind(), routing_key, headers);
         let destinations = names.into_iter().map(|q| QueueKey::new(vhost, q)).collect();
         Ok(RouteResult {
             exchange_name: CompactString::from(exchange),

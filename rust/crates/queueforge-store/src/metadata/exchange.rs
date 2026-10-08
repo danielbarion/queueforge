@@ -31,6 +31,13 @@ impl MetadataStore {
                 }
             }
         }
+        for vh in self.list_vhosts()? {
+            for (source, destination, routing_key) in self.list_exchange_bindings(vh.name.as_str())? {
+                if let Err(e) = router.bind_exchange(vh.name.as_str(), &source, &destination, &routing_key) {
+                    debug!(error = %e, "skipping exchange binding during router bootstrap");
+                }
+            }
+        }
         for policy in self.list_policies()? {
             let _ = router.upsert_policy(policy);
         }
@@ -140,6 +147,7 @@ impl MetadataStore {
         };
         if removed {
             Self::delete_bindings_for_exchange(&txn, vhost, name)?;
+            Self::delete_exchange_bindings_touching(&txn, vhost, name)?;
         }
         txn.commit()?;
         Ok(removed)

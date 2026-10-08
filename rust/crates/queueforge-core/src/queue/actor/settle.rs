@@ -78,7 +78,8 @@ impl QueueState {
             if let Some(limit) = self.args.delivery_limit {
                 let count = self.redeliveries.entry(qm.offset.0).or_insert(0);
                 *count = count.saturating_add(1);
-                if *count >= limit {
+                // RabbitMQ allows `limit` returns; the next one drops the message.
+                if *count > limit {
                     self.schedule_dead_letter(qm, DeathReason::Rejected, self.dlx_on_fail());
                     crate::prom::dead_lettered("delivery_limit");
                     self.update_gauges();

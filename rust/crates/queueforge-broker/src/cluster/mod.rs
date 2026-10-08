@@ -82,6 +82,13 @@ struct Inner {
     down: std::sync::Mutex<HashSet<String>>,
     /// Wakes [`Cluster::wait_quorum_catchup`] after `heard` or `down` gains a member.
     catchup: Notify,
+    /// The Raft driver, once the `raft` feature flag is enabled.
+    raft: std::sync::OnceLock<Arc<raft_node::RaftNode>>,
+    /// Members whose hello advertised `raft`.
+    raft_peers: std::sync::Mutex<HashSet<String>>,
+    /// Quorum messages the `quorum` group holds, by replica key, as their
+    /// `enq` data. It makes a replayed `enq` a no-op and is the snapshot.
+    quorum_live: Mutex<HashMap<String, Value>>,
 }
 
 /// Refused connects before a member is treated as down.
@@ -261,6 +268,7 @@ impl Inner {
     }
 }
 
+mod consensus;
 mod dispatch;
 mod forward;
 mod ingress;
@@ -269,6 +277,9 @@ mod membership;
 mod net;
 mod proxy;
 mod quorum;
+pub(crate) mod raft;
+mod raft_apply;
+mod raft_node;
 mod state;
 mod subscribe;
 mod wire;

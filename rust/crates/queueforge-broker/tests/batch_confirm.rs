@@ -220,7 +220,8 @@ async fn pipelined_classic_confirms_share_one_fsync() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let base = 63000 + (nanos % 400) as u16;
+    // Ports sit below the macOS ephemeral range (49152+), so outbound dials cannot take them.
+    let base = 30000 + (nanos % 400) as u16;
     batch(
         "rust",
         base,
@@ -254,7 +255,7 @@ async fn one_hundred_twenty_eight_classic_confirms_share_one_fsync() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let base = 64000 + (nanos % 400) as u16;
+    let base = 31000 + (nanos % 400) as u16;
     batch(
         "rust",
         base,

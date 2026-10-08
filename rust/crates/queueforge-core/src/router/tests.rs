@@ -15,6 +15,7 @@ fn headers_unbind_keeps_the_sibling_binding() {
         auto_delete: false,
         internal: false,
         alternate: None,
+        delayed_type: None,
     });
     let mut color = Binding::new("/", "h", "q2", "");
     color.args = vec![(CompactString::from("color"), HeaderArg::Str("blue".into()))];
@@ -57,6 +58,7 @@ fn put_kind(router: &ExchangeRouter, name: &str, kind: ExchangeType) {
         auto_delete: false,
         internal: false,
         alternate: None,
+        delayed_type: None,
     });
 }
 
@@ -238,6 +240,7 @@ fn cannot_bind_default_exchange() {
         auto_delete: false,
         internal: true,
         alternate: None,
+        delayed_type: None,
     });
     let err = r.bind(Binding::new("/", "", "q", "q")).unwrap_err();
     assert!(matches!(err, Error::PreconditionFailed(_)));

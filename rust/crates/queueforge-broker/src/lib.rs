@@ -32,4 +32,4 @@ pub use listener::{
     start_amqp_listener, start_amqp_listener_with_limits, AmqpListener, AmqpListenerHandle,
 };
 pub use shutdown::{ConnectionGuard, ConnectionTracker, CONNECTION_DRAIN_TIMEOUT};
-pub use tls::{load_server_config, with_https_alpn, TlsError};
+pub use tls::{load_server_config, load_server_config_with_client_ca, with_https_alpn, TlsError};

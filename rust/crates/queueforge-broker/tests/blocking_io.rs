@@ -68,7 +68,8 @@ async fn permission_and_overview_use_blocking_pool() {
     let ch = admin.create_channel().await.expect("admin channel");
     ch.queue_declare(
         "tracked-q",
-        QueueDeclareOptions::default(),
+        // Durable: RabbitMQ 4 refuses transient non-exclusive queues by default.
+        QueueDeclareOptions { durable: true, ..QueueDeclareOptions::default() },
         FieldTable::default(),
     )
     .await

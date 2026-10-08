@@ -63,7 +63,7 @@ pub(super) async fn attach_peer(
                 op: "hello".into(),
                 ok: false,
                 error: String::new(),
-                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone()}),
+                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features()}),
                 v: 1,
                 node_id: inner.node_id.clone(),
                 from: inner.node_id.clone(),
@@ -78,7 +78,19 @@ pub(super) async fn attach_peer(
         let Ok(msg) = serde_json::from_str::<Msg>(&line) else {
             continue;
         };
+        if msg.op == "raft" {
+            // One-way (docs/raft.md, section 1): never answered with a reply.
+            if let Some(node) = super::consensus::node(&inner) {
+                let from = if msg.from.is_empty() { msg.node_id.as_str() } else { msg.from.as_str() };
+                node.step(from, msg.payload);
+            }
+            continue;
+        }
         if msg.op == "reply" {
+            if msg.id == 0 || msg.payload.get("features").is_some() {
+                let from = if msg.from.is_empty() { msg.node_id.clone() } else { msg.from.clone() };
+                super::consensus::note_features(&inner, &from, &msg.payload);
+            }
             if let Some(snap) = msg.payload.get("snapshot") {
                 apply_snapshot(&inner, snap).await;
             }
@@ -126,13 +138,14 @@ pub(super) async fn attach_peer(
                     apply_consumed(&inner, consumed).await;
                 }
                 note_peer_caught_up(&inner, node);
+                super::consensus::note_features(&inner, node, &msg.payload);
                 let _ = peer.tx.send(
                     serde_json::to_string(&Msg {
                         id: msg.id,
                         op: "reply".into(),
                         ok: true,
                         error: String::new(),
-                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone()}),
+                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features()}),
                         v: 1,
                         node_id: inner.node_id.clone(),
                         from: inner.node_id.clone(),
@@ -173,6 +186,10 @@ fn note_peer_caught_up(inner: &Inner, peer: &str) {
 
 /// Recompute the quorum leader from `inner` membership and the live set. The lowest live member id, including this node, becomes leader.
 pub(super) async fn refresh_leader(inner: &Arc<Inner>) {
+    // With Raft on, the quorum group's election names the leader.
+    if super::consensus::node(inner).is_some() {
+        return;
+    }
     let mut ids = vec![inner.node_id.clone()];
     {
         let peers = inner.peers.lock().await;

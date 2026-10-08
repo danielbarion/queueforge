@@ -23,6 +23,9 @@
 #![deny(missing_docs)]
 
 mod authz;
+/// MQTT and STOMP over a loopback AMQP connection.
+pub mod bridge;
+mod compat;
 mod connections;
 mod console;
 mod definitions;
@@ -35,6 +38,7 @@ mod spa;
 mod state;
 
 pub use connections::{
+    ReplySink,
     ChannelInfo, ConnectionInfo, ConnectionTracker, ConsumerInfo, TopicPermission,
 };
 pub use error::{MgmtError, Result};

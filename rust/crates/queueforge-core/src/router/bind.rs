@@ -34,6 +34,10 @@ impl ExchangeRouter {
         idx.epoch = epoch;
         idx.remove_exchange(vhost, name);
         self.index.store(Arc::new(idx));
+        // Exchange-to-exchange links with this exchange at either end go too.
+        let mut edges = (**self.exchange_bindings.load()).clone();
+        edges.retain(|e| !(e.vhost.as_str() == vhost && (e.source.as_str() == name || e.destination.as_str() == name)));
+        self.exchange_bindings.store(Arc::new(edges));
         debug!(vhost, exchange = name, "router: exchange deleted");
         Ok(ex)
     }
@@ -56,7 +60,7 @@ impl ExchangeRouter {
                 binding.vhost, binding.exchange
             )));
         };
-        let kind = ex.kind;
+        let kind = ex.routing_kind();
         let key = BindingKey::from_binding(&binding);
         if self.index.load().contains(&key) {
             return Ok(false);
@@ -88,7 +92,7 @@ impl ExchangeRouter {
         let ex_key = (binding.vhost.clone(), binding.exchange.clone());
         let kind = map
             .get(&ex_key)
-            .map(|e| e.kind)
+            .map(|e| e.routing_kind())
             .unwrap_or(ExchangeType::Direct);
         let key = BindingKey::from_binding(binding);
         if !self.index.load().contains(&key) {
@@ -148,6 +152,15 @@ impl ExchangeRouter {
         list.push(edge);
         self.exchange_bindings.store(Arc::new(list));
         Ok(true)
+    }
+
+    /// Every exchange-to-exchange binding as `(vhost, source, destination, routing_key)`.
+    pub fn list_exchange_links(&self) -> Vec<(String, String, String, String)> {
+        self.exchange_bindings
+            .load()
+            .iter()
+            .map(|e| (e.vhost.to_string(), e.source.to_string(), e.destination.to_string(), e.routing_key.to_string()))
+            .collect()
     }
 
     /// Remove an exchange-to-exchange binding. Missing rows still succeed.

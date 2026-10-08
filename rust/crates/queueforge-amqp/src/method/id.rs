@@ -13,7 +13,9 @@ impl Method {
             | Self::ConnectionOpen(_)
             | Self::ConnectionOpenOk(_)
             | Self::ConnectionClose(_)
-            | Self::ConnectionCloseOk(_) => connection::CLASS_ID,
+            | Self::ConnectionCloseOk(_)
+            | Self::ConnectionBlocked(_)
+            | Self::ConnectionUnblocked(_) => connection::CLASS_ID,
 
             Self::ChannelOpen(_)
             | Self::ChannelOpenOk(_)
@@ -82,6 +84,8 @@ impl Method {
             Self::ConnectionOpenOk(_) => connection::OpenOk::METHOD_ID,
             Self::ConnectionClose(_) => connection::Close::METHOD_ID,
             Self::ConnectionCloseOk(_) => connection::CloseOk::METHOD_ID,
+            Self::ConnectionBlocked(_) => connection::Blocked::METHOD_ID,
+            Self::ConnectionUnblocked(_) => connection::Unblocked::METHOD_ID,
 
             Self::ChannelOpen(_) => channel::Open::METHOD_ID,
             Self::ChannelOpenOk(_) => channel::OpenOk::METHOD_ID,

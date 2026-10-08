@@ -33,7 +33,7 @@ pub struct PutQueueBody {
 
 /// Parse management JSON queue arguments into [`QueueArgs`].
 ///
-/// Accepts the closed v1 x-arg set; unknown keys return [`MgmtError::PreconditionFailed`].
+/// Known x- arguments are type-checked; other keys are ignored, as RabbitMQ does.
 pub(crate) fn parse_mgmt_queue_args(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<QueueArgs, MgmtError> {
@@ -62,6 +62,10 @@ pub(crate) fn parse_mgmt_queue_args(
                 }
             }
             serde_json::Value::String(s) => owned_strings.push((key.clone(), s.clone())),
+            // A JSON boolean, such as x-single-active-consumer: true.
+            serde_json::Value::Bool(b) => long_pairs.push((key.clone(), i64::from(*b))),
+            // RabbitMQ stores arguments it does not interpret; only known x- keys are typed.
+            _ if !is_known_arg(key) => {}
             other => {
                 return Err(MgmtError::BadRequest(format!(
                     "argument '{key}' has unsupported JSON type ({})",
@@ -89,6 +93,28 @@ pub(crate) fn parse_mgmt_queue_args(
         queueforge_core::Error::PreconditionFailed(msg) => MgmtError::PreconditionFailed(msg),
         other => MgmtError::BadRequest(other.to_string()),
     })
+}
+
+/// Whether `QueueArgs::parse` interprets this argument.
+fn is_known_arg(key: &str) -> bool {
+    matches!(
+        key,
+        "x-message-ttl"
+            | "x-expires"
+            | "x-max-length"
+            | "x-max-length-bytes"
+            | "x-overflow"
+            | "x-dead-letter-exchange"
+            | "x-dead-letter-routing-key"
+            | "x-max-death-hops"
+            | "x-max-priority"
+            | "x-single-active-consumer"
+            | "x-delivery-limit"
+            | "x-queue-type"
+            | "x-dead-letter-strategy"
+            | "x-max-age"
+            | "x-queue-leader-locator"
+    )
 }
 
 #[derive(Debug, Serialize)]

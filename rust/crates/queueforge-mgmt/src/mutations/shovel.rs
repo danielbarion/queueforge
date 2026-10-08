@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use compact_str::CompactString;
-use queueforge_core::{Message, QueueCmd, QueueDeclareOpts, QueueKey};
+use queueforge_core::{QueueCmd, QueueDeclareOpts, QueueKey};
 use tokio::sync::oneshot;
 
 use crate::authz::{require_administrator, require_session};
@@ -39,82 +39,128 @@ fn vhost_from_amqp_uri(uri: &str) -> String {
     }
 }
 
+/// Running shovels by `vhost` and name, so DELETE can stop one.
+static SHOVELS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<(String, String), tokio::task::AbortHandle>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The vhost a local URI names. `amqp://` with no host means this broker, as
+/// in RabbitMQ; a missing URI does too. Returns `None` for a remote URI.
+fn local_vhost(uri: Option<&str>, fallback: &str) -> Option<String> {
+    let Some(uri) = uri else {
+        return Some(fallback.to_string());
+    };
+    let rest = uri.strip_prefix("amqp://").or_else(|| uri.strip_prefix("amqps://"))?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if !host.is_empty() {
+        return None;
+    }
+    if path.is_empty() {
+        return Some(fallback.to_string());
+    }
+    Some(decode_vhost(path).unwrap_or_else(|_| path.to_string()))
+}
+
 /// PUT /api/parameters/shovel/{vhost}/{name}
 pub async fn put_shovel(
     State(state): State<MgmtState>,
     headers: HeaderMap,
+    Path((raw_vhost, name)): Path<(String, String)>,
     Json(body): Json<ShovelPut>,
 ) -> Result<StatusCode, MgmtError> {
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
+    let vhost = decode_vhost(&raw_vhost)?;
     let src = json_str(&body.value, "src-queue")
         .ok_or_else(|| MgmtError::BadRequest("src-queue is required".into()))?;
     let dest = json_str(&body.value, "dest-queue")
         .ok_or_else(|| MgmtError::BadRequest("dest-queue is required".into()))?;
-    if let (Some(src_uri), Some(dest_uri)) = (
-        json_str(&body.value, "src-uri"),
-        json_str(&body.value, "dest-uri"),
-    ) {
-        tokio::spawn(async move {
-            if let Err(err) = shovel_link(src_uri, dest_uri, src, dest).await {
-                tracing::warn!(error = %err, "shovel stopped");
-            }
-        });
-        return Ok(StatusCode::CREATED);
-    }
-    let queues = Arc::clone(&state.queues);
-    tokio::spawn(async move {
-        loop {
-            let key = QueueKey::new("/", &src);
-            let Some(handle) = queues.get(&key) else {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                continue;
-            };
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(QueueCmd::Get {
-                    no_ack: true,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-            let Ok(Some((_, message, _))) = rx.await else {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                continue;
-            };
-            let body = message.message.body.clone();
-            let dest_key = QueueKey::new("/", &dest);
-            if queues.get(&dest_key).is_none() {
-                let _ = queues
-                    .declare("/", &dest, QueueDeclareOpts::default())
-                    .await;
-            }
-            let Some(dest_handle) = queues.get(&dest_key) else {
-                continue;
-            };
-            let mut msg = Message::blank();
-            msg.routing_key = CompactString::from(dest.as_str());
-            msg.body = body;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if dest_handle
-                .tx
-                .send(QueueCmd::Enqueue {
-                    msg: Arc::new(msg),
-                    reply: reply_tx,
-                })
-                .await
-                .is_err()
-            {
-                break;
-            }
-            let _ = reply_rx.await;
+    let src_uri = json_str(&body.value, "src-uri");
+    let dest_uri = json_str(&body.value, "dest-uri");
+    let task = match (local_vhost(src_uri.as_deref(), &vhost), local_vhost(dest_uri.as_deref(), &vhost)) {
+        (Some(src_vhost), Some(dest_vhost)) => {
+            let queues = Arc::clone(&state.queues);
+            tokio::spawn(local_shovel(queues, src_vhost, src, dest_vhost, dest))
         }
-    });
+        _ => {
+            let (src_uri, dest_uri) = (
+                src_uri.unwrap_or_else(|| "amqp://".into()),
+                dest_uri.unwrap_or_else(|| "amqp://".into()),
+            );
+            tokio::spawn(async move {
+                if let Err(err) = shovel_link(src_uri, dest_uri, src, dest).await {
+                    tracing::warn!(error = %err, "shovel stopped");
+                }
+            })
+        }
+    };
+    if let Some(old) = SHOVELS
+        .lock()
+        .expect("shovels poisoned")
+        .insert((vhost, name), task.abort_handle())
+    {
+        old.abort();
+    }
     Ok(StatusCode::CREATED)
+}
+
+/// DELETE /api/parameters/shovel/{vhost}/{name}
+pub async fn delete_shovel(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path((raw_vhost, name)): Path<(String, String)>,
+) -> Result<StatusCode, MgmtError> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let vhost = decode_vhost(&raw_vhost)?;
+    match SHOVELS.lock().expect("shovels poisoned").remove(&(vhost, name.clone())) {
+        Some(task) => {
+            task.abort();
+            Ok(StatusCode::NO_CONTENT)
+        }
+        None => Err(MgmtError::NotFound(format!("shovel '{name}'"))),
+    }
+}
+
+/// Move messages between two queues on this broker, keeping their properties.
+async fn local_shovel(
+    queues: Arc<queueforge_core::QueueRegistry>,
+    src_vhost: String,
+    src: String,
+    dest_vhost: String,
+    dest: String,
+) {
+    let idle = std::time::Duration::from_millis(25);
+    loop {
+        let Some(handle) = queues.get(&QueueKey::new(&src_vhost, &src)) else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+        let dest_key = QueueKey::new(&dest_vhost, &dest);
+        if queues.get(&dest_key).is_none() {
+            let _ = queues.declare(&dest_vhost, &dest, QueueDeclareOpts::default()).await;
+        }
+        let Some(dest_handle) = queues.get(&dest_key) else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+        let (tx, rx) = oneshot::channel();
+        if handle.tx.send(QueueCmd::Get { no_ack: true, reply: tx }).await.is_err() {
+            tokio::time::sleep(idle).await;
+            continue;
+        }
+        let Ok(Some((_, message, _))) = rx.await else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let msg = Arc::clone(&message.message);
+        if dest_handle.tx.send(QueueCmd::Enqueue { msg, reply: reply_tx }).await.is_err() {
+            continue;
+        }
+        if let Ok(Ok(done)) = reply_rx.await {
+            let _ = done.durable_done.await;
+        }
+    }
 }
 
 /// PUT /api/parameters/federation-upstream/{vhost}/{name}

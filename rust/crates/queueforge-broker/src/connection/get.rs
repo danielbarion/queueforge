@@ -81,6 +81,9 @@ where
                 .unwrap_or_else(|err| err.into_inner())
                 .queue_type
                 == Some(QueueType::Quorum);
+            if quorum {
+                cluster.wait_quorum_leader().await;
+            }
             if quorum && !cluster.is_quorum_leader() {
                 if let Some(proxied) = cluster.leader_consume_handle(&key) {
                     handle = proxied;

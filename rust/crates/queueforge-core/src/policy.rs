@@ -119,8 +119,10 @@ pub fn select_policy<'a>(
     best
 }
 
-/// User policy fills unset keys, then an operator policy overrides those fills.
-/// A key set on the declare itself stays.
+/// User policy fills unset keys. An operator policy then caps each numeric
+/// limit it sets (message TTL, length, length bytes, expiry, delivery limit):
+/// the lower of the queue's value and the operator's wins, as in RabbitMQ.
+/// Other operator keys fill only what is still unset.
 pub fn apply_user_and_operator(
     declared: &QueueArgs,
     user: Option<&Policy>,
@@ -130,32 +132,29 @@ pub fn apply_user_and_operator(
     let Some(op) = operator else {
         return out;
     };
-    if declared.message_ttl_ms.is_none() && op.message_ttl_ms.is_some() {
-        out.message_ttl_ms = op.message_ttl_ms;
+    fn cap<T: Ord + Copy>(have: Option<T>, limit: Option<T>) -> Option<T> {
+        match (have, limit) {
+            (Some(h), Some(l)) => Some(h.min(l)),
+            (None, l) => l,
+            (h, None) => h,
+        }
     }
+    out.message_ttl_ms = cap(out.message_ttl_ms, op.message_ttl_ms);
     if declared.dead_letter_exchange.is_none() && op.dead_letter_exchange.is_some() {
         out.dead_letter_exchange = op.dead_letter_exchange.clone();
     }
     if declared.dead_letter_routing_key.is_none() && op.dead_letter_routing_key.is_some() {
         out.dead_letter_routing_key = op.dead_letter_routing_key.clone();
     }
-    if declared.max_length.is_none() && op.max_length.is_some() {
-        out.max_length = op.max_length;
-    }
-    if declared.max_length_bytes.is_none() && op.max_length_bytes.is_some() {
-        out.max_length_bytes = op.max_length_bytes;
-    }
-    if declared.expires_ms.is_none() && op.expires_ms.is_some() {
-        out.expires_ms = op.expires_ms;
-    }
+    out.max_length = cap(out.max_length, op.max_length);
+    out.max_length_bytes = cap(out.max_length_bytes, op.max_length_bytes);
+    out.expires_ms = cap(out.expires_ms, op.expires_ms);
     if declared.overflow == OverflowPolicy::DropHead {
         if let Some(overflow) = op.overflow {
             out.overflow = overflow;
         }
     }
-    if declared.delivery_limit.is_none() && op.delivery_limit.is_some() {
-        out.delivery_limit = op.delivery_limit;
-    }
+    out.delivery_limit = cap(out.delivery_limit, op.delivery_limit);
     if declared.dead_letter_strategy == crate::queue::DeadLetterStrategy::AtMostOnce {
         if let Some(strategy) = op.dead_letter_strategy {
             out.dead_letter_strategy = strategy;

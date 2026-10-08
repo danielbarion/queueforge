@@ -45,3 +45,15 @@ pub const LEGACY_BINDINGS: TableDefinition<(&str, &str, &str, &str), &[u8]> =
 /// The args fingerprint distinguishes headers bindings that share a routing key.
 pub const BINDINGS: TableDefinition<(&str, &str, &str, &str, &str), &[u8]> =
     TableDefinition::new("bindings_v2");
+
+/// `exchange_bindings`: (vhost, source, destination, routing_key) → empty.
+///
+/// Exchange-to-exchange bindings. Stored when both exchanges are durable.
+pub const EXCHANGE_BINDINGS: TableDefinition<(&str, &str, &str, &str), &[u8]> =
+    TableDefinition::new("exchange_bindings");
+
+/// `parameters`: (component, vhost, name) → value bytes.
+///
+/// Runtime parameters without a table of their own, such as stream
+/// consumer offsets and publisher sequences.
+pub const PARAMETERS: TableDefinition<(&str, &str, &str), &[u8]> = TableDefinition::new("parameters");

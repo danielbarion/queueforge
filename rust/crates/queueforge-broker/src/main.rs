@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use queueforge_auth::{AuthService, BootstrapMode};
 use queueforge_broker::{
-    load_server_config, start_amqp_listener_with_limits, with_https_alpn, ConnectionLimiter,
+    load_server_config_with_client_ca, start_amqp_listener_with_limits, with_https_alpn, ConnectionLimiter,
     ConnectionParams, CONNECTION_DRAIN_TIMEOUT, DEFAULT_CHANNEL_MAX, DEFAULT_FRAME_MAX,
     DEFAULT_MAX_MESSAGE_BYTES, FRAME_MAX_FLOOR,
 };
@@ -72,15 +72,18 @@ async fn run() -> Result<()> {
     config
         .apply_env_overrides()
         .context("applying environment overrides")?;
+    config.cluster.resolve_discovery().context("resolving cluster discovery")?;
     config.validate().context("validating configuration")?;
     config.tls.validate().context("invalid TLS configuration")?;
 
     init_tracing(&config.logging.level)?;
+    // OAuth 2.0 and LDAP, tried after the internal store.
+    queueforge_auth::external::configure(config.auth.clone());
 
     let tls_config = if config.tls.enabled {
         let cert = config.tls.cert_path_required().context("TLS cert_path")?;
         let key = config.tls.key_path_required().context("TLS key_path")?;
-        let cfg = load_server_config(cert, key).with_context(|| {
+        let cfg = load_server_config_with_client_ca(cert, key, config.tls.ca_path.as_deref()).with_context(|| {
             format!(
                 "loading TLS cert {} / key {}",
                 cert.display(),
@@ -178,6 +181,29 @@ async fn run() -> Result<()> {
     }
     let queues: Arc<QueueRegistry> = Arc::new(registry);
     let connections = ConnectionTracker::shared();
+
+    // Resource alarm, as RabbitMQ raises it: past the soft memory watermark or
+    // under the disk free limit, publishing connections are blocked and
+    // clients that asked are sent connection.blocked.
+    {
+        let memory = Arc::clone(&memory);
+        let disk = Arc::clone(&disk);
+        let connections = Arc::clone(&connections);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tick.tick().await;
+                let reason = if memory.soft_alarm() || memory.hard_alarm() {
+                    Some("low on memory".to_string())
+                } else if !disk.allows_durable_write() {
+                    Some("low on disk".to_string())
+                } else {
+                    None
+                };
+                connections.set_alarm(reason);
+            }
+        });
+    }
 
     // Exchange router before recovery so durable actors get a live DLX handle.
     // Implicit default-exchange routing is queue-name lookup (no binding rows).
@@ -380,6 +406,34 @@ async fn run() -> Result<()> {
 
     let conn_limiter = ConnectionLimiter::shared(config.limits.max_connections);
 
+    // DNS discovery: refresh members.json every 5 s; the dial loop reloads it.
+    if let (Some("dns"), Some(name), Some(listen)) = (config.cluster.discovery.as_deref(), config.cluster.dns_name.clone(), config.cluster.listen) {
+        let port = config.cluster.dns_port.unwrap_or(listen.port());
+        let me = queueforge_core::ClusterMember { id: config.cluster.node_id.clone(), addr: listen };
+        let path = config.data.dir.join("members.json");
+        tokio::spawn(async move {
+            let mut last = String::new();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let lookup = name.clone();
+                let Ok(mut found) = tokio::task::spawn_blocking(move || queueforge_core::config::dns_members(&lookup, port)).await else {
+                    continue;
+                };
+                if found.is_empty() {
+                    continue;
+                }
+                if !found.iter().any(|m| m.id == me.id) {
+                    found.push(me.clone());
+                }
+                found.sort_by(|a, b| a.id.cmp(&b.id));
+                let json = serde_json::to_string(&found).unwrap_or_default();
+                if json != last {
+                    let _ = std::fs::write(&path, &json);
+                    last = json;
+                }
+            }
+        });
+    }
     let cluster = if config.cluster.is_enabled() {
         let listen = config.cluster.listen.context("cluster.listen")?;
         Some(
@@ -414,6 +468,28 @@ async fn run() -> Result<()> {
     }
 
     // AMQP TCP listener + connection state machine.
+    // With TLS on, the MQTT, STOMP and AMQP 1.0 bridges still need a plain
+    // AMQP login; they get one on loopback, on a port chosen by the OS.
+    let bridge_listener = if tls_config.is_some() {
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let l = start_amqp_listener_with_limits(
+            loopback,
+            Arc::clone(&store),
+            Arc::clone(&queues),
+            Arc::clone(&router),
+            Arc::clone(&connections),
+            conn_params.clone(),
+            None,
+            None,
+            cluster.clone(),
+        )
+        .await
+        .context("binding the loopback AMQP listener for protocol bridges")?;
+        info!(local_addr = %l.local_addr, "loopback AMQP listener for bridges ready");
+        Some(l)
+    } else {
+        None
+    };
     let amqp_listener = start_amqp_listener_with_limits(
         config.listeners.amqp,
         Arc::clone(&store),
@@ -428,20 +504,55 @@ async fn run() -> Result<()> {
     .await
     .with_context(|| format!("binding AMQP listener on {}", config.listeners.amqp))?;
     info!(local_addr = %amqp_listener.local_addr, tls = amqp_listener.tls, "AMQP listener ready");
+    // A TLS listener next to the plain one, as RabbitMQ's listeners.ssl.
+    let amqps_listener = match config.listeners.amqps {
+        Some(addr) => {
+            let cert = config.tls.cert_path_required().context("listeners.amqps needs tls.cert_path")?;
+            let key = config.tls.key_path_required().context("listeners.amqps needs tls.key_path")?;
+            let tls = load_server_config_with_client_ca(cert, key, config.tls.ca_path.as_deref())
+                .with_context(|| format!("loading TLS cert {} / key {}", cert.display(), key.display()))?;
+            let l = start_amqp_listener_with_limits(
+                addr,
+                Arc::clone(&store),
+                Arc::clone(&queues),
+                Arc::clone(&router),
+                Arc::clone(&connections),
+                conn_params,
+                None,
+                Some(tls),
+                cluster.clone(),
+            )
+            .await
+            .with_context(|| format!("binding AMQPS listener on {addr}"))?;
+            info!(local_addr = %l.local_addr, "AMQPS listener ready");
+            Some(l)
+        }
+        None => None,
+    };
     if hold_quorum_catchup {
         ready.set_ready(true);
         info!("broker ready (quorum catchup complete)");
     }
+    let bridge_port = bridge_listener.as_ref().map_or(amqp_listener.local_addr.port(), |l| l.local_addr.port());
     if let Some(addr) = config.listeners.mqtt {
-        queueforge_broker::protocols::spawn_mqtt(addr, Arc::clone(&queues));
+        queueforge_broker::protocols::spawn_mqtt(addr, bridge_port);
         info!(%addr, "MQTT listening");
     }
     if let Some(addr) = config.listeners.stomp {
-        queueforge_broker::protocols::spawn_stomp(addr, Arc::clone(&queues));
+        queueforge_broker::protocols::spawn_stomp(addr, bridge_port);
         info!(%addr, "STOMP listening");
     }
     if let Some(addr) = config.listeners.stream {
-        queueforge_broker::protocols::spawn_stream(addr, Arc::clone(&queues));
+        // Clients reconnect to the advertised address, so a wildcard bind advertises localhost.
+        let advertised_host = if addr.ip().is_unspecified() { "localhost".to_string() } else { addr.ip().to_string() };
+        let ctx = queueforge_mgmt::bridge::stream::StreamContext {
+            store: Arc::clone(&store),
+            amqp_port: bridge_port,
+            advertised_host,
+            advertised_port: addr.port(),
+            queues: Some(Arc::clone(&queues)),
+        };
+        queueforge_broker::protocols::spawn_stream(addr, Arc::new(ctx));
         info!(%addr, "stream listening");
     }
 
@@ -459,6 +570,12 @@ async fn run() -> Result<()> {
 
     // Stop accept + broadcast connection.close; wait for connection tasks.
     let conns_drained = amqp_listener.graceful_stop(CONNECTION_DRAIN_TIMEOUT).await;
+    if let Some(l) = amqps_listener {
+        l.abort();
+    }
+    if let Some(l) = bridge_listener {
+        l.abort();
+    }
 
     // Drain queue actors (durable actors fsync in Shutdown); surface fsync errors.
     let queue_report = queues.shutdown_all().await;

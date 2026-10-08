@@ -191,6 +191,31 @@ async fn one_delivery(ch: &Channel, queue: &str) -> Vec<u8> {
     body
 }
 
+/// The first body on `shared` after the home restarted. An ack that had not
+/// reached the home's next group commit may come back once, as an acked
+/// message can after a RabbitMQ crash. Only that earlier body is skipped.
+async fn kept_after_restart(ch: &Channel) -> Vec<u8> {
+    let mut skipped = false;
+    loop {
+        let msg = ch
+            .basic_get("shared", lapin::options::BasicGetOptions::default())
+            .await
+            .unwrap()
+            .expect("message survived home restart");
+        let body = msg.delivery.data.clone();
+        if body == b"cross" && !skipped {
+            skipped = true;
+            msg.delivery.ack(BasicAckOptions::default()).await.expect("ack");
+            continue;
+        }
+        return body;
+    }
+}
+
+/// Every test here shares the one RabbitMQ on localhost and fixed broker
+/// ports, so they run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn mark(label: &str, behavior: &str) {
     eprintln!("passed {label}: {behavior}");
 }
@@ -1354,14 +1379,7 @@ members = [
         wait_ready(b_mgmt).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         let again = connect(a_amqp).await;
-        let msg = again
-            .basic_get("shared", lapin::options::BasicGetOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(
-            msg.expect("message survived home restart").data.as_slice(),
-            b"kept"
-        );
+        assert_eq!(kept_after_restart(&again).await, b"kept");
         mark(label, "home back message still consumable");
     } else {
         let _a2 = spawn(
@@ -1376,14 +1394,7 @@ members = [
         wait_ready(a_mgmt).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         let again = connect(b_amqp).await;
-        let msg = again
-            .basic_get("shared", lapin::options::BasicGetOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(
-            msg.expect("message survived home restart").data.as_slice(),
-            b"kept"
-        );
+        assert_eq!(kept_after_restart(&again).await, b"kept");
         mark(label, "home down is a channel error");
         mark(label, "home back message still consumable");
     }
@@ -1851,12 +1862,14 @@ async fn definitions_roundtrip(
 
 #[tokio::test]
 async fn rust_and_bun_definitions_roundtrip() {
+    let _serial = SERIAL.lock().await;
     definitions_roundtrip("rust", spawn_rust, 45310, 45311, 45312).await;
     definitions_roundtrip("bun", spawn_bun, 45320, 45321, 45322).await;
 }
 
 #[tokio::test]
 async fn rust_and_bun_policy_without_declare_args() {
+    let _serial = SERIAL.lock().await;
     let rust_dir = std::env::temp_dir().join("qf-rust-policy");
     let _ = fs::remove_dir_all(&rust_dir);
     let rust = spawn_rust(45210, 45211, 45212, rust_dir, "");
@@ -1905,6 +1918,7 @@ async fn classic_unknown_x_arg(label: &str, amqp: u16) {
 
 #[tokio::test]
 async fn rust_and_bun_classic_unknown_x_arg() {
+    let _serial = SERIAL.lock().await;
     let rust = spawn_rust(
         45410,
         45411,
@@ -1987,6 +2001,7 @@ async fn exchange_to_exchange(label: &str, amqp: u16) {
 
 #[tokio::test]
 async fn rust_and_bun_exchange_to_exchange() {
+    let _serial = SERIAL.lock().await;
     let rust = spawn_rust(
         45510,
         45511,
@@ -2942,6 +2957,7 @@ async fn rabbit_queue_behaviors(label: &str, amqp: u16) {
 
 #[tokio::test]
 async fn rust_and_bun_rabbit_queue_behaviors() {
+    let _serial = SERIAL.lock().await;
     let rust = spawn_rust(
         45810,
         45811,
@@ -2966,6 +2982,7 @@ async fn rust_and_bun_rabbit_queue_behaviors() {
 
 #[tokio::test]
 async fn rust_and_bun_classic_gaps() {
+    let _serial = SERIAL.lock().await;
     let rust_dir = std::env::temp_dir().join("qf-rust-gaps");
     let _ = fs::remove_dir_all(&rust_dir);
     let rust = spawn_rust(45710, 45711, 45712, rust_dir, "");
@@ -2982,6 +2999,7 @@ async fn rust_and_bun_classic_gaps() {
 
 #[tokio::test]
 async fn rust_and_bun_classic_edges() {
+    let _serial = SERIAL.lock().await;
     let rust = spawn_rust(
         45610,
         45611,
@@ -3006,6 +3024,7 @@ async fn rust_and_bun_classic_edges() {
 
 #[tokio::test]
 async fn rust_matches_the_shared_check() {
+    let _serial = SERIAL.lock().await;
     let n = stamp() as u16 % 1000;
     let amqp = 36000 + n;
     let mgmt = 37000 + n;
@@ -3019,6 +3038,7 @@ async fn rust_matches_the_shared_check() {
 
 #[tokio::test]
 async fn bun_matches_the_shared_check() {
+    let _serial = SERIAL.lock().await;
     let n = (stamp() as u16).wrapping_add(17) % 1000;
     let amqp = 36100 + (n % 800);
     let mgmt = 37100 + (n % 800);
@@ -3032,12 +3052,14 @@ async fn bun_matches_the_shared_check() {
 
 #[tokio::test]
 async fn rust_durable_restart_and_bun_durable_restart() {
+    let _serial = SERIAL.lock().await;
     durable_roundtrip(spawn_rust, 39010, 39110, 39210, "rust").await;
     durable_roundtrip(spawn_bun, 39020, 39120, 39220, "bun").await;
 }
 
 #[tokio::test]
 async fn rust_cluster_and_bun_cluster() {
+    let _serial = SERIAL.lock().await;
     cluster_roundtrip(spawn_rust, 40010, "rust").await;
     cluster_roundtrip(spawn_bun, 41010, "bun").await;
 }
@@ -3497,6 +3519,21 @@ default_queue_type = "quorum"
     })
     .await
     .unwrap();
+    // RabbitMQ allows `x-delivery-limit` returns. With limit 1 the message
+    // comes back once more, and the second return dead-letters it.
+    let twice = tokio::time::timeout(Duration::from_secs(2), lim_c.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(twice.data.as_slice(), b"limit-body");
+    twice
+        .nack(BasicNackOptions {
+            multiple: false,
+            requeue: true,
+        })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     let dead = lim
         .basic_get("lim-dead", lapin::options::BasicGetOptions::default())
@@ -3683,6 +3720,7 @@ default_queue_type = "quorum"
 
 #[tokio::test]
 async fn rust_and_bun_quorum_cluster() {
+    let _serial = SERIAL.lock().await;
     quorum_scenario(spawn_rust, 42010, "rust").await;
     quorum_scenario(spawn_bun, 43010, "bun").await;
 }
@@ -3920,15 +3958,19 @@ async fn stream_roundtrip(port: u16, name: &str, body: &[u8]) {
     assert_eq!(key, 0x8001, "declare publisher");
     let mut messages = 1u32.to_be_bytes().to_vec();
     messages.extend_from_slice(&1u64.to_be_bytes());
-    messages.extend_from_slice(&(body.len() as i32).to_be_bytes());
-    messages.extend_from_slice(body);
+    // An AMQP 1.0 data section, as stream clients send: RabbitMQ 4 parses it.
+    let mut section = vec![0x00, 0x53, 0x75, 0xb0];
+    section.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    section.extend_from_slice(body);
+    messages.extend_from_slice(&(section.len() as i32).to_be_bytes());
+    messages.extend_from_slice(&section);
     let mut publish = vec![1u8];
     publish.extend_from_slice(&messages);
     sock.write_all(&stream_frame(0x0002, &publish, None))
         .await
         .unwrap();
-    let (key, _) = stream_read(&mut sock).await;
-    assert_eq!(key, 0x0003, "publish confirm");
+    let (key, reply) = stream_read(&mut sock).await;
+    assert_eq!(key, 0x0003, "publish confirm, got {reply:?}");
     let mut sub = vec![1u8];
     sub.extend_from_slice(&stream_str(name));
     sub.extend_from_slice(&1u16.to_be_bytes());
@@ -4117,6 +4159,7 @@ async fn protocols_on(amqp: u16, mqtt: u16, stomp: u16, stream: u16, label: &str
 
 #[tokio::test]
 async fn protocols_match_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     protocols_on(5672, 1883, 61613, 5552, "rabbit").await;
     let rust = spawn_with_protocols("rust", 46101, 46102, 46103, 46104, 46105, 46106);
     wait_ready(rust.mgmt).await;
@@ -4671,6 +4714,7 @@ async fn amqp_surface(label: &str, amqp: u16) {
 
 #[tokio::test]
 async fn amqp_scenarios_match_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     let vhost = format!("qf{}", stamp());
     let http = Client::new();
     let created = http
@@ -4787,6 +4831,7 @@ async fn quorum_client(label: &str, amqp: u16, mgmt: u16, rabbit: bool) {
 
 #[tokio::test]
 async fn quorum_client_matches_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     let vhost = format!("qq{}", stamp() % 1_000_000_000);
     let http = Client::new();
     let created = http
@@ -5021,6 +5066,7 @@ async fn shovel_and_federation(label: &str, amqp: u16, mgmt: u16, rabbit: bool) 
 
 #[tokio::test]
 async fn shovel_and_federation_match_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     shovel_and_federation("rabbit", 5672, 15672, true).await;
     let rust_dir = std::env::temp_dir().join("qf-rust-shovel");
     let _ = fs::remove_dir_all(&rust_dir);
@@ -5181,6 +5227,7 @@ async fn import_rabbit_definitions(label: &str, node: &Node, doc: &serde_json::V
 
 #[tokio::test]
 async fn definitions_and_metrics_match_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     let vhost = format!("imp{}", stamp() % 1_000_000_000);
     let http = Client::new();
     let auth = |req: reqwest::RequestBuilder| req.basic_auth("admin", Some("devpassword12"));
@@ -5426,6 +5473,7 @@ async fn durable_once(label: &str, port: u16) {
 /// Persistent publish, confirm, and consume on RabbitMQ 4, Rust, and Bun.
 #[tokio::test]
 async fn durable_group_commit_matches_rabbitmq() {
+    let _serial = SERIAL.lock().await;
     let vhost = format!("fl{}", stamp() % 1_000_000_000);
     let http = Client::new();
     let created = http

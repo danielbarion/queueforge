@@ -22,6 +22,8 @@ pub enum QueueType {
     Classic,
     /// Replicated quorum queue.
     Quorum,
+    /// Append-only stream read from offsets.
+    Stream,
 }
 
 impl QueueType {
@@ -30,6 +32,7 @@ impl QueueType {
         match s {
             "classic" => Ok(Self::Classic),
             "quorum" => Ok(Self::Quorum),
+            "stream" => Ok(Self::Stream),
             other => Err(Error::PreconditionFailed(format!(
                 "unsupported x-queue-type '{other}'"
             ))),
@@ -41,6 +44,7 @@ impl QueueType {
         match self {
             Self::Classic => "classic",
             Self::Quorum => "quorum",
+            Self::Stream => "stream",
         }
     }
 }
@@ -124,6 +128,9 @@ pub struct QueueArgs {
     /// `x-dead-letter-strategy`. Default is `at-most-once`.
     #[serde(default)]
     pub dead_letter_strategy: DeadLetterStrategy,
+    /// Stream `x-max-age` in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_ms: Option<u64>,
 }
 
 fn default_max_death_hops() -> u32 {
@@ -146,6 +153,7 @@ impl Default for QueueArgs {
             delivery_limit: None,
             queue_type: None,
             dead_letter_strategy: DeadLetterStrategy::AtMostOnce,
+            max_age_ms: None,
         }
     }
 }
@@ -168,7 +176,7 @@ impl QueueArgs {
 
     /// Parse from name/value pairs (AMQP field-table converted at the edge).
     ///
-    /// Ignores unknown `x-` keys. Rejects other unknown keys and invalid values.
+    /// Ignores unknown keys, as RabbitMQ does. Rejects invalid values of known keys.
     pub fn parse<'a, I>(pairs: I) -> Result<Self>
     where
         I: IntoIterator<Item = (&'a str, ArgValue<'a>)>,
@@ -178,16 +186,16 @@ impl QueueArgs {
         for (key, value) in pairs {
             match key {
                 "x-message-ttl" => {
-                    args.message_ttl_ms = Some(positive_long(value, "x-message-ttl")?);
+                    args.message_ttl_ms = Some(non_negative_long(value, "x-message-ttl")?);
                 }
                 "x-expires" => {
                     args.expires_ms = Some(positive_long(value, "x-expires")?);
                 }
                 "x-max-length" => {
-                    args.max_length = Some(positive_long(value, "x-max-length")?);
+                    args.max_length = Some(non_negative_long(value, "x-max-length")?);
                 }
                 "x-max-length-bytes" => {
-                    args.max_length_bytes = Some(positive_long(value, "x-max-length-bytes")?);
+                    args.max_length_bytes = Some(non_negative_long(value, "x-max-length-bytes")?);
                 }
                 "x-overflow" => {
                     let s = shortstr(value, "x-overflow")?;
@@ -221,7 +229,7 @@ impl QueueArgs {
                     args.single_active = truthy(value, "x-single-active-consumer")?;
                 }
                 "x-delivery-limit" => {
-                    let n = positive_long(value, "x-delivery-limit")?;
+                    let n = non_negative_long(value, "x-delivery-limit")?;
                     if n > u64::from(u32::MAX) {
                         return Err(Error::PreconditionFailed(
                             "x-delivery-limit out of range".into(),
@@ -243,12 +251,25 @@ impl QueueArgs {
                         }
                     };
                 }
-                other if other.starts_with("x-") => {}
-                other => {
-                    return Err(Error::PreconditionFailed(format!(
-                        "unknown queue argument '{other}'"
-                    )));
+                "x-max-age" => {
+                    let s = shortstr(value, "x-max-age")?;
+                    args.max_age_ms = Some(parse_age(s).ok_or_else(|| {
+                        Error::PreconditionFailed(format!("invalid x-max-age '{s}'"))
+                    })?);
                 }
+                "x-queue-leader-locator" => {
+                    // RabbitMQ accepts these two and refuses anything else.
+                    match shortstr(value, "x-queue-leader-locator")? {
+                        "client-local" | "balanced" => {}
+                        other => {
+                            return Err(Error::PreconditionFailed(format!(
+                                "invalid arg 'x-queue-leader-locator': {other}"
+                            )))
+                        }
+                    }
+                }
+                // RabbitMQ keeps arguments it does not know, x- or not.
+                _ => {}
             }
         }
         Ok(args)
@@ -279,6 +300,40 @@ fn positive_long(value: ArgValue<'_>, name: &str) -> Result<u64> {
             "{name} must be a long integer"
         ))),
     }
+}
+
+/// Like [`positive_long`], but 0 is allowed. RabbitMQ accepts 0 for TTL, length
+/// limits and the delivery limit.
+fn non_negative_long(value: ArgValue<'_>, name: &str) -> Result<u64> {
+    match value {
+        ArgValue::Long(n) if n >= 0 => Ok(n as u64),
+        ArgValue::Long(n) => Err(Error::PreconditionFailed(format!(
+            "{name} must be a non-negative long (got {n})"
+        ))),
+        ArgValue::Str(s) => s.parse::<u64>().map_err(|_| {
+            Error::PreconditionFailed(format!("{name} must be a non-negative long (got '{s}')"))
+        }),
+        ArgValue::Other => Err(Error::PreconditionFailed(format!(
+            "{name} must be a long integer"
+        ))),
+    }
+}
+
+/// RabbitMQ's age spelling: a number and a unit, Y M D h m s. Milliseconds.
+pub fn parse_age(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let unit = s.chars().last()?;
+    let n: u64 = s[..s.len() - unit.len_utf8()].parse().ok()?;
+    let per = match unit {
+        'Y' => 365 * 86_400_000,
+        'M' => 30 * 86_400_000,
+        'D' => 86_400_000,
+        'h' => 3_600_000,
+        'm' => 60_000,
+        's' => 1_000,
+        _ => return None,
+    };
+    n.checked_mul(per)
 }
 
 fn truthy(value: ArgValue<'_>, name: &str) -> Result<bool> {
@@ -376,16 +431,31 @@ mod tests {
     }
 
     #[test]
-    fn reject_unknown_non_x_key() {
-        let err = QueueArgs::parse([("foo", ArgValue::Long(1))]).unwrap_err();
-        assert!(matches!(err, Error::PreconditionFailed(_)));
-        assert!(err.to_string().contains("foo"));
+    fn unknown_non_x_key_is_ignored() {
+        // RabbitMQ 4.3 declares a queue with a plain argument and keeps it.
+        let args = QueueArgs::parse([("foo", ArgValue::Long(1))]).expect("accepted");
+        assert_eq!(args, QueueArgs::default());
     }
 
     #[test]
-    fn reject_non_positive_ttl() {
-        assert!(QueueArgs::parse([("x-message-ttl", ArgValue::Long(0))]).is_err());
+    fn zero_ttl_and_limits_are_accepted_negative_is_not() {
+        // RabbitMQ accepts 0: the message expires at once, or the queue keeps nothing.
+        let args = QueueArgs::parse([
+            ("x-message-ttl", ArgValue::Long(0)),
+            ("x-max-length", ArgValue::Long(0)),
+        ])
+        .unwrap();
+        assert_eq!(args.message_ttl_ms, Some(0));
+        assert_eq!(args.max_length, Some(0));
         assert!(QueueArgs::parse([("x-message-ttl", ArgValue::Long(-1))]).is_err());
+        assert!(QueueArgs::parse([("x-expires", ArgValue::Long(0))]).is_err());
+    }
+
+    #[test]
+    fn leader_locator_values() {
+        assert!(QueueArgs::parse([("x-queue-leader-locator", ArgValue::Str("balanced"))]).is_ok());
+        assert!(QueueArgs::parse([("x-queue-leader-locator", ArgValue::Str("client-local"))]).is_ok());
+        assert!(QueueArgs::parse([("x-queue-leader-locator", ArgValue::Str("nowhere"))]).is_err());
     }
 
     #[test]

@@ -285,3 +285,46 @@ impl CloseOk {
         Ok(Self)
     }
 }
+
+/// connection.blocked (60), a RabbitMQ extension: publishes are held.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Blocked {
+    /// Why, such as "low on memory".
+    pub reason: String,
+}
+
+impl Blocked {
+    /// Method id.
+    pub const METHOD_ID: u16 = 60;
+
+    /// Encode arguments.
+    pub fn encode_args(&self, enc: &mut Encoder) -> Result<()> {
+        enc.write_shortstr(&self.reason)
+    }
+
+    /// Decode arguments.
+    pub fn decode_args(dec: &mut Decoder<'_>) -> Result<Self> {
+        Ok(Self {
+            reason: dec.read_shortstr()?,
+        })
+    }
+}
+
+/// connection.unblocked (61): publishes may run again.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Unblocked;
+
+impl Unblocked {
+    /// Method id.
+    pub const METHOD_ID: u16 = 61;
+
+    /// Encode arguments (empty).
+    pub fn encode_args(&self, _enc: &mut Encoder) -> Result<()> {
+        Ok(())
+    }
+
+    /// Decode arguments (empty).
+    pub fn decode_args(_dec: &mut Decoder<'_>) -> Result<Self> {
+        Ok(Self)
+    }
+}

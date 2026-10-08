@@ -164,11 +164,10 @@ impl QueueState {
                 }
                 OverflowPolicy::DropHead => {
                     // Priority: drop lowest-priority oldest; FIFO: classic head.
+                    // Nothing older is left to drop. The new message is then the
+                    // head, and `enqueue` drops it once it is in, as RabbitMQ does.
                     let Some(head) = self.pop_ready_drop_head() else {
-                        return Err(Error::PreconditionFailed(format!(
-                            "message rejected as queue {} length limit is reached",
-                            self.key
-                        )));
+                        return Ok(());
                     };
                     // Progress-safe: message is out of ready before DLX runs.
                     self.schedule_dead_letter(head, DeathReason::Maxlen, self.dlx_on_fail());
@@ -276,6 +275,16 @@ impl QueueState {
         } else {
             // Transient queue or non-persistent message: complete immediately.
             let _ = tx.send(Ok(()));
+        }
+
+        // x-max-length 0, or a body over x-max-length-bytes on an empty queue:
+        // the new message is the head and is dropped (dead-lettered as maxlen).
+        if self.args.overflow == OverflowPolicy::DropHead {
+            while self.would_exceed_limits(0, 0) {
+                let Some(head) = self.pop_ready_drop_head() else { break };
+                self.schedule_dead_letter(head, DeathReason::Maxlen, self.dlx_on_fail());
+                crate::prom::dead_lettered("maxlen");
+            }
         }
 
         self.drain_ready();

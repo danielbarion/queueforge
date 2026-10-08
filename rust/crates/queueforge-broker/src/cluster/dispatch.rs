@@ -436,8 +436,12 @@ pub(super) async fn dispatch_op(
             let _ = rx.await;
             Ok(Value::Null)
         }
-        "delete" => {
-            let key = key_from(&msg.payload);
+        // Bun and PHP name this op delete_queue, with the queue in "queue" or "name".
+        "delete" | "delete_queue" => {
+            let mut key = key_from(&msg.payload);
+            if key.name.is_empty() {
+                key = QueueKey::new(json_str(&msg.payload, "vhost"), json_str(&msg.payload, "name"));
+            }
             let count = inner
                 .queues
                 .delete(

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use queueforge_amqp::connection as conn_method;
 use queueforge_amqp::{FieldTable, FieldValue, Method};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tracing::{info, warn};
 
 impl<'a, S> Connection<'a, S>
@@ -64,6 +64,7 @@ where
             .await
         {
             Ok(Some(_)) => {}
+            Ok(None) if queueforge_auth::external::principal(&user).is_some_and(|p| p.has_vhost(&vhost)) => {}
             Ok(None) => {
                 let _ = self
                     .send_connection_close(
@@ -91,18 +92,7 @@ where
             }
         }
 
-        self.vhost = Some(vhost.clone());
-        self.send_method(0, &Method::ConnectionOpenOk(conn_method::OpenOk::new()))
-            .await?;
-        info!(
-            peer = %self.peer,
-            user = %user,
-            vhost = %vhost,
-            "connection open"
-        );
-        metrics::gauge!("queueforge_connections").increment(1.0);
-        queueforge_core::prom::connection_opened();
-        self.gauges_held = true;
+        // Refuse inside connection.open, before open-ok, as RabbitMQ does.
         if !self
             .connections
             .connection_allowed(user.as_str(), vhost.as_str())
@@ -118,6 +108,18 @@ where
             self.mark_closed();
             return Ok(Step::Done);
         }
+        self.vhost = Some(vhost.clone());
+        self.send_method(0, &Method::ConnectionOpenOk(conn_method::OpenOk::new()))
+            .await?;
+        info!(
+            peer = %self.peer,
+            user = %user,
+            vhost = %vhost,
+            "connection open"
+        );
+        metrics::gauge!("queueforge_connections").increment(1.0);
+        queueforge_core::prom::connection_opened();
+        self.gauges_held = true;
         let (track_id, force_rx) =
             self.connections
                 .register(self.peer, user.as_str(), vhost.as_str());
@@ -142,8 +144,10 @@ where
                 ("publisher_confirms", FieldValue::Bool(true)),
                 ("consumer_cancel_notify", FieldValue::Bool(true)),
                 ("basic.nack", FieldValue::Bool(true)),
-                ("connection.blocked", FieldValue::Bool(false)),
+                ("connection.blocked", FieldValue::Bool(true)),
                 ("authentication_failure_close", FieldValue::Bool(true)),
+                ("exchange_exchange_bindings", FieldValue::Bool(true)),
+                ("per_consumer_qos", FieldValue::Bool(true)),
             ])),
         );
         props.insert(
@@ -155,7 +159,8 @@ where
             version_major: 0,
             version_minor: 9,
             server_properties: props,
-            mechanisms: b"PLAIN".to_vec(),
+            // EXTERNAL is offered once a verified client certificate named the user.
+            mechanisms: if super::peer_cn().is_some() { b"PLAIN EXTERNAL".to_vec() } else { b"PLAIN".to_vec() },
             locales: b"en_US".to_vec(),
         });
         self.send_method(0, &start).await
@@ -184,7 +189,35 @@ where
             method_id,
         });
         // Best-effort; peer may already be gone.
-        let _ = self.send_method(0, &close).await;
+        if self.send_method(0, &close).await.is_err() {
+            return Ok(());
+        }
+        if !self.outbound.is_empty() && self.flush_coalesced().await.is_err() {
+            return Ok(());
+        }
+        // RabbitMQ keeps the socket until the client's close-ok, so the client
+        // reads the close instead of a reset. Frames before it are dropped.
+        let mut seen = std::mem::take(&mut self.read_buf);
+        let mut tmp = [0u8; 4096];
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if has_close_ok(&seen) {
+                    break;
+                }
+                match self.stream.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&tmp[..n]),
+                }
+            }
+        })
+        .await;
         Ok(())
     }
+}
+
+/// A connection.close-ok method frame (type 1, channel 0, class 10 method 51) in `buf`.
+fn has_close_ok(buf: &[u8]) -> bool {
+    buf.windows(11).any(|w| {
+        w[0] == 1 && w[1] == 0 && w[2] == 0 && w[7..11] == [0x00, 0x0a, 0x00, 0x33]
+    })
 }

@@ -20,7 +20,8 @@ fn bootstrap_creates_default_vhost_and_builtins() {
     assert_eq!(vhosts[0].name, DEFAULT_VHOST);
 
     let exchanges = store.list_exchanges(DEFAULT_VHOST).unwrap();
-    assert_eq!(exchanges.len(), 4);
+    // RabbitMQ's set: "", amq.direct/fanout/topic/headers/match, amq.rabbitmq.event/trace.
+    assert_eq!(exchanges.len(), 8);
 
     let default_ex = store
         .get_exchange(DEFAULT_VHOST, DEFAULT_EXCHANGE_NAME)
@@ -79,7 +80,7 @@ fn reopen_preserves_data_and_does_not_duplicate_builtins() {
     }
     let store = MetadataStore::open(dir.path()).unwrap();
     assert_eq!(store.list_vhosts().unwrap().len(), 2);
-    assert_eq!(store.list_exchanges("app").unwrap().len(), 4);
+    assert_eq!(store.list_exchanges("app").unwrap().len(), 8);
     assert_eq!(store.list_queues("app").unwrap().len(), 1);
     let q = store.get_queue("app", "jobs").unwrap().unwrap();
     assert!(q.durable);
@@ -96,7 +97,7 @@ fn vhost_crud() {
     let err = store.create_vhost("tenant-a").unwrap_err();
     assert!(matches!(err, StoreError::VhostExists(_)));
 
-    assert_eq!(store.list_exchanges("tenant-a").unwrap().len(), 4);
+    assert_eq!(store.list_exchanges("tenant-a").unwrap().len(), 8);
 
     assert!(store.delete_vhost("tenant-a").unwrap());
     assert!(store.get_vhost("tenant-a").unwrap().is_none());
@@ -314,10 +315,10 @@ fn delete_vhost_cascades_queues_exchanges_and_permissions() {
     assert!(store.get_permission("carol", "gone").unwrap().is_none());
     // Sibling vhost perms + topology intact.
     assert!(store.get_permission("carol", "keep").unwrap().is_some());
-    assert_eq!(store.list_exchanges("keep").unwrap().len(), 4);
+    assert_eq!(store.list_exchanges("keep").unwrap().len(), 8);
     assert_eq!(store.list_queues("keep").unwrap().len(), 1);
     // Default vhost untouched.
-    assert_eq!(store.list_exchanges(DEFAULT_VHOST).unwrap().len(), 4);
+    assert_eq!(store.list_exchanges(DEFAULT_VHOST).unwrap().len(), 8);
 }
 
 #[test]

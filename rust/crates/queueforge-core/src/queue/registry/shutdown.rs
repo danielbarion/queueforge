@@ -173,7 +173,12 @@ pub(super) fn spawn_supervised_actor(
     let actor_key = key.clone();
     let info_for_actor = Arc::clone(&info);
     let memory_for_actor = Arc::clone(&memory);
+    let stream = bootstrap.args.queue_type == Some(crate::queue::QueueType::Stream);
     let join = tokio::spawn(async move {
+        if stream {
+            crate::queue::stream::run_stream(actor_key, rx, info_for_actor, bootstrap).await;
+            return;
+        }
         actor::run(
             actor_key,
             rx,

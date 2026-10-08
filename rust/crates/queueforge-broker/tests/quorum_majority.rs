@@ -303,12 +303,13 @@ members = [
 
 #[tokio::test]
 async fn rust_quorum_majority_confirm() {
-    let base = 47000 + (stamp() as u16 % 400);
+    // Ports sit below the macOS ephemeral range (49152+), so outbound dials cannot take them.
+    let base = 44000 + (stamp() as u16 % 400);
     quorum_failover("rust", base).await;
 }
 
 #[tokio::test]
 async fn bun_quorum_majority_confirm() {
-    let base = 49000 + (stamp() as u16 % 400);
+    let base = 45000 + (stamp() as u16 % 400);
     quorum_failover("bun", base).await;
 }

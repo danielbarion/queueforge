@@ -36,6 +36,10 @@ pub enum Method {
     ConnectionClose(connection::Close),
     /// connection.close-ok
     ConnectionCloseOk(connection::CloseOk),
+    /// connection.blocked (RabbitMQ extension)
+    ConnectionBlocked(connection::Blocked),
+    /// connection.unblocked (RabbitMQ extension)
+    ConnectionUnblocked(connection::Unblocked),
 
     // --- channel (20) ---
     /// channel.open

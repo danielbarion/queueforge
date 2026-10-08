@@ -178,6 +178,8 @@ impl MetadataStore {
 
 mod access;
 mod binding;
+mod e2e;
+mod parameters;
 mod exchange;
 mod policy;
 mod queue;

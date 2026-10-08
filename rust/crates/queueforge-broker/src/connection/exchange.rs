@@ -86,17 +86,11 @@ where
                 .flatten()
                 .is_none()
         {
-            self.server_channel_close(
-                channel,
-                REPLY_NOT_FOUND,
-                &format!(
-                    "NOT_FOUND - no exchange '{}' in vhost '{vhost}'",
-                    delete.exchange
-                ),
-                exchange_method::CLASS_ID,
-                exchange_method::Delete::METHOD_ID,
-            )
-            .await?;
+            // RabbitMQ answers delete-ok for a missing exchange.
+            if !delete.no_wait {
+                self.send_method(channel, &Method::ExchangeDeleteOk(exchange_method::DeleteOk))
+                    .await?;
+            }
             return Ok(Step::Continue);
         }
 
@@ -143,9 +137,21 @@ where
             Ok(())
         })
         .await;
-        let _ = self
+        if self
             .router
-            .delete_exchange(&vhost, delete.exchange.as_str());
+            .delete_exchange(&vhost, delete.exchange.as_str())
+            .is_ok()
+        {
+            self.emit_event("exchange.deleted", &vhost, vec![("name", queueforge_core::AppHeaderValue::Str(delete.exchange.to_string()))]);
+            if let Some(cluster) = &self.cluster {
+                cluster
+                    .replicate_json(
+                        "delete_exchange",
+                        serde_json::json!({"vhost": vhost.as_str(), "name": delete.exchange.as_str()}),
+                    )
+                    .await;
+            }
+        }
 
         if !delete.no_wait {
             self.send_method(
@@ -192,6 +198,15 @@ where
             .await?;
             return Ok(Step::Continue);
         }
+        // Stored when both ends are durable, so the link survives a restart.
+        let durable = |name: &str| self.router.get_exchange(&vhost, name).is_some_and(|ex| ex.durable);
+        if durable(bind.source.as_str()) && durable(bind.destination.as_str()) {
+            let store = Arc::clone(&self.store);
+            let (v, src, dst, rk) = (vhost.clone(), bind.source.clone(), bind.destination.clone(), bind.routing_key.clone());
+            if let Err(e) = MetadataStore::blocking(store, move |s| s.put_exchange_binding(&v, &src, &dst, &rk)).await {
+                warn!(error = %e, "exchange binding was not stored");
+            }
+        }
         if !bind.no_wait {
             self.send_method(channel, &Method::ExchangeBindOk(exchange_method::BindOk))
                 .await?;
@@ -211,6 +226,11 @@ where
             unbind.destination.as_str(),
             unbind.routing_key.as_str(),
         );
+        let store = Arc::clone(&self.store);
+        let (v, src, dst, rk) = (vhost.clone(), unbind.source.clone(), unbind.destination.clone(), unbind.routing_key.clone());
+        if let Err(e) = MetadataStore::blocking(store, move |s| s.delete_exchange_binding(&v, &src, &dst, &rk)).await {
+            warn!(error = %e, "exchange binding row was not removed");
+        }
         if !unbind.no_wait {
             self.send_method(
                 channel,

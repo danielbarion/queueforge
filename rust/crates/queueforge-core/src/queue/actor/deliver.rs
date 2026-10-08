@@ -156,17 +156,21 @@ impl QueueState {
             return None;
         }
         if self.args.single_active {
-            let session = self
+            // The active consumer is the earliest one with the highest
+            // priority, credit or not. When its prefetch is full the message
+            // waits; another consumer never takes it.
+            let (_, i) = self
                 .rr_order
                 .iter()
                 .enumerate()
                 .filter_map(|(i, session)| {
                     let c = self.consumers.get(session)?;
-                    Self::has_credit(c).then_some((std::cmp::Reverse(c.priority), i))
+                    Some((std::cmp::Reverse(c.priority), i))
                 })
-                .min()
-                .map(|(_, i)| self.rr_order[i])?;
-            return Some(session);
+                .min()?;
+            let session = self.rr_order[i];
+            let c = self.consumers.get(&session)?;
+            return Self::has_credit(c).then_some(session);
         }
         let best = self
             .rr_order

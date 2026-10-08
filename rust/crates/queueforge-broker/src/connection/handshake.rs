@@ -71,6 +71,42 @@ where
         &mut self,
         start_ok: conn_method::StartOk,
     ) -> Result<Step, ConnError> {
+        // RabbitMQ sends connection.blocked only to clients that ask for it.
+        self.wants_blocked = matches!(
+            start_ok.client_properties.get("capabilities"),
+            Some(queueforge_amqp::FieldValue::Table(caps))
+                if matches!(caps.get("connection.blocked"), Some(queueforge_amqp::FieldValue::Bool(true)))
+        );
+        // EXTERNAL: the user is the verified client certificate's common name,
+        // as RabbitMQ's ssl_cert_login_from = common_name. It must exist.
+        if start_ok.mechanism.eq_ignore_ascii_case("EXTERNAL") {
+            let cn = super::peer_cn();
+            let store = Arc::clone(&self.store);
+            let lookup = cn.clone().unwrap_or_default();
+            let known = match cn {
+                Some(_) => MetadataStore::blocking(store, move |s| s.get_user(&lookup))
+                    .await
+                    .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?
+                    .is_some(),
+                None => false,
+            };
+            if !known {
+                let _ = self
+                    .send_connection_close(
+                        REPLY_ACCESS_REFUSED,
+                        "ACCESS_REFUSED - EXTERNAL login refused",
+                        conn_method::CLASS_ID,
+                        conn_method::StartOk::METHOD_ID,
+                    )
+                    .await;
+                self.mark_closed();
+                return Ok(Step::Done);
+            }
+            self.user = super::peer_cn();
+            self.send_connection_tune().await?;
+            self.state = State::TuneSent;
+            return Ok(Step::Continue);
+        }
         if !start_ok.mechanism.eq_ignore_ascii_case("PLAIN") {
             let _ = self
                 .send_connection_close(
@@ -132,12 +168,21 @@ where
             }
         };
 
-        match authed {
-            Some(user) => {
+        // The next backends: OAuth 2.0, then LDAP.
+        let external = match authed {
+            Some(_) => None,
+            None => queueforge_auth::external::login(&username, &password).await,
+        };
+        match (authed, external) {
+            (Some(user), _) => {
                 info!(peer = %self.peer, user = %user.name, "authenticated");
                 self.user = Some(user.name.to_string());
             }
-            None => {
+            (None, Some(name)) => {
+                info!(peer = %self.peer, user = %name, "authenticated by an external backend");
+                self.user = Some(name);
+            }
+            (None, None) => {
                 warn!(peer = %self.peer, user = %username, "authentication failed");
                 let _ = self
                     .send_connection_close(

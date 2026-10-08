@@ -19,6 +19,14 @@ pub(super) async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
 }
 
+/// Which implementation is serving this management port. Public, so a console can tell Rust, Bun, and PHP apart before login.
+pub(super) async fn identity() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "product_name": "QueueForge",
+        "kind": "rust",
+    }))
+}
+
 /// `state` is the management process. Returns 200 when this node may serve traffic, including the optional client-CIDR check. A disallowed peer address returns 503.
 pub(super) async fn readyz(State(state): State<MgmtState>) -> Response {
     if state.ready.is_ready() {

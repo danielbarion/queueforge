@@ -41,6 +41,8 @@ impl MetadataStore {
                     let _users = txn.open_table(USERS)?;
                     let _permissions = txn.open_table(PERMISSIONS)?;
                     let _bindings = txn.open_table(BINDINGS)?;
+                    let _e2e = txn.open_table(crate::tables::EXCHANGE_BINDINGS)?;
+                    let _params = txn.open_table(crate::tables::PARAMETERS)?;
                 }
                 info!(
                     data_dir = %self.data_dir.display(),
@@ -69,6 +71,8 @@ impl MetadataStore {
                     let _users = txn.open_table(USERS)?;
                     let _permissions = txn.open_table(PERMISSIONS)?;
                     let _bindings = txn.open_table(BINDINGS)?;
+                    let _e2e = txn.open_table(crate::tables::EXCHANGE_BINDINGS)?;
+                    let _params = txn.open_table(crate::tables::PARAMETERS)?;
                 }
                 Self::migrate_legacy_bindings(&txn)?;
                 for name in &vhost_names {

@@ -46,15 +46,8 @@ pub(crate) struct ExchangeItem {
 }
 
 fn parse_exchange_type(s: &str) -> Result<ExchangeType, MgmtError> {
-    match s.to_ascii_lowercase().as_str() {
-        "direct" => Ok(ExchangeType::Direct),
-        "fanout" => Ok(ExchangeType::Fanout),
-        "topic" => Ok(ExchangeType::Topic),
-        "headers" => Ok(ExchangeType::Headers),
-        other => Err(MgmtError::BadRequest(format!(
-            "invalid exchange type '{other}'"
-        ))),
-    }
+    ExchangeType::parse(&s.to_ascii_lowercase())
+        .ok_or_else(|| MgmtError::BadRequest(format!("invalid exchange type '{s}'")))
 }
 
 /// PUT /api/exchanges/{vhost}/{name}
@@ -89,6 +82,7 @@ pub async fn put_exchange(
         auto_delete: body.auto_delete,
         internal: body.internal,
         alternate: None,
+        delayed_type: None,
     };
 
     let vhost_lookup = vhost.clone();

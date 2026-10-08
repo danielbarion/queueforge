@@ -272,9 +272,34 @@ pub struct QueueDelivery {
     pub server_cancel: bool,
 }
 
+/// Where a stream consumer starts reading (`x-stream-offset`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStart {
+    /// The oldest entry still kept.
+    First,
+    /// The newest entry.
+    Last,
+    /// Only entries published after the consumer starts. The default.
+    Next,
+    /// A given offset, clamped to what is kept.
+    Offset(u64),
+    /// The first entry at or after this Unix time in milliseconds.
+    TimestampMs(u64),
+    /// The first entry no older than this many milliseconds.
+    AgeMs(u64),
+}
+
 /// Commands handled by a per-queue actor.
 #[derive(Debug)]
 pub enum QueueCmd {
+    /// Set where the next consumer registered with `session` starts, for a
+    /// stream queue. Other queue types ignore it.
+    StreamStart {
+        /// Session the following `RegisterConsumer` will use.
+        session: ConsumerSessionId,
+        /// Starting point.
+        start: StreamStart,
+    },
     /// Enqueue a message into the ready set.
     Enqueue {
         /// Message to enqueue.
@@ -406,6 +431,13 @@ pub enum QueueCmd {
     Stats {
         /// Reply with current stats.
         reply: oneshot::Sender<QueueStats>,
+    },
+    /// The first and last offsets a stream holds, as the stream protocol's
+    /// `first_chunk_id` and `committed_chunk_id`. Other queues, and an empty
+    /// stream, reply `None`.
+    StreamOffsets {
+        /// Reply with `(first, last)` visible offsets.
+        reply: oneshot::Sender<Option<(u64, u64)>>,
     },
     /// Graceful actor shutdown.
     Shutdown {

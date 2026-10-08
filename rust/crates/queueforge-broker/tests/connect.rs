@@ -38,6 +38,8 @@ async fn start_test_broker() -> TestBroker {
     );
     let router = Arc::new(store.bootstrap_router().expect("bootstrap router"));
     let connections = ConnectionTracker::shared();
+    // These cases use transient queues; RabbitMQ 4 needs the deprecated feature permitted.
+    connections.set_transient_nonexcl(true);
     let listener = start_amqp_listener(
         "127.0.0.1:0".parse().unwrap(),
         store,
@@ -161,6 +163,8 @@ async fn lapin_login_accepts_sha256_hash_stored_by_bun() {
     );
     let router = Arc::new(store.bootstrap_router().expect("bootstrap router"));
     let connections = ConnectionTracker::shared();
+    // These cases use transient queues; RabbitMQ 4 needs the deprecated feature permitted.
+    connections.set_transient_nonexcl(true);
     let listener = start_amqp_listener(
         "127.0.0.1:0".parse().unwrap(),
         store,
@@ -1137,6 +1141,8 @@ async fn start_test_broker_with_limits(max_connections: u32, max_message_bytes: 
     );
     let router = Arc::new(store.bootstrap_router().expect("bootstrap router"));
     let connections = ConnectionTracker::shared();
+    // These cases use transient queues; RabbitMQ 4 needs the deprecated feature permitted.
+    connections.set_transient_nonexcl(true);
     let params = ConnectionParams {
         max_message_bytes,
         ..ConnectionParams::default()
@@ -1385,7 +1391,7 @@ async fn lapin_channel_flow_holds_publish() {
 }
 
 #[tokio::test]
-async fn lapin_global_qos_caps_two_channels() {
+async fn lapin_global_qos_is_per_consumer() {
     use futures_lite::stream::StreamExt;
     use lapin::options::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
@@ -1430,7 +1436,7 @@ async fn lapin_global_qos_caps_two_channels() {
         .await
         .expect("consume b");
 
-    for body in [b"one".as_slice(), b"two".as_slice()] {
+    for body in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
         setup
             .basic_publish(
                 "",
@@ -1456,17 +1462,27 @@ async fn lapin_global_qos_caps_two_channels() {
     .expect("stream")
     .expect("delivery");
 
-    let second = tokio::time::timeout(Duration::from_millis(300), async {
+    // RabbitMQ 4 applies basic.qos global=true to each consumer, so the
+    // other consumer takes the second message and the third waits.
+    let second = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            d = cons_a.next() => d,
+            d = cons_b.next() => d,
+        }
+    })
+    .await
+    .expect("second delivery goes to the other consumer")
+    .expect("stream")
+    .expect("delivery");
+    assert_ne!(first.delivery_tag, second.delivery_tag);
+    let third = tokio::time::timeout(Duration::from_millis(300), async {
         tokio::select! {
             d = cons_a.next() => d,
             d = cons_b.next() => d,
         }
     })
     .await;
-    assert!(
-        second.is_err(),
-        "channel-global prefetch 1 should hold the second delivery"
-    );
+    assert!(third.is_err(), "each consumer holds one unacked message");
 
     first.ack(BasicAckOptions::default()).await.expect("ack");
     let after = tokio::time::timeout(Duration::from_secs(3), async {
@@ -1856,15 +1872,6 @@ async fn global_qos_one_leaves_second_message_ready() {
         )
         .await
         .expect("consume a");
-    let mut cons_b = ch_a
-        .basic_consume(
-            "gqos-hold",
-            "hb",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .expect("consume b");
     for body in [b"one".as_slice(), b"two".as_slice()] {
         setup
             .basic_publish(
@@ -1880,23 +1887,13 @@ async fn global_qos_one_leaves_second_message_ready() {
             .expect("confirm");
     }
 
-    let first = tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::select! {
-            d = cons_a.next() => d,
-            d = cons_b.next() => d,
-        }
-    })
+    let first = tokio::time::timeout(Duration::from_secs(3), cons_a.next())
     .await
     .expect("first delivery")
     .expect("stream")
     .expect("delivery");
     let _ = first;
-    let second = tokio::time::timeout(Duration::from_millis(400), async {
-        tokio::select! {
-            d = cons_a.next() => d,
-            d = cons_b.next() => d,
-        }
-    })
+    let second = tokio::time::timeout(Duration::from_millis(400), cons_a.next())
     .await;
     assert!(second.is_err(), "second delivery must stay unacked-capped");
 
