@@ -15,6 +15,9 @@ require dirname(__DIR__) . '/src/Protocols.php';
 require dirname(__DIR__) . '/src/Amqp10.php';
 require dirname(__DIR__) . '/src/Extras.php';
 require dirname(__DIR__) . '/src/Server.php';
+require dirname(__DIR__) . '/src/Cores.php';
+require dirname(__DIR__) . '/src/Handoff.php';
+require dirname(__DIR__) . '/src/Supervise.php';
 
 $args = array_slice($argv, 1);
 $configPath = '';
@@ -113,6 +116,29 @@ if (preg_match('/^\[cluster\](.*?)(?=^\[|\z)/ms', $raw, $block) === 1) {
     }
 }
 
+if (getenv('QUEUEFORGE_DATA_DIR')) {
+    $cfg['dir'] = (string) getenv('QUEUEFORGE_DATA_DIR');
+}
+if (getenv('QUEUEFORGE_NODE_ID')) {
+    $cfg['node_id'] = (string) getenv('QUEUEFORGE_NODE_ID');
+}
+if (getenv('QUEUEFORGE_CLUSTER')) {
+    $cfg['cluster'] = (string) getenv('QUEUEFORGE_CLUSTER');
+}
+if (getenv('QUEUEFORGE_MEMBERS')) {
+    $parsed = json_decode((string) getenv('QUEUEFORGE_MEMBERS'), true);
+    if (is_array($parsed)) {
+        $cfg['members'] = $parsed;
+    }
+}
+if (getenv('QUEUEFORGE_BIND_MGMT') === '0') {
+    $cfg['management'] = '';
+}
+if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1 && !$cfg['tls']) {
+    Supervise::run(__FILE__, $configPath, $dev, $cfg);
+    exit(0);
+}
+
 $dir = $cfg['dir'];
 if (!str_starts_with($dir, '/')) {
     $dir = dirname($configPath) . '/' . $dir;
@@ -135,12 +161,23 @@ if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
         'allow_self_signed' => true,
     ]]);
 }
-$listen = stream_socket_server("$scheme://$addr", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $context);
-if ($listen === false) {
-    fwrite(STDERR, "listen $addr: $errstr\n");
-    exit(1);
+$listen = null;
+if (getenv('QUEUEFORGE_CHILD') !== '1') {
+    $listen = stream_socket_server("$scheme://$addr", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $context);
+    if ($listen === false) {
+        fwrite(STDERR, "listen $addr: $errstr\n");
+        exit(1);
+    }
+    stream_set_blocking($listen, false);
 }
-stream_set_blocking($listen, false);
 $extras = new Extras($broker, $cfg);
-fwrite(STDOUT, "queueforge-php amqp=$addr fsync_ms={$cfg['fsync_ms']}\n");
-(new Server($listen, $broker, $cfg['fsync_ms'], $extras))->run();
+$handoff = null;
+$down = getenv('QUEUEFORGE_HANDOFF_DOWN');
+$up = getenv('QUEUEFORGE_HANDOFF_UP');
+if (is_string($down) && $down !== '' && is_string($up) && $up !== '') {
+    $handoff = Handoff::bind($down);
+    $handoff->peer = $up;
+}
+$who = (string) ($cfg['node_id'] ?? 'solo');
+fwrite(STDOUT, "queueforge-php amqp=" . ($listen === null ? 'adopted' : $addr) . " node=$who fsync_ms={$cfg['fsync_ms']}\n");
+(new Server($listen, $broker, $cfg['fsync_ms'], $extras, $handoff))->run();

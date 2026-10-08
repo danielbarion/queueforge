@@ -168,12 +168,21 @@ Harness::guard('channel.flow and tx', static function () use ($port): void {
     Harness::ok('tx.commit is accepted', true);
     $c->close();
 
-    // Rollback is refused: publishes apply as they arrive, so it cannot undo.
+    // Rollback inside a transaction is accepted; outside one it is a 406,
+    // as on RabbitMQ.
+    $r = new Amqp('127.0.0.1', $port);
+    $r->channel();
+    $r->tx(10);
+    $r->expect(90, 11);
+    $r->tx(30);
+    $r->expect(90, 31);
+    Harness::ok('tx.rollback in a transaction is accepted', true);
+    $r->close();
     $d = new Amqp('127.0.0.1', $port);
     $d->channel();
     $d->tx(30);
     $close = $d->expectClose();
-    Harness::eq('tx.rollback is a 540', 540, $close['code'] ?? 0);
+    Harness::eq('tx.rollback outside a transaction is a 406', 406, $close['code'] ?? 0);
     $d->close();
 });
 

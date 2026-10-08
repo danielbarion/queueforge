@@ -166,6 +166,9 @@ Harness::guard('management auth', static function () use ($port): void {
     Harness::eq('healthz is open', 200, http($port, 'GET', '/healthz')['status']);
     Harness::eq('readyz is open', 200, http($port, 'GET', '/readyz')['status']);
     Harness::eq('metrics is open', 200, http($port, 'GET', '/metrics')['status']);
+    $identity = http($port, 'GET', '/api/identity');
+    Harness::eq('identity is open', 200, $identity['status']);
+    Harness::eq('identity names php', 'php', $identity['json']['kind'] ?? '');
     Harness::eq('the api needs a session', 401, http($port, 'GET', '/api/overview')['status']);
     Harness::eq('a bad password is refused', 401, http($port, 'POST', '/api/login', ['username' => 'admin', 'password' => 'wrong'])['status']);
 
@@ -400,6 +403,8 @@ Harness::guard('prometheus series', static function () use ($port): void {
     ] as $series) {
         Harness::ok("$series is exposed", str_contains($body, $series));
     }
+    preg_match('/^rabbitmq_disk_space_available_bytes (\d+)/m', $body, $disk);
+    Harness::ok('free disk is a real sample', isset($disk[1]) && (int) $disk[1] > 0);
     // The per-queue gauges carry labels.
     Harness::ok('per-queue gauges are labelled', str_contains($body, 'rabbitmq_queue_messages_ready{vhost="/"'));
     // The durability invariant: no confirm may be released before its fsync.

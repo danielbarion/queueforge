@@ -109,7 +109,8 @@ final class Amqp
     public function unbindExchange(string $destination, string $source, string $key = '', int $ch = 1): void
     {
         $this->method($ch, 40, 40, pack('n', 0) . Codec::shortstr($destination) . Codec::shortstr($source) . Codec::shortstr($key) . chr(0) . self::table([]));
-        $this->expect(40, 41);
+        // exchange.unbind-ok is 40.51 in AMQP 0-9-1.
+        $this->expect(40, 51);
     }
 
     /** @param array<string, string|int> $args */
@@ -165,12 +166,30 @@ final class Amqp
      */
     public function publish(string $exchange, string $key, string $body, array $properties = [], bool $mandatory = false, bool $immediate = false, int $ch = 1): void
     {
+        $this->write($this->publishBytes($exchange, $key, $body, $properties, $mandatory, $immediate, $ch));
+    }
+
+    /**
+     * The bytes {@link publish} would send, so a test can write several
+     * publishes in one socket write.
+     *
+     * @param array<string, string|int> $properties
+     */
+    public function publishBytes(string $exchange, string $key, string $body, array $properties = [], bool $mandatory = false, bool $immediate = false, int $ch = 1): string
+    {
         $bits = ($mandatory ? 1 : 0) | ($immediate ? 2 : 0);
-        $this->method($ch, 60, 40, pack('n', 0) . Codec::shortstr($exchange) . Codec::shortstr($key) . chr($bits));
-        $this->write(Codec::frame(2, $ch, pack('nn', 60, 0) . Codec::u64(strlen($body)) . self::properties($properties)));
+        $out = Codec::method($ch, 60, 40, pack('n', 0) . Codec::shortstr($exchange) . Codec::shortstr($key) . chr($bits));
+        $out .= Codec::frame(2, $ch, pack('nn', 60, 0) . Codec::u64(strlen($body)) . self::properties($properties));
         if ($body !== '') {
-            $this->write(Codec::frame(3, $ch, $body));
+            $out .= Codec::frame(3, $ch, $body);
         }
+        return $out;
+    }
+
+    /** Writes bytes that were built earlier, as one socket write. */
+    public function sendRaw(string $bytes): void
+    {
+        $this->write($bytes);
     }
 
     /** @return array{delivered:bool,body:?string,messages:int} */

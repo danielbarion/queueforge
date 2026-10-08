@@ -22,6 +22,32 @@ final class Chan
     public array $remote = [];
     /** @var array{key:string,mode:int,need:int,got:string}|null */
     public ?array $pub = null;
+    /** @var array<int, string> consumer tag of each unacked delivery tag */
+    public array $tagOf = [];
+    /** @var array<string, int> unacked deliveries held per consumer tag */
+    public array $held = [];
+    /** tx.select was sent: publishes and acks wait for tx.commit. */
+    public bool $tx = false;
+    /** @var list<array<string,mixed>> publishes held by the transaction */
+    public array $txPub = [];
+    /** @var list<array{0:string,1:int,2:bool}> acks and nacks held by the transaction */
+    public array $txAcks = [];
+
+    /** Forget one unacked delivery. Returns its message id, or null. */
+    public function settle(int $dtag): ?int
+    {
+        if (!isset($this->unacked[$dtag])) {
+            return null;
+        }
+        $msgId = $this->unacked[$dtag];
+        unset($this->unacked[$dtag]);
+        $tag = $this->tagOf[$dtag] ?? null;
+        unset($this->tagOf[$dtag]);
+        if ($tag !== null && isset($this->held[$tag])) {
+            $this->held[$tag]--;
+        }
+        return $msgId;
+    }
 }
 
 final class Sock
@@ -32,6 +58,8 @@ final class Sock
     }
 
     public string $in = '';
+    /** Index of the first unparsed byte in `in`. Compacting every frame copied the tail. */
+    public int $inAt = 0;
     public string $out = '';
     public int $off = 0;
     public string $stage = 'header';
@@ -40,6 +68,8 @@ final class Sock
     public string $user = '';
     /** The vhost from connection.open. */
     public string $vhost = '/';
+    /** True once a frame has named a queue. The connection is not moved again. */
+    public bool $settled = false;
     /** @var array<int, Chan> */
     public array $channels = [];
     /** @var array<string, mixed> AMQP 1.0 phase and link state */
@@ -86,6 +116,10 @@ final class Server
      */
     private const SWEEP_SECONDS = 0.25;
     private float $nextSweep = 0;
+    /** True while tx.commit applies what a transaction held. */
+    private bool $replaying = false;
+    /** @var list<array{0:mixed,1:float}> streams of moved connections, closed after a delay */
+    private array $retired = [];
     /**
      * At or below this many outstanding confirms, flush at once rather than
      * waiting for the interval. Batching needs a queue to batch; a handful of
@@ -93,20 +127,27 @@ final class Server
      */
     private const FLUSH_SMALL = 8;
 
-    /** @param resource $listen */
-    public function __construct(private $listen, private Broker $broker, private int $fsyncMs, public ?Extras $extras = null)
+    /** @param resource|null $listen */
+    public function __construct(private $listen, private Broker $broker, private int $fsyncMs, public ?Extras $extras = null, public ?Handoff $handoff = null)
     {
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
         $this->nextBeat = microtime(true) + self::BEAT_SECONDS;
+        $this->bootAt = microtime(true);
         $this->amqp10 = new Amqp10($broker);
     }
 
     private Amqp10 $amqp10;
+    private float $bootAt = 0;
+    private bool $announced = false;
 
     public function run(): void
     {
         while (true) {
-            $read = [$this->listen];
+            $this->pullHandoff();
+            $read = [];
+            if (is_resource($this->listen)) {
+                $read[] = $this->listen;
+            }
             if ($this->extras !== null) {
                 foreach ($this->extras->reads() as $fp) {
                     $read[] = $fp;
@@ -125,13 +166,14 @@ final class Server
             $except = [];
             $left = $this->nextSync - microtime(true);
             $wait = $this->broker->waiting === [] ? 1.0 : max(0.001, $left);
-            // Never sleep past the next expiry sweep, or a message with a
-            // short TTL would keep counting toward queue depth for up to a
-            // second after it expired.
             $wait = min($wait, max(0.001, $this->nextSweep - microtime(true)));
+            if ($this->handoff !== null) {
+                $wait = min($wait, 0.002);
+                $this->closeRetired();
+            }
             $sec = (int) $wait;
             $usec = (int) (($wait - $sec) * 1000000);
-            $selected = @stream_select($read, $write, $except, $sec, $usec);
+            $selected = ($read === [] && $write === []) ? 0 : @stream_select($read, $write, $except, $sec, $usec);
             if ($selected === false) {
                 continue;
             }
@@ -143,13 +185,7 @@ final class Server
                 if ($fp === $this->listen) {
                     $client = @stream_socket_accept($this->listen, 0);
                     if ($client !== false) {
-                        stream_set_blocking($client, false);
-                        $this->tune($client);
-                        $id = $this->nextConn++;
-                        $this->conns[$id] = new Sock($client);
-                        $this->byFp[(int) $client] = $id;
-                        $this->broker->prom['connections']++;
-                        $this->broker->prom['connectionsOpened']++;
+                        $this->take($client);
                     }
                     continue;
                 }
@@ -176,12 +212,223 @@ final class Server
             // Nothing readable means the publishers are blocked rather than
             // streaming.
             $this->commit($selected === 0);
+            $this->pullHandoff();
+            $this->announce();
             $this->beat();
             $this->broker->maybeCompact();
             if ($this->extras !== null) {
                 $this->extras->tick();
             }
         }
+    }
+
+    /** @param resource $fp */
+    private function take($fp, ?array $state = null, string $bytes = ''): void
+    {
+        stream_set_blocking($fp, false);
+        $this->tune($fp);
+        $id = $this->nextConn++;
+        $sock = new Sock($fp);
+        if ($state !== null) {
+            $sock->stage = 'frames';
+            $sock->user = (string) ($state['user'] ?? '');
+            $sock->vhost = (string) ($state['vhost'] ?? '/');
+            foreach ($state['channels'] ?? [] as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $ch = new Chan();
+                $ch->confirm = ($item['confirm'] ?? false) === true;
+                $ch->prefetch = (int) ($item['prefetch'] ?? 0);
+                $sock->channels[(int) $item['id']] = $ch;
+            }
+            $sock->in = $bytes;
+        }
+        $this->conns[$id] = $sock;
+        $this->byFp[(int) $fp] = $id;
+        $this->broker->prom['connections']++;
+        $this->broker->prom['connectionsOpened']++;
+        if ($state !== null) {
+            $this->onData($id, '');
+        }
+    }
+
+    private function pullHandoff(): void
+    {
+        if ($this->handoff === null) {
+            return;
+        }
+        while ($packet = $this->handoff->recv()) {
+            $msg = $packet['msg'];
+            if (($msg['type'] ?? '') !== 'conn' || !is_resource($packet['fp'])) {
+                if (is_resource($packet['fp'])) {
+                    fclose($packet['fp']);
+                }
+                continue;
+            }
+            if (isset($msg['state']) && is_array($msg['state'])) {
+                $raw = base64_decode((string) ($msg['bytes'] ?? ''), true);
+                $this->take($packet['fp'], $msg['state'], is_string($raw) ? $raw : '');
+            } else {
+                $this->take($packet['fp']);
+            }
+        }
+    }
+
+    /** Tells the parent this child can take connections, once peers are up. */
+    private function announce(): void
+    {
+        if ($this->announced || $this->handoff === null) {
+            return;
+        }
+        $need = max(0, count($this->broker->members) - 1);
+        $have = $this->extras === null ? 0 : count($this->extras->cluster->peerIds());
+        if ($have < $need && microtime(true) < $this->bootAt + 8) {
+            return;
+        }
+        $this->announced = $this->handoff->send(['type' => 'ready']);
+    }
+
+    /**
+     * Moves this connection to the queue's home before the naming frame is handled.
+     * One move. A publish stays here until its header and body are buffered, so
+     * closing this process's socket does not discard unread bytes.
+     *
+     * @return 'no'|'pending'|'moved'
+     */
+    private function maybeMigrate(int $id): string
+    {
+        if ($this->handoff === null || !isset($this->conns[$id])) {
+            return 'no';
+        }
+        $sock = $this->conns[$id];
+        if ($sock->settled || $sock->stage !== 'frames') {
+            return 'no';
+        }
+        // Bytes still in the kernel buffer travel with the passed socket, so
+        // nothing more is read here. Draining it made a deep publish window a
+        // datagram larger than the receiver's buffer, which cut the
+        // connection.
+        $queue = Handoff::namedQueue($sock->in, $sock->inAt);
+        if ($queue === null) {
+            return 'no';
+        }
+        if (($this->broker->queues[$queue]['args']['queueType'] ?? 'classic') === 'quorum') {
+            $sock->settled = true;
+            return 'no';
+        }
+        $home = $this->broker->home($queue);
+        if ($home === '' || $home === $this->broker->nodeId) {
+            $sock->settled = true;
+            return 'no';
+        }
+        if (!$this->namingFrameReady($sock->in, $sock->inAt)) {
+            return 'pending';
+        }
+        $channels = [];
+        foreach ($sock->channels as $cid => $ch) {
+            $channels[] = ['id' => $cid, 'confirm' => $ch->confirm, 'prefetch' => $ch->prefetch];
+        }
+        $payload = [
+            'type' => 'migrate',
+            'home' => $home,
+            'state' => [
+                'user' => $sock->user,
+                'vhost' => $sock->vhost,
+                'channels' => $channels,
+            ],
+            'bytes' => base64_encode(substr($sock->in, $sock->inAt)),
+        ];
+        // The relay reads one datagram into a 256 KiB buffer. A connection whose
+        // unread bytes would not fit stays here and is forwarded instead.
+        if (strlen((string) $payload['bytes']) > Handoff::MAX_BYTES) {
+            $sock->settled = true;
+            return 'no';
+        }
+        $ok = false;
+        for ($try = 0; $try < 100 && !$ok; $try++) {
+            $ok = $this->handoff->send($payload, $sock->fp);
+            if (!$ok) {
+                usleep(1000);
+            }
+        }
+        if (!$ok) {
+            $sock->settled = true;
+            return 'no';
+        }
+        $this->forget($id);
+        return 'moved';
+    }
+
+    /**
+     * Stop serving a connection that moved to another process. Nothing is
+     * requeued or deleted: the home process owns the session now. The local
+     * stream is closed a little later, once the home has the socket.
+     */
+    private function forget(int $id): void
+    {
+        $sock = $this->conns[$id] ?? null;
+        if ($sock === null) {
+            return;
+        }
+        unset($this->byFp[(int) $sock->fp], $this->conns[$id]);
+        $this->broker->prom['connections']--;
+        $this->retired[] = [$sock->fp, microtime(true) + 1.0];
+    }
+
+    /** Close the streams of connections that moved away a while ago. */
+    private function closeRetired(): void
+    {
+        $now = microtime(true);
+        $keep = [];
+        foreach ($this->retired as [$fp, $at]) {
+            if ($at <= $now) {
+                @fclose($fp);
+            } else {
+                $keep[] = [$fp, $at];
+            }
+        }
+        $this->retired = $keep;
+    }
+
+    /** A consume is ready at its method frame. A publish waits for header and body. */
+    private function namingFrameReady(string $buf, int $at): bool
+    {
+        if (strlen($buf) - $at < 11 || ($buf[$at] ?? '') !== "\x01") {
+            return false;
+        }
+        $len = unpack('N', substr($buf, $at + 3, 4))[1];
+        if (strlen($buf) - $at < 8 + $len) {
+            return false;
+        }
+        $class = unpack('n', substr($buf, $at + 7, 2))[1];
+        $method = unpack('n', substr($buf, $at + 9, 2))[1];
+        if (!($class === 60 && $method === 40)) {
+            return true;
+        }
+        $pos = $at + 8 + $len;
+        if (strlen($buf) - $pos < 8 || ($buf[$pos] ?? '') !== "\x02") {
+            return false;
+        }
+        $hlen = unpack('N', substr($buf, $pos + 3, 4))[1];
+        if (strlen($buf) - $pos < 8 + $hlen || $hlen < 12) {
+            return false;
+        }
+        $need = Codec::readU64($buf, $pos + 11);
+        $cursor = $pos + 8 + $hlen;
+        $got = 0;
+        while ($got < $need) {
+            if (strlen($buf) - $cursor < 8 || ($buf[$cursor] ?? '') !== "\x03") {
+                return false;
+            }
+            $blen = unpack('N', substr($buf, $cursor + 3, 4))[1];
+            if (strlen($buf) - $cursor < 8 + $blen) {
+                return false;
+            }
+            $got += $blen;
+            $cursor += 8 + $blen;
+        }
+        return true;
     }
 
     /** @param resource $fp */
@@ -253,6 +500,9 @@ final class Server
         $this->broker->prom['connectionsClosed']++;
         $this->broker->prom['channels'] -= count($sock->channels);
         $this->broker->prom['channelsClosed'] += count($sock->channels);
+        foreach (array_keys($sock->channels) as $channel) {
+            $this->releaseChannel($id, $channel);
+        }
         foreach ($this->broker->queues as $name => $q) {
             $before = count($q['consumers']);
             $this->broker->queues[$name]['consumers'] = array_values(array_filter(
@@ -261,7 +511,74 @@ final class Server
             ));
             $this->broker->prom['consumers'] -= $before - count($this->broker->queues[$name]['consumers']);
         }
+        // An exclusive queue goes with the connection that declared it.
+        foreach ($this->broker->queues as $name => $q) {
+            if (($q['owner'] ?? null) === $id) {
+                $this->broker->deleteQueue($name);
+            }
+        }
         unset($this->conns[$id]);
+        $this->pump();
+    }
+
+    /**
+     * A closing channel gives back its unacked messages, in delivery order,
+     * and its consumers go. An auto-delete queue that lost its last consumer
+     * is deleted.
+     */
+    private function releaseChannel(int $id, int $channel): void
+    {
+        $ch = $this->conns[$id]->channels[$channel] ?? null;
+        if ($ch === null) {
+            return;
+        }
+        foreach (array_reverse(array_keys($ch->unacked)) as $dtag) {
+            $msgId = $ch->settle($dtag);
+            if ($msgId !== null) {
+                $this->broker->requeue($msgId);
+            }
+        }
+        $ch->txPub = [];
+        $ch->txAcks = [];
+        $touched = [];
+        foreach ($this->broker->queues as $name => $q) {
+            $before = count($q['consumers']);
+            $this->broker->queues[$name]['consumers'] = array_values(array_filter(
+                $q['consumers'],
+                static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel),
+            ));
+            $removed = $before - count($this->broker->queues[$name]['consumers']);
+            if ($removed > 0) {
+                $this->broker->prom['consumers'] -= $removed;
+                $touched[] = $name;
+            }
+        }
+        foreach ($touched as $name) {
+            $this->autoDelete($name);
+        }
+    }
+
+    /** Delete an auto-delete queue once its last consumer is gone. */
+    private function autoDelete(string $name): void
+    {
+        $q = $this->broker->queues[$name] ?? null;
+        if ($q !== null && ($q['autoDelete'] ?? false) && ($q['hadConsumer'] ?? false) && $q['consumers'] === []) {
+            $this->broker->deleteQueue($name);
+        }
+    }
+
+    /**
+     * An exclusive queue belongs to the connection that declared it. Any
+     * other connection gets 405 RESOURCE_LOCKED, and its channel closes.
+     */
+    private function locked(int $id, int $channel, string $queue, int $class, int $method): bool
+    {
+        $owner = $this->broker->queues[$queue]['owner'] ?? null;
+        if ($owner === null || $owner === $id) {
+            return false;
+        }
+        $this->conns[$id]->send(Codec::channelClose($channel, 405, "RESOURCE_LOCKED - cannot obtain exclusive access to locked queue '$queue' in vhost '/'", $class, $method));
+        return true;
     }
 
     private function onData(int $id, string $data): void
@@ -289,7 +606,7 @@ final class Server
                 $this->drop($id);
                 return;
             }
-            $sock->in = substr($sock->in, 8);
+            $sock->inAt = 8;
             $sock->stage = 'frames';
             $sock->send(Codec::connectionStart());
         }
@@ -301,24 +618,42 @@ final class Server
             }
             return;
         }
-        while (isset($this->conns[$id]) && strlen($sock->in) >= 7) {
-            $type = ord($sock->in[0]);
-            $channel = unpack('n', substr($sock->in, 1, 2))[1];
-            $len = unpack('N', substr($sock->in, 3, 4))[1];
-            if (strlen($sock->in) < 8 + $len) {
+        while (isset($this->conns[$id])) {
+            $rest = strlen($sock->in) - $sock->inAt;
+            if ($rest < 7) {
                 break;
             }
-            if ($sock->in[7 + $len] !== "\xce") {
+            $i = $sock->inAt;
+            $type = ord($sock->in[$i]);
+            $channel = unpack('n', substr($sock->in, $i + 1, 2))[1];
+            $len = unpack('N', substr($sock->in, $i + 3, 4))[1];
+            if ($rest < 8 + $len) {
+                break;
+            }
+            if ($sock->in[$i + 7 + $len] !== "\xce") {
                 $this->drop($id);
                 return;
             }
-            $payload = substr($sock->in, 7, $len);
-            $sock->in = substr($sock->in, 8 + $len);
+            if ($type === 1) {
+                $move = $this->maybeMigrate($id);
+                if ($move === 'moved') {
+                    return;
+                }
+                if ($move === 'pending') {
+                    break;
+                }
+            }
+            $payload = substr($sock->in, $i + 7, $len);
+            $sock->inAt = $i + 8 + $len;
             $this->onFrame($id, $type, $channel, $payload);
             if (!isset($this->conns[$id])) {
                 return;
             }
             $sock = $this->conns[$id];
+        }
+        if ($sock->inAt >= 16384) {
+            $sock->in = substr($sock->in, $sock->inAt);
+            $sock->inAt = 0;
         }
         $sock->flush();
     }
@@ -368,6 +703,18 @@ final class Server
             }
             if (($flags & 0x0100) !== 0) {
                 $ch->pub['expiration'] = (int) Codec::readShortstr($payload, $at);
+            }
+            if (($flags & 0x0080) !== 0) {
+                Codec::readShortstr($payload, $at);
+            }
+            if (($flags & 0x0040) !== 0) {
+                $at += 8;
+            }
+            if (($flags & 0x0020) !== 0) {
+                Codec::readShortstr($payload, $at);
+            }
+            if (($flags & 0x0010) !== 0) {
+                $ch->pub['userId'] = Codec::readShortstr($payload, $at);
             }
             // The low bit of a flag word says another word follows. Properties
             // in those later words are not read, but the words are drained so
@@ -439,6 +786,7 @@ final class Server
             if (isset($sock->channels[$channel])) {
                 $this->broker->prom['channels']--;
                 $this->broker->prom['channelsClosed']++;
+                $this->releaseChannel($id, $channel);
             }
             unset($sock->channels[$channel]);
             $sock->send(Codec::channelCloseOk($channel));
@@ -522,11 +870,16 @@ final class Server
             ]);
             unset($ch->remote[$tag]);
         }
+        $touched = [];
         foreach ($this->broker->queues as $name => $queue) {
+            $before = count($queue['consumers']);
             $this->broker->queues[$name]['consumers'] = array_values(array_filter(
                 $queue['consumers'],
                 static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel && $c['tag'] === $tag),
             ));
+            if (count($this->broker->queues[$name]['consumers']) !== $before) {
+                $touched[] = $name;
+            }
         }
         if ($ch->consumer === $tag) {
             $ch->consumer = null;
@@ -535,6 +888,9 @@ final class Server
         if (!$nowait) {
             $this->conns[$id]->send(Codec::cancelOk($channel, $tag));
         }
+        foreach ($touched as $name) {
+            $this->autoDelete((string) $name);
+        }
     }
 
     private function get(int $id, int $channel, string $payload, int $o): void
@@ -542,6 +898,9 @@ final class Server
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
         $noAck = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        if ($this->locked($id, $channel, $queue, 60, 70)) {
+            return;
+        }
         $sock = $this->conns[$id];
         $ch = $sock->channels[$channel];
         // A classic queue homed elsewhere is asked over the cluster link. The
@@ -589,6 +948,10 @@ final class Server
             );
             return;
         }
+        // basic.get counts as use for x-expires, as on RabbitMQ.
+        if (isset($this->broker->queues[$queue])) {
+            $this->broker->queues[$queue]['lastUsed'] = microtime(true);
+        }
         $msgId = $this->broker->getReady($queue);
         if ($msgId === null) {
             $this->broker->prom['getEmpty']++;
@@ -633,8 +996,7 @@ final class Server
         if (!isset($ch->unacked[$tag])) {
             return;
         }
-        $msgId = $ch->unacked[$tag];
-        unset($ch->unacked[$tag]);
+        $msgId = $ch->settle($tag);
         if ($requeue) {
             $this->broker->requeue($msgId);
         } else {
@@ -654,9 +1016,11 @@ final class Server
             return;
         }
         $ch = $sock->channels[$channel];
-        foreach (array_reverse($ch->unacked, true) as $tag => $msgId) {
-            $this->broker->requeue($msgId);
-            unset($ch->unacked[$tag]);
+        foreach (array_reverse(array_keys($ch->unacked)) as $tag) {
+            $msgId = $ch->settle($tag);
+            if ($msgId !== null) {
+                $this->broker->requeue($msgId);
+            }
         }
         if ($method === 110) {
             $sock->send(Codec::recoverOk($channel));
@@ -669,6 +1033,9 @@ final class Server
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
         $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
+        if ($this->locked($id, $channel, $queue, 50, 30)) {
+            return;
+        }
         // Purging a queue homed elsewhere has to reach the node holding it.
         $home = $this->remoteHome($queue);
         if ($home !== null && $this->extras !== null) {
@@ -685,10 +1052,38 @@ final class Server
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
+        $ifUnused = ($bits & 1) === 1;
+        $ifEmpty = ($bits & 2) === 2;
         $nowait = ($bits & 4) === 4;
+        if ($this->locked($id, $channel, $queue, 50, 40)) {
+            return;
+        }
+        $q = $this->broker->queues[$queue] ?? null;
+        if ($q !== null && $ifUnused && $q['consumers'] !== []) {
+            $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - queue '$queue' in vhost '/' in use", 50, 40));
+            return;
+        }
+        if ($q !== null && $ifEmpty && $this->broker->readyCount($queue) > 0) {
+            $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - queue '$queue' in vhost '/' not empty", 50, 40));
+            return;
+        }
         $home = $this->remoteHome($queue);
         if ($home !== null && $this->extras !== null) {
             $this->extras->cluster->request($home, 'delete_queue', ['vhost' => '/', 'queue' => $queue]);
+        }
+        // Consumers of a deleted queue are told with basic.cancel, as RabbitMQ
+        // does for clients that advertise consumer_cancel_notify.
+        foreach ($q['consumers'] ?? [] as $c) {
+            $sock = $this->conns[$c['conn']] ?? null;
+            if ($sock === null) {
+                continue;
+            }
+            $sock->send(Codec::method($c['ch'], 60, 30, Codec::shortstr($c['tag']) . chr(0)));
+            $peer = $sock->channels[$c['ch']] ?? null;
+            if ($peer !== null && $peer->consumer === $c['tag']) {
+                $peer->consumer = null;
+                $peer->queue = null;
+            }
         }
         $n = $this->broker->deleteQueue($queue);
         if (!$nowait) {
@@ -729,21 +1124,47 @@ final class Server
         } else {
             $this->broker->unbindExchange($destination, $source, $key);
         }
-        $this->conns[$id]->send(Codec::method($channel, 40, $bind ? 31 : 41));
+        $this->conns[$id]->send(Codec::method($channel, 40, $bind ? 31 : 51));
     }
 
     /**
-     * tx.select, tx.commit and tx.rollback. Publishes are applied as they
-     * arrive rather than buffered, so commit is an acknowledgement and
-     * rollback cannot undo anything. A client that needs real atomicity
-     * should use publisher confirms instead.
+     * tx.select, tx.commit and tx.rollback. In a transaction, publishes and
+     * acks are held on the channel. Commit applies them in order; rollback
+     * drops them, so the publishes never happen and the acked messages stay
+     * unacked, as on RabbitMQ.
      */
     private function transaction(int $id, int $channel, int $method): void
     {
         $sock = $this->conns[$id];
-        if ($method === 30) {
-            $sock->send(Codec::channelClose($channel, 540, 'NOT_IMPLEMENTED - tx.rollback cannot undo an applied publish', 90, 30));
-            return;
+        $ch = $sock->channels[$channel];
+        if ($method === 10) {
+            $ch->tx = true;
+        } elseif ($method === 20) {
+            if (!$ch->tx) {
+                $sock->send(Codec::channelClose($channel, 406, 'PRECONDITION_FAILED - channel is not transactional', 90, 20));
+                return;
+            }
+            $this->replaying = true;
+            try {
+                foreach ($ch->txPub as $pub) {
+                    $ch->pub = $pub;
+                    $this->finishPublish($id, $channel);
+                }
+                foreach ($ch->txAcks as [$payload, $o, $negative]) {
+                    $this->ack($id, $channel, $payload, $o, $negative);
+                }
+            } finally {
+                $this->replaying = false;
+            }
+            $ch->txPub = [];
+            $ch->txAcks = [];
+        } elseif ($method === 30) {
+            if (!$ch->tx) {
+                $sock->send(Codec::channelClose($channel, 406, 'PRECONDITION_FAILED - channel is not transactional', 90, 30));
+                return;
+            }
+            $ch->txPub = [];
+            $ch->txAcks = [];
         }
         $sock->send(Codec::method($channel, 90, $method + 1));
     }
@@ -788,18 +1209,76 @@ final class Server
             $o++;
             $args = Codec::readTable($payload, $o);
         }
+        if ($this->locked($id, $channel, $name, 50, 10)) {
+            return;
+        }
+        $locator = $args['x-queue-leader-locator'] ?? null;
+        if ($locator !== null && $locator !== 'client-local' && $locator !== 'balanced') {
+            $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - invalid arg 'x-queue-leader-locator' for queue '$name' in vhost '/': \"$locator\" is not one of [client-local, balanced]", 50, 10));
+            return;
+        }
         if (!$passive && !isset($this->broker->queues[$name])
             && !$this->broker->queueAllowed($this->conns[$id]->vhost)) {
             $this->conns[$id]->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - queue limit', 50, 10));
             return;
         }
+        $isNew = !isset($this->broker->queues[$name]);
         try {
             $state = $this->broker->declareQueue($name, $args, $durable, $exclusive, $passive, $autoDelete);
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 50, 10);
             return;
         }
+        if ($isNew && !$passive) {
+            $this->broker->emitEvent('queue.created', [
+                ['name', $name],
+                ['durable', $durable],
+                ['auto_delete', $autoDelete],
+                ['exclusive', $exclusive],
+            ]);
+        }
+        if ($exclusive && !isset($this->broker->queues[$name]['owner'])) {
+            $this->broker->queues[$name]['owner'] = $id;
+        }
+        if (!$passive) {
+            $this->replicateQueue($name, $args);
+        }
         $this->conns[$id]->send(Codec::queueDeclareOk($channel, $name, $state['messages'], $state['consumers']));
+    }
+
+    /** Creates the queue on every peer before the client is told the declare finished. */
+    private function replicateQueue(string $name, array $args): void
+    {
+        if ($this->extras === null || count($this->broker->members) < 2) {
+            return;
+        }
+        $pending = 0;
+        $done = 0;
+        foreach ($this->extras->cluster->peerIds() as $peer) {
+            $id = $this->extras->cluster->request($peer, 'declare_queue', [
+                'queue' => $name,
+                'args' => $args,
+            ], '', static function () use (&$done): void {
+                $done++;
+            });
+            if ($id !== 0) {
+                $pending++;
+            }
+        }
+        $deadline = microtime(true) + 0.5;
+        while ($done < $pending && microtime(true) < $deadline) {
+            $read = $this->extras->reads();
+            $write = [];
+            $except = [];
+            if ($read === [] || @stream_select($read, $write, $except, 0, 20000) === false) {
+                break;
+            }
+            foreach ($read as $fp) {
+                if ($this->extras->owns($fp)) {
+                    $this->extras->onRead($fp);
+                }
+            }
+        }
     }
 
     /**
@@ -834,13 +1313,18 @@ final class Server
         $exclusive = ($bits & 4) === 4;
         $nowait = ($bits & 8) === 8;
         if ($tag === '') {
-            $tag = 'ctag-' . $id . '-' . $channel;
+            // Unique per consumer, as RabbitMQ's amq.ctag-...: two consumers on
+            // one channel must not share a tag.
+            $tag = 'amq.ctag-' . bin2hex(random_bytes(8));
         }
         $priority = 0;
         if (isset($payload[$o])) {
             $o++;
             $args = Codec::readTable($payload, $o);
             $priority = (int) ($args['x-priority'] ?? 0);
+        }
+        if ($this->locked($id, $channel, $queue, 60, 20)) {
+            return;
         }
         $ch = $this->conns[$id]->channels[$channel];
         // A classic queue homed elsewhere is subscribed to over the cluster
@@ -873,6 +1357,7 @@ final class Server
         $ch->consumer = $tag;
         $ch->queue = $queue;
         $ch->noAck[$tag] = $noAck;
+        $this->broker->queues[$queue]['hadConsumer'] = true;
         if (!$nowait) {
             $this->conns[$id]->send(Codec::consumeOk($channel, $tag));
         }
@@ -914,9 +1399,18 @@ final class Server
             return;
         }
         $pub = $ch->pub;
-        $tag = $ch->confirm ? $ch->nextPub++ : 0;
         $ch->pub = null;
         $sock = $this->conns[$id];
+        // RabbitMQ refuses a user-id property that is not the login.
+        if (isset($pub['userId']) && $pub['userId'] !== ($sock->user ?? '')) {
+            $sock->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - user_id property set to '{$pub['userId']}' but authenticated user was '{$sock->user}'", 60, 40));
+            return;
+        }
+        if ($ch->tx && !$this->replaying) {
+            $ch->txPub[] = $pub;
+            return;
+        }
+        $tag = $ch->confirm ? $ch->nextPub++ : 0;
         if (!$this->broker->topicWriteAllowed($sock->user, $sock->vhost, $pub['exchange'], $pub['key'])) {
             $sock->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - write access to topic refused', 60, 40));
             return;
@@ -970,8 +1464,16 @@ final class Server
         $multiple = ($bits & 1) === 1;
         $requeue = $negative && ($bits & 2) === 2;
         $ch = $this->conns[$id]->channels[$channel];
-        foreach ($ch->unacked as $have => $msg) {
+        if ($ch->tx && !$this->replaying) {
+            $ch->txAcks[] = [$payload, $o, $negative];
+            return;
+        }
+        foreach (array_keys($ch->unacked) as $have) {
             if ($multiple ? $have <= $tag : $have === $tag) {
+                $msg = $ch->settle($have);
+                if ($msg === null) {
+                    continue;
+                }
                 if ($negative && $requeue) {
                     $this->broker->requeue($msg);
                 } elseif ($negative) {
@@ -980,7 +1482,6 @@ final class Server
                 } else {
                     $this->broker->ack($msg);
                 }
-                unset($ch->unacked[$have]);
             }
         }
         $this->pump();
@@ -1066,6 +1567,7 @@ final class Server
         if (!$idle && !$small && microtime(true) < $this->nextSync) {
             return;
         }
+        $dirty = [];
         foreach ($this->broker->flush() as $ack) {
             if ($ack['tag'] <= 0 || !isset($this->conns[$ack['conn']])) {
                 continue;
@@ -1073,12 +1575,14 @@ final class Server
             $sock = $this->conns[$ack['conn']];
             if (($ack['nack'] ?? false) === true) {
                 $sock->send(Codec::basicNack($ack['ch'], $ack['tag']));
-                $sock->flush();
-                continue;
+            } else {
+                $sock->send(Codec::basicAck($ack['ch'], $ack['tag']));
+                $this->broker->prom['confirmed']++;
             }
-            $sock->send(Codec::basicAck($ack['ch'], $ack['tag']));
+            $dirty[$ack['conn']] = $sock;
+        }
+        foreach ($dirty as $sock) {
             $sock->flush();
-            $this->broker->prom['confirmed']++;
         }
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
         $this->pump();
@@ -1123,7 +1627,7 @@ final class Server
                     if ($ch === null) {
                         return false;
                     }
-                    return $ch->prefetch === 0 || count($ch->unacked) < $ch->prefetch;
+                    return $ch->prefetch === 0 || ($ch->held[$cons['tag']] ?? 0) < $ch->prefetch;
                 });
                 if ($pick === null) {
                     break;
@@ -1167,6 +1671,8 @@ final class Server
                 $dtag = $ch->nextDel++;
                 if (!$noAck) {
                     $ch->unacked[$dtag] = $msgId;
+                    $ch->tagOf[$dtag] = $cons['tag'];
+                    $ch->held[$cons['tag']] = ($ch->held[$cons['tag']] ?? 0) + 1;
                 }
                 $msg = $this->broker->msgs[$msgId];
                 $sock->send(Codec::deliver(

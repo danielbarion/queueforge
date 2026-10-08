@@ -68,14 +68,20 @@ final class Broker
         'amq.fanout' => 'fanout',
         'amq.topic' => 'topic',
         'amq.headers' => 'headers',
+        'amq.match' => 'headers',
+        'amq.rabbitmq.event' => 'topic',
     ];
+    /** True while the broker itself publishes, which may use an internal exchange. */
+    public bool $internalPublish = false;
     /**
      * Exchange rows beyond the kind: durability, auto-delete, internal, and
      * the alternate exchange.
      *
      * @var array<string, array{durable:bool,autoDelete:bool,internal:bool,alternate:?string}>
      */
-    public array $exchangeRows = [];
+    public array $exchangeRows = [
+        'amq.rabbitmq.event' => ['durable' => true, 'autoDelete' => false, 'internal' => true, 'alternate' => null],
+    ];
     /**
      * Lets a transient non-exclusive queue be declared. Off by default, which
      * is the RabbitMQ deprecation behaviour Bun also implements.
@@ -473,6 +479,30 @@ final class Broker
         $this->bindings[] = ['exchange' => $exchange, 'queue' => $queue, 'key' => $key, 'args' => $args];
     }
 
+    /**
+     * Publish one event to amq.rabbitmq.event, as RabbitMQ's event exchange
+     * plugin does. A queue nobody bound costs one routing lookup. Errors are
+     * dropped: an event never fails what caused it.
+     *
+     * @param list<array{0:string,1:mixed}> $headers
+     */
+    public function emitEvent(string $key, array $headers): void
+    {
+        $this->internalPublish = true;
+        try {
+            if ($this->route('amq.rabbitmq.event', $key, []) === []) {
+                return;
+            }
+            $headers[] = ['vhost', '/'];
+            $headers[] = ['timestamp_in_ms', (int) (microtime(true) * 1000)];
+            $this->publish(0, 0, 0, 'amq.rabbitmq.event', $key, '', 1, 0, $headers);
+        } catch (RuntimeException) {
+            // An event is best effort.
+        } finally {
+            $this->internalPublish = false;
+        }
+    }
+
     /** @param list<array{0:string,1:string}> $headers
      *  @return list<string> */
     public function route(string $exchange, string $key, array $headers = []): array
@@ -495,10 +525,12 @@ final class Broker
         if (isset($seen[$exchange])) {
             return [];
         }
-        $seen[$exchange] = true;
-        if (($this->exchangeRows[$exchange]['internal'] ?? false) === true) {
+        // Only the exchange a client published to is checked; a hop into an
+        // internal exchange is how it is meant to be used.
+        if ($seen === [] && !$this->internalPublish && ($this->exchangeRows[$exchange]['internal'] ?? false) === true) {
             throw new RuntimeException("ACCESS_REFUSED - internal exchange '$exchange'", 403);
         }
+        $seen[$exchange] = true;
         $out = $this->routeDirect($exchange, $key, $headers);
         foreach ($this->e2e as $link) {
             if ($link['source'] !== $exchange) {
@@ -887,6 +919,14 @@ final class Broker
         if ($qid === '') {
             return;
         }
+        // Classic ids are local and already acked out of the log. Keeping one
+        // entry per delivery grows without bound and exhausts the process
+        // around a million messages. Quorum ids are the ones a peer must not
+        // hand out again after replaying its log.
+        $kind = $this->queues[$queue]['args']['queueType'] ?? null;
+        if ($kind !== null && $kind !== 'quorum') {
+            return;
+        }
         $this->consumed[$queue . "\0" . $qid] = true;
     }
 
@@ -982,6 +1022,9 @@ final class Broker
         if ($this->cluster === null || ($this->queues[$queue]['args']['queueType'] ?? 'classic') === 'quorum') {
             return null;
         }
+        if (getenv('QUEUEFORGE_LOCAL') === '1') {
+            return null;
+        }
         $home = $this->home($queue);
         if ($home === '' || $home === $this->nodeId) {
             return null;
@@ -1065,6 +1108,14 @@ final class Broker
     private function pushReady(string $queue, int $id): void
     {
         if (!isset($this->msgs[$id])) {
+            return;
+        }
+        // x-max-length 0 with drop-head keeps nothing: the new message is the
+        // head and is dropped at once, dead-lettered as maxlen, as RabbitMQ does.
+        if (($this->queues[$queue]['args']['maxLength'] ?? null) === 0
+            && ($this->queues[$queue]['args']['overflow'] ?? 'drop-head') === 'drop-head') {
+            $this->prom['dlxMaxlen']++;
+            $this->deadLetter($id, 'maxlen');
             return;
         }
         $this->noteExpiry($queue, $id);
@@ -1388,9 +1439,15 @@ final class Broker
             return false;
         }
         $queue = $this->msgs[$id]['queue'];
+        // The queue was deleted while the message was out; there is nowhere to put it back.
+        if (!isset($this->queues[$queue])) {
+            unset($this->msgs[$id]);
+            return false;
+        }
         $limit = $this->queues[$queue]['args']['deliveryLimit'] ?? null;
         $this->msgs[$id]['deliveries'] = (int) ($this->msgs[$id]['deliveries'] ?? 0) + 1;
-        if ($limit !== null && $this->msgs[$id]['deliveries'] >= $limit) {
+        // x-delivery-limit N allows N returns, so N+1 deliveries, as RabbitMQ does.
+        if ($limit !== null && $this->msgs[$id]['deliveries'] > $limit) {
             $this->prom['dlxDeliveryLimit']++;
             $this->deadLetter($id, 'rejected');
             return false;

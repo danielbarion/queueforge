@@ -35,9 +35,10 @@ final class Harness
      *
      * @param list<string> $extraListeners
      * @param array{listen?:string,members?:list<array{id:string,addr:string}>} $cluster
+     * @param array<string, string> $env
      * @return array{proc:mixed,dir:string,port:int}
      */
-    public static function broker(array $extraListeners = [], int $fsyncMs = 10, string $nodeId = '', array $cluster = []): array
+    public static function broker(array $extraListeners = [], int $fsyncMs = 10, string $nodeId = '', array $cluster = [], array $env = []): array
     {
         $port = self::freePort();
         $dir = sys_get_temp_dir() . '/qf-test-' . bin2hex(random_bytes(6));
@@ -74,7 +75,12 @@ final class Harness
 
         $root = dirname(__DIR__, 2);
         $cmd = ['php', "$root/bin/queueforge", '--config', "$dir/config.toml", '--dev-bootstrap'];
-        $proc = proc_open($cmd, [1 => ['file', "$dir/out.log", 'w'], 2 => ['file', "$dir/err.log", 'w']], $pipes);
+        $procEnv = null;
+        if ($env !== []) {
+            $base = getenv();
+            $procEnv = is_array($base) ? array_merge($base, $env) : $env;
+        }
+        $proc = proc_open($cmd, [1 => ['file', "$dir/out.log", 'w'], 2 => ['file', "$dir/err.log", 'w']], $pipes, null, $procEnv);
         if (!is_resource($proc)) {
             throw new RuntimeException('cannot start the broker');
         }
@@ -103,6 +109,11 @@ final class Harness
     public static function stop(array $handle, bool $kill = false): void
     {
         if (is_resource($handle['proc'])) {
+            $status = proc_get_status($handle['proc']);
+            $pid = is_array($status) ? (int) ($status['pid'] ?? 0) : 0;
+            if ($pid > 0 && function_exists('posix_kill')) {
+                @posix_kill(-$pid, $kill ? 9 : 15);
+            }
             proc_terminate($handle['proc'], $kill ? 9 : 15);
             proc_close($handle['proc']);
         }

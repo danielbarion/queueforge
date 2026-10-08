@@ -1,4 +1,5 @@
-# Inside the bench container the load client connects to port 5672.
+# A container limited to one CPU stays one process. More CPUs start one child
+# per core. The parent hands each connection to the child that owns the queue.
 # fsync_interval_ms matches the Rust and Bun bench images.
 # Management is on so the container matches the Rust and Bun bench images.
 

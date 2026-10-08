@@ -157,29 +157,39 @@ final class Features
     }
 
     /**
-     * 32-bit FNV-1a over bytes, used to pick the home node of a classic
-     * queue. This matches Bun, whose hash runs over UTF-16 code units and so
-     * agrees with a byte-wise pass for ASCII names. Bun documents that it
-     * already diverges from Rust's 64-bit byte FNV
-     * (bun/src/broker/routing.ts:46-59), so agreeing with both is not
-     * possible; this side matches Bun.
+     * 64-bit FNV-1a over the UTF-8 bytes of the vhost, one 0xff byte, then
+     * the queue name. The same value Rust and Bun use (docs/raft.md, section 9).
      */
-    public static function fnv1a32(string $text): int
+    public static function homeHash(string $vhost, string $name): string
     {
-        $hash = 0x811c9dc5;
-        $len = strlen($text);
-        for ($i = 0; $i < $len; $i++) {
-            $hash ^= ord($text[$i]);
-            // Multiply by the 32-bit FNV prime, 16777619, without overflowing
-            // into PHP's 64-bit int sign.
-            $hash = ($hash + (($hash << 1) + ($hash << 4) + ($hash << 7) + ($hash << 8) + ($hash << 24))) & 0xffffffff;
-        }
-        return $hash;
+        [$hi, $lo] = self::fnv1a64($vhost . "\xff" . $name);
+        return sprintf('%08x%08x', $hi, $lo);
     }
 
     /**
-     * Picks the home node of a classic queue: the member at
-     * fnv1a(vhost \0 name) % count, over the member ids in sorted order.
+     * FNV-1a 64 as two 32-bit halves, so it needs no GMP and never overflows
+     * into a float. The prime is 2^40 + 0x1b3.
+     *
+     * @return array{0:int,1:int} high and low 32 bits
+     */
+    private static function fnv1a64(string $bytes): array
+    {
+        $hi = 0xcbf29ce4;
+        $lo = 0x84222325;
+        $length = strlen($bytes);
+        for ($i = 0; $i < $length; $i++) {
+            $lo ^= ord($bytes[$i]);
+            $low = $lo * 0x1b3;
+            $hi = ($hi * 0x1b3 + ($low >> 32) + ($lo << 8)) & 0xffffffff;
+            $lo = $low & 0xffffffff;
+        }
+        return [$hi, $lo];
+    }
+
+    /**
+     * Picks the home node of a classic queue. Member ids are sorted, and the
+     * index is {@see homeHash} modulo that count. The chosen home is stored
+     * with the queue, so a later membership change does not move it.
      *
      * @param list<array{id:string,addr:string}> $members
      */
@@ -190,7 +200,11 @@ final class Features
         }
         $ids = array_column($members, 'id');
         sort($ids);
-        return $ids[self::fnv1a32($vhost . "\0" . $name) % count($ids)];
+        [$hi, $lo] = self::fnv1a64($vhost . "\xff" . $name);
+        $n = count($ids);
+        // (hi * 2^32 + lo) mod n, kept in range of a native int.
+        $index = (($hi % $n) * ((1 << 32) % $n) + $lo % $n) % $n;
+        return $ids[$index];
     }
 
     /** @param list<string> $copies durable|memory */

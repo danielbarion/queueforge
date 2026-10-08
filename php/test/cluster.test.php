@@ -75,19 +75,15 @@ Harness::guard('line framing', static function (): void {
     Harness::eq('reply is ok', true, $decoded['ok']);
 });
 
-// The home hash must agree with Bun, whose values are pinned here.
+// The home hash must agree with Rust and Bun (docs/raft.md, section 9).
 Harness::guard('home hash', static function (): void {
-    foreach (['a' => 3826002220, 'foo' => 2851307223, "/\0q0" => 1994922035] as $text => $want) {
-        Harness::eq("fnv1a of " . json_encode($text), $want, Features::fnv1a32($text));
-    }
+    Harness::eq('orders home hash', '58c6545457c80e72', Features::homeHash('/', 'orders'));
     $members = [
-        ['id' => 'a', 'addr' => '127.0.0.1:1'],
-        ['id' => 'b', 'addr' => '127.0.0.1:2'],
-        ['id' => 'c', 'addr' => '127.0.0.1:3'],
+        ['id' => 'n3', 'addr' => '127.0.0.1:3'],
+        ['id' => 'n1', 'addr' => '127.0.0.1:1'],
+        ['id' => 'n2', 'addr' => '127.0.0.1:2'],
     ];
-    // fnv1a("/\0q0") % 3 picks the member at that index of the sorted ids.
-    $expected = ['a', 'b', 'c'][1994922035 % 3];
-    Harness::eq('home of q0 follows the hash', $expected, Features::home($members, '/', 'q0'));
+    Harness::eq('orders is on n3', 'n3', Features::home($members, '/', 'orders'));
     Harness::ok(
         'home is stable across calls',
         Features::home($members, '/', 'orders') === Features::home($members, '/', 'orders'),
@@ -311,6 +307,10 @@ Harness::guard('consumed set', static function (): void {
     $broker->noteConsumed('q', 'q-x-1-aa');
     Harness::ok('noting it records it', $broker->wasConsumed('q', 'q-x-1-aa'));
     Harness::eq('an empty id is ignored', false, $broker->wasConsumed('q', ''));
+
+    $broker->declareQueue('classic-q');
+    $broker->noteConsumed('classic-q', '1');
+    Harness::ok('a classic queue does not keep a consumed id', !$broker->wasConsumed('classic-q', '1'));
 
     $list = $broker->consumedList();
     Harness::eq('the wire list has one entry', 1, count($list));

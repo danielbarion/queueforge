@@ -39,15 +39,24 @@ final class Http
         $path = explode('?', $target, 2)[0];
         $body = substr($raw, strlen($head) + 4);
         $cookie = '';
+        $basic = null;
         foreach ($lines as $line) {
             if (str_starts_with(strtolower($line), 'cookie:')) {
                 $cookie = trim(substr($line, 7));
             }
+            if (str_starts_with(strtolower($line), 'authorization:')) {
+                $basic = $this->basicUser(trim(substr($line, 14)));
+            }
         }
-        $user = $this->userFromCookie($cookie);
+        // HTTP Basic, as RabbitMQ's management API and its CLI tools use it,
+        // or the console's session cookie.
+        $user = $basic ?? $this->userFromCookie($cookie);
         if ($method === 'GET' && ($path === '/healthz' || $path === '/readyz')) {
             $ok = $path === '/healthz' || $this->broker->ready;
             return $this->status($ok ? 200 : 503, $ok ? "ok\n" : "not ready\n", 'text/plain');
+        }
+        if ($method === 'GET' && $path === '/api/identity') {
+            return $this->json(200, ['product_name' => 'QueueForge', 'kind' => 'php']);
         }
         if ($method === 'GET' && $path === '/metrics') {
             return $this->status(200, $this->metrics(), 'text/plain; version=0.0.4');
@@ -68,7 +77,14 @@ final class Http
             return $this->json(401, ['error' => 'unauthorized']);
         }
         if (str_starts_with($path, '/api/')) {
-            $response = $this->api($method, $path, $body, $user ?? '');
+            // A broker error answers this request; it must not end the process.
+            try {
+                $response = $this->api($method, $path, $body, $user ?? '');
+            } catch (RuntimeException $err) {
+                $code = $err->getCode();
+                $status = $code === 404 ? 404 : ($code === 403 ? 403 : 400);
+                return $this->json($status, ['error' => $status === 404 ? 'not_found' : 'bad_request', 'reason' => $err->getMessage()]);
+            }
             // Any mutation that succeeded is replicated, so a user or a
             // queue created through one node reaches its peers. Replication
             // sends a whole snapshot, so doing it once here rather than per
@@ -79,6 +95,43 @@ final class Http
             return $response;
         }
         return $this->file($path);
+    }
+
+    /**
+     * The alarm fields of a RabbitMQ node row. This broker has no memory
+     * watermark, so mem_alarm stays false; the disk alarm uses RabbitMQ's
+     * default 50 MB free limit on the data directory's filesystem.
+     *
+     * @return array<string, mixed>
+     */
+    private function alarms(): array
+    {
+        $free = @disk_free_space(dirname($this->broker->userFile));
+        $free = $free === false ? null : (int) $free;
+        return [
+            'mem_used' => memory_get_usage(true),
+            'mem_alarm' => false,
+            'disk_free' => $free,
+            'disk_free_limit' => 50_000_000,
+            'disk_free_alarm' => $free !== null && $free < 50_000_000,
+        ];
+    }
+
+    /** The user an `Authorization: Basic ...` value logs in, if the password and a management tag check out. */
+    private function basicUser(string $value): ?string
+    {
+        if (stripos($value, 'basic ') !== 0) {
+            return null;
+        }
+        $decoded = base64_decode(trim(substr($value, 6)), true);
+        if ($decoded === false || !str_contains($decoded, ':')) {
+            return null;
+        }
+        [$name, $pass] = explode(':', $decoded, 2);
+        if (!$this->broker->verify($name, $pass) || !$this->broker->canManage($name)) {
+            return null;
+        }
+        return $name;
     }
 
     private function login(string $body): string
@@ -228,7 +281,7 @@ final class Http
                     'addr' => $member['addr'],
                     'running' => true,
                     'type' => 'queueforge-php',
-                ];
+                ] + $this->alarms();
             }
             if ($items === []) {
                 $items[] = [
@@ -236,7 +289,7 @@ final class Http
                     'addr' => '',
                     'running' => true,
                     'type' => 'queueforge-php',
-                ];
+                ] + $this->alarms();
             }
             return $this->json(200, $items);
         }
@@ -676,11 +729,19 @@ final class Http
             }
             foreach ((array) ($json['bindings'] ?? []) as $row) {
                 if (is_array($row) && isset($row['source'], $row['destination'])) {
-                    $this->broker->bind(
-                        (string) $row['destination'],
-                        (string) $row['source'],
-                        (string) ($row['routing_key'] ?? ''),
-                    );
+                    if (($row['destination_type'] ?? 'queue') === 'exchange') {
+                        $this->broker->bindExchange(
+                            (string) $row['destination'],
+                            (string) $row['source'],
+                            (string) ($row['routing_key'] ?? ''),
+                        );
+                    } else {
+                        $this->broker->bind(
+                            (string) $row['destination'],
+                            (string) $row['source'],
+                            (string) ($row['routing_key'] ?? ''),
+                        );
+                    }
                 }
             }
             return $this->status(204, '', 'application/json');
@@ -860,7 +921,7 @@ final class Http
             ...$counter('rabbitmq_global_messages_dead_lettered_confirmed_total', 0),
             ...$gauge('rabbitmq_alarms_memory_used_watermark', 0),
             ...$gauge('rabbitmq_alarms_free_disk_space_watermark', 0),
-            ...$gauge('rabbitmq_disk_space_available_bytes', 0),
+            ...$gauge('rabbitmq_disk_space_available_bytes', $this->diskFree()),
             ...$gauge('rabbitmq_unreachable_cluster_peers_count', 0),
         ];
         // Per-queue gauges. Names are escaped because a queue name may
@@ -894,6 +955,13 @@ final class Http
             '',
         ];
         return implode("\n", $lines);
+    }
+
+    /** Available bytes on the filesystem that holds the data directory. A failed probe is 0. */
+    private function diskFree(): int
+    {
+        $free = disk_free_space(dirname($this->broker->store->path));
+        return $free === false ? 0 : (int) $free;
     }
 
     /** Escapes a Prometheus label value. */
