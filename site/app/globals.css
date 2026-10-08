@@ -44,6 +44,7 @@ p code, dd code {
   border-radius: 6px;
   background: var(--surface-2);
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 .skip {
   position: absolute;
@@ -512,6 +513,14 @@ button.copy:hover { border-color: var(--accent); color: var(--accent); }
 /* Table */
 .table-panel { margin-top: 32px; padding: 0; overflow: hidden; }
 .scroll { overflow-x: auto; }
+.bench-table { overflow: visible; }
+.bench-table .scroll { overflow: visible; }
+.bench-table table { border-collapse: separate; border-spacing: 0; }
+.bench-table thead th {
+  position: sticky;
+  top: 65px;
+  z-index: 1;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -551,15 +560,6 @@ tbody:first-of-type tr.group th { padding-top: 14px; }
 td .app { display: inline-flex; align-items: center; gap: 8px; }
 td.best { color: var(--accent); font-weight: 500; }
 td.na { color: var(--faint); }
-
-/* Footer */
-footer {
-  padding-block: 32px 56px;
-  color: var(--muted);
-  font-size: 14px;
-  border-top: 1px solid var(--line);
-}
-footer .wrap {
 td.caveat { color: var(--muted); }
 th sup, td sup, .caption sup { font-size: 0.7em; margin-left: 0.15em; color: var(--faint); }
 
@@ -657,6 +657,15 @@ td.support .mark-icon { display: block; margin: 0 auto; }
 }
 td.support.is-n .support-note { color: var(--faint); }
 .feature-table tbody tr:not(.group):hover th[scope="row"] { background: var(--surface-2); }
+
+/* Footer */
+footer {
+  padding-block: 32px 56px;
+  color: var(--muted);
+  font-size: 14px;
+  border-top: 1px solid var(--line);
+}
+footer .wrap {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -670,24 +679,15 @@ footer nav a { font-size: 13px; }
   .scoreboard, .split-proof, .about-tease, .wire, .engine, .pair {
     grid-template-columns: 1fr;
   }
+  .tallies { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   h1 { max-width: none; }
   .bar { flex-wrap: wrap; gap: 0 12px; min-height: 0; padding-block: 10px 6px; }
+  .bench-table thead th { top: 92px; }
   .bar nav { width: 100%; margin-left: -10px; }
   nav a { padding: 0 10px; min-height: 36px; }
   .members { grid-template-columns: 1fr; }
-  .figures { gap: 8px; }
-  .figures li { padding: 12px 10px 10px; }
-  .tallies { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .figures strong { font-size: clamp(1.4rem, 7vw, 1.9rem); }
-  .bars li {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 8px;
-  }
-  .bar-track { grid-column: 1 / -1; grid-row: 2; }
-  .bar-times { min-width: 0; margin-left: 6px; }
-}
   .tallies li { padding: 14px; }
   .tally-sub { font-size: 11px; }
   td.support { padding: 12px 6px; }
@@ -696,6 +696,16 @@ footer nav a { font-size: 13px; }
   .feature-table thead th:not(:first-child) { width: auto; padding-inline: 6px; }
   .feature-detail { font-size: 12px; }
   .feature-code { display: none; }
+  .figures { gap: 8px; }
+  .figures li { padding: 12px 10px 10px; }
+  .figures strong { font-size: clamp(1.4rem, 7vw, 1.9rem); }
+  .bars li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 8px;
+  }
+  .bar-track { grid-column: 1 / -1; grid-row: 2; }
+  .bar-times { min-width: 0; margin-left: 6px; }
+}
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .btn { transition: none; }

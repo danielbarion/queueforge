@@ -1,6 +1,12 @@
-// Feature support, read from each broker's source on 2026-10-07. "p" is
+// Feature support, read from each broker's source on 2026-10-07 and updated
+// on 2026-10-08 after the Raft and PHP work. "p" is
 // partial: the note says what is missing. RabbitMQ notes name the plugin
 // a feature needs; core features carry no note.
+//
+// Rows that conformance/ covers were then checked against RabbitMQ 4.3 and
+// each broker (`cd conformance && bun run.ts`). A green cell on such a row
+// means every test for it passed. On 2026-10-08: RabbitMQ 133/134 (the
+// delayed exchange is a plugin), Rust 134/134, Bun 134/134, PHP 60/134.
 
 export type Level = "y" | "p" | "n";
 export type Cell = Level | readonly [Level, string];
@@ -22,7 +28,7 @@ export const BROKERS: { key: Broker; name: string }[] = [
   { key: "php", name: "PHP" },
 ];
 
-export const AUDITED = "2026-10-07";
+export const AUDITED = "2026-10-08";
 
 export const featureGroups: FeatureGroup[] = [
   {
@@ -33,19 +39,19 @@ export const featureGroups: FeatureGroup[] = [
         detail: "The client protocol every engine is built around",
         cells: {
           mq: "y",
-          rust: ["p", "no queue.purge"],
-          bun: ["p", "no global qos"],
-          php: ["p", "no tx.rollback"],
+          rust: "y",
+          bun: "y",
+          php: "y",
         },
       },
       {
         name: "AMQP 1.0",
-        detail: "Native in RabbitMQ 4. A shim on port 5672 here",
+        detail: "Native in RabbitMQ 4, with v2 addresses, on port 5672",
         cells: {
           mq: "y",
-          rust: ["p", "shim, small bodies"],
-          bun: ["p", "shim, default exchange"],
-          php: ["p", "shim, no credit"],
+          rust: ["y", "bridged over loopback 0-9-1"],
+          bun: "y",
+          php: ["n", "shim; 0 of 12 tests pass"],
         },
       },
       {
@@ -53,39 +59,39 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Publish and subscribe for devices",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "QoS 0, no auth"],
-          bun: ["p", "QoS 0, no auth"],
+          rust: ["p", "retained in memory"],
+          bun: "y",
           php: ["p", "QoS 0, no auth"],
         },
       },
       {
         name: "MQTT 5.0",
         detail: "Properties, session expiry, reason codes",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["p", "properties and reason codes"], bun: ["p", "properties and reason codes"], php: "n" },
       },
       {
         name: "STOMP",
         detail: "Text frames, versions 1.0 to 1.2",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "no ACK or auth"],
-          bun: ["p", "no ACK or auth"],
+          rust: "y",
+          bun: "y",
           php: ["p", "no ACK or auth"],
         },
       },
       {
         name: "WebSockets",
         detail: "Web MQTT and Web STOMP",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["y", "/ws on the management port"], bun: ["y", "/ws on the management port"], php: "n" },
       },
       {
         name: "Stream protocol",
         detail: "The binary stream protocol, port 5552",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "in memory, no offsets"],
-          bun: ["p", "in memory, no offsets"],
-          php: ["p", "in memory, no offsets"],
+          rust: "y",
+          bun: "y",
+          php: ["n", "in memory; 0 of 9 tests pass"],
         },
       },
       {
@@ -94,7 +100,7 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: ["p", "AMQP and HTTPS"],
-          bun: ["n", "parsed, unused"],
+          bun: ["p", "AMQP and HTTPS, one process"],
           php: ["p", "AMQP only"],
         },
       },
@@ -119,8 +125,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "One exchange routes into another",
         cells: {
           mq: "y",
-          rust: ["p", "not stored"],
-          bun: ["p", "not stored"],
+          rust: "y",
+          bun: "y",
           php: ["p", "not stored"],
         },
       },
@@ -135,8 +141,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Clients cannot publish to them directly",
         cells: {
           mq: "y",
-          rust: ["p", "blocks e2e hops"],
-          bun: ["p", "blocks e2e hops"],
+          rust: "y",
+          bun: "y",
           php: "y",
         },
       },
@@ -146,27 +152,27 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: "y",
-          bun: ["p", "passive does not check"],
-          php: ["p", "if-unused ignored"],
+          bun: "y",
+          php: "y",
         },
       },
       {
         name: "Consistent-hash exchange",
         detail: "Spread keys across queues by weight",
         code: ["x-consistent-hash"],
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["p", "routing key only"], bun: ["p", "routing key only"], php: "n" },
       },
       {
         name: "Delayed messages",
         detail: "Hold a message for a set time before routing",
         code: ["x-delayed-message"],
-        cells: { mq: ["p", "community plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["p", "community plugin"], rust: ["p", "delays held in memory"], bun: ["p", "delays held in memory"], php: "n" },
       },
       {
         name: "Local random exchange",
         detail: "Deliver to a queue on the publishing node",
         code: ["x-local-random"],
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "n" },
       },
     ],
   },
@@ -189,8 +195,8 @@ export const featureGroups: FeatureGroup[] = [
         code: ["x-queue-type=quorum"],
         cells: {
           mq: "y",
-          rust: ["p", "majority ack, no Raft"],
-          bun: ["p", "majority ack, no Raft"],
+          rust: ["p", "one Raft group for every queue"],
+          bun: ["p", "one Raft group for every queue"],
           php: ["p", "majority ack, no Raft"],
         },
       },
@@ -198,12 +204,12 @@ export const featureGroups: FeatureGroup[] = [
         name: "Stream queues",
         detail: "Append-only log, consume from an offset",
         code: ["x-queue-type=stream"],
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "one node, not replicated"], bun: ["p", "one node, not replicated"], php: ["p", "1 of 5 tests pass"] },
       },
       {
         name: "Super streams",
         detail: "A stream partitioned across several logs",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "n" },
       },
       {
         name: "Exclusive, auto-delete, server-named",
@@ -211,15 +217,15 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: "y",
-          bun: ["p", "server-named only"],
-          php: ["p", "server-named only"],
+          bun: "y",
+          php: "y",
         },
       },
       {
         name: "Queue message TTL",
         detail: "Expire messages after a time",
         code: ["x-message-ttl"],
-        cells: { mq: "y", rust: ["p", "0 refused"], bun: "y", php: "y" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Per-message TTL",
@@ -230,13 +236,13 @@ export const featureGroups: FeatureGroup[] = [
         name: "Queue expiry",
         detail: "Delete a queue that sits unused",
         code: ["x-expires"],
-        cells: { mq: "y", rust: "y", bun: ["p", "reset on consume only"], php: "y" },
+        cells: { mq: "y", rust: "y", bun: "y", php: ["p", "1 of 2 tests pass"] },
       },
       {
         name: "Length limits",
         detail: "Cap a queue by count or bytes",
         code: ["x-max-length", "x-max-length-bytes"],
-        cells: { mq: "y", rust: ["p", "0 refused"], bun: "y", php: "y" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Overflow behaviour",
@@ -250,8 +256,8 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: "y",
-          bun: ["p", "x-death count stays 1"],
-          php: ["p", "x-death count stays 1"],
+          bun: "y",
+          php: ["p", "no x-death header"],
         },
       },
       {
@@ -277,8 +283,8 @@ export const featureGroups: FeatureGroup[] = [
         code: ["x-single-active-consumer"],
         cells: {
           mq: "y",
-          rust: ["p", "switches on full prefetch"],
-          bun: ["p", "not sticky"],
+          rust: "y",
+          bun: "y",
           php: ["p", "switches on full prefetch"],
         },
       },
@@ -294,7 +300,7 @@ export const featureGroups: FeatureGroup[] = [
         code: ["x-delivery-limit"],
         cells: {
           mq: ["y", "quorum queues"],
-          rust: ["p", "nack requeue only"],
+          rust: "y",
           bun: "y",
           php: "y",
         },
@@ -302,7 +308,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Queue leader locator",
         detail: "Choose which node a new queue lives on",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "validated, not used"], bun: ["p", "validated, not used"], php: "y" },
       },
     ],
   },
@@ -327,22 +333,22 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Acks, nacks, rejects",
         detail: "Including multiple and requeue",
-        cells: { mq: "y", rust: "y", bun: "y", php: ["p", "unacked lost on drop"] },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Prefetch",
         detail: "basic.qos, per consumer and per channel",
         cells: {
           mq: "y",
-          rust: ["p", "global flag ignored"],
-          bun: ["p", "global flag ignored"],
-          php: ["p", "global flag ignored"],
+          rust: "y",
+          bun: "y",
+          php: "y",
         },
       },
       {
         name: "basic.get",
         detail: "Pull one message",
-        cells: { mq: "y", rust: "y", bun: ["p", "message-count is 0"], php: "y" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Mandatory and basic.return",
@@ -354,9 +360,9 @@ export const featureGroups: FeatureGroup[] = [
         detail: "tx.select, commit, rollback",
         cells: {
           mq: "y",
-          rust: ["p", "nack not in tx"],
+          rust: "y",
           bun: "y",
-          php: ["p", "no rollback"],
+          php: "y",
         },
       },
       {
@@ -364,20 +370,20 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Redeliver unacked messages",
         cells: {
           mq: "y",
-          rust: ["p", "requeue only"],
-          bun: ["p", "requeue only"],
-          php: ["p", "requeue only"],
+          rust: "y",
+          bun: "y",
+          php: "y",
         },
       },
       {
         name: "Consumer cancel notification",
         detail: "The client hears when its queue goes away",
-        cells: { mq: "y", rust: "y", bun: "y", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "connection.blocked",
         detail: "Tell publishers when an alarm is raised",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Sender-selected distribution",
@@ -388,12 +394,12 @@ export const featureGroups: FeatureGroup[] = [
         name: "Direct reply-to",
         detail: "RPC replies without a reply queue",
         code: ["amq.rabbitmq.reply-to"],
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "n" },
       },
       {
         name: "Validated user-id",
         detail: "The user-id property must match the login",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
     ],
   },
@@ -406,8 +412,8 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: "y",
-          bun: ["p", "patterns not checked"],
-          php: ["p", "patterns not checked"],
+          bun: "y",
+          php: ["p", "one vhost; 0 of 3 tests pass"],
         },
       },
       {
@@ -415,9 +421,9 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Limit routing keys per user",
         cells: {
           mq: "y",
-          rust: ["p", "write only"],
-          bun: ["p", "write only"],
-          php: ["p", "write only"],
+          rust: "y",
+          bun: "y",
+          php: ["n", "0 of 2 tests pass"],
         },
       },
       {
@@ -430,25 +436,25 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Caps on connections, channels and queues",
         cells: {
           mq: "y",
-          rust: ["p", "not stored"],
-          bun: ["p", "not stored"],
-          php: ["p", "not stored"],
+          rust: ["p", "enforced, not stored"],
+          bun: ["p", "enforced, not stored"],
+          php: ["n", "0 of 2 tests pass"],
         },
       },
       {
         name: "x.509 client certificates",
         detail: "The EXTERNAL SASL mechanism",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["p", "AMQP 0-9-1 only"], bun: ["p", "AMQP 0-9-1 only"], php: ["n", "only the refusal test passes"] },
       },
       {
         name: "LDAP",
         detail: "Users and permissions from a directory",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["p", "bind and an admin group, no access queries"], bun: ["p", "bind and an admin group, no access queries"], php: ["n", "only the refusal test passes"] },
       },
       {
         name: "OAuth 2.0",
         detail: "JWT tokens instead of passwords",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: ["p", "RS256 via JWKS, no token refresh"], bun: ["p", "RS256 via JWKS, no token refresh"], php: ["n", "only the refusal test passes"] },
       },
     ],
   },
@@ -491,7 +497,7 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: ["p", "no parameters"],
-          bun: ["p", "drops e2e bindings"],
+          bun: ["p", "no parameters"],
           php: ["p", "no users or policies"],
         },
       },
@@ -505,9 +511,9 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Limits that users cannot override",
         cells: {
           mq: "y",
-          rust: ["p", "not stored"],
-          bun: ["p", "not stored"],
-          php: ["p", "does not cap values"],
+          rust: "y",
+          bun: "y",
+          php: ["n", "does not cap values"],
         },
       },
       {
@@ -516,7 +522,7 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: ["y", "plugin"],
           rust: ["p", "not stored"],
-          bun: ["p", "not stored"],
+          bun: "y",
           php: ["n", "stored, never runs"],
         },
       },
@@ -535,34 +541,34 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Stop publishers before resources run out",
         cells: {
           mq: "y",
-          rust: ["p", "refuses publish"],
-          bun: ["p", "reported only"],
-          php: "n",
+          rust: "y",
+          bun: "y",
+          php: ["p", "disk only, no memory watermark"],
         },
       },
       {
         name: "Command-line tool",
         detail: "rabbitmqctl and friends",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["y", "queueforge-ctl"], bun: ["y", "queueforge-ctl"], php: ["p", "4 of 6 tests pass"] },
       },
       {
         name: "Message tracing",
         detail: "The firehose tracer",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "publish only"], bun: "y", php: "n" },
       },
       {
         name: "Event exchange",
         detail: "Broker events published as messages",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: "y", bun: "y", php: "n" },
       },
       {
         name: "Feature flags",
         detail: "Turn on new behaviour across a cluster",
         cells: {
           mq: "y",
-          rust: ["p", "two fixed flags"],
-          bun: ["p", "two fixed flags"],
-          php: ["p", "not read"],
+          rust: ["p", "three flags; raft turns itself on"],
+          bun: ["p", "three flags; raft turns itself on"],
+          php: ["p", "fixed list"],
         },
       },
     ],
@@ -585,35 +591,35 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Rust, Bun and PHP members in one list",
         cells: {
           mq: ["n", "one implementation"],
-          rust: ["p", "classic homes differ"],
-          bun: ["p", "classic homes differ"],
-          php: ["p", "classic homes differ"],
+          rust: "y",
+          bun: "y",
+          php: ["p", "keeps the cluster on version 1"],
         },
       },
       {
         name: "Raft consensus",
         detail: "Elections and terms for replicated state",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "two groups: meta and quorum"], bun: ["p", "two groups: meta and quorum"], php: ["p", "core only, not wired in"] },
       },
       {
         name: "Replicated metadata store",
         detail: "Khepri in RabbitMQ 4.3",
         cells: {
           mq: "y",
-          rust: ["p", "push, no consensus"],
-          bun: ["p", "push, no consensus"],
+          rust: ["p", "Raft log; membership is pushed"],
+          bun: ["p", "Raft log; membership is pushed"],
           php: ["n", "merged snapshots"],
         },
       },
       {
         name: "Peer discovery",
         detail: "Kubernetes, Consul, etcd, DNS, AWS",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "config, env and DNS"], bun: ["p", "config, env and DNS"], php: "n" },
       },
       {
         name: "Rolling upgrades",
         detail: "Upgrade one node at a time",
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: ["p", "raft waits for every member"], bun: ["p", "raft waits for every member"], php: "n" },
       },
       {
         name: "Uses every core",

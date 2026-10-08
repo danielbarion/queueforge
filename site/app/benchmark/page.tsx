@@ -14,15 +14,45 @@ import {
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
 const RATES = ["one", "shared", "spread"] as const;
 
+/** A rate that can be compared with the others in its column. */
+function comparable(row: LoadRow, key: (typeof RATES)[number]) {
+  const rate = row[key];
+  return rate !== null && !row.caveats?.[key] ? rate : null;
+}
+
 function groups(rows: LoadRow[]) {
   const sizes = [...new Set(rows.map((row) => row.size))];
   return sizes.map((size) => {
     const members = rows.filter((row) => row.size === size);
     const best = Object.fromEntries(
-      RATES.map((key) => [key, Math.max(...members.map((row) => row[key]))]),
+      RATES.map((key) => [
+        key,
+        Math.max(...members.map((row) => comparable(row, key) ?? -Infinity)),
+      ]),
     ) as Record<(typeof RATES)[number], number>;
     return { size, members, best };
   });
+}
+
+function RateCell({ row, field, best }: { row: LoadRow; field: (typeof RATES)[number]; best: number }) {
+  const rate = row[field];
+  const caveat = row.caveats?.[field];
+  if (rate === null || caveat === "failed") {
+    return (
+      <td className="na">
+        no delivery<sup>a</sup>
+      </td>
+    );
+  }
+  if (caveat === "split") {
+    return (
+      <td className="caveat">
+        {formatRate(rate)}
+        <sup>b</sup>
+      </td>
+    );
+  }
+  return <td className={rate === best ? "best" : undefined}>{formatRate(rate)}</td>;
 }
 
 export const metadata: Metadata = {
@@ -37,7 +67,7 @@ export default function BenchmarkPage() {
     <main id="content">
       <section className="page-intro">
         <div className="wrap">
-          <p className="kicker">Benchmark · 2026-10-05</p>
+          <p className="kicker">Benchmark · 2026-10-08</p>
           <h1>Measured against RabbitMQ 4.3.</h1>
           <p className="lede">
             QueueForge waits for the covering fsync. RabbitMQ 4.3 classic confirms before its
@@ -55,9 +85,9 @@ export default function BenchmarkPage() {
             </h2>
             <p className="section-lead">
               Paced messages/s that stayed kept. Durable 256-byte body, 128 confirms in flight, 1
-              CPU / 512 MiB, Mac client through the published port. RabbitMQ, Rust and Bun are from
-              2026-10-05T09:03:42Z; PHP is the parity build from 2026-10-06T18:17:14Z, same client
-              and limits. A step counts only when confirms and acks both reach 95% of the offer.
+              CPU / 512 MiB, Mac client through the published port, measured 2026-10-08 from
+              12:50Z (Rust rerun 13:43Z on a quiet host). Same client and scenarios as the
+              2026-10-05 run. A step counts only when confirms and acks both reach 95% of the offer.
             </p>
           </div>
           <div className="panel chart">
@@ -73,13 +103,13 @@ export default function BenchmarkPage() {
             <h2>Sixteen queues, four cores.</h2>
             <p className="section-lead">
               Unpaced confirm/s inside the Docker network. 4 CPU / 4 GiB, durable classic, 256-byte
-              body, measure 8 s. Rust and Bun are from 2026-10-05T21:29:06Z. PHP is from
-              2026-10-06T12:05:24Z, same client and size. Rust is{" "}
+              body, measure 8 s, from 2026-10-08T13:00:41Z. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ here. Bun is{" "}
-              {formatTimes(scale[2].rate, scale[0].rate)}×. PHP is{" "}
-              {formatTimes(scale[3].rate, scale[0].rate)}× and does not gain from the extra cores.
-              Same CPU count with more RAM did not raise the rate. The PHP load cells predate the
-              parity build and the small-batch flush. The login column has no PHP cell.
+              {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
+              {formatTimes(scale[2].rate, scale[1].rate)}× Rust, and consume/s matches confirm/s.
+              PHP, one process per core with each queue on its home process, is{" "}
+              {formatTimes(scale[3].rate, scale[0].rate)}× RabbitMQ. PHP rows are the 13:31Z rerun
+              after the handoff fix.
             </p>
           </div>
           <div className="panel chart">
@@ -96,10 +126,10 @@ export default function BenchmarkPage() {
             One row per broker and container. 1 conn and 16 queues are confirm/s. 16 conn is
             consume/s on one shared queue, the rate that does not grow it. Connections are a
             separate login sweep: the last hold that stayed up and passed the probe. Message rates
-            and that hold were not measured together. There is no 1 CPU / 1 GiB login cell, and no
-            PHP login cell.
+            and that hold were not measured together. There is no 1 CPU / 1 GiB login cell. PHP
+            above 1 CPU has no login hold yet.
           </p>
-          <div className="panel table-panel">
+          <div className="panel table-panel bench-table">
             <div className="scroll">
               <table>
                 <thead>
@@ -129,9 +159,7 @@ export default function BenchmarkPage() {
                           </span>
                         </td>
                         {RATES.map((key) => (
-                          <td key={key} className={row[key] === best[key] ? "best" : undefined}>
-                            {formatRate(row[key])}
-                          </td>
+                          <RateCell key={key} row={row} field={key} best={best[key]} />
                         ))}
                         <td className={row.connections === "n/a" ? "na" : undefined}>
                           {row.connections}
@@ -146,14 +174,21 @@ export default function BenchmarkPage() {
             </div>
           </div>
           <p className="caption">
-            Highlighted: the highest message rate for that container size, per column.
+            Highlighted: the highest comparable message rate for that container size, per column.
+          </p>
+          <p className="caption">
+            PHP with more than one CPU moves each connection to the process that is its
+            queue&apos;s home. That move passes the socket over a Unix datagram, and PHP&apos;s
+            receive cut every datagram to 8192 bytes, so a connection that arrived with a deep
+            publish window was lost and reset. With the buffer fixed, every PHP cell is one
+            queue on one process and is scored like the others.
           </p>
           <p className="caption">
             Bun at 4 CPU held 160,000 connections. Attempts of 320,000 were cut by the login
             window at 171,961 (4 GiB) and 174,334 (8 GiB). Rust at 4 CPU / 8 GiB held 100,000, and
             the probe was refused. 95,000 passed. RabbitMQ at 4 CPU / 8 GiB held 61,562. Larger
             asks stop at 65,527 sockets. Rust confirm/s on the shared queue, small size to large,
-            was 104,653.0, 106,388.5, 163,821.6, 224,816.2, and 239,222.9. The source table is{" "}
+            was 106,618.1, 105,064.2, 192,043.2, 225,623.5, and 242,289.1; consume/s is the rate in the table. The source table is{" "}
             <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>

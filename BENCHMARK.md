@@ -8,9 +8,83 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [latest run](#latest-2026-10-05t090342z) is the current paced `queueforge-compare` result for RabbitMQ, Rust and Bun; the PHP rows in those tables come from [PHP parity paced](#php-parity-paced-2026-10-06t181520z), a later session with a matching client and limits but a newer image. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size.
+The [2026-10-08 session](#session-2026-10-08) is the current result for all four brokers: paced, the load sweep, and a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
 
 The PHP rows are the parity build, the one with client-visible parity with Bun and Rust. The earlier PHP image is kept in [PHP paced](#php-paced-2026-10-06t161324z) for comparison.
+
+## Session (2026-10-08)
+
+Everything in this section was measured after the Raft and PHP work of 2026-10-08, on images built from that tree at 12:34Z–12:50Z. Docker Desktop was at 2 CPUs and 8320565248 bytes for the paced runs. The load sweeps raised it to 8 CPUs and 25159827456 bytes and restored it afterwards; Postgres was restarted and accepting connections both times.
+
+Images:
+
+- `queueforge-rust:bench` `sha256:4bb0b6352932242d4564a5793446259c71ce3d0d79c0065f09093bd9ec69920c`
+- `queueforge-bun:bench` `sha256:e4c63bb2ba9ec3992e6b40a1c4eadd18c3e02ea9d9a376c1bd1b12454a2de958`
+- `queueforge-php:bench` `sha256:9c7e5e910086fdb3233a797fa6815312871142117ea9d80c61d0a502446e7a62`
+- `rabbitmq:4.3-management` `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`
+- `queueforge-php:bench` after the handoff fix, for the PHP load rerun: `sha256:e9c2ecec344c115a7a69ef9e758e774b39f4484196022fa555b7455bc6f8c176`
+
+### Paced, 128 confirms (2026-10-08T12:50:37Z)
+
+Same client and scenarios as [Paced](#paced-2026-10-07t213657z): `rust/target/release/queueforge-compare`, rebuilt from unchanged source. One container at a time, 1 CPU and 512 MiB, host ports 35672–35675. A Rust build overlapped the first Rust cells, so Rust was rerun alone at 13:43Z; the rerun is below and the overlapped run had durable-256 18396.03 and fan-2x2 20111. Every scenario is `declare=ok publish=ok consume=ok ack=ok confirms=ok`.
+
+| Broker | durable-256 msg/s | first miss | confirm p50 ms | fan-2x2 msg/s | first miss |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RabbitMQ | 10110.95 | 32000 | 4.13 | 10602.10 | 32000 |
+| Rust | 20377.46 | 64000 | 1.85 | 24530.32 | 96000 |
+| Bun | 17926.84 | 48000 | 2.16 | 23189.31 | 96000 |
+| PHP | 6579.89 | 16000 | 10.60 | 10974.87 | 32000 |
+
+### Paced, one confirm
+
+| Broker | durable-256 msg/s | first miss | confirm p50 ms | fan-2x2 msg/s | first miss |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RabbitMQ | 1633.88 | 4000 | 0.41 | 2095.87 | 6400 |
+| Rust | 2491.43 | 4000 | 0.24 | 198.15 | 800 |
+| Bun | 2318.39 | 8000 | 0.23 | 172.14 | 200 |
+| PHP | 1636.71 | 4000 | 0.38 | 1912.44 | 6400 |
+
+The short scenarios (`size-64`, `size-4096`, `transient-256`, `prefetch-1`, `prefetch-128`) kept every step on all four brokers in both runs, scoring 600.00, 250.00 or 1250.00, except Rust `size-64` at one confirm (595.25 on the overlapped run, 600.00 on the rerun).
+
+### Load (2026-10-08T13:00:41Z)
+
+Same client (`qf-loadgen:linux`), shapes, sizes, pins and 2 s warmup / 8 s measure as [Load remeasure](#load-2026-10-07t210340z). RabbitMQ, Rust and Bun are the 13:00:41Z sweep; all 45 of their cells are `ok=1`, `oom=false`, with no blocked connections, nacks, misses or returns, and `queueforge_confirm_before_fsync_total` 0 on every QueueForge cell. PHP is the 13:31Z rerun after the handoff fix, 15 of 15 cells `ok=1`. In the 13:00 sweep, PHP above 1 CPU passed the one-connection shape (about 33k/s, which failed with `no_consume` before the homes work) and failed both 16-connection shapes with `reset`/`eof`. The cause was the move of a connection to its queue's home process: `socket_recvmsg` sized its buffer from `buffer_size`, not from the `iov` the code passed, so every handoff datagram was cut to 8192 bytes and a connection that arrived with a deep publish window was lost. `php/src/Handoff.php` now sets `buffer_size`.
+
+`confirm/s` and `consume/s` are both shown. On one shared queue Rust confirms run ahead of deliveries and the queue grows; the table on the site uses the lower of the two.
+
+| Container | Broker | single confirm/s | single consume/s | shared confirm/s | shared consume/s | spread confirm/s | spread consume/s | spread MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 54418.2 | 54413.9 | 41963.4 | 42296.2 | 43022.9 | 43068.8 | 183 |
+| 1 CPU / 512 MiB | Rust | 165861.2 | 165856.0 | 106618.1 | 64029.5 | 150341.5 | 150311.5 | 363 |
+| 1 CPU / 512 MiB | Bun | 219556.0 | 219556.0 | 161088.0 | 161097.0 | 152448.0 | 152448.0 | 145 |
+| 1 CPU / 512 MiB | PHP | 10704.0 | 10704.0 | 84384.0 | 84384.0 | 100537.0 | 100608.1 | 208 |
+| 1 CPU / 1 GiB | RabbitMQ | 56560.0 | 56563.8 | 40483.1 | 40559.2 | 41014.6 | 41088.1 | 194 |
+| 1 CPU / 1 GiB | Rust | 163104.0 | 163109.2 | 105064.2 | 64015.2 | 153594.0 | 153632.0 | 367 |
+| 1 CPU / 1 GiB | Bun | 229916.0 | 229916.0 | 181136.0 | 181141.5 | 194000.0 | 193992.0 | 153 |
+| 1 CPU / 1 GiB | PHP | 10720.0 | 10720.0 | 92092.0 | 92092.0 | 105243.0 | 105293.0 | 245 |
+| 2 CPU / 2 GiB | RabbitMQ | 71457.8 | 71453.1 | 73728.0 | 73688.0 | 81944.5 | 81863.2 | 245 |
+| 2 CPU / 2 GiB | Rust | 201546.6 | 201552.0 | 192043.2 | 95089.6 | 269472.9 | 269444.0 | 565 |
+| 2 CPU / 2 GiB | Bun | 183544.0 | 183544.0 | 147696.0 | 147680.0 | 313856.0 | 313816.0 | 251 |
+| 2 CPU / 2 GiB | PHP | 35008.0 | 35008.0 | 92092.1 | 92289.5 | 206849.8 | 206664.0 | 140 |
+| 4 CPU / 4 GiB | RabbitMQ | 78450.9 | 78457.8 | 67762.5 | 67505.4 | 163720.0 | 163281.1 | 252 |
+| 4 CPU / 4 GiB | Rust | 201461.4 | 201456.8 | 225623.5 | 110926.5 | 417402.2 | 417449.9 | 793 |
+| 4 CPU / 4 GiB | Bun | 173436.0 | 173436.0 | 166752.0 | 166776.0 | 519616.0 | 519568.0 | 384 |
+| 4 CPU / 4 GiB | PHP | 33072.0 | 33072.0 | 92950.0 | 92640.8 | 379881.0 | 380125.9 | 318 |
+| 4 CPU / 8 GiB | RabbitMQ | 80848.9 | 80855.2 | 75887.1 | 75888.1 | 163131.8 | 162923.1 | 250 |
+| 4 CPU / 8 GiB | Rust | 200998.9 | 201002.6 | 242289.1 | 118865.5 | 410258.1 | 410261.5 | 810 |
+| 4 CPU / 8 GiB | Bun | 196044.0 | 196044.0 | 176320.0 | 176320.0 | 501680.0 | 501696.0 | 398 |
+| 4 CPU / 8 GiB | PHP | 33776.0 | 33767.0 | 86524.0 | 86273.5 | 380481.8 | 380544.6 | 321 |
+
+### Quorum queues with Raft (local, not a container run)
+
+Three Rust debug builds on the Mac host, every member on one APFS disk, `fsync_interval_ms=10`, a 1-publisher probe (`conformance/raft-probe.ts`). On macOS each Raft log write and each queue log write is an `F_FULLFSYNC`, so these are latency figures for one laptop disk, not a capacity claim.
+
+| Path | 1 in flight p50 ms | 1 in flight msg/s | 128 in flight p50 ms | 128 in flight msg/s |
+| --- | ---: | ---: | ---: | ---: |
+| Version 1 (majority ack, `QUEUEFORGE_RAFT=0`) | 10.3 | 88 | 26.0 | 4707 |
+| Raft (commit = confirm) | 23.5 | 42 | 45.7 | 2558 |
+
+Raft adds a log fsync on the leader and on a follower before every confirm. The numbers above are after pipelined appends and the leader's early `append` (docs/raft.md, section 7); before those, 128 in flight ran at about 1800/s.
 
 ## Load (2026-10-05T21:29:06Z)
 
@@ -119,36 +193,214 @@ Drained cgroup memory stays a few hundred MiB: Bun about 371–535, RabbitMQ abo
 
 The wide-row p50 is mostly wait inside the 8192-deep window. On one connection that wait is under a millisecond for Rust and Bun, 1.6–2.4 ms for RabbitMQ, and about 13 ms for PHP.
 
-The paced 09:03:42Z ladder, from the Mac through the published port, kept 13139.01 / 19230.10 / 18396.86 messages/s at 128 in flight on 1 CPU / 512 MiB (RabbitMQ / Rust / Bun). That ladder counts a step only when 95% of an offered rate is kept. The numbers in this section are the full-window push from inside the Docker network.
+The paced ladder on 2026-10-07T21:36:57Z, from the Mac through the published port, kept 10996.58 / 19221.45 / 18452.24 / 6505.41 messages/s at 128 in flight on 1 CPU / 512 MiB (RabbitMQ / Rust / Bun / PHP). That ladder counts a step only when 95% of an offered rate is kept. The numbers in this section are the full-window push from inside the Docker network.
+
+## Bun homes (2026-10-06T22:33:30Z)
+
+Same client, shapes, sizes, and pins as [Load](#load-2026-10-05t212906z). Only Bun was remeasured. Rust, RabbitMQ, and PHP rows above are unchanged. Image `queueforge-bun:bench` `sha256:5989731ec1fc37e43d097497e5e38fa56cec5ed35806a8f942e9b155fe175936` (2026-10-06T22:32:48Z). Docker Desktop was at 8 CPUs and 25159827456 bytes, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again.
+
+A container whose cgroup grants one CPU stays one process. Two or four CPUs start that many children. The parent accepts the TCP connection and hands the socket to the child that owns the queue, once, after the queue name is known. That child stores and delivers. It does not forward the message. An earlier image shared the port and forwarded every publish; that run is not this table. Confirms and deliveries stayed apart there.
+
+All 15 cells are `ok=1`. No OOM, blocked connections, nacks, misses, or returns. `queueforge_confirm_before_fsync_total` was 0 on every cell.
+
+One connection stays on one child, so extra CPUs do not raise it: about 173k–180k. Sixteen connections on one queue also stay on that queue's home: about 130k–152k, and confirm/s matches consume/s. Sixteen queues spread across the children. Confirm/s and consume/s stay together: 159952.0, 175792.0, 286304.0, 413888.0, and 446832.0, at CPU 76, 83, 165, 283, and 304. At 4 CPU / 4 GiB that is 413888.0 confirm/s and 413896.0 consume/s. The 2026-10-05 Rust row at that size is 339656.9. The 2026-10-05 RabbitMQ row is 159453.6. Extra RAM at 4 CPUs raises the 16-queue rate from 413888.0 to 446832.0. It does not raise the one-queue rates.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB, 1 conn | 174808.0 | 174812.0 | 0.50 | 2.40 | 84 | 512 |
+| 1 CPU / 1 GiB, 1 conn | 180432.0 | 180428.0 | 0.50 | 2.30 | 83 | 454 |
+| 2 CPU / 2 GiB, 1 conn | 177380.0 | 177376.0 | 0.60 | 2.20 | 93 | 533 |
+| 4 CPU / 4 GiB, 1 conn | 175700.0 | 175708.0 | 0.60 | 2.00 | 109 | 632 |
+| 4 CPU / 8 GiB, 1 conn | 172680.0 | 172680.0 | 0.60 | 2.30 | 107 | 650 |
+| 1 CPU / 512 MiB, 16 conn | 130400.0 | 130424.0 | 59.20 | 165.60 | 85 | 418 |
+| 1 CPU / 1 GiB, 16 conn | 149936.0 | 149931.0 | 54.50 | 105.60 | 85 | 456 |
+| 2 CPU / 2 GiB, 16 conn | 151008.0 | 151020.5 | 51.70 | 99.60 | 97 | 528 |
+| 4 CPU / 4 GiB, 16 conn | 151920.0 | 151920.0 | 52.10 | 98.70 | 104 | 650 |
+| 4 CPU / 8 GiB, 16 conn | 149536.0 | 149544.0 | 52.80 | 98.60 | 102 | 639 |
+| 1 CPU / 512 MiB, 16 queues | 159952.0 | 159952.0 | 48.30 | 105.80 | 76 | 423 |
+| 1 CPU / 1 GiB, 16 queues | 175792.0 | 175792.0 | 46.50 | 86.00 | 83 | 507 |
+| 2 CPU / 2 GiB, 16 queues | 286304.0 | 286288.0 | 27.90 | 67.30 | 165 | 847 |
+| 4 CPU / 4 GiB, 16 queues | 413888.0 | 413896.0 | 19.00 | 41.90 | 283 | 1286 |
+| 4 CPU / 8 GiB, 16 queues | 446832.0 | 446832.0 | 18.10 | 45.00 | 304 | 1302 |
+
+## PHP cores (2026-10-07T03:47:05Z)
+
+Same client, shapes, sizes, and pins. Only PHP was remeasured. Image `queueforge-php:bench` `sha256:53c4efbd34ae221dfa303298450299d09d14689ec3e8741019aa882872ab3bbf` (2026-10-07T03:47:05Z). Docker Desktop was at 8 CPUs and 25159827456 bytes, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again.
+
+One CPU stays one process. More CPUs start one child per core. The parent accepts AMQP and hands each connection to a child. A child keeps the messages from the connections it was given; it does not forward them. The benchmark opens every publisher before every consumer, and the publisher count divides the process count, so a queue's publisher and its consumer land on the same child. One publisher and one consumer do not. Those cells confirm and then deliver nothing.
+
+Twelve cells are `ok=1`. The three one-connection cells with more than one CPU are `ok=0`, `err=no_consume`, consume/s 0. They are not a rate. No OOM, blocked connections, nacks, misses, or returns on the cells that passed. Where confirm/s and consume/s are both reported below, they stay together.
+
+Sixteen queues at 4 CPU / 4 GiB are 387660.0 confirm/s and 387562.0 consume/s, at CPU 363. The 2026-10-05 Rust row at that size is 339656.9. The RabbitMQ row is 159453.6. Sixteen connections on one queue at that size are 378086.0 confirm/s and 377935.8 consume/s.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 CPU / 512 MiB, 1 conn | 9760.0 | 9760.0 | 13.60 | 19.70 | 9 | 31 | |
+| 1 CPU / 1 GiB, 1 conn | 9744.0 | 9744.0 | 13.60 | 17.80 | 8 | 29 | |
+| 2 CPU / 2 GiB, 1 conn | 40576.0 | 0.0 | 3.00 | 3.80 | 13 | 253 | not a rate |
+| 4 CPU / 4 GiB, 1 conn | 36351.9 | 0.0 | 3.20 | 14.60 | 18 | 269 | not a rate |
+| 4 CPU / 8 GiB, 1 conn | 38144.0 | 0.0 | 3.20 | 7.60 | 16 | 273 | not a rate |
+| 1 CPU / 512 MiB, 16 conn | 89095.9 | 89373.4 | 79.40 | 147.80 | 92 | 211 | |
+| 1 CPU / 1 GiB, 16 conn | 99376.0 | 99024.4 | 70.10 | 135.40 | 94 | 225 | |
+| 2 CPU / 2 GiB, 16 conn | 210743.1 | 210728.8 | 33.20 | 66.60 | 186 | 139 | |
+| 4 CPU / 4 GiB, 16 conn | 378086.0 | 377935.8 | 16.70 | 47.30 | 353 | 247 | |
+| 4 CPU / 8 GiB, 16 conn | 379552.5 | 379477.8 | 16.60 | 51.20 | 355 | 242 | |
+| 1 CPU / 512 MiB, 16 queues | 101392.4 | 101392.4 | 72.50 | 140.30 | 92 | 207 | |
+| 1 CPU / 1 GiB, 16 queues | 108238.0 | 108246.6 | 64.10 | 119.60 | 94 | 247 | |
+| 2 CPU / 2 GiB, 16 queues | 211555.1 | 211735.8 | 33.10 | 75.60 | 186 | 131 | |
+| 4 CPU / 4 GiB, 16 queues | 387660.0 | 387562.0 | 16.50 | 47.70 | 363 | 275 | |
+| 4 CPU / 8 GiB, 16 queues | 389549.2 | 389758.0 | 16.20 | 51.80 | 360 | 280 | |
+
+## Load (2026-10-07T21:03:40Z)
+
+Same client, shapes, sizes, and pins as [Load](#load-2026-10-05t212906z). All four brokers were remeasured. Images: Rust `queueforge-rust:bench` `sha256:29d17851d2746e41226d188251a3787abbec8c0386b78679409992a5ba874957` (2026-10-07T21:03:31Z), Bun `queueforge-bun:bench` `sha256:665787b123a4cde32631adab0576287843ceb43fc187fd19da3f47a5a9f35ed9` (2026-10-07T21:01:11Z), PHP `queueforge-php:bench` `sha256:c0c2ce662bc940f7c21ecbc2b4740f52819788c8c56e86742c94bcb72952c296` (2026-10-07T21:01:10Z), RabbitMQ `rabbitmq:4.3-management` `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`. Docker Desktop was raised to 8 CPUs for the sweep and returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again. TSV `/tmp/qf-load/load-all.tsv`.
+
+Fifty-one cells are `ok=1`. The nine PHP cells with more than one CPU are `ok=0`, `err=c1_eof` or `err=c2_eof`, confirm/s 0, and they exited in under a second. They are not a rate. No OOM on any cell. Where a p99 below is 200.00 ms, that is the histogram overflow bucket.
+
+Bun confirms and deliveries stay together on every cell. `queueforge_confirm_before_fsync_total` was 0 on every Bun cell. Sixteen queues at 4 CPU / 4 GiB are 555216.0 confirm/s and 555184.0 consume/s, at CPU 308 and 362 MiB. At 4 CPU / 8 GiB they are 547216.0 and 547264.0. One connection stays on one child: 224036.0 down to 185652.0, then 198988.0. Sixteen connections on one queue also stay on that home: 162400.0 to 178496.0, and extra CPUs do not raise it.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB, 1 conn | 224036.0 | 224032.0 | 0.40 | 2.30 | 79 | 168 |
+| 1 CPU / 1 GiB, 1 conn | 229504.0 | 229492.0 | 0.40 | 2.30 | 75 | 113 |
+| 2 CPU / 2 GiB, 1 conn | 186400.0 | 186396.0 | 0.50 | 3.30 | 83 | 169 |
+| 4 CPU / 4 GiB, 1 conn | 185652.0 | 185648.0 | 0.50 | 2.30 | 105 | 293 |
+| 4 CPU / 8 GiB, 1 conn | 198988.0 | 198980.0 | 0.50 | 2.10 | 102 | 290 |
+| 1 CPU / 512 MiB, 16 conn | 162400.0 | 162376.0 | 45.30 | 181.60 | 82 | 149 |
+| 1 CPU / 1 GiB, 16 conn | 178496.0 | 178496.0 | 42.30 | 140.30 | 76 | 138 |
+| 2 CPU / 2 GiB, 16 conn | 168704.0 | 168692.0 | 45.90 | 108.70 | 96 | 208 |
+| 4 CPU / 4 GiB, 16 conn | 164672.0 | 164656.0 | 48.10 | 93.10 | 103 | 337 |
+| 4 CPU / 8 GiB, 16 conn | 166176.0 | 166192.0 | 47.40 | 93.00 | 106 | 339 |
+| 1 CPU / 512 MiB, 16 queues | 174912.0 | 174912.0 | 42.00 | 173.90 | 60 | 144 |
+| 1 CPU / 1 GiB, 16 queues | 208896.0 | 208896.0 | 34.80 | 197.40 | 80 | 150 |
+| 2 CPU / 2 GiB, 16 queues | 334416.0 | 334408.0 | 23.70 | 61.70 | 160 | 235 |
+| 4 CPU / 4 GiB, 16 queues | 555216.0 | 555184.0 | 14.10 | 39.30 | 308 | 362 |
+| 4 CPU / 8 GiB, 16 queues | 547216.0 | 547264.0 | 14.10 | 52.90 | 290 | 381 |
+
+Rust confirms and deliveries stay together on one connection and on sixteen queues. On one shared queue, confirms run ahead of deliveries, so the compare table uses consume/s there. Rust confirm/s on that shape, in size order, is 101157.4, 113040.0, 185820.9, 238494.2, and 242481.1. Sixteen queues at 4 CPU / 4 GiB are 402591.5 confirm/s and 402628.9 consume/s. `queueforge_confirm_before_fsync_total` was 0 on the one-connection and sixteen-queue cells. Two shared cells (1 CPU) left that scrape blank; the other shared cells were 0.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB, 1 conn | 168320.2 | 168320.2 | 0.80 | 1.70 | 89 | 60 |
+| 1 CPU / 1 GiB, 1 conn | 158330.8 | 158325.4 | 0.80 | 2.00 | 83 | 72 |
+| 2 CPU / 2 GiB, 1 conn | 199800.5 | 199800.5 | 0.60 | 1.50 | 129 | 30 |
+| 4 CPU / 4 GiB, 1 conn | 206490.6 | 206496.0 | 0.60 | 1.10 | 139 | 50 |
+| 4 CPU / 8 GiB, 1 conn | 201626.6 | 201626.2 | 0.60 | 1.20 | 139 | 41 |
+| 1 CPU / 512 MiB, 16 conn | 101157.4 | 62325.1 | 70.00 | 200.00 | 96 | 334 |
+| 1 CPU / 1 GiB, 16 conn | 113040.0 | 68226.9 | 63.50 | 200.00 | 95 | 363 |
+| 2 CPU / 2 GiB, 16 conn | 185820.9 | 95306.0 | 41.80 | 100.40 | 185 | 587 |
+| 4 CPU / 4 GiB, 16 conn | 238494.2 | 116860.6 | 33.60 | 54.90 | 333 | 789 |
+| 4 CPU / 8 GiB, 16 conn | 242481.1 | 119871.9 | 32.50 | 73.00 | 338 | 833 |
+| 1 CPU / 512 MiB, 16 queues | 126972.5 | 127012.2 | 55.50 | 200.00 | 96 | 300 |
+| 1 CPU / 1 GiB, 16 queues | 152235.4 | 152243.1 | 50.50 | 98.00 | 96 | 365 |
+| 2 CPU / 2 GiB, 16 queues | 259525.0 | 259590.0 | 30.80 | 56.10 | 188 | 562 |
+| 4 CPU / 4 GiB, 16 queues | 402591.5 | 402628.9 | 18.10 | 118.00 | 329 | 831 |
+| 4 CPU / 8 GiB, 16 queues | 408183.8 | 408089.6 | 17.20 | 46.50 | 369 | 861 |
+
+RabbitMQ confirms and deliveries stay together. Sixteen queues at 4 CPU / 4 GiB are 169979.2 confirm/s and 169788.9 consume/s. The early-confirm counter is a QueueForge metric; these rows do not report it.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB, 1 conn | 55009.2 | 55011.5 | 2.30 | 3.60 | 97 | 224 |
+| 1 CPU / 1 GiB, 1 conn | 57424.0 | 57424.0 | 2.20 | 3.10 | 96 | 156 |
+| 2 CPU / 2 GiB, 1 conn | 78327.1 | 78331.4 | 1.60 | 4.00 | 157 | 152 |
+| 4 CPU / 4 GiB, 1 conn | 79349.9 | 79345.0 | 1.60 | 2.80 | 202 | 175 |
+| 4 CPU / 8 GiB, 1 conn | 80578.0 | 80578.0 | 1.60 | 2.70 | 199 | 175 |
+| 1 CPU / 512 MiB, 16 conn | 40549.8 | 40346.1 | 200.00 | 200.00 | 97 | 226 |
+| 1 CPU / 1 GiB, 16 conn | 42988.5 | 42542.8 | 191.80 | 200.00 | 97 | 225 |
+| 2 CPU / 2 GiB, 16 conn | 77824.0 | 77261.0 | 108.20 | 155.90 | 170 | 243 |
+| 4 CPU / 4 GiB, 16 conn | 71813.9 | 72143.0 | 110.10 | 196.50 | 229 | 249 |
+| 4 CPU / 8 GiB, 16 conn | 78019.0 | 79043.0 | 101.40 | 174.60 | 237 | 249 |
+| 1 CPU / 512 MiB, 16 queues | 43926.6 | 43797.4 | 184.10 | 200.00 | 97 | 190 |
+| 1 CPU / 1 GiB, 16 queues | 43886.4 | 43871.9 | 182.00 | 200.00 | 97 | 190 |
+| 2 CPU / 2 GiB, 16 queues | 86072.8 | 86202.0 | 95.10 | 136.80 | 194 | 204 |
+| 4 CPU / 4 GiB, 16 queues | 169979.2 | 169788.9 | 47.50 | 99.40 | 381 | 227 |
+| 4 CPU / 8 GiB, 16 queues | 171022.1 | 171028.4 | 47.40 | 95.80 | 383 | 239 |
+
+PHP at 1 CPU is `ok=1`. Confirms and deliveries stay together. One connection is 10720.0 and 10816.0 confirm/s. Sixteen connections on one queue are 94662.0 confirm/s and 94290.0 consume/s at 512 MiB, and 92950.0 both ways at 1 GiB. Sixteen queues are 102676.6 and 104815.6 confirm/s. The nine cells above 1 CPU never produced a rate. The last PHP rates for those sizes remain the cores run above.
+
+| Container | confirm/s | consume/s | p50 ms | p99 ms | CPU | MiB | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 CPU / 512 MiB, 1 conn | 10720.0 | 10720.0 | 12.10 | 14.60 | 9 | 85 | |
+| 1 CPU / 1 GiB, 1 conn | 10816.0 | 10816.0 | 12.10 | 16.10 | 9 | 31 | |
+| 2 CPU / 2 GiB, 1 conn | | | | | | | not a rate, c1_eof |
+| 4 CPU / 4 GiB, 1 conn | | | | | | | not a rate, c1_eof |
+| 4 CPU / 8 GiB, 1 conn | | | | | | | not a rate, c2_eof |
+| 1 CPU / 512 MiB, 16 conn | 94662.0 | 94290.0 | 75.00 | 142.90 | 95 | 219 | |
+| 1 CPU / 1 GiB, 16 conn | 92950.0 | 92950.0 | 76.60 | 144.60 | 94 | 226 | |
+| 2 CPU / 2 GiB, 16 conn | | | | | | | not a rate, c1_eof |
+| 4 CPU / 4 GiB, 16 conn | | | | | | | not a rate, c2_eof |
+| 4 CPU / 8 GiB, 16 conn | | | | | | | not a rate, c2_eof |
+| 1 CPU / 512 MiB, 16 queues | 102676.6 | 102676.6 | 69.80 | 125.00 | 94 | 242 | |
+| 1 CPU / 1 GiB, 16 queues | 104815.6 | 104815.6 | 66.90 | 122.00 | 95 | 246 | |
+| 2 CPU / 2 GiB, 16 queues | | | | | | | not a rate, c1_eof |
+| 4 CPU / 4 GiB, 16 queues | | | | | | | not a rate, c1_eof |
+| 4 CPU / 8 GiB, 16 queues | | | | | | | not a rate, c1_eof |
 
 ### Load compare
 
-One row per broker and container. `1 conn` and `16 queues` are confirm/s. Confirms and deliveries stay together on those shapes. `16 conn` is consume/s on the one shared queue, the rate that does not grow it. Rust confirm/s on that shape, in the same size order, is 104653.0, 106388.5, 163821.6, 224816.2, and 239222.9. `MiB` is the 16-queue load sample.
+One row per broker and container. `1 conn` and `16 queues` are confirm/s. Confirms and deliveries stay together on those shapes, except Rust on one shared queue, where confirms run ahead. `16 conn` is consume/s on that queue, the rate that does not grow it. Rust confirm/s on that shape, in the same size order, is 101157.4, 113040.0, 185820.9, 238494.2, and 242481.1. `MiB` is the 16-queue load sample from the remeasure, except the PHP rows above 1 CPU, whose message rates and MiB stay the cores run. Connections and login memory are the 2026-10-07T21:47:10Z hold sweep.
 
-`Connections` and `Login memory` are a different run: simultaneous logins, client in a container, no swap, one broker at a time. The number is the last hold that stayed up and passed the probe. Message rates and that hold were not measured together. There is no 1 CPU / 1 GiB login cell. PHP has no login cell: that sweep was not repeated. Bun at 4 CPU held 160000; attempts of 320000 were cut by the login window at 171961 (4 GiB) and 174334 (8 GiB). Rust at 4 CPU / 8 GiB held 100000, and the probe was refused (`max_connections` is 100000); 95000 passed. RabbitMQ at 4 CPU / 8 GiB held 61562; larger asks stop at 65527 sockets.
+`Connections` and `Login memory` are a different run from the message rates: simultaneous logins, client in a container, no swap, one broker at a time, 2026-10-07T21:47:10Z through 23:20:51Z. The number is the last hold that stayed up and passed 40 confirms. Docker Desktop was at 8 CPUs and 25159827456 bytes, then returned to 2 CPUs and 8320565248 bytes. Postgres was accepting connections again. There is no 1 CPU / 1 GiB login cell. PHP at 1 CPU / 512 MiB held 1000. Asks of 1750 and above were cut by the login window near 1010 connections and did not pass. PHP above 1 CPU never passed: the large asks were cut by that window, and 1000 then held nothing. Those cells are not a hold. Bun at 4 CPU / 4 GiB held 251968. At 4 CPU / 8 GiB it held 260000; 280000 and 320000 exited before a probe. Rust at 4 CPU / 8 GiB connected 100000, and the 40 confirms failed; 95000 passed. RabbitMQ at 4 CPU / 8 GiB held 65449. An ask of 69691 stopped at 65527 sockets and the probe did not pass.
 
 | App | Size | 1 conn msg/s | 16 conn msg/s | 16 queues msg/s | Connections | MiB | Login memory |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| RabbitMQ | 1 CPU / 512 MiB | 51505.4 | 37190.1 | 40603.8 | 3500 | 187 | 503.3 MiB |
-| Rust | 1 CPU / 512 MiB | 141278.2 | 60154.2 | 135840.6 | 9191 | 348 | 468.1 MiB |
-| Bun | 1 CPU / 512 MiB | 140988.0 | 118944.0 | 148240.0 | 43184 | 384 | 422.9 MiB |
-| PHP | 1 CPU / 512 MiB | 9968.0 | 61326.2 | 64600.5 | n/a | 115 | n/a |
-| RabbitMQ | 1 CPU / 1 GiB | 53602.4 | 39660.9 | 41877.0 | n/a | 190 | n/a |
-| Rust | 1 CPU / 1 GiB | 161930.6 | 62948.4 | 144892.1 | n/a | 344 | n/a |
-| Bun | 1 CPU / 1 GiB | 135216.0 | 120592.5 | 147968.0 | n/a | 447 | n/a |
-| PHP | 1 CPU / 1 GiB | 10000.0 | 66571.1 | 66739.4 | n/a | 125 | n/a |
-| RabbitMQ | 2 CPU / 2 GiB | 71411.1 | 67480.6 | 86316.0 | 18750 | 216 | 1.726 GiB |
-| Rust | 2 CPU / 2 GiB | 187547.9 | 78149.5 | 249498.5 | 37300 | 469 | 1.837 GiB |
-| Bun | 2 CPU / 2 GiB | 165656.0 | 131344.0 | 165440.0 | 170100 | 491 | 1.571 GiB |
-| PHP | 2 CPU / 2 GiB | 9824.0 | 66820.4 | 68165.4 | n/a | 122 | n/a |
-| RabbitMQ | 4 CPU / 4 GiB | 78982.8 | 67820.9 | 159453.6 | 37862 | 262 | 3.551 GiB |
-| Rust | 4 CPU / 4 GiB | 188426.8 | 110058.8 | 339656.9 | 73714 | 700 | 3.629 GiB |
-| Bun | 4 CPU / 4 GiB | 170184.0 | 136616.0 | 169120.0 | 160000 | 505 | 1.473 GiB |
-| PHP | 4 CPU / 4 GiB | 9744.0 | 67678.0 | 67594.8 | n/a | 126 | n/a |
-| RabbitMQ | 4 CPU / 8 GiB | 77459.4 | 71467.6 | 151569.8 | 61562 | 240 | 5.292 GiB |
-| Rust | 4 CPU / 8 GiB | 193370.8 | 120737.6 | 344963.6 | 95000 | 682 | 4.663 GiB |
-| Bun | 4 CPU / 8 GiB | 170488.0 | 140456.0 | 174560.0 | 160000 | 535 | 1.476 GiB |
-| PHP | 4 CPU / 8 GiB | 9776.0 | 65964.0 | 67545.8 | n/a | 125 | n/a |
+| RabbitMQ | 1 CPU / 512 MiB | 55009.2 | 40346.1 | 43926.6 | 3500 | 190 | 477.8 MiB |
+| Rust | 1 CPU / 512 MiB | 168320.2 | 62325.1 | 126972.5 | 8980 | 300 | 492.7 MiB |
+| Bun | 1 CPU / 512 MiB | 224036.0 | 162376.0 | 174912.0 | 43828 | 144 | 442.3 MiB |
+| PHP | 1 CPU / 512 MiB | 10720.0 | 94290.0 | 102676.6 | 1000 | 242 | 18.75 MiB |
+| RabbitMQ | 1 CPU / 1 GiB | 57424.0 | 42542.8 | 43886.4 | n/a | 190 | n/a |
+| Rust | 1 CPU / 1 GiB | 158330.8 | 68226.9 | 152235.4 | n/a | 365 | n/a |
+| Bun | 1 CPU / 1 GiB | 229504.0 | 178496.0 | 208896.0 | n/a | 150 | n/a |
+| PHP | 1 CPU / 1 GiB | 10816.0 | 92950.0 | 104815.6 | n/a | 246 | n/a |
+| RabbitMQ | 2 CPU / 2 GiB | 78327.1 | 77261.0 | 86072.8 | 18750 | 204 | 1.775 GiB |
+| Rust | 2 CPU / 2 GiB | 199800.5 | 95306.0 | 259525.0 | 34600 | 562 | 1.838 GiB |
+| Bun | 2 CPU / 2 GiB | 186400.0 | 168692.0 | 334416.0 | 121284 | 235 | 1.467 GiB |
+| PHP | 2 CPU / 2 GiB | 0 | 210728.8 | 211555.1 | n/a | 131 | n/a |
+| RabbitMQ | 4 CPU / 4 GiB | 79349.9 | 72143.0 | 169979.2 | 38217 | 227 | 3.884 GiB |
+| Rust | 4 CPU / 4 GiB | 206490.6 | 116860.6 | 402591.5 | 68467 | 831 | 3.636 GiB |
+| Bun | 4 CPU / 4 GiB | 185652.0 | 164656.0 | 555216.0 | 251968 | 362 | 2.934 GiB |
+| PHP | 4 CPU / 4 GiB | 0 | 377935.8 | 387660.0 | n/a | 275 | n/a |
+| RabbitMQ | 4 CPU / 8 GiB | 80578.0 | 79043.0 | 171022.1 | 65449 | 239 | 6.34 GiB |
+| Rust | 4 CPU / 8 GiB | 201626.6 | 119871.9 | 408183.8 | 95000 | 861 | 5.025 GiB |
+| Bun | 4 CPU / 8 GiB | 198988.0 | 166192.0 | 547216.0 | 260000 | 381 | 3.217 GiB |
+| PHP | 4 CPU / 8 GiB | 0 | 379477.8 | 389549.2 | n/a | 280 | n/a |
+
+## Paced (2026-10-07T21:36:57Z)
+
+Same client as [Latest](#latest-2026-10-05t090342z): `rust/target/release/queueforge-compare`, binary mtime 2026-10-04T16:16:23-0300, not rebuilt. `QUEUEFORGE_COMPARE_RATES` unset. One container at a time, 1 CPU and 512 MiB, host ports 35672, 35673, 35674, and 35675. Images: RabbitMQ `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`, Rust `sha256:29d17851d2746e41226d188251a3787abbec8c0386b78679409992a5ba874957` (2026-10-07T21:03:31Z), Bun `sha256:665787b123a4cde32631adab0576287843ceb43fc187fd19da3f47a5a9f35ed9` (2026-10-07T21:01:11Z), PHP `sha256:c0c2ce662bc940f7c21ecbc2b4740f52819788c8c56e86742c94bcb72952c296` (2026-10-07T21:01:10Z). Docker Desktop stayed at 2 CPUs and 8320565248 bytes. RabbitMQ started at 21:36:57Z, Rust at 21:38:42Z, Bun at 21:40:27Z, PHP at 21:42:16Z. Every scenario is `declare=ok publish=ok consume=ok ack=ok confirms=ok`.
+
+QueueForge disk line: `fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync`. RabbitMQ disk line: `publisher confirms before fsync`.
+
+### One confirm, durable-256
+
+| Broker | p50 ms | p99 ms | messages/s | First miss |
+| --- | ---: | ---: | ---: | ---: |
+| RabbitMQ | 0.48 | 1.85 | 1569.22 | 4000 |
+| Rust | 0.24 | 1.06 | 2555.27 | 8000 |
+| Bun | 0.19 | 1.06 | 2837.72 | 8000 |
+| PHP | 0.34 | 1.64 | 1924.02 | 4000 |
+
+### 128 confirms
+
+| Scenario | Broker | messages/s | × Rabbit | p50 ms | p99 ms | First miss | Wall s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| durable-256 | RabbitMQ | 10996.58 | | 4.23 | 19.90 | 32000 | 20.26 |
+| durable-256 | Rust | 19221.45 | 1.748× (1.74795) | 2.02 | 11.11 | 48000 | 20.16 |
+| durable-256 | Bun | 18452.24 | 1.678× (1.67800) | 2.10 | 10.56 | 48000 | 20.16 |
+| durable-256 | PHP | 6505.41 | 0.592× (0.59158) | 10.79 | 18.39 | 16000 | 20.18 |
+| fan-2x2 | RabbitMQ | 11983.62 | | 8.42 | 19.99 | 32000 | 20.14 |
+| fan-2x2 | Rust | 23962.66 | 2.000× (1.99962) | 2.70 | 11.30 | 96000 | 20.29 |
+| fan-2x2 | Bun | 23653.92 | 1.974× (1.97385) | 2.23 | 10.78 | 96000 | 20.13 |
+| fan-2x2 | PHP | 11078.05 | 0.924× (0.92443) | 9.80 | 15.72 | 32000 | 20.15 |
+
+The site chart is the durable-256 row. On one confirm, the fan-2x2 ladder is not that chart. Bun's first miss there is 200, at 175.56 messages/s. Rust keeps 200 and misses 800, at 198.11 messages/s. RabbitMQ keeps through 3200 and misses 6400, at 2188.35 messages/s. PHP keeps through 3200 and misses 6400, at 2314.94 messages/s.
+
+### Short scenarios
+
+On both ladders, `size-4096` scores 250.00 and `transient-256` scores 1250.00, and the top step is kept. `prefetch-1` and `prefetch-128` score 600.00 with the 1000 step kept. `size-64` scores 600.00 on the one-confirm ladder for all four, and on the 128 ladder for Rust, Bun, and PHP. RabbitMQ's 128-confirm `size-64` scores 597.75 with the 1000 step still kept.
+
+The remote one-confirm check and the login hold were not part of this run.
 
 ## Latest (2026-10-05T09:03:42Z)
 

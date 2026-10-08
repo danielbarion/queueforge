@@ -9,14 +9,18 @@ export const metadata: Metadata = {
 
 const RUST = `cd rust
 cargo build --release -p queueforge-broker
-./target/release/queueforge --config configs/queueforge.example.toml --dev-bootstrap`;
+./target/release/queueforge \\
+  --config configs/queueforge.example.toml \\
+  --dev-bootstrap`;
 
 const BUN = `cd bun
 bun install
-bun run start -- --config config.example.toml --dev-bootstrap`;
+bun run start -- \\
+  --config config.example.toml --dev-bootstrap`;
 
 const PHP = `cd php
-php bin/queueforge --config config.example.toml --dev-bootstrap`;
+php bin/queueforge \\
+  --config config.example.toml --dev-bootstrap`;
 
 const BINDS = [
   ["amqp", "0.0.0.0:5672"],
@@ -54,40 +58,50 @@ export default function AboutPage() {
           </p>
           <div className="engines">
             <article className="panel engine tone-rust">
-              <h3>
-                <span className="dot" aria-hidden="true" />
-                Rust
-              </h3>
-              <span className="store">write-ahead log</span>
-              <p>
-                Tokio. Metadata in redb. Messages in a write-ahead log. Management HTTP and the
-                React UI are compiled into the binary.
-              </p>
+              <div>
+                <h3>
+                  <span className="dot" aria-hidden="true" />
+                  Rust
+                </h3>
+                <span className="store">write-ahead log</span>
+                <p>
+                  Tokio. Metadata in redb. Messages in a write-ahead log. Management HTTP and the
+                  React UI are compiled into the binary.
+                </p>
+              </div>
               <CopyCommand text={RUST} />
             </article>
             <article className="panel engine tone-bun">
-              <h3>
-                <span className="dot" aria-hidden="true" />
-                Bun
-              </h3>
-              <span className="store">SQLite</span>
-              <p>
-                AMQP on a Bun TCP listener. Messages in SQLite. Management HTTP is Elysia. Same
-                ports, unless the config says otherwise.
-              </p>
+              <div>
+                <h3>
+                  <span className="dot" aria-hidden="true" />
+                  Bun
+                </h3>
+                <span className="store">SQLite</span>
+                <p>
+                  AMQP on a Bun TCP listener. More than one granted core starts one child per core.
+                  The parent hands each connection to the child that owns the queue. Messages stay in
+                  that child&apos;s SQLite. The public metrics port adds up{" "}
+                  <code>queueforge_confirm_before_fsync_total</code> across the children. On the
+                  2026-10-06 16-queue run that counter was 0 on every cell. The other metric lines,
+                  and the management page, are the first child only.
+                </p>
+              </div>
               <CopyCommand text={BUN} />
             </article>
             <article className="panel engine tone-php">
-              <h3>
-                <span className="dot" aria-hidden="true" />
-                PHP
-              </h3>
-              <span className="store">append-only log</span>
-              <p>
-                One process, one <code>stream_select()</code> loop. No Composer and no install
-                step. Messages in an append-only log. The example config listens on 5675, so it
-                can run alongside the other two.
-              </p>
+              <div>
+                <h3>
+                  <span className="dot" aria-hidden="true" />
+                  PHP
+                </h3>
+                <span className="store">append-only log</span>
+                <p>
+                  One process on one core. More cores start one child per core, and the parent hands
+                  each connection to a child. Messages stay on that child. The example config listens
+                  on 5675, so it can run alongside the other two.
+                </p>
+              </div>
               <CopyCommand text={PHP} />
             </article>
           </div>

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Bars } from "./bars";
-import { formatTimes, GITHUB, paced, scale } from "./bench";
+import { formatRate, formatTimes, GITHUB, paced, scale } from "./bench";
+import { FeatureTease } from "./feature-table";
 
 export default function Page() {
   const rabbit = paced[0].rate;
@@ -9,8 +10,8 @@ export default function Page() {
     <main id="content">
       <section className="hero">
         <div className="wrap">
-          <p className="kicker">Open source · AMQP 0-9-1</p>
-          <h1>An AMQP broker in Rust, Bun, and PHP.</h1>
+          <p className="kicker">Open source · AMQP 0-9-1 and 1.0 · MQTT · STOMP · Streams</p>
+          <h1>A RabbitMQ-compatible broker in Rust, Bun, and PHP.</h1>
           <p className="lede">
             Three processes, one client protocol. You run QueueForge yourself. There is no account
             and no hosted broker.
@@ -49,9 +50,8 @@ export default function Page() {
               <Bars rows={paced} unit="/s" base={rabbit} />
               <p className="caption">
                 128 confirms in flight. Durable 256-byte body. Mac client through the published
-                port. RabbitMQ, Rust and Bun on 2026-10-05; PHP on 2026-10-06. A step counts only
-                when confirms and acks both reach 95% of the offer. The PHP bar is the parity
-                build, measured 2026-10-06T18:17Z.
+                port, 1 CPU / 512 MiB, measured 2026-10-08. A step counts only when confirms and
+                acks both reach 95% of the offer.
               </p>
             </div>
           </div>
@@ -62,16 +62,19 @@ export default function Page() {
         <div className="wrap split-proof">
           <div>
             <p className="kicker">At four cores</p>
-            <h2>Rust follows the cores. Bun stays on one.</h2>
+            <h2>Bun, Rust and PHP follow the cores when the queues are separate.</h2>
             <p className="section-lead">
-              Unpaced, 16 queues, 4 CPU / 4 GiB. Rust is {formatTimes(scale[1].rate, scale[0].rate)}×
-              RabbitMQ on this shape. Bun stays near one core, just above RabbitMQ. PHP, measured
-              the next day on the same shape, is {formatTimes(scale[3].rate, scale[0].rate)}× and
-              stays near one core. Giving the same CPU count more RAM did not raise the rate.
+              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-08. Rust is{" "}
+              {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ. Bun, one process per core, is{" "}
+              {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
+              {formatTimes(scale[2].rate, scale[1].rate)}× Rust. Confirms and deliveries both stay
+              near {formatRate(scale[2].rate)}/s. PHP, one process per core, is{" "}
+              {formatTimes(scale[3].rate, scale[0].rate)}× RabbitMQ.
             </p>
             <p className="note">
               This is a different run from the chart above: a full window, inside the Docker
-              network, measured for 8 seconds. Not the paced score.
+              network, measured for 8 seconds. Not the paced score. One queue still lives on one
+              process, so one connection does not speed up.
             </p>
           </div>
           <div className="panel chart">
@@ -80,6 +83,8 @@ export default function Page() {
           </div>
         </div>
       </section>
+
+      <FeatureTease />
 
       <section className="rule">
         <div className="wrap about-tease">
@@ -91,7 +96,8 @@ export default function Page() {
             <p>
               The Rust broker keeps messages in a write-ahead log. The Bun broker keeps them in
               SQLite. The PHP broker keeps them in an append-only log. A client speaks AMQP 0-9-1
-              to any of them, and the same member list can mix the binaries. The storage layers
+              to any of them, and the same member list can mix the binaries: Rust and Bun members
+              run one Raft log together for metadata and quorum queues. The storage layers
               differ on purpose; what a client, a peer, or the management UI can observe does not.
             </p>
             <p>
