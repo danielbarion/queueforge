@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@plugin "daisyui";
+@plugin "daisyui/theme" {
+  name: "queueforge";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+  --color-base-100: #060a11;
+  --color-base-200: #0d1420;
+  --color-base-300: #131c2b;
+  --color-base-content: #e9f1fb;
+  --color-primary: #3ee0c5;
+  --color-primary-content: #04241e;
+  --color-secondary: #f0c75e;
+  --color-secondary-content: #2a2208;
+  --color-accent: #ff7a96;
+  --color-accent-content: #2a0c14;
+  --color-neutral: #1f2a3c;
+  --color-neutral-content: #e9f1fb;
+  --color-info: #93a7bd;
+  --color-info-content: #060a11;
+  --color-success: #3ee0c5;
+  --color-success-content: #04241e;
+  --color-warning: #f0c75e;
+  --color-warning-content: #2a2208;
+  --color-error: #ff6b8a;
+  --color-error-content: #2a0c14;
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+@plugin "daisyui/theme" {
+  name: "queueforge-light";
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: #f6f3ec;
+  --color-base-200: #fffdf8;
+  --color-base-300: #e7e1d6;
+  --color-base-content: #142033;
+  --color-primary: #0c8f7d;
+  --color-primary-content: #f6f3ec;
+  --color-secondary: #8a6a12;
+  --color-secondary-content: #fffdf8;
+  --color-accent: #b4234a;
+  --color-accent-content: #fffdf8;
+  --color-neutral: #d9d2c6;
+  --color-neutral-content: #142033;
+  --color-info: #5c6d80;
+  --color-info-content: #f6f3ec;
+  --color-success: #0c8f7d;
+  --color-success-content: #f6f3ec;
+  --color-warning: #8a6a12;
+  --color-warning-content: #fffdf8;
+  --color-error: #b4234a;
+  --color-error-content: #fffdf8;
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: var(--font-plex-sans), "Avenir Next", "Segoe UI", sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+  --color-muted: #93a7bd;
+  --color-faint: #7d8fa5;
+  --color-line: #1f2a3c;
+  --color-rust: #3ee0c5;
+  --color-bun: #f0c75e;
+  --color-php: #ff7a96;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  html[data-theme="queueforge-light"] {
+    color-scheme: light;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    font-family: var(--font-sans);
+  }
+}
+
+.qf-field {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.qf-field > span {
+  display: block;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: normal;
+}
+
+.qf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.qf-table th {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.qf-table th,
+.qf-table td {
+  border-bottom: 1px solid var(--color-base-300);
+  padding: 0.65rem 0.25rem;
+}
+
+.qf-table .num {
+  font-family: var(--font-mono);
+  text-align: right;
+}
