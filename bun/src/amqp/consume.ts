@@ -5,7 +5,7 @@
  * inside a transaction wait for tx.commit.
  */
 import { bodyFrame, contentHeaderFrame, emptyProps, encodeDeliver, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
-import type { LiveMsg } from "../broker/index.ts";
+import { ChanError, type LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
 
 /**
@@ -65,6 +65,17 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
   const pri = tableGet(args, "x-priority");
   const priority = pri && (pri.t === "I" || pri.t === "l" || pri.t === "s" || pri.t === "S") ? Number(pri.t === "I" || pri.t === "l" ? pri.v : pri.v) : 0;
   if (!tag) tag = `ctag-${crypto.randomUUID()}`;
+  if (queue === "amq.rabbitmq.reply-to") {
+    this.consumeReplies(channel, c, tag, noAck);
+    if (!nowait) await this.send(methodFrame(channel, method(60, 21, (w) => w.shortstr(tag))));
+    return;
+  }
+  this.own(queue);
+  this.need("read", "queue", queue);
+  const target = this.broker.queues.get(this.broker.key(this.vhost, queue));
+  const stream = target?.argsParsed.queueType === "stream";
+  if (stream && c.prefetch === 0) throw new ChanError(406, "PRECONDITION_FAILED - consumer prefetch count is not set for stream queue");
+  if (stream && noAck) throw new ChanError(406, "PRECONDITION_FAILED - stream queues need manual acknowledgement");
   const session = this.broker.nextSession();
   c.consumers.set(tag, queue);
   this.broker.noteMgmtConsumer({
@@ -82,6 +93,7 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     session,
     noAck,
     exclusive,
+    streamOffset: tableGet(args, "x-stream-offset"),
     priority: Number.isFinite(priority) ? priority : 0,
     want: () => {
       if (!this.creditOk(c, tag)) return false;
@@ -195,6 +207,10 @@ export function deliver(this: Conn, channel: number, tag: string, dtag: number, 
 export async function cancel(this: Conn, channel: number, c: Ch, payload: Uint8Array) {
   const r = new R(payload.subarray(4));
   const tag = r.shortstr();
+  if (this.cancelReplies(c, tag)) {
+    await this.send(methodFrame(channel, method(60, 31, (w) => w.shortstr(tag))));
+    return;
+  }
   const queue = c.consumers.get(tag);
   if (queue) await this.broker.cancel(this.vhost, queue, tag);
   c.consumers.delete(tag);
@@ -306,11 +322,17 @@ export async function get(this: Conn, channel: number, c: Ch, payload: Uint8Arra
   r.u16();
   const queue = r.shortstr();
   const noAck = (r.u8() & 1) !== 0;
+  this.own(queue);
+  this.need("read", "queue", queue);
   const msg = await this.broker.get(this.vhost, queue, noAck);
+  const q = this.broker.queues.get(this.broker.key(this.vhost, queue));
+  if (q) q.lastUsed = Date.now();
   if (!msg) {
     await this.send(methodFrame(channel, method(60, 72, (w) => w.shortstr(""))));
     return;
   }
+  // get-ok carries the ready count left behind this message.
+  const left = q?.ready.length ?? 0;
   const dtag = c.nextDel++;
   if (!noAck) c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: "" });
   await this.sendMany([
@@ -321,7 +343,7 @@ export async function get(this: Conn, channel: number, c: Ch, payload: Uint8Arra
         w.bits([msg.redelivered]);
         w.shortstr(msg.exchange);
         w.shortstr(msg.routingKey);
-        w.u32(0);
+        w.u32(left);
       }),
     ),
     contentHeaderFrame(channel, msg.body.length, msg.propRaw.length ? msg.propRaw : emptyProps()),

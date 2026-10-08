@@ -8,7 +8,7 @@ import type { Cluster } from "../cluster.ts";
 import type { Config } from "../config.ts";
 import { Store, type BindRow, type ExRow } from "../store.ts";
 import { ConsumedSet } from "./consumed-set.ts";
-import type { LiveMsg, MgmtChannel, MgmtConnection, MgmtConsumer, Policy, QueueLive, TopicPerm } from "./model.ts";
+import type { AlarmListener, LiveMsg, MgmtChannel, MgmtConnection, MgmtConsumer, Policy, QueueLive, TopicPerm } from "./model.ts";
 import { emptyProm } from "./model.ts";
 
 /**
@@ -28,6 +28,10 @@ export class Broker {
   remoteQuorum = new Map<string, number>();
   cluster: Cluster | null = null;
   users = new Map<string, { hash: string; tags: string[] }>();
+  /** Logins from the OAuth 2.0 and LDAP backends, by login name. Users in `users` never look here. */
+  principals = new Map<string, import("../auth/backends.ts").Principal>();
+  oauth: import("../auth/backends.ts").OauthBackend | null = null;
+  ldap: import("../auth/backends.ts").LdapBackend | null = null;
   perms: Array<{ user: string; vhost: string; configure: string; write: string; read: string }> = [];
   vhosts = new Set<string>();
   sessionsNext = 1;
@@ -42,6 +46,20 @@ export class Broker {
   vhostQueueLimit = new Map<string, number>();
   operatorPolicies: Policy[] = [];
   transientNonexcl = false;
+  memAlarm = false;
+  diskAlarm = false;
+  /** True while a memory or disk alarm holds publishes. */
+  blocked = false;
+  alarmListeners = new Set<AlarmListener>();
+  unblockWaiters: Array<() => void> = [];
+  /** Stream queue logs, by vhost and name. Loaded on first use. */
+  streams = new Map<string, import("./stream.ts").StreamState>();
+  /** Running shovels by vhost and name. */
+  shovels = new Map<string, { def: import("./shovel.ts").ShovelDef; stop: () => void }>();
+  /** Vhosts with firehose tracing on. */
+  tracedVhosts = new Set<string>();
+  /** Direct reply-to addresses, each delivering to one requester channel. */
+  replySinks = new Map<string, (msg: { routingKey: string; body: Uint8Array; propRaw: Uint8Array }) => boolean>();
   readonly startedAt = Date.now();
 
   constructor(

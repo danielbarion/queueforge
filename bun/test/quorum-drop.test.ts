@@ -269,12 +269,12 @@ test("a quorum confirm does not wait for a flush staged after its covering fsync
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     store.insertMessage("/", "later", body(), "{}");
-    expect(store.stagedWithoutFlush).toBe(true);
+    expect(store.stagedWithoutFlush as boolean).toBe(true);
     const flushes = store.fullFlushCount;
     releasePeer();
     expect(await pending).toBe("ack");
     expect(store.fullFlushCount).toBe(flushes);
-    expect(store.stagedWithoutFlush).toBe(true);
+    expect(store.stagedWithoutFlush as boolean).toBe(true);
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -418,8 +418,8 @@ test("a quorum delivery reads the durable body back from the store", async () =>
     expect(q.ready.at(0)?.propRaw.byteLength).toBe(0);
     expect(q.ready.at(0)?.routingKey).toBe("");
     expect(q.ready.bytes).toBe(payload.byteLength);
-    let got = new Uint8Array();
-    let gotProps = new Uint8Array();
+    let got: Uint8Array = new Uint8Array();
+    let gotProps: Uint8Array = new Uint8Array();
     let gotKey = "";
     await broker.consume("/", "q", {
       tag: "c",

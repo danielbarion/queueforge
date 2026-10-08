@@ -4,9 +4,12 @@
  * Each method reads its frame, calls the broker, and sends the matching
  * ok unless the client set nowait.
  */
-import { argsFromFields } from "../broker/index.ts";
+import { argsFromFields, ChanError } from "../broker/index.ts";
 import { fieldStr, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
+
+/** Exchange types a client may declare. */
+const EXCHANGE_TYPES = new Set(["direct", "fanout", "topic", "headers", "x-consistent-hash", "x-local-random", "x-delayed-message"]);
 
 /**
  * Declare or passively check an exchange.
@@ -30,7 +33,26 @@ export async function exDeclare(this: Conn, channel: number, _c: Ch, payload: Ui
   const nowait = (bits & 16) !== 0;
   const args = readTable(r);
   const alt = fieldStr(tableGet(args, "alternate-exchange")) || null;
-  if (!passive) await this.broker.declareExchange(this.vhost, name, kind || "direct", durable, autoDelete, internal, alt);
+  if (passive) {
+    if (!this.broker.exchanges.has(this.broker.key(this.vhost, name))) {
+      throw new ChanError(404, `NOT_FOUND - no exchange '${name}' in vhost '${this.vhost}'`);
+    }
+  } else {
+    const type = kind || "direct";
+    if (!EXCHANGE_TYPES.has(type)) {
+      await this.connClose(503, `COMMAND_INVALID - unknown exchange type '${type}'`);
+      return;
+    }
+    let delayedType: string | null = null;
+    if (type === "x-delayed-message") {
+      delayedType = fieldStr(tableGet(args, "x-delayed-type"));
+      if (!delayedType || !EXCHANGE_TYPES.has(delayedType) || delayedType.startsWith("x-")) {
+        throw new ChanError(406, "PRECONDITION_FAILED - Invalid argument, 'x-delayed-type' must be an existing exchange type");
+      }
+    }
+    this.need("configure", "exchange", name);
+    await this.broker.declareExchange(this.vhost, name, type, durable, autoDelete, internal, alt, delayedType);
+  }
   if (!nowait) await this.send(methodFrame(channel, method(40, 11, () => {})));
 }
 
@@ -38,15 +60,24 @@ export async function exDeclare(this: Conn, channel: number, _c: Ch, payload: Ui
  * Delete an exchange.
  *
  * @param channel Channel to send delete-ok on.
- * @param payload Method payload. The if-unused bit is not enforced.
- * nowait (bit 1) skips delete-ok.
+ * @param payload Method payload. if-unused (bit 0) refuses an exchange that is
+ * still the source of a binding with 406. nowait (bit 1) skips delete-ok.
  */
 export async function exDelete(this: Conn, channel: number, payload: Uint8Array) {
   const r = new R(payload.subarray(4));
   r.u16();
   const name = r.shortstr();
-  const nowait = (r.u8() & 2) !== 0;
-  await this.broker.deleteExchange(this.vhost, name);
+  const bits = r.u8();
+  const nowait = (bits & 2) !== 0;
+  this.need("configure", "exchange", name);
+  if ((bits & 1) !== 0) {
+    const b = this.broker;
+    const used = b.bindings.some((x) => x.vhost === this.vhost && x.exchange === name)
+      || b.e2e.some((x) => x.vhost === this.vhost && x.source === name);
+    if (used) throw new ChanError(406, `PRECONDITION_FAILED - exchange '${name}' in vhost '${this.vhost}' in use`);
+  }
+  // A missing exchange is not an error, as in RabbitMQ.
+  if (this.broker.exchanges.has(this.broker.key(this.vhost, name))) await this.broker.deleteExchange(this.vhost, name);
   if (!nowait) await this.send(methodFrame(channel, method(40, 21, () => {})));
 }
 
@@ -64,6 +95,8 @@ export async function exBind(this: Conn, channel: number, payload: Uint8Array) {
   const source = r.shortstr();
   const routingKey = r.shortstr();
   const nowait = (r.u8() & 1) !== 0;
+  this.need("write", "exchange", destination);
+  this.need("read", "exchange", source);
   await this.broker.bindExchange(this.vhost, source, destination, routingKey);
   if (!nowait) await this.send(methodFrame(channel, method(40, 31, () => {})));
 }
@@ -82,6 +115,8 @@ export async function exUnbind(this: Conn, channel: number, payload: Uint8Array)
   const source = r.shortstr();
   const routingKey = r.shortstr();
   const nowait = (r.u8() & 1) !== 0;
+  this.need("write", "exchange", destination);
+  this.need("read", "exchange", source);
   await this.broker.unbindExchange(this.vhost, source, destination, routingKey);
   if (!nowait) await this.send(methodFrame(channel, method(40, 51, () => {})));
 }
@@ -113,6 +148,8 @@ export async function qDeclare(this: Conn, channel: number, payload: Uint8Array)
     );
     return;
   }
+  if (name) this.own(name);
+  if (!passive && !this.broker.queues.has(this.broker.key(this.vhost, name))) this.need("configure", "queue", name || "amq.gen");
   const res = await this.broker.declareQueue({
     vhost: this.vhost,
     name,
@@ -121,6 +158,7 @@ export async function qDeclare(this: Conn, channel: number, payload: Uint8Array)
     exclusive,
     autoDelete: (bits & 8) !== 0,
     args: fields,
+    owner: this.id,
   });
   if ((bits & 16) === 0) {
     await this.send(
@@ -151,6 +189,13 @@ export async function qBind(this: Conn, channel: number, payload: Uint8Array) {
   const routingKey = r.shortstr();
   const nowait = (r.u8() & 1) !== 0;
   const args = readTable(r);
+  this.own(queue);
+  this.need("write", "queue", queue);
+  this.need("read", "exchange", exchange || "amq.default");
+  const ex = this.broker.exchanges.get(this.broker.key(this.vhost, exchange));
+  if (ex?.kind === "topic" && !this.broker.topicReadAllowed(this.user, this.vhost, exchange, routingKey)) {
+    throw new ChanError(403, `ACCESS_REFUSED - read access to topic '${routingKey}' in exchange '${exchange}' in vhost '${this.vhost}' refused for user '${this.user}'`);
+  }
   await this.broker.bind(this.vhost, exchange, queue, routingKey, args);
   if (!nowait) await this.send(methodFrame(channel, method(50, 21, () => {})));
 }
@@ -168,6 +213,9 @@ export async function qUnbind(this: Conn, channel: number, payload: Uint8Array) 
   const exchange = r.shortstr();
   const routingKey = r.shortstr();
   const args = readTable(r);
+  this.own(queue);
+  this.need("write", "queue", queue);
+  this.need("read", "exchange", exchange || "amq.default");
   await this.broker.unbind(this.vhost, exchange, queue, routingKey, args);
   await this.send(methodFrame(channel, method(50, 51, () => {})));
 }
@@ -184,6 +232,8 @@ export async function qPurge(this: Conn, channel: number, payload: Uint8Array) {
   r.u16();
   const queue = r.shortstr();
   const nowait = (r.u8() & 1) !== 0;
+  this.own(queue);
+  this.need("read", "queue", queue);
   const n = await this.broker.purge(this.vhost, queue);
   if (!nowait) await this.send(methodFrame(channel, method(50, 31, (w) => w.u32(n))));
 }
@@ -192,14 +242,30 @@ export async function qPurge(this: Conn, channel: number, payload: Uint8Array) {
  * Delete a queue.
  *
  * @param channel Channel to send delete-ok on.
- * @param payload Method payload. if-unused and if-empty are not enforced.
+ * @param payload Method payload. if-unused (bit 0) refuses a queue with
+ * consumers, and if-empty (bit 1) a queue with messages, both with 406.
  * nowait is bit 2. Delete-ok carries the number of messages removed.
  */
 export async function qDelete(this: Conn, channel: number, payload: Uint8Array) {
   const r = new R(payload.subarray(4));
   r.u16();
   const queue = r.shortstr();
-  const nowait = (r.u8() & 4) !== 0;
+  const bits = r.u8();
+  const nowait = (bits & 4) !== 0;
+  this.own(queue);
+  this.need("configure", "queue", queue);
+  const q = this.broker.queues.get(this.broker.key(this.vhost, queue));
+  // RabbitMQ answers delete-ok with 0 messages for a missing queue.
+  if (!q) {
+    if (!nowait) await this.send(methodFrame(channel, method(50, 41, (w) => w.u32(0))));
+    return;
+  }
+  if ((bits & 1) !== 0 && q.consumers.length > 0) {
+    throw new ChanError(406, `PRECONDITION_FAILED - queue '${queue}' in vhost '${this.vhost}' in use`);
+  }
+  if ((bits & 2) !== 0 && q.ready.length + q.unacked.size > 0) {
+    throw new ChanError(406, `PRECONDITION_FAILED - queue '${queue}' in vhost '${this.vhost}' not empty`);
+  }
   const n = await this.broker.deleteQueue(this.vhost, queue);
   if (!nowait) await this.send(methodFrame(channel, method(50, 41, (w) => w.u32(n))));
 }

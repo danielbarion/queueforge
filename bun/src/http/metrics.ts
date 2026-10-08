@@ -5,6 +5,7 @@
  * QueueForge fsync counters. Label values are escaped by {@link promLabel}.
  */
 import type { Broker } from "../broker/index.ts";
+import { availableBytes } from "../disk.ts";
 
 /**
  * Escape a Prometheus label value.
@@ -100,7 +101,7 @@ export function metricsText(broker: Broker): string {
     "# TYPE rabbitmq_alarms_free_disk_space_watermark gauge",
     "rabbitmq_alarms_free_disk_space_watermark 0",
     "# TYPE rabbitmq_disk_space_available_bytes gauge",
-    "rabbitmq_disk_space_available_bytes 0",
+    `rabbitmq_disk_space_available_bytes ${availableBytes(broker.cfg.dataDir || ".")}`,
     "# TYPE rabbitmq_unreachable_cluster_peers_count gauge",
     "rabbitmq_unreachable_cluster_peers_count 0",
     ...[...broker.queues.values()].flatMap((q) => {

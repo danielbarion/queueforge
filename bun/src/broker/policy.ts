@@ -13,7 +13,7 @@ import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
-import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
+import { matchOne, policyItem, policyFromBody, fillPolicyArgs, capOperatorArgs } from "./policy-data.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
@@ -40,9 +40,7 @@ export function matchPolicy(this: Broker, vhost: string, name: string, entity: "
 export function argsWithPolicy(this: Broker, vhost: string, name: string, args: Record<string, string | number>): Record<string, string | number> {
   const user = this.matchPolicy(vhost, name, "queues");
   const operator = this.matchOperatorPolicy(vhost, name, "queues");
-  let out = fillPolicyArgs(args, user);
-  out = fillPolicyArgs(args, operator, out);
-  return out;
+  return capOperatorArgs(fillPolicyArgs(args, user), operator);
 }
 
 /**

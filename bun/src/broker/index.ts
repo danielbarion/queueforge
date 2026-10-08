@@ -14,6 +14,10 @@ import "./quorum.ts";
 import "./delivery.ts";
 import "./snapshot.ts";
 import "./accounts.ts";
+import "./alarms.ts";
+import "./events.ts";
+import "./shovel.ts";
+import "./stream.ts";
 
 export { ChanError } from "../errors.ts";
 export { Broker };

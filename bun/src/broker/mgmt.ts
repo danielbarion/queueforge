@@ -4,6 +4,7 @@
  * These functions are the Broker methods. Loading this file installs them.
  */
 import { Broker } from "./class.ts";
+import { principalAllows } from "../auth/backends.ts";
 import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
@@ -347,6 +348,9 @@ export function listTopicPerms(this: Broker, user?: string) {
  * @returns True when the pattern matches. An invalid stored pattern returns false.
  */
 export function topicWriteAllowed(this: Broker, user: string, vhost: string, exchange: string, routingKey: string): boolean {
+  // A token's write scope may name a routing key; LDAP logins allow every key.
+  const principal = this.principalOf(user);
+  if (principal) return principalAllows(principal, vhost, "write", exchange || "amq.default", routingKey);
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
   try {
@@ -366,6 +370,8 @@ export function topicWriteAllowed(this: Broker, user: string, vhost: string, exc
  * @returns True when the pattern matches. An invalid stored pattern returns false.
  */
 export function topicReadAllowed(this: Broker, user: string, vhost: string, exchange: string, routingKey: string): boolean {
+  const principal = this.principalOf(user);
+  if (principal) return principalAllows(principal, vhost, "read", exchange, routingKey);
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
   try {

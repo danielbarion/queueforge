@@ -54,7 +54,8 @@ export function expire(this: Broker, q: QueueLive) {
  */
 export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: number, reason: "expired" | "rejected" | "maxlen"): boolean {
   this.materialize(msg);
-  if (!q.argsParsed.dlx || depth > 8) return true;
+  // "" is the default exchange, a valid dead-letter target.
+  if (q.argsParsed.dlx == null || depth > 8) return true;
   const headers = deathHeaders(q.name, reason, msg.exchange, msg.routingKey, msg.headers);
   const rk = q.argsParsed.dlxKey ?? msg.routingKey;
   let dests: string[] = [];
@@ -128,6 +129,7 @@ export function pump(this: Broker, q: QueueLive) {
       return;
     }
     this.noteDeliver(chosen.noAck, msg.redelivered);
+    if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
     chosen.deliver(msg);
   }
 }
@@ -201,8 +203,10 @@ export async function consume(this: Broker, vhost: string, queue: string, consum
     throw new ChanError(403, `ACCESS_REFUSED - exclusive consumer on ${queue}`);
   }
   q.consumers.push(consumer);
+  if (q.argsParsed.queueType === "stream") this.addStreamReader(q, consumer, consumer.streamOffset);
   this.prom.consumers++;
   q.lastUsed = Date.now();
+  this.emitEvent("consumer.created", vhost, { queue, consumer_tag: consumer.tag, exclusive: consumer.exclusive, ack_required: !consumer.noAck });
   this.sessions.set(consumer.session, { vhost, queue });
 }
 
@@ -217,7 +221,9 @@ export async function consume(this: Broker, vhost: string, queue: string, consum
 export async function kick(this: Broker, vhost: string, queue: string, session: number) {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
+  if (q.argsParsed.queueType === "stream") return this.pumpStream(q);
   const consumer = q.consumers.find((c) => c.session === session);
+  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader();
   if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
     if (!consumer) return;
     q.consumers = q.consumers.filter((c) => c.session !== session);
@@ -253,12 +259,20 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
   const consumer = q.consumers.find((c) => c.tag === tag);
-  if (consumer) this.prom.consumers = Math.max(0, this.prom.consumers - 1);
+  if (q.argsParsed.queueType === "stream") this.removeStreamReader(q, tag);
+  if (consumer) {
+    this.prom.consumers = Math.max(0, this.prom.consumers - 1);
+    this.emitEvent("consumer.deleted", vhost, { queue, consumer_tag: tag });
+  }
   q.consumers = q.consumers.filter((c) => c.tag !== tag);
   const session = consumer?.session ?? this.remoteQuorum.get(`${vhost}\0${queue}\0${tag}`);
   this.remoteQuorum.delete(`${vhost}\0${queue}\0${tag}`);
   if (session != null && q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
     await this.cluster!.call(this.quorumLeader(), "unsub", { vhost, queue, session });
+  }
+  // An auto-delete queue goes once the last consumer it ever had is gone.
+  if (consumer && q.autoDelete && q.consumers.length === 0 && this.isLocalHome(q.home)) {
+    await this.deleteQueue(vhost, queue).catch(() => {});
   }
 }
 
@@ -273,6 +287,8 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
 export function ack(this: Broker, vhost: string, queue: string, id: string): Promise<void> | void {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
+  // A stream ack only returns credit; the entry stays in the log.
+  if (q.argsParsed.queueType === "stream") return this.pumpStream(q);
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     return this.cluster!.call(q.home!, "ack", { vhost, queue, id }).then(() => undefined);
   }
@@ -306,6 +322,7 @@ export function ack(this: Broker, vhost: string, queue: string, id: string): Pro
 export function nack(this: Broker, vhost: string, queue: string, id: string, requeue: boolean): Promise<void> | void {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
+  if (q.argsParsed.queueType === "stream") return this.pumpStream(q);
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     return this.cluster!.call(q.home!, "nack", { vhost, queue, id, requeue }).then(() => undefined);
   }
@@ -317,7 +334,7 @@ export function nack(this: Broker, vhost: string, queue: string, id: string, req
   q.unacked.delete(id);
   if (requeue) {
     msg.deliveries = (msg.deliveries ?? 0) + 1;
-    if (q.argsParsed.deliveryLimit != null && msg.deliveries >= q.argsParsed.deliveryLimit) {
+    if (q.argsParsed.deliveryLimit != null && msg.deliveries > q.argsParsed.deliveryLimit) {
       const accepted = this.deadLetter(q, msg, 0, "rejected");
       if (!accepted && q.argsParsed.dlxStrategy === "at-least-once") {
         q.unacked.set(id, msg);
@@ -356,6 +373,8 @@ export function nack(this: Broker, vhost: string, queue: string, id: string, req
 export async function get(this: Broker, vhost: string, queue: string, noAck: boolean): Promise<LiveMsg | null> {
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
+  if (q.argsParsed.queueType === "stream") throw new ChanError(540, "NOT_IMPLEMENTED - basic.get is not supported by stream queues");
+  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader();
   if (q.argsParsed.queueType === "quorum") this.promoteIfLeader();
   if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
     try {

@@ -6,6 +6,8 @@
 import { closeSync } from "node:fs";
 import { createChunkFile } from "./fast-log.ts";
 
+declare const self: Worker;
+
 self.onmessage = (event: MessageEvent<{ path: string; size: number; state: SharedArrayBuffer }>) => {
   const { path, size, state } = event.data;
   const view = new BigInt64Array(state);

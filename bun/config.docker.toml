@@ -1,4 +1,7 @@
 # Baked into the bench image. Same disk flush as rust/configs/queueforge.docker.toml.
+# A container limited to one CPU stays one process. More CPUs start one child
+# per core. The parent accepts a connection and hands the socket to the child
+# that owns that queue. The child does not forward during the measure.
 
 [listeners]
 amqp = "0.0.0.0:5672"

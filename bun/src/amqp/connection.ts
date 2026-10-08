@@ -16,15 +16,30 @@ import { Conn } from "./listen.ts";
  */
 export async function handleStartOk(this: Conn, payload: Uint8Array) {
   const rr = new R(payload.subarray(4));
-  readTable(rr);
+  const client = readTable(rr);
+  // RabbitMQ only sends connection.blocked to clients that ask for it.
+  const caps = client.find(([k]) => k === "capabilities")?.[1];
+  this.wantsBlocked = caps?.t === "F" && caps.v.some(([k, v]) => k === "connection.blocked" && v.t === "t" && v.v);
   const mechanism = rr.shortstr();
   const response = rr.longstr();
+  // EXTERNAL: the user is the verified client certificate's common name, as
+  // RabbitMQ's ssl_cert_login_from = common_name. It must exist; no password.
+  if (mechanism === "EXTERNAL") {
+    if (!this.peerCN || !this.broker.users.has(this.peerCN)) return this.connClose(403, "ACCESS_REFUSED - EXTERNAL login refused");
+    this.user = this.peerCN;
+    return this.sendTune();
+  }
   if (mechanism !== "PLAIN") return this.connClose(403, "ACCESS_REFUSED - mechanism");
   const parts = new TextDecoder().decode(response).split("\0");
   const user = parts.length >= 3 ? parts[1]! : parts[0] ?? "";
   const pass = parts.length >= 3 ? parts[2]! : parts[1] ?? "";
   if (!(await this.broker.verify(user, pass))) return this.connClose(403, "ACCESS_REFUSED - login");
   this.user = user;
+  return this.sendTune();
+}
+
+/** connection.tune: channel-max, frame-max, heartbeat. */
+export async function sendTune(this: Conn) {
   await this.send(methodFrame(0, method(10, 30, (w) => {
     w.u16(2047);
     w.u32(131072);
@@ -77,6 +92,7 @@ export async function handleConnectionOpen(this: Conn, payload: Uint8Array) {
     });
   }
   await this.send(methodFrame(0, method(10, 41, (w) => w.shortstr(""))));
+  this.watchAlarms();
 }
 
 /**
@@ -116,14 +132,25 @@ export async function connClose(this: Conn, code: number, text: string) {
       w.u16(0);
     }),
   );
-  // The close frame and the FIN go out before this stack yields. A socket.end()
-  // deferred to a timer never ran, so the peer kept the TCP connection open.
+  // The close frame goes out before this stack yields. As RabbitMQ does, the
+  // socket stays open for the client's close-ok, so the client reads a close
+  // and not a reset. A client that never answers is cut after 1 s.
   this.staged.push(frame);
   this.stagedBytes += frame.length;
   try {
     this.flush();
     this.socket.flush?.();
-    this.socket.end();
+    const end = () => {
+      clearTimeout(timer);
+      this.closeOkWait = null;
+      try {
+        this.socket.end();
+      } catch {
+        /* this connection is already gone */
+      }
+    };
+    const timer = setTimeout(end, 1000);
+    this.closeOkWait = end;
   } catch {
     try {
       this.socket.end();
@@ -153,6 +180,7 @@ export function noteMetricsClosed(this: Conn) {
 }
 
 Conn.prototype.handleStartOk = handleStartOk;
+Conn.prototype.sendTune = sendTune;
 Conn.prototype.handleTuneOk = handleTuneOk;
 Conn.prototype.handleConnectionOpen = handleConnectionOpen;
 Conn.prototype.handleConnectionClose = handleConnectionClose;

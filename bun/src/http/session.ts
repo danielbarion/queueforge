@@ -52,10 +52,53 @@ export function tokenOf(header: string | null, name: string): string | null {
  *
  * @param header The Cookie header, or null.
  * @param host The Host header, or null. It selects which cookie name is read.
- * @returns The session user and tags, or null when the cookie is absent or unknown.
+ * @param authorization The Authorization header. HTTP Basic credentials that
+ * {@link verifyBasic} already checked are accepted, as RabbitMQ's API does.
+ * @returns The session user and tags, or null when neither is valid.
  */
-export function requireUser(header: string | null, host: string | null) {
+export function requireUser(header: string | null, host: string | null, authorization: string | null = null) {
   const token = tokenOf(header, cookieNameFromHost(host));
-  if (!token) return null;
-  return sessions.get(token) ?? null;
+  const fromCookie = token ? sessions.get(token) : undefined;
+  if (fromCookie) return fromCookie;
+  if (!authorization) return null;
+  const basic = basicSessions.get(authorization);
+  if (!basic || basic.until < Date.now()) return null;
+  return basic.who;
+}
+
+/** Verified Basic headers. A hash check per request would cost a PBKDF2 round each time. */
+const basicSessions = new Map<string, { who: { user: string; tags: string[] }; until: number }>();
+const BASIC_TTL_MS = 5_000;
+const BASIC_MAX = 1024;
+
+/**
+ * Check an `Authorization: Basic` header once and remember it briefly, so the
+ * synchronous route checks can accept it. A wrong password is not cached.
+ */
+export async function verifyBasic(
+  authorization: string | null,
+  verify: (user: string, password: string) => Promise<boolean>,
+  tags: (user: string) => string[],
+): Promise<void> {
+  if (!authorization || !authorization.startsWith("Basic ")) return;
+  const cached = basicSessions.get(authorization);
+  if (cached && cached.until >= Date.now()) return;
+  let decoded = "";
+  try {
+    decoded = atob(authorization.slice(6).trim());
+  } catch {
+    return;
+  }
+  const at = decoded.indexOf(":");
+  if (at <= 0) return;
+  const user = decoded.slice(0, at);
+  const password = decoded.slice(at + 1);
+  if (!(await verify(user, password))) {
+    basicSessions.delete(authorization);
+    return;
+  }
+  const userTags = tags(user);
+  if (!userTags.includes("administrator") && !userTags.includes("management") && !userTags.includes("monitoring")) return;
+  if (basicSessions.size >= BASIC_MAX) basicSessions.clear();
+  basicSessions.set(authorization, { who: { user, tags: userTags }, until: Date.now() + BASIC_TTL_MS });
 }

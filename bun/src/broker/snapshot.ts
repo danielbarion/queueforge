@@ -67,6 +67,57 @@ function queueFromWire(payload: Record<string, unknown>): QueueRow {
   };
 }
 
+/**
+ * A replicated policy row. Rust sends its `Policy` struct (snake_case,
+ * `apply_to`); Bun sends its own camelCase row. Both map to Bun's `Policy`.
+ */
+export function policyFromWire(p: Record<string, unknown>): Policy {
+  const num = (v: unknown) => (v == null ? null : Number(v));
+  const str = (v: unknown) => (v == null ? null : String(v));
+  const applyTo = String(p.applyTo ?? p.apply_to ?? "all");
+  return {
+    vhost: String(p.vhost ?? "/"),
+    name: String(p.name ?? ""),
+    pattern: String(p.pattern ?? ""),
+    applyTo: applyTo === "queues" || applyTo === "exchanges" ? applyTo : "all",
+    priority: Number(p.priority ?? 0),
+    messageTtl: num(p.messageTtl ?? p.message_ttl_ms),
+    expiresMs: num(p.expiresMs ?? p.expires_ms),
+    dlx: str(p.dlx ?? p.dead_letter_exchange),
+    dlxKey: str(p.dlxKey ?? p.dead_letter_routing_key),
+    maxLength: num(p.maxLength ?? p.max_length),
+    maxLengthBytes: num(p.maxLengthBytes ?? p.max_length_bytes),
+    overflow: (str(p.overflow) as Policy["overflow"]) ?? null,
+    dlxStrategy: (str(p.dlxStrategy ?? p.dead_letter_strategy) as Policy["dlxStrategy"]) ?? null,
+    deliveryLimit: num(p.deliveryLimit ?? p.delivery_limit),
+    alternate: str(p.alternate ?? p.alternate_exchange),
+  };
+}
+
+/**
+ * The wire form of a policy: Rust's `Policy` field names, which Rust parses
+ * and `policyFromWire` reads back.
+ */
+export function policyToWire(p: Policy): Record<string, unknown> {
+  return {
+    vhost: p.vhost,
+    name: p.name,
+    pattern: p.pattern,
+    apply_to: p.applyTo,
+    priority: p.priority,
+    message_ttl_ms: p.messageTtl,
+    expires_ms: p.expiresMs,
+    dead_letter_exchange: p.dlx,
+    dead_letter_routing_key: p.dlxKey,
+    max_length: p.maxLength,
+    max_length_bytes: p.maxLengthBytes,
+    overflow: p.overflow,
+    dead_letter_strategy: p.dlxStrategy,
+    delivery_limit: p.deliveryLimit,
+    alternate_exchange: p.alternate,
+  };
+}
+
 export function applyRemote(this: Broker, kind: string, payload: Record<string, unknown>) {
   if (kind === "exchange") {
     const e = payload as ExRow;
@@ -92,8 +143,18 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
     this.store.deleteQueue(vhost, name);
   } else if (kind === "binding") {
     const b = payload as BindRow;
-    this.bindings.push(b);
-    this.store.putBinding(b);
+    // Applying twice (a replay, or a snapshot after a push) keeps one row.
+    const same = this.bindings.some(
+      (x) => x.vhost === b.vhost && x.exchange === b.exchange && x.queue === b.queue && x.routingKey === b.routingKey && JSON.stringify(x.args ?? null) === JSON.stringify(b.args ?? null),
+    );
+    if (!same) {
+      this.bindings.push(b);
+      this.store.putBinding(b);
+    }
+  } else if (kind === "policy") {
+    this.upsertPolicy(policyFromWire(payload));
+  } else if (kind === "delete_policy") {
+    this.deletePolicy(String(payload.vhost ?? "/"), String(payload.name ?? ""));
   } else if (kind === "unbind") {
     const vhost = String(payload.vhost);
     const exchange = String(payload.exchange);

@@ -6,7 +6,8 @@
  */
 import type { Broker, LiveMsg } from "../broker/index.ts";
 import { ChanError } from "../broker/index.ts";
-import type { Amqp10State } from "../protocols/index.ts";
+import type { Socket as NodeSocket } from "node:net";
+import type { Amqp10Session } from "../amqp10/session.ts";
 import { emptyProps, R } from "../codec.ts";
 
 /** One basic.publish waiting for its header and body. */
@@ -37,6 +38,13 @@ export type Ch = {
   deliveryMode: number;
   priority: number;
   expiration: string;
+  userId: string;
+  /** reply-to property of the publish being assembled. */
+  replyTo: string;
+  /** This channel's direct reply-to address, or empty. */
+  replyAddr: string;
+  /** Consumer tag of the reply consumer, or empty. */
+  replyTag: string;
 };
 
 /** Socket surface the listener uses. Tests can pass a fake with these methods. */
@@ -54,10 +62,16 @@ export type AmqpSocket = {
  * Fields are visible to the sibling modules that implement its methods.
  * Callers outside this folder use {@link startAmqp} only.
  */
+/** Source of {@link Conn.id}. */
+let connSeq = 0;
+
 export class Conn {
   buf: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   stage: "header" | "frames" | "amqp10" = "header";
-  amqp10: Amqp10State = { phase: "header", sender: null, receiver: null };
+  /** Common name of a verified client certificate; offers SASL EXTERNAL. */
+  peerCN: string | null = null;
+  /** Set once an AMQP 1.0 header arrives; every later byte goes to it. */
+  amqp10: Amqp10Session | null = null;
   user = "";
   vhost = "/";
   closed = false;
@@ -70,13 +84,24 @@ export class Conn {
   /** Index of the first unsent frame in `outbound`. */
   outHead = 0;
   connClosed = false;
+  /** After a server connection.close: ends the socket once close-ok arrives or 1 s passes. */
+  closeOkWait: (() => void) | null = null;
   metricsOpened = false;
   /** Set once so a double close does not decrement the connection gauge twice. */
   metricsClosed = false;
+  /** Node socket when the parent handed this connection off. Null for a direct listen. */
+  handed: import("node:net").Socket | null = null;
+  migrated = false;
   /** Management connection id, empty until connection.open succeeds. */
   mgmtName = "";
   /** Frames waiting for the socket to accept more bytes. */
   outbound: Uint8Array[] = [];
+  /**
+   * The socket copies what it accepts before `write` returns, so a gathered
+   * burst may use the shared buffer. Only Bun's own listener promises that;
+   * a node socket queues the buffer it was given.
+   */
+  reuseWrites = false;
   /**
    * Frames gathered for one socket write. A microtask flushes them so a burst
    * shares one write without waiting a timer tick.
@@ -100,6 +125,18 @@ export class Conn {
    * `driveInbound` sets this while consumers on this connection are behind.
    */
   wakeInbound: (() => void) | null = null;
+  /** Process-unique id. Owns exclusive queues declared on this connection. */
+  id = ++connSeq;
+  /** Permission results, valid while `permRef` and `permLen` match the broker table. */
+  permCache = new Map<string, boolean>();
+  permRef: unknown = null;
+  permLen = -1;
+  /** Exchange whose existence and write permission the last publish checked. */
+  writeEx: string | null = null;
+  /** The client advertised the connection.blocked capability. */
+  wantsBlocked = false;
+  /** Registered with the broker while this connection is told about alarms. */
+  alarmListener: ((blocked: boolean, reason: string) => void) | null = null;
 
   constructor(
     readonly socket: AmqpSocket,
@@ -149,6 +186,7 @@ export interface Conn {
   noteMetricsClosed(): void;
   connClose(code: number, text: string): Promise<void>;
   handleStartOk(payload: Uint8Array): Promise<void>;
+  sendTune(): Promise<void>;
   handleTuneOk(payload: Uint8Array): void;
   handleConnectionOpen(payload: Uint8Array): Promise<void>;
   handleConnectionClose(): Promise<void>;
@@ -166,17 +204,40 @@ export interface Conn {
  * @param broker Process-wide broker the connection calls into.
  * @returns The Bun listen server. Stop it by calling `server.stop()`.
  */
-export function startAmqp(host: string, port: number, broker: Broker) {
-  return Bun.listen<Conn>({
+export function startAmqp(host: string, port: number, broker: Broker, reusePort = false, tls: { cert: string; key: string; ca?: string } | null = null) {
+  type ListenSocket = AmqpSocket & { setNoDelay(on: boolean): void; data?: Conn };
+  const options = {
     hostname: host,
     port,
+    reusePort,
+    // With a CA, client certificates are asked for but optional, as RabbitMQ's
+    // verify_peer with fail_if_no_peer_cert=false; an untrusted one is dropped.
+    ...(tls
+      ? {
+          tls: {
+            cert: Bun.file(tls.cert),
+            key: Bun.file(tls.key),
+            ...(tls.ca ? { ca: Bun.file(tls.ca), requestCert: true, rejectUnauthorized: false } : {}),
+          },
+        }
+      : {}),
     socket: {
-      open(socket) {
+      handshake(socket: ListenSocket & { authorized?: boolean; getPeerCertificate?: () => { subject?: { CN?: string } } }) {
+        if (!tls?.ca) return;
+        const subject = socket.getPeerCertificate?.()?.subject;
+        if (subject && !socket.authorized) {
+          socket.end();
+          return;
+        }
+        if (subject?.CN && socket.data) socket.data.peerCN = subject.CN;
+      },
+      open(socket: ListenSocket) {
         socket.setNoDelay(true);
         const conn = new Conn(socket, broker);
+        conn.reuseWrites = true;
         socket.data = conn;
       },
-      data(socket, data) {
+      data(socket: ListenSocket, data: Uint8Array | ArrayBuffer) {
         const conn = socket.data as Conn;
         const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
         void conn.push(bytes).catch(() => {
@@ -189,21 +250,22 @@ export function startAmqp(host: string, port: number, broker: Broker) {
           }
         });
       },
-      drain(socket) {
+      drain(socket: ListenSocket) {
         (socket.data as Conn).flush();
       },
-      close(socket) {
-        const conn = socket.data as Conn | undefined;
+      close(socket: ListenSocket) {
+        const conn = socket.data;
         if (!conn) return;
         conn.closed = true;
         conn.connClosed = true;
         conn.noteMetricsClosed();
-        void conn.dropConsumers().then(() => conn.requeueAll()).catch(() => {
+        conn.amqp10?.closed();
+        void conn.dropConsumers().then(() => conn.requeueAll()).then(() => conn.dropExclusive()).finally(() => conn.unwatchAlarms()).catch(() => {
           /* a missing queue home rejects nack; that must not exit the process */
         });
       },
-      error(socket) {
-        const conn = socket.data as Conn | undefined;
+      error(socket: ListenSocket) {
+        const conn = socket.data;
         if (conn) {
           conn.closed = true;
           conn.connClosed = true;
@@ -215,7 +277,102 @@ export function startAmqp(host: string, port: number, broker: Broker) {
         }
       },
     },
+  };
+  return Bun.listen(options as unknown as Bun.TCPSocketListenOptions<Conn>);
+}
+
+/** Run one adopted TCP socket as an AMQP connection. The parent already accepted it. */
+export function adoptNodeSocket(broker: Broker, socket: NodeSocket) {
+  socket.setNoDelay(true);
+  socket.resume();
+  const wrapper: AmqpSocket = {
+    write(bytes) {
+      try {
+        socket.write(bytes);
+      } catch {
+        return 0;
+      }
+      return bytes.length;
+    },
+    end() {
+      socket.end();
+    },
+    remoteAddress: socket.remoteAddress,
+    remotePort: socket.remotePort,
+  };
+  const conn = new Conn(wrapper, broker);
+  conn.handed = socket;
+  const fail = () => {
+    conn.closed = true;
+    conn.connClosed = true;
+    conn.noteMetricsClosed();
+    try {
+      socket.end();
+    } catch {
+      /* already closed */
+    }
+  };
+  socket.on("data", (buf: Buffer) => {
+    void conn.push(new Uint8Array(buf)).catch(fail);
   });
+  socket.on("close", () => {
+    conn.closed = true;
+    conn.connClosed = true;
+    conn.noteMetricsClosed();
+    void conn.dropConsumers().then(() => conn.requeueAll()).then(() => conn.dropExclusive()).finally(() => conn.unwatchAlarms()).catch(() => {});
+  });
+  socket.on("error", fail);
+}
+
+type MigratedState = {
+  user: string;
+  vhost: string;
+  channels: Array<{ id: number; confirm: boolean; prefetch: number }>;
+};
+
+/** Continue a connection the previous child already handshook. `bytes` starts at the unparsed frame. */
+export function adoptMigrated(broker: Broker, socket: NodeSocket, state: MigratedState, bytes: Uint8Array) {
+  socket.setNoDelay(true);
+  const wrapper: AmqpSocket = {
+    write(chunk) {
+      try {
+        socket.write(chunk);
+      } catch {
+        return 0;
+      }
+      return chunk.length;
+    },
+    end() {
+      socket.end();
+    },
+    remoteAddress: socket.remoteAddress,
+    remotePort: socket.remotePort,
+  };
+  const conn = new Conn(wrapper, broker);
+  conn.handed = socket;
+  conn.stage = "frames";
+  conn.user = state.user;
+  conn.vhost = state.vhost;
+  for (const item of state.channels) {
+    const ch = conn.ch(item.id);
+    ch.confirm = item.confirm;
+    ch.prefetch = item.prefetch;
+  }
+  const fail = () => {
+    conn.closed = true;
+    conn.connClosed = true;
+    try {
+      socket.end();
+    } catch {
+      /* already closed */
+    }
+  };
+  socket.on("data", (buf: Buffer) => {
+    void conn.push(new Uint8Array(buf)).catch(fail);
+  });
+  socket.on("error", fail);
+  socket.resume();
+  void conn.push(bytes).catch(fail);
 }
 
 /**
@@ -250,6 +407,10 @@ export function ch(this: Conn, id: number): Ch {
       deliveryMode: 1,
       priority: 0,
       expiration: "",
+      userId: "",
+      replyTo: "",
+      replyAddr: "",
+      replyTag: "",
     };
     this.channels.set(id, c);
   }

@@ -98,6 +98,7 @@ export function publish(this: Broker, input: {
   confirm?: boolean;
   mandatory?: boolean;
 }): Promise<"ack" | "nack" | "return"> | "ack" | "nack" | "return" {
+  if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(input.vhost)) this.tracePublish(input);
   const fast = localClassicFast.call(this, input);
   if (fast !== SLOW) return fast;
   return publishSlow.call(this, input);
@@ -116,6 +117,24 @@ async function publishSlow(this: Broker, input: {
   confirm?: boolean;
   mandatory?: boolean;
 }): Promise<"ack" | "nack" | "return"> {
+  // x-delayed-message: hold the message for its x-delay, then route it.
+  // The publish is confirmed now, as the RabbitMQ plugin does. Delays live in
+  // memory, so a restart loses messages that are still waiting.
+  if (input.exchange !== "" && !(input as { delayed?: boolean }).delayed) {
+    const ex = this.exchanges.get(this.key(input.vhost, input.exchange));
+    if (ex?.kind === "x-delayed-message") {
+      const raw = input.headers.find(([k]) => k === "x-delay")?.[1];
+      const delay = raw && "v" in raw ? Number(raw.v) : 0;
+      if (Number.isFinite(delay) && delay > 0) {
+        this.prom.received++;
+        const timer = setTimeout(() => {
+          void Promise.resolve(this.publish({ ...input, confirm: false, mandatory: false, delayed: true } as typeof input)).catch(() => {});
+        }, delay);
+        timer.unref?.();
+        return "ack";
+      }
+    }
+  }
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;
   if (input.exchange === "") {
@@ -342,6 +361,10 @@ export function enqueueLocal(this: Broker,
   },
   depth: number,
 ): boolean {
+  if (q.argsParsed.queueType === "stream") {
+    this.appendStream(q, src);
+    return true;
+  }
   this.expire(q);
   const bytes = q.ready.bytes;
   const overCount = q.argsParsed.maxLength != null && q.ready.length >= q.argsParsed.maxLength;
@@ -367,6 +390,16 @@ export function enqueueLocal(this: Broker,
         return false;
       }
       this.prom.dlxMaxlen++;
+    }
+    // Nothing older is left to drop, so the new message is the head and goes:
+    // x-max-length 0 keeps nothing, as in RabbitMQ.
+    if (
+      (q.argsParsed.maxLength != null && q.ready.length >= q.argsParsed.maxLength) ||
+      (q.argsParsed.maxLengthBytes != null && q.ready.bytes + src.body.length > q.argsParsed.maxLengthBytes)
+    ) {
+      this.deadLetter(q, liveFrom(q, src), depth, "maxlen");
+      this.prom.dlxMaxlen++;
+      return true;
     }
   }
   let expiresAt: number | null = null;

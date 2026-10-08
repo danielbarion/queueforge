@@ -171,60 +171,76 @@ export function fieldStr(f: Field | undefined): string {
   return "";
 }
 
+/**
+ * Read one field value after its type byte.
+ *
+ * Type letters follow RabbitMQ, not the 0-9-1 spec table: `s` is a signed
+ * 16-bit integer (amqplib sends small numbers that way) and `u` unsigned.
+ * Floats and decimals are skipped and kept as `other`.
+ */
+function readValue(r: R, kind: string): Field {
+  switch (kind) {
+    case "S":
+      return { t: "S", v: text.decode(r.longstr()) };
+    case "s":
+    case "U":
+      return { t: "I", v: r.i16() };
+    case "u":
+      return { t: "I", v: r.u16() };
+    case "I":
+      return { t: "I", v: r.i32() };
+    case "i":
+      return { t: "I", v: r.u32() };
+    case "l":
+    case "L":
+      return { t: "l", v: Number(r.u64()) };
+    case "t":
+      return { t: "t", v: r.u8() !== 0 };
+    case "b":
+      return { t: "I", v: r.i8() };
+    case "B":
+      return { t: "I", v: r.u8() };
+    case "x": {
+      const n = r.u32();
+      const v = r.b.subarray(r.o, r.o + n);
+      r.o += n;
+      return { t: "x", v };
+    }
+    case "V":
+      return { t: "V" };
+    case "F":
+      return { t: "F", v: readTable(r) };
+    case "T":
+      return { t: "T", v: r.u64() };
+    case "A": {
+      const n = r.u32();
+      const endA = r.o + n;
+      const items: Field[] = [];
+      while (r.o < endA) items.push(readValue(r, String.fromCharCode(r.u8())));
+      r.o = endA;
+      return { t: "A", v: items };
+    }
+    case "D":
+      r.skip(5);
+      return { t: "other", raw: "D" };
+    case "f":
+      r.skip(4);
+      return { t: "other", raw: "f" };
+    case "d":
+      r.skip(8);
+      return { t: "other", raw: "d" };
+    default:
+      return { t: "other", raw: kind };
+  }
+}
+
 export function readTable(r: R): Array<[string, Field]> {
   const size = r.u32();
   const end = r.o + size;
   const out: Array<[string, Field]> = [];
   while (r.o < end) {
     const name = r.shortstr();
-    const kind = String.fromCharCode(r.u8());
-    let field: Field;
-    if (kind === "S") field = { t: "S", v: text.decode(r.longstr()) };
-    else if (kind === "s") field = { t: "s", v: r.shortstr() };
-    else if (kind === "I") field = { t: "I", v: r.i32() };
-    else if (kind === "i") field = { t: "I", v: r.u32() };
-    else if (kind === "l" || kind === "L") field = { t: "l", v: Number(r.u64()) };
-    else if (kind === "t") field = { t: "t", v: r.u8() !== 0 };
-    else if (kind === "b" || kind === "B") field = { t: "I", v: kind === "b" ? r.i8() : r.u8() };
-    else if (kind === "U") field = { t: "I", v: r.i16() };
-    else if (kind === "u") field = { t: "I", v: r.u16() };
-    else if (kind === "x") {
-      const n = r.u32();
-      const v = r.b.subarray(r.o, r.o + n);
-      r.o += n;
-      field = { t: "x", v };
-    } else if (kind === "V") field = { t: "V" };
-    else if (kind === "F") {
-      r.u32();
-      field = { t: "other", raw: "F" };
-    } else if (kind === "T") {
-      r.u64();
-      field = { t: "other", raw: "T" };
-    } else if (kind === "A") {
-      const n = r.u32();
-      const endA = r.o + n;
-      const items: Field[] = [];
-      while (r.o < endA) {
-        const itemKind = String.fromCharCode(r.u8());
-        if (itemKind === "S") items.push({ t: "S", v: text.decode(r.longstr()) });
-        else if (itemKind === "s") items.push({ t: "s", v: r.shortstr() });
-        else break;
-      }
-      r.o = endA;
-      field = { t: "A", v: items };
-    } else if (kind === "D") {
-      r.skip(5);
-      field = { t: "other", raw: "D" };
-    } else if (kind === "f") {
-      r.skip(4);
-      field = { t: "other", raw: "f" };
-    } else if (kind === "d") {
-      r.skip(8);
-      field = { t: "other", raw: "d" };
-    } else {
-      field = { t: "other", raw: kind };
-    }
-    out.push([name, field]);
+    out.push([name, readValue(r, String.fromCharCode(r.u8()))]);
   }
   r.o = end;
   return out;
@@ -235,8 +251,13 @@ function writeFieldValue(w: W, field: Field) {
     w.u8("S".charCodeAt(0));
     w.longstr(field.v);
   } else if (field.t === "s") {
-    w.u8("s".charCodeAt(0));
-    w.shortstr(field.v);
+    // RabbitMQ reads `s` as a 16-bit integer, so text goes out as `S`.
+    w.u8("S".charCodeAt(0));
+    w.longstr(field.v);
+  } else if (field.t === "x") {
+    w.u8("x".charCodeAt(0));
+    w.u32(field.v.length);
+    w.bytes(field.v);
   } else if (field.t === "I") {
     w.u8("I".charCodeAt(0));
     w.u32(field.v >>> 0);
@@ -272,8 +293,12 @@ export function writeTable(w: W, fields: Array<[string, Field]>) {
       inner.u8("S".charCodeAt(0));
       inner.longstr(field.v);
     } else if (field.t === "s") {
-      inner.u8("s".charCodeAt(0));
-      inner.shortstr(field.v);
+      inner.u8("S".charCodeAt(0));
+      inner.longstr(field.v);
+    } else if (field.t === "x") {
+      inner.u8("x".charCodeAt(0));
+      inner.u32(field.v.length);
+      inner.bytes(field.v);
     } else if (field.t === "I") {
       inner.u8("I".charCodeAt(0));
       inner.u32(field.v >>> 0);
@@ -315,7 +340,37 @@ export type ContentProps = {
   deliveryMode: number;
   priority: number;
   expiration: string;
+  /** The user-id property, or empty. RabbitMQ refuses one that is not the login. */
+  userId: string;
+  /** The reply-to property, or empty. */
+  replyTo: string;
 };
+
+/**
+ * Copy a property block with reply-to replaced.
+ *
+ * @param propRaw Flags and property values, as stored for redelivery.
+ * @param replyTo New reply-to. The flag must already be set.
+ */
+export function replaceReplyTo(propRaw: Uint8Array, replyTo: string): Uint8Array {
+  const r = new R(propRaw);
+  const flags = r.u16();
+  const take = (bit: number) => (flags & (1 << (15 - bit))) !== 0;
+  if (take(0)) r.shortstr();
+  if (take(1)) r.shortstr();
+  if (take(2)) r.o += 4 + (new R(propRaw.subarray(r.o)).u32());
+  if (take(3)) r.u8();
+  if (take(4)) r.u8();
+  if (take(5)) r.shortstr();
+  const start = r.o;
+  r.shortstr();
+  const end = r.o;
+  const w = new W();
+  w.bytes(propRaw.subarray(0, start));
+  w.shortstr(replyTo);
+  w.bytes(propRaw.subarray(end));
+  return w.concat();
+}
 
 export function readContentHeader(payload: Uint8Array): { bodySize: number; props: ContentProps } {
   const r = new R(payload);
@@ -335,14 +390,22 @@ export function readContentHeader(payload: Uint8Array): { bodySize: number; prop
   if (take(3)) deliveryMode = r.u8();
   if (take(4)) priority = r.u8();
   if (take(5)) r.shortstr();
-  if (take(6)) r.shortstr();
+  let replyTo = "";
+  if (take(6)) replyTo = r.shortstr();
   if (take(7)) expiration = r.shortstr();
+  let userId = "";
+  if (take(11)) {
+    if (take(8)) r.shortstr();
+    if (take(9)) r.u64();
+    if (take(10)) r.shortstr();
+    userId = r.shortstr();
+  }
   while (flags & 1) {
     flags = r.u16();
   }
   return {
     bodySize,
-    props: { raw: payload.subarray(flagStart), headers, deliveryMode, priority, expiration },
+    props: { raw: payload.subarray(flagStart), headers, deliveryMode, priority, expiration, userId, replyTo },
   };
 }
 
@@ -362,7 +425,9 @@ export function contentHeaderFrame(channel: number, bodySize: number, propRaw: U
   return f.concat();
 }
 
+/** One body frame. An empty body gets no frame, as the spec requires. */
 export function bodyFrame(channel: number, body: Uint8Array): Uint8Array {
+  if (body.length === 0) return new Uint8Array(0);
   const f = new W();
   f.u8(3);
   f.u16(channel);
@@ -443,7 +508,9 @@ export function encodeDeliver(
   const prop = msg.propRaw.length ? msg.propRaw : EMPTY_PROPS;
   const methodLen = 16 + tagB.length + exB.length + rkB.length;
   const headerLen = 12 + prop.length;
-  const b = new Uint8Array(8 + methodLen + 8 + headerLen + 8 + msg.body.length);
+  // An empty body has no body frame: amqplib refuses one after a size-0 header.
+  const bodyLen = msg.body.length ? 8 + msg.body.length : 0;
+  const b = new Uint8Array(8 + methodLen + 8 + headerLen + bodyLen);
   let o = 0;
   b[o++] = 1;
   putU16(b, o, channel);
@@ -482,6 +549,7 @@ export function encodeDeliver(
   b.set(prop, o);
   o += prop.length;
   b[o++] = 0xce;
+  if (!bodyLen) return b;
 
   b[o++] = 3;
   putU16(b, o, channel);

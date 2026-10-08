@@ -29,10 +29,12 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  * @param alternate Alternate-exchange name, or null.
  * @returns Nothing. An existing exchange with the same name is replaced.
  */
-export async function declareExchange(this: Broker, vhost: string, name: string, kind: string, durable: boolean, autoDelete: boolean, internal: boolean, alternate: string | null) {
+export async function declareExchange(this: Broker, vhost: string, name: string, kind: string, durable: boolean, autoDelete: boolean, internal: boolean, alternate: string | null, delayedType: string | null = null) {
   if (name.startsWith("amq.")) throw new ChanError(403, `ACCESS_REFUSED - exchange ${vhost}/${name}`);
-  const row: ExRow = { vhost, name, kind, durable, autoDelete, internal, alternate };
+  const row: ExRow = { vhost, name, kind, durable, autoDelete, internal, alternate, delayedType };
+  const created = !this.exchanges.has(this.key(vhost, name));
   this.exchanges.set(this.key(vhost, name), row);
+  if (created) this.emitEvent("exchange.created", vhost, { name, type: kind, durable, auto_delete: autoDelete, internal });
   if (durable) this.store.putExchange(row);
   await this.cluster?.replicate("exchange", row);
 }
@@ -49,7 +51,10 @@ export async function deleteExchange(this: Broker, vhost: string, name: string) 
   if (!this.exchanges.has(this.key(vhost, name))) throw new ChanError(404, `NOT_FOUND - exchange ${vhost}/${name}`);
   this.exchanges.delete(this.key(vhost, name));
   this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.exchange === name));
+  this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && (e.source === name || e.destination === name)));
   this.store.deleteExchange(vhost, name);
+  this.store.deleteExchangeBinding(vhost, name, null, null);
+  this.emitEvent("exchange.deleted", vhost, { name });
   await this.cluster?.replicate("delete_exchange", { vhost, name });
 }
 
@@ -67,6 +72,8 @@ export async function declareQueue(this: Broker, opts: {
   autoDelete: boolean;
   passive: boolean;
   args: Record<string, string | number>;
+  /** Connection id recorded as the owner of an exclusive queue. */
+  owner?: number;
 }): Promise<{ name: string; messages: number; consumers: number }> {
   let name = opts.name;
   if (!name) name = `amq.gen-${crypto.randomUUID()}`;
@@ -74,13 +81,20 @@ export async function declareQueue(this: Broker, opts: {
   const existing = this.queues.get(this.key(opts.vhost, name));
   if (opts.passive) {
     if (!existing) throw new ChanError(404, `NOT_FOUND - queue ${opts.vhost}/${name}`);
+    // RabbitMQ counts a passive declare as use of the queue for x-expires.
+    existing.lastUsed = Date.now();
     this.prom.queuesDeclared++;
     return { name, messages: existing.ready.length, consumers: existing.consumers.length };
   }
   if (existing) {
     if (existing.durable !== opts.durable) throw new ChanError(406, `PRECONDITION_FAILED - inequivalent arg durable for queue ${name}`);
+    existing.lastUsed = Date.now();
     this.prom.queuesDeclared++;
     return { name, messages: existing.ready.length, consumers: existing.consumers.length };
+  }
+  const locator = opts.args["x-queue-leader-locator"];
+  if (locator != null && locator !== "client-local" && locator !== "balanced") {
+    throw new ChanError(406, `PRECONDITION_FAILED - invalid arg 'x-queue-leader-locator' for queue '${name}' in vhost '${opts.vhost}': ${locator}`);
   }
   const qtype = String(opts.args["x-queue-type"] ?? "");
   if (!opts.durable && !opts.exclusive && qtype !== "quorum" && !this.transientNonexcl) {
@@ -89,7 +103,10 @@ export async function declareQueue(this: Broker, opts: {
   const here = [...this.queues.values()].filter((q) => q.vhost === opts.vhost).length;
   if (!this.queueAllowed(opts.vhost, here)) throw new ChanError(403, "ACCESS_REFUSED - queue limit");
   const requested = String(opts.args["x-queue-type"] ?? "");
-  if (requested && requested !== "classic" && requested !== "quorum") {
+  if (requested === "stream" && (!opts.durable || opts.exclusive || opts.autoDelete)) {
+    throw new ChanError(406, "PRECONDITION_FAILED - a stream queue must be durable, non-exclusive and not auto-delete");
+  }
+  if (requested && requested !== "classic" && requested !== "quorum" && requested !== "stream") {
     throw new ChanError(406, `PRECONDITION_FAILED - unsupported x-queue-type '${requested}'`);
   }
   let args = this.argsWithPolicy(opts.vhost, name, opts.args);
@@ -98,6 +115,7 @@ export async function declareQueue(this: Broker, opts: {
     throw new ChanError(406, "PRECONDITION_FAILED - quorum queue must be durable and non-exclusive");
   }
   if (queueType === "quorum") args = { ...args, "x-queue-type": "quorum" };
+  if (queueType === "stream") args = { ...args, "x-queue-type": "stream" };
   if (queueType === "quorum" && args["x-delivery-limit"] == null) args["x-delivery-limit"] = 20;
   const row: QueueRow = {
     vhost: opts.vhost,
@@ -123,11 +141,13 @@ export async function declareQueue(this: Broker, opts: {
   }
   const live = this.makeQueue(row, !this.isLocalHome(home));
   live.declaredArgs = { ...opts.args };
+  live.owner = opts.exclusive ? (opts.owner ?? null) : null;
   this.queues.set(this.key(opts.vhost, name), live);
   if (opts.durable) this.store.putQueue(row);
   await this.cluster?.replicate("queue", row);
   this.prom.queuesDeclared++;
   this.prom.queuesCreated++;
+  this.emitEvent("queue.created", opts.vhost, { name, durable: opts.durable, auto_delete: opts.autoDelete, exclusive: opts.exclusive });
   return { name, messages: 0, consumers: 0 };
 }
 
@@ -148,9 +168,11 @@ export async function deleteQueue(this: Broker, vhost: string, name: string): Pr
   for (const c of q.consumers) c.onCancel?.();
   q.consumers = [];
   this.queues.delete(this.key(vhost, name));
+  if (this.streams.delete(this.key(vhost, name)) || q.argsParsed.queueType === "stream") this.store.deleteStreamLog(vhost, name);
   this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.queue === name));
   this.store.deleteQueue(vhost, name);
   await this.cluster?.replicate("delete_queue", { vhost, name });
+  this.emitEvent("queue.deleted", vhost, { name });
   return n;
 }
 
@@ -173,6 +195,7 @@ export async function bind(this: Broker, vhost: string, exchange: string, queue:
     (b) => !(b.vhost === vhost && b.exchange === exchange && b.queue === queue && b.routingKey === routingKey && JSON.stringify(b.args) === argsJson),
   );
   this.bindings.push(row);
+  this.emitEvent("binding.created", vhost, { source_name: exchange, source_kind: "exchange", destination_name: queue, destination_kind: "queue", routing_key: routingKey });
   const q = this.queues.get(this.key(vhost, queue))!;
   if (q.durable || this.exchanges.get(this.key(vhost, exchange))?.durable) this.store.putBinding(row);
   await this.cluster?.replicate("binding", row);
@@ -196,6 +219,7 @@ export async function unbind(this: Broker, vhost: string, exchange: string, queu
     return JSON.stringify(b.args) !== argsJson;
   });
   this.store.deleteBinding(vhost, exchange, queue, routingKey, argsJson);
+  this.emitEvent("binding.deleted", vhost, { source_name: exchange, source_kind: "exchange", destination_name: queue, destination_kind: "queue", routing_key: routingKey });
   await this.cluster?.replicate("unbind", { vhost, exchange, queue, routingKey, args });
 }
 
@@ -207,11 +231,15 @@ export async function unbind(this: Broker, vhost: string, exchange: string, queu
  * @param routingKey Routing key.
  * @param headers Message headers used by a headers exchange.
  * @returns Destination queue names, without duplicates. A cycle in exchange links is visited once.
+ * Only the first exchange is checked for `internal`: a hop from another
+ * exchange may reach an internal one.
  */
 export function route(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
   if (exchange === "" && this.e2e.length === 0 && this.queues.has(this.key(vhost, routingKey))) {
     return [routingKey];
   }
+  const first = this.exchanges.get(this.key(vhost, exchange));
+  if (first?.internal) throw new ChanError(403, `ACCESS_REFUSED - cannot publish to internal exchange '${exchange}' in vhost '${vhost}'`);
   const seen = new Set<string>();
   const pending = [exchange];
   const out: string[] = [];
@@ -245,15 +273,18 @@ export function route(this: Broker, vhost: string, exchange: string, routingKey:
  * @param source Source exchange. The default exchange throws 406.
  * @param destination Destination exchange. The default exchange throws 406. A missing exchange throws 404.
  * @param routingKey Binding key stored on the link.
- * @returns Nothing. An identical link is replaced.
+ * @returns Nothing. An identical link is replaced. The link is stored when both exchanges are durable.
  */
 export async function bindExchange(this: Broker, vhost: string, source: string, destination: string, routingKey: string) {
   if (source === "" || destination === "") throw new ChanError(406, "PRECONDITION_FAILED - cannot bind the default exchange");
-  if (!this.exchanges.has(this.key(vhost, source)) || !this.exchanges.has(this.key(vhost, destination))) {
+  const src = this.exchanges.get(this.key(vhost, source));
+  const dst = this.exchanges.get(this.key(vhost, destination));
+  if (!src || !dst) {
     throw new ChanError(404, `NOT_FOUND - no exchange '${source}' or '${destination}' in vhost '${vhost}'`);
   }
   this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
   this.e2e.push({ vhost, source, destination, routingKey });
+  if (src.durable && dst.durable) this.store.putExchangeBinding({ vhost, source, destination, routingKey });
 }
 
 /**
@@ -267,6 +298,7 @@ export async function bindExchange(this: Broker, vhost: string, source: string, 
  */
 export async function unbindExchange(this: Broker, vhost: string, source: string, destination: string, routingKey: string) {
   this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
+  this.store.deleteExchangeBinding(vhost, source, destination, routingKey);
 }
 
 /**
@@ -276,7 +308,7 @@ export async function unbindExchange(this: Broker, vhost: string, source: string
  * @param exchange Exchange name. An empty name returns the queue named by `routingKey` when that queue exists.
  * @param routingKey Routing key matched by direct and topic bindings.
  * @param headers Message headers matched by a headers exchange.
- * @returns Matching queue names, without duplicates. A missing exchange throws 404. An internal exchange throws 403.
+ * @returns Matching queue names, without duplicates. A missing exchange throws 404.
  */
 export function routeOne(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
   if (exchange === "") {
@@ -284,12 +316,48 @@ export function routeOne(this: Broker, vhost: string, exchange: string, routingK
   }
   const ex = this.exchanges.get(this.key(vhost, exchange));
   if (!ex) throw new ChanError(404, `NOT_FOUND - exchange ${vhost}/${exchange}`);
-  if (ex.internal && exchange !== "") throw new ChanError(403, `ACCESS_REFUSED - internal exchange ${exchange}`);
   const rows = this.bindings.filter((b) => b.vhost === vhost && b.exchange === exchange);
-  if (ex.kind === "fanout") return [...new Set(rows.map((b) => b.queue))];
-  if (ex.kind === "topic") return [...new Set(rows.filter((b) => topicMatches(b.routingKey, routingKey)).map((b) => b.queue))];
-  if (ex.kind === "headers") return [...new Set(rows.filter((b) => headersMatch(b.args, headers)).map((b) => b.queue))];
+  const kind = ex.kind === "x-delayed-message" ? (ex.delayedType ?? "direct") : ex.kind;
+  if (kind === "x-consistent-hash") return consistentHash(rows, routingKey);
+  if (kind === "x-local-random") {
+    const queues = [...new Set(rows.map((b) => b.queue))];
+    return queues.length ? [queues[Math.floor(Math.random() * queues.length)]!] : [];
+  }
+  if (kind === "fanout") return [...new Set(rows.map((b) => b.queue))];
+  if (kind === "topic") return [...new Set(rows.filter((b) => topicMatches(b.routingKey, routingKey)).map((b) => b.queue))];
+  if (kind === "headers") return [...new Set(rows.filter((b) => headersMatch(b.args, headers)).map((b) => b.queue))];
   return [...new Set(rows.filter((b) => b.routingKey === routingKey).map((b) => b.queue))];
+}
+
+/**
+ * Pick one queue for `routingKey` on an `x-consistent-hash` exchange.
+ *
+ * Each binding key is a weight: a queue bound with "3" owns three of the
+ * buckets. Jump consistent hashing maps the key to a bucket, so one key always
+ * reaches the same queue while the bindings stay the same, and adding a
+ * bucket moves only the keys that land on it.
+ */
+function consistentHash(rows: BindRow[], routingKey: string): string[] {
+  const buckets: string[] = [];
+  for (const b of rows) {
+    const weight = Math.max(0, Math.floor(Number(b.routingKey)) || 0);
+    for (let i = 0; i < weight; i++) buckets.push(b.queue);
+  }
+  if (!buckets.length) return [];
+  return [buckets[jumpHash(fnv1a(routingKey), buckets.length)]!];
+}
+
+/** Lamping and Veach's jump consistent hash. */
+function jumpHash(key: number, buckets: number): number {
+  let k = BigInt(key >>> 0);
+  let b = -1;
+  let j = 0;
+  while (j < buckets) {
+    b = j;
+    k = BigInt.asUintN(64, k * 2862933555777941757n + 1n);
+    j = Math.floor(((b + 1) * 2 ** 31) / (Number(k >> 33n) + 1));
+  }
+  return b;
 }
 
 Broker.prototype.declareExchange = declareExchange;

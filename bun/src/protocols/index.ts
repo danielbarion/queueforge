@@ -7,4 +7,3 @@
 export { startMqtt } from "./mqtt.ts";
 export { startStomp } from "./stomp.ts";
 export { startStream } from "./stream.ts";
-export { driveAmqp10, type Amqp10State } from "./amqp10.ts";

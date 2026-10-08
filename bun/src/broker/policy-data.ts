@@ -139,3 +139,28 @@ export function fillPolicyArgs(
   if (empty("x-delivery-limit") && pol.deliveryLimit != null) out["x-delivery-limit"] = pol.deliveryLimit;
   return out;
 }
+
+/**
+ * Apply an operator policy as RabbitMQ does: each numeric limit it sets caps
+ * the effective value, so the lower of the queue's value and the operator's
+ * wins. Keys the operator leaves unset are unchanged.
+ *
+ * @param current Arguments after the declare and the user policy.
+ * @param op Matched operator policy, or null.
+ * @returns A new map. `current` is not mutated.
+ */
+export function capOperatorArgs(current: Record<string, string | number>, op: Policy | null): Record<string, string | number> {
+  const out = { ...current };
+  if (!op) return out;
+  const cap = (key: string, limit: number | null | undefined) => {
+    if (limit == null) return;
+    const have = out[key] == null || out[key] === "" ? null : Number(out[key]);
+    out[key] = have == null || !Number.isFinite(have) ? limit : Math.min(have, limit);
+  };
+  cap("x-message-ttl", op.messageTtl);
+  cap("x-max-length", op.maxLength);
+  cap("x-max-length-bytes", op.maxLengthBytes);
+  cap("x-expires", op.expiresMs);
+  cap("x-delivery-limit", op.deliveryLimit);
+  return out;
+}

@@ -4,6 +4,7 @@
  * These functions are the Broker methods. Loading this file installs them.
  */
 import { Broker } from "./class.ts";
+import { principalAllows, principalHasVhost, type Principal } from "../auth/backends.ts";
 import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
@@ -40,6 +41,7 @@ export function load(this: Broker) {
     this.queues.set(this.key(q.vhost, q.name), this.makeQueue(q, false));
   }
   this.bindings = this.store.listBindings();
+  this.e2e = this.store.listExchangeBindings();
   for (const p of this.store.listPolicies() as Policy[]) this.policies.push(p);
   this.applyPolicies();
   const otherMembers = this.cfg.members.some((member) => member.id !== this.cfg.nodeId);
@@ -138,8 +140,29 @@ export function ensureBuiltins(this: Broker, vhost: string) {
  */
 export async function verify(this: Broker, user: string, password: string): Promise<boolean> {
   const row = this.users.get(user);
-  if (!row) return false;
-  return rabbitPasswordHashMatches(password, row.hash);
+  if (row && rabbitPasswordHashMatches(password, row.hash)) return true;
+  // The next backends, in RabbitMQ's auth_backends order: OAuth 2.0, then LDAP.
+  if (this.oauth && password.split(".").length === 3) {
+    const got = await this.oauth.login(password);
+    if (got) {
+      this.principals.set(user || got.sub, got.principal);
+      return true;
+    }
+  }
+  if (this.ldap && !row) {
+    const p = await this.ldap.login(user, password);
+    if (p) {
+      this.principals.set(user, p);
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The OAuth or LDAP login behind `user`, when the user is not in the internal store. */
+export function principalOf(this: Broker, user: string): Principal | null {
+  if (this.users.has(user)) return null;
+  return this.principals.get(user) ?? null;
 }
 
 /**
@@ -152,6 +175,8 @@ export async function verify(this: Broker, user: string, password: string): Prom
  * @returns True when the user's pattern matches `resource`. No permission, or a pattern that is not a valid regular expression, returns false.
  */
 export function can(this: Broker, user: string, vhost: string, kind: "configure" | "write" | "read", resource = ".*"): boolean {
+  const principal = this.principalOf(user);
+  if (principal) return principalAllows(principal, vhost, kind, resource);
   const perm = this.perms.find((p) => p.user === user && p.vhost === vhost);
   if (!perm) return false;
   try {
@@ -169,6 +194,8 @@ export function can(this: Broker, user: string, vhost: string, kind: "configure"
  * @returns True when a permission row exists. The configure, write, and read patterns are not tested.
  */
 export function hasVhostAccess(this: Broker, user: string, vhost: string): boolean {
+  const principal = this.principalOf(user);
+  if (principal) return principalHasVhost(principal, vhost);
   return this.perms.some((p) => p.user === user && p.vhost === vhost);
 }
 
@@ -200,6 +227,7 @@ Broker.prototype.load = load;
 Broker.prototype.makeQueue = makeQueue;
 Broker.prototype.ensureBuiltins = ensureBuiltins;
 Broker.prototype.verify = verify;
+Broker.prototype.principalOf = principalOf;
 Broker.prototype.can = can;
 Broker.prototype.hasVhostAccess = hasVhostAccess;
 Broker.prototype.homeOf = homeOf;
@@ -211,6 +239,7 @@ declare module "./class.ts" {
     makeQueue: typeof makeQueue;
     ensureBuiltins: typeof ensureBuiltins;
     verify: typeof verify;
+    principalOf: typeof principalOf;
     can: typeof can;
     hasVhostAccess: typeof hasVhostAccess;
     homeOf: typeof homeOf;

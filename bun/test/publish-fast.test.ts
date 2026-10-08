@@ -207,6 +207,7 @@ test("a parked publish confirm is written after the fsync", async () => {
     const conn = new Conn(socket, broker);
     conn.vhost = "/";
     conn.user = "guest";
+    broker.perms = [...broker.perms, { user: "guest", vhost: "/", configure: ".*", write: ".*", read: ".*" }];
     const c = conn.ch(1);
     c.confirm = true;
     c.deliveryMode = 2;

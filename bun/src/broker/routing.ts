@@ -46,8 +46,8 @@ export function headersMatch(args: Array<[string, Field]>, headers: Array<[strin
 /**
  * Hash a string with 32-bit FNV-1a over UTF-16 code units.
  *
- * @param s Text to hash. This is not the Rust cluster hash, which uses bytes and a 64-bit FNV.
- * @returns The hash as an unsigned 32-bit number. Callers that must agree with a Rust home use `queueHome` only on the Bun side.
+ * @param s Text to hash. Used for consistent-hash routing; queue homes use {@link homeHash}.
+ * @returns The hash as an unsigned 32-bit number.
  */
 export function fnv1a(s: string): number {
   let h = 0x811c9dc5;
@@ -114,11 +114,16 @@ export function liveFrom(q: QueueLive, src: { body: Uint8Array; exchange: string
  * @returns The chosen consumer, or null when none call `want()`. Single-active returns the highest priority. Otherwise the cursor walks consumers of the highest priority.
  */
 export function pickConsumer(q: QueueLive): Consumer | null {
+  if (q.argsParsed.singleActive) {
+    // The active consumer is the earliest one with the highest priority. When
+    // its prefetch is full the message waits; another consumer never takes it.
+    let active = q.consumers[0];
+    if (!active) return null;
+    for (const c of q.consumers) if ((c.priority ?? 0) > (active.priority ?? 0)) active = c;
+    return active.want() ? active : null;
+  }
   const ready = q.consumers.filter((c) => c.want());
   if (!ready.length) return null;
-  if (q.argsParsed.singleActive) {
-    return ready.reduce((best, c) => ((c.priority ?? 0) > (best.priority ?? 0) ? c : best));
-  }
   const bestPri = Math.max(...ready.map((c) => c.priority ?? 0));
   const n = q.consumers.length;
   for (let i = 0; i < n; i++) {
@@ -134,13 +139,34 @@ export function pickConsumer(q: QueueLive): Consumer | null {
 /**
  * Pick a static quorum home from the member list.
  *
- * @param vhost Vhost joined with `name` by a NUL before hashing.
+ * @param vhost Vhost, hashed before `name`.
  * @param name Queue name. Exclusive queues do not use this helper.
  * @param members Cluster members. An empty list returns null. The list is copied and sorted by id; the caller's array is left as it was.
- * @returns The chosen member id, or null when `members` is empty. The index is `fnv1a` of the joined key modulo the sorted length.
+ * @returns The chosen member id, or null when `members` is empty. The index is {@link homeHash} modulo the sorted length, as in Rust.
  */
 export function queueHome(vhost: string, name: string, members: { id: string }[]): string | null {
   if (members.length === 0) return null;
   const sorted = [...members].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return sorted[fnv1a(`${vhost}\0${name}`) % sorted.length]!.id;
+  return sorted[Number(homeHash(vhost, name) % BigInt(sorted.length))]!.id;
+}
+
+const FNV64_OFFSET = 0xcbf29ce484222325n;
+const FNV64_PRIME = 0x100000001b3n;
+const MASK64 = (1n << 64n) - 1n;
+
+/**
+ * The cluster's classic queue home hash, the same in every implementation
+ * (docs/raft.md, section 9): 64-bit FNV-1a over the UTF-8 bytes of `vhost`,
+ * one 0xff byte, then `name`.
+ */
+export function homeHash(vhost: string, name: string): bigint {
+  let h = FNV64_OFFSET;
+  const step = (b: number) => {
+    h ^= BigInt(b);
+    h = (h * FNV64_PRIME) & MASK64;
+  };
+  for (const b of new TextEncoder().encode(vhost)) step(b);
+  step(0xff);
+  for (const b of new TextEncoder().encode(name)) step(b);
+  return h;
 }

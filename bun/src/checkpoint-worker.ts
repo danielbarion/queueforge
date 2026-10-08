@@ -8,6 +8,8 @@ import { Database } from "bun:sqlite";
 
 const open = new Map<string, Database>();
 
+declare const self: Worker;
+
 self.onmessage = (event: MessageEvent<string>) => {
   const path = event.data;
   if (!path || path === ":memory:") return;

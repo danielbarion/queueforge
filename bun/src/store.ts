@@ -14,6 +14,8 @@ export type ExRow = {
   autoDelete: boolean;
   internal: boolean;
   alternate: string | null;
+  /** `x-delayed-type` of an `x-delayed-message` exchange: how it routes once a delay ends. */
+  delayedType?: string | null;
 };
 export type QueueRow = {
   vhost: string;
@@ -144,6 +146,18 @@ export class Store {
         vhost TEXT, exchange TEXT, queue TEXT, routing_key TEXT, args TEXT,
         PRIMARY KEY (vhost, exchange, queue, routing_key, args)
       );
+      CREATE TABLE IF NOT EXISTS stream_messages (
+        vhost TEXT, queue TEXT, offset INTEGER, ts INTEGER, body BLOB, meta TEXT,
+        PRIMARY KEY (vhost, queue, offset)
+      );
+      CREATE TABLE IF NOT EXISTS parameters (
+        component TEXT, vhost TEXT, name TEXT, value TEXT,
+        PRIMARY KEY (component, vhost, name)
+      );
+      CREATE TABLE IF NOT EXISTS exchange_bindings (
+        vhost TEXT, source TEXT, destination TEXT, routing_key TEXT,
+        PRIMARY KEY (vhost, source, destination, routing_key)
+      );
       CREATE TABLE IF NOT EXISTS policies (
         vhost TEXT, name TEXT, body TEXT, PRIMARY KEY (vhost, name)
       );
@@ -152,6 +166,12 @@ export class Store {
         vhost TEXT, queue TEXT, body BLOB, meta TEXT
       );
     `);
+    // Added after the first release. An older database gains the column here.
+    try {
+      this.db.exec("ALTER TABLE exchanges ADD COLUMN delayed_type TEXT");
+    } catch {
+      /* the column already exists */
+    }
     const grouped = this.mode === "every_n_ms" || this.mode === "every_n_messages";
     if (grouped) {
       this.fastLog = FastLog.open(this.filePath);
@@ -245,11 +265,11 @@ export class Store {
   putExchange(e: ExRow) {
     this.db
       .query(
-        `INSERT INTO exchanges (vhost, name, kind, durable, auto_delete, internal, alternate)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(vhost, name) DO UPDATE SET kind=excluded.kind, durable=excluded.durable, auto_delete=excluded.auto_delete, internal=excluded.internal, alternate=excluded.alternate`,
+        `INSERT INTO exchanges (vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(vhost, name) DO UPDATE SET kind=excluded.kind, durable=excluded.durable, auto_delete=excluded.auto_delete, internal=excluded.internal, alternate=excluded.alternate, delayed_type=excluded.delayed_type`,
       )
-      .run(e.vhost, e.name, e.kind, e.durable ? 1 : 0, e.autoDelete ? 1 : 0, e.internal ? 1 : 0, e.alternate);
+      .run(e.vhost, e.name, e.kind, e.durable ? 1 : 0, e.autoDelete ? 1 : 0, e.internal ? 1 : 0, e.alternate, e.delayedType ?? null);
   }
   deleteExchange(vhost: string, name: string) {
     this.db.query("DELETE FROM exchanges WHERE vhost=? AND name=?").run(vhost, name);
@@ -257,7 +277,7 @@ export class Store {
   }
   listExchanges(): ExRow[] {
     const rows = this.db
-      .query("SELECT vhost, name, kind, durable, auto_delete, internal, alternate FROM exchanges")
+      .query("SELECT vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type FROM exchanges")
       .all() as Array<{
       vhost: string;
       name: string;
@@ -266,6 +286,7 @@ export class Store {
       auto_delete: number;
       internal: number;
       alternate: string | null;
+      delayed_type: string | null;
     }>;
     return rows.map((r) => ({
       vhost: String(r.vhost),
@@ -275,6 +296,7 @@ export class Store {
       autoDelete: !!r.auto_delete,
       internal: !!r.internal,
       alternate: r.alternate == null ? null : String(r.alternate),
+      delayedType: r.delayed_type == null ? null : String(r.delayed_type),
     }));
   }
   putQueue(q: QueueRow) {
@@ -289,6 +311,10 @@ export class Store {
     };
     if (q.durable) this.durableWrite(write);
     else write();
+  }
+  deleteStreamLog(vhost: string, queue: string) {
+    this.db.query("DELETE FROM stream_messages WHERE vhost=? AND queue=?").run(vhost, queue);
+    this.deleteParameter("stream-next", vhost, queue);
   }
   deleteQueue(vhost: string, name: string) {
     // Rows already in the overwrite log need a delete record there too, or a
@@ -366,6 +392,66 @@ export class Store {
       routingKey: String(r.routing_key),
       args: JSON.parse(String(r.args || "[]")) as BindRow["args"],
     }));
+  }
+  /** Append one stream entry. */
+  appendStreamEntry(vhost: string, queue: string, e: { offset: number; ts: number; body: Uint8Array; exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array }) {
+    const meta = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64") });
+    this.db.query("INSERT OR REPLACE INTO stream_messages (vhost, queue, offset, ts, body, meta) VALUES (?, ?, ?, ?, ?, ?)").run(vhost, queue, e.offset, e.ts, e.body, meta);
+  }
+  /** Every stored entry of one stream, oldest first. */
+  listStreamEntries(vhost: string, queue: string) {
+    const rows = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset").all(vhost, queue) as Array<{ offset: number; ts: number; body: Uint8Array; meta: string }>;
+    return rows.map((r) => {
+      const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string };
+      return { offset: Number(r.offset), ts: Number(r.ts), body: new Uint8Array(r.body), exchange: m.x, routingKey: m.k, headers: m.h ?? [], propRaw: new Uint8Array(Buffer.from(m.p, "base64")) };
+    });
+  }
+  /** Where an empty stream continues: one past the last offset it ever stored. */
+  streamNextOffset(vhost: string, queue: string): number {
+    const row = this.db.query("SELECT value FROM parameters WHERE component='stream-next' AND vhost=? AND name=?").get(vhost, queue) as { value: string } | null;
+    return row ? Number(row.value) : 0;
+  }
+  /** Drop entries below `offset`, remembering where the stream continues. */
+  deleteStreamEntriesBefore(vhost: string, queue: string, offset: number) {
+    this.db.query("DELETE FROM stream_messages WHERE vhost=? AND queue=? AND offset<?").run(vhost, queue, offset);
+    this.putParameter("stream-next", vhost, queue, String(offset));
+  }
+  /** Store one runtime parameter, such as a shovel definition, as JSON text. */
+  putParameter(component: string, vhost: string, name: string, value: string) {
+    this.db.query("INSERT OR REPLACE INTO parameters (component, vhost, name, value) VALUES (?, ?, ?, ?)").run(component, vhost, name, value);
+  }
+  /** Remove one runtime parameter. Returns true when a row was removed. */
+  deleteParameter(component: string, vhost: string, name: string): boolean {
+    return this.db.query("DELETE FROM parameters WHERE component=? AND vhost=? AND name=?").run(component, vhost, name).changes > 0;
+  }
+  listParameters(component: string): Array<{ vhost: string; name: string; value: string }> {
+    const rows = this.db.query("SELECT vhost, name, value FROM parameters WHERE component=?").all(component) as Array<{ vhost: string; name: string; value: string }>;
+    return rows.map((r) => ({ vhost: String(r.vhost), name: String(r.name), value: String(r.value) }));
+  }
+  /** Store one exchange-to-exchange binding. */
+  putExchangeBinding(e: { vhost: string; source: string; destination: string; routingKey: string }) {
+    this.db
+      .query("INSERT OR REPLACE INTO exchange_bindings (vhost, source, destination, routing_key) VALUES (?, ?, ?, ?)")
+      .run(e.vhost, e.source, e.destination, e.routingKey);
+  }
+  /** Remove one exchange-to-exchange binding, or with a null key every link touching `source` as source or destination. */
+  deleteExchangeBinding(vhost: string, source: string, destination: string | null, routingKey: string | null) {
+    if (destination == null) {
+      this.db.query("DELETE FROM exchange_bindings WHERE vhost=? AND (source=? OR destination=?)").run(vhost, source, source);
+      return;
+    }
+    this.db
+      .query("DELETE FROM exchange_bindings WHERE vhost=? AND source=? AND destination=? AND routing_key=?")
+      .run(vhost, source, destination, routingKey ?? "");
+  }
+  listExchangeBindings(): Array<{ vhost: string; source: string; destination: string; routingKey: string }> {
+    const rows = this.db.query("SELECT vhost, source, destination, routing_key FROM exchange_bindings").all() as Array<{
+      vhost: string;
+      source: string;
+      destination: string;
+      routing_key: string;
+    }>;
+    return rows.map((r) => ({ vhost: String(r.vhost), source: String(r.source), destination: String(r.destination), routingKey: String(r.routing_key) }));
   }
   insertMessage(vhost: string, queue: string, body: Uint8Array, meta: string): number {
     if (this.mode === "every_n_ms" || this.mode === "every_n_messages") {

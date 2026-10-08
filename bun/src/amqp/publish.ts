@@ -51,6 +51,8 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
   c.deliveryMode = parsed.props.deliveryMode;
   c.priority = parsed.props.priority;
   c.expiration = parsed.props.expiration;
+  c.userId = parsed.props.userId;
+  c.replyTo = parsed.props.replyTo;
   c.got = 0;
   c.chunks = [];
   if (c.bodySize === 0) return this.finishPublish(channel, c);
@@ -83,13 +85,16 @@ export function onBody(this: Conn, channel: number, payload: Uint8Array): Promis
 export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unknown> | void {
   const pub = c.publish;
   if (!pub) return;
+  // A memory or disk alarm holds the publish. The parser awaits this, so the
+  // connection reads nothing more until the alarm clears, as in RabbitMQ.
+  if (this.broker.blocked) return this.broker.whenUnblocked().then(() => this.finishPublish(channel, c));
   if (!c.flow) {
     c.publish = null;
     return;
   }
   const body = concat(c.chunks);
   const headers = c.headers;
-  const propRaw = c.propRaw.length ? c.propRaw : emptyProps();
+  let propRaw = c.propRaw.length ? c.propRaw : emptyProps();
   const persistent = c.deliveryMode === 2;
   const priority = c.priority;
   const expiration = c.expiration;
@@ -97,8 +102,48 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   if (pub.immediate) {
     return this.chanClose(channel, 540, "NOT_IMPLEMENTED - immediate=true", 60, 40);
   }
+  // The last exchange checked is remembered, so a publish burst to one
+  // exchange pays for the lookup and the permission test once.
+  if (pub.exchange !== this.writeEx || this.permRef !== this.broker.perms || this.permLen !== this.broker.perms.length) {
+    if (pub.exchange !== "") {
+      const ex = this.broker.exchanges.get(this.broker.key(this.vhost, pub.exchange));
+      if (!ex) return this.chanClose(channel, 404, `NOT_FOUND - no exchange '${pub.exchange}' in vhost '${this.vhost}'`, 60, 40);
+      if (ex.internal) {
+        return this.chanClose(channel, 403, `ACCESS_REFUSED - cannot publish to internal exchange '${pub.exchange}' in vhost '${this.vhost}'`, 60, 40);
+      }
+    }
+    const resource = pub.exchange || "amq.default";
+    if (!this.allowed("write", resource)) {
+      return this.chanClose(
+        channel,
+        403,
+        `ACCESS_REFUSED - write access to exchange '${resource}' in vhost '${this.vhost}' refused for user '${this.user}'`,
+        60,
+        40,
+      );
+    }
+    this.writeEx = pub.exchange;
+  }
+  if (c.userId && c.userId !== this.user) {
+    return this.chanClose(channel, 406, `PRECONDITION_FAILED - user_id property set to '${c.userId}' but authenticated user was '${this.user}'`, 60, 40);
+  }
   if (!this.broker.topicWriteAllowed(this.user, this.vhost, pub.exchange, pub.routingKey)) {
     return this.chanClose(channel, 403, "ACCESS_REFUSED - write access to topic refused", 60, 40);
+  }
+  // Direct reply-to: rewrite the requester's reply-to, or hand a reply to it.
+  if (c.replyTo || (pub.exchange === "" && pub.routingKey.startsWith("amq.rabbitmq.reply-to."))) {
+    let routed: Uint8Array | "sent" | "dropped";
+    try {
+      routed = this.routeReply(c, pub.exchange, pub.routingKey, body, propRaw);
+    } catch (err) {
+      if (err instanceof ChanError) return this.chanClose(channel, err.code, err.message, 60, 40);
+      throw err;
+    }
+    if (routed === "sent" || routed === "dropped") {
+      if (c.confirm) return this.send(encodeSettle(channel, c.nextPub++, false));
+      return;
+    }
+    propRaw = routed;
   }
   // Outside a transaction the tag is the arrival order, before the fsync wait.
   // Inside a transaction the tag is assigned when the op runs, at commit.
@@ -149,7 +194,7 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   const fail = (err: unknown) => {
     const code = err instanceof ChanError ? err.code : 541;
     const text = err instanceof ChanError ? err.message : "INTERNAL_ERROR";
-    console.error("publish confirm failed", err);
+    if (!(err instanceof ChanError)) console.error("publish failed", err);
     return this.chanClose(channel, code, text, 60, 40);
   };
   if (c.tx) {
@@ -171,7 +216,12 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
     });
     return;
   }
-  return run();
+  try {
+    const pending = run();
+    return pending instanceof Promise ? pending.catch(fail) : pending;
+  } catch (err) {
+    return fail(err);
+  }
 }
 
 Conn.prototype.beginPublish = beginPublish;

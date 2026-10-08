@@ -131,7 +131,16 @@ export function exportDefinitions(this: Broker) {
       destination_type: "queue",
       routing_key: b.routingKey,
       arguments: argMap(b.args),
-    })),
+    })).concat(
+      this.e2e.map((e) => ({
+        source: e.source,
+        vhost: e.vhost,
+        destination: e.destination,
+        destination_type: "exchange",
+        routing_key: e.routingKey,
+        arguments: {},
+      })),
+    ),
     policies: this.policies.map((p) => ({
       vhost: p.vhost,
       name: p.name,
@@ -182,7 +191,7 @@ export async function importDefinitions(this: Broker, body: {
   for (const p of body.permissions ?? []) await this.putPerm(p);
   for (const ex of body.exchanges ?? []) {
     if (!ex.name || ex.name.startsWith("amq.")) continue;
-    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, null);
+    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, null, (ex as { arguments?: Record<string, unknown> }).arguments?.["x-delayed-type"] as string ?? null);
   }
   for (const p of body.policies ?? []) {
     const apply = p["apply-to"] ?? "all";
@@ -231,8 +240,12 @@ export async function importDefinitions(this: Broker, body: {
     });
   }
   for (const b of body.bindings ?? []) {
-    if (b.destination_type && b.destination_type !== "queue") continue;
     if (!b.source) continue;
+    if (b.destination_type === "exchange") {
+      await this.bindExchange(b.vhost, b.source, b.destination, b.routing_key ?? "");
+      continue;
+    }
+    if (b.destination_type && b.destination_type !== "queue") continue;
     const args = Object.entries(b.arguments ?? {}).map(([k, v]) =>
       [k, typeof v === "number" ? { t: "I" as const, v } : { t: "S" as const, v: String(v) }] as [string, Field],
     );
@@ -256,7 +269,7 @@ export function listUsers(this: Broker) {
  * @returns The tag list. An unknown user returns an empty list, not null.
  */
 export function userTags(this: Broker, name: string) {
-  return this.users.get(name)?.tags ?? [];
+  return this.users.get(name)?.tags ?? this.principals.get(name)?.tags ?? [];
 }
 
 /**
@@ -266,8 +279,13 @@ export function userTags(this: Broker, name: string) {
  */
 export function sweep(this: Broker) {
   const now = Date.now();
+  this.checkAlarms();
   for (const q of [...this.queues.values()]) {
     if (!this.isLocalHome(q.home)) continue;
+    if (q.argsParsed.queueType === "stream") {
+      this.trimStream(q);
+      continue;
+    }
     this.pump(q);
     const expires = q.argsParsed.expiresMs;
     if (expires != null && q.consumers.length === 0 && now - q.lastUsed >= expires) {

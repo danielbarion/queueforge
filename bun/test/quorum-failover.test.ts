@@ -70,8 +70,8 @@ ${members}
 
 test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async () => {
   const shapes: Array<{ label: string; kinds: Array<"rust" | "bun">; base: number }> = [
-    { label: "rust-rust-bun", kinds: ["rust", "rust", "bun"], base: 49110 },
-    { label: "bun-bun-rust", kinds: ["bun", "bun", "rust"], base: 49310 },
+    { label: "rust-rust-bun", kinds: ["rust", "rust", "bun"], base: 41110 },
+    { label: "bun-bun-rust", kinds: ["bun", "bun", "rust"], base: 41510 },
   ];
   for (const shape of shapes) {
     const ids = ["a", "b", "c"];
@@ -124,6 +124,9 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
               got = { body: msg.content.toString(), key: msg.fields.routingKey };
               ch.ack(msg);
             }
+            // Closing the channel first sends the ack; a bare connection.close
+            // drops it, and the body comes back, on RabbitMQ too.
+            await ch.close();
             await conn.close();
           } catch {
             /* peer still electing */
@@ -149,6 +152,7 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
       if (again) opened.ch.ack(again);
       const duplicate = await opened.ch.get("qq-durable", { noAck: false });
       expect(duplicate).toBe(false);
+      await opened.ch.close();
       await opened.conn.close();
       console.log(`${shape.label} restart returned ${returned} and not ${acked}`);
       kids[0]!.kill("SIGKILL");
@@ -171,7 +175,7 @@ test("rust-rust-bun and bun-bun-rust keep a confirmed body after kill -9", async
 test("classic confirms wait until the fsync that covers the publish", async () => {
   for (const policy of ["every_n_ms", "always", "every_n_messages"] as const) {
     const dir = mkdtempSync(join(tmpdir(), `qf-classic-${policy}-`));
-    const amqpPort = policy === "every_n_ms" ? 49420 : policy === "always" ? 49430 : 49440;
+    const amqpPort = policy === "every_n_ms" ? 41920 : policy === "always" ? 41930 : 41940;
     const mgmt = amqpPort + 100;
     const cfg = join(dir, "qf.toml");
     await Bun.write(

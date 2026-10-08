@@ -51,6 +51,9 @@ test("admin pages, exchange bind flow, and port-scoped sessions", async () => {
   const child = await boot(portA, portM);
   const base = `http://127.0.0.1:${portM}`;
   try {
+    const identity = await fetch(`${base}/api/identity`);
+    expect(identity.status).toBe(200);
+    expect(await identity.json()).toEqual({ product_name: "QueueForge", kind: "bun" });
     async function login(host: string) {
       const res = await fetch(`${base}/api/login`, {
         method: "POST",
@@ -284,7 +287,8 @@ test("channels, policies, limits, flags, and live connections", async () => {
     expect((await call("PUT", "/api/queues/%2F/pol.op.q", { durable: true })).status).toBe(201);
     const queues = await call("GET", "/api/queues/%2F");
     const q = queues.json.items.find((row: { name: string }) => row.name === "pol.op.q");
-    expect(q.arguments["x-message-ttl"]).toBe(2500);
+    // RabbitMQ applies an operator policy as a cap: the lower TTL (the user policy's 1000) wins.
+    expect(q.arguments["x-message-ttl"]).toBe(1000);
     expect(q.arguments["x-dead-letter-exchange"]).toBe("amq.direct");
     expect(q.arguments["x-max-length"]).toBe(9);
     const detail = await call("GET", "/api/queues/%2F/pol.op.q");

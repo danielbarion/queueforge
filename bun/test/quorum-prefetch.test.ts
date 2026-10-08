@@ -58,6 +58,8 @@ test("a slow quorum drop keeps unacked inside prefetch", async () => {
       },
     } as unknown as Cluster;
     const conn = new Conn({ write: (frame) => frame.length, end() {} }, broker);
+    conn.user = "guest";
+    broker.perms = [...broker.perms, { user: "guest", vhost: "/", configure: ".*", write: ".*", read: ".*" }];
     const ch = conn.ch(1);
     ch.prefetch = 2;
     const payload = method(60, 20, (w) => {

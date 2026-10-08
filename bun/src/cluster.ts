@@ -4,6 +4,8 @@ import type { Broker, LiveMsg } from "./broker/index.ts";
 import { decodeQuorumAppend } from "./wire.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";
+import { Consensus, helloFeatures } from "./raft/glue.ts";
+import { META } from "./raft/node.ts";
 
 type Waiter = {
   resolve: (v: unknown) => void;
@@ -68,12 +70,23 @@ export class Cluster {
   private nextDelivery = 1;
   /** `${vhost}\\0${queue}\\0${deliveryId}` → local message id for a remote ack. */
   private remoteAcks = new Map<string, string>();
+  /** Same key → the remote consumer session, so `requeue` finds what a closed channel held. */
+  private remoteSessions = new Map<string, number>();
   private subs = new Map<number, (msg: LiveMsg) => void>();
   private server: Server | null = null;
   private sockets: Socket[] = [];
   private dialTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private broker: Broker) {}
+  /** Raft groups, once every voter advertises the `raft` feature. */
+  consensus: Consensus;
+
+  constructor(private broker: Broker) {
+    const self = () => this.broker.cfg.nodeId;
+    // One-way (docs/raft.md, section 1). A peer that is not connected misses it; Raft resends.
+    this.consensus = new Consensus(broker, (to, payload) =>
+      this.peers.get(to)?.write({ v: 1, op: "raft", id: 0, from: self(), nodeId: self(), payload }),
+    );
+  }
 
   start() {
     this.loadMembers();
@@ -103,6 +116,7 @@ export class Cluster {
     });
     server.listen(port, host);
     this.server = server;
+    this.consensus.start();
     this.dialTimer = setInterval(() => this.dial(), 200);
     this.dial();
   }
@@ -115,6 +129,7 @@ export class Cluster {
     if (members.length === 0) return;
     this.broker.cfg.members = members;
     void Bun.write(`${this.broker.cfg.dataDir}/members.json`, JSON.stringify(members));
+    this.consensus?.membersChanged();
   }
 
   private loadMembers() {
@@ -135,6 +150,7 @@ export class Cluster {
     this.sockets = [];
     this.server?.close();
     this.server = null;
+    this.consensus.stop();
   }
 
   private dial() {
@@ -160,7 +176,7 @@ export class Cluster {
         const peer: Peer = { id: member.id, write, pending: new Map(), token };
         this.peers.set(member.id, peer);
         this.broker.promoteIfLeader();
-        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed } });
+        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: helloFeatures() } });
       });
       const dropIfCurrent = () => {
         if (this.peers.get(member.id)?.token === token) this.peers.delete(member.id);
@@ -252,8 +268,13 @@ export class Cluster {
         ok: true,
         from: this.broker.cfg.nodeId,
         nodeId: this.broker.cfg.nodeId,
-        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot(), consumed: this.broker.consumed },
+        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: helloFeatures() },
       });
+      this.consensus.noteFeatures(id, payload);
+      return;
+    }
+    if (op === "raft") {
+      this.consensus.step(String(msg.from ?? msg.nodeId ?? fallbackId), (msg.payload ?? {}) as Parameters<Consensus["step"]>[1]);
       return;
     }
     if (op === "reply") {
@@ -272,12 +293,13 @@ export class Cluster {
         /* a peer of the other implementation keeps its own files */
       }
       this.broker.applyConsumed(payload.consumed);
+      this.consensus.noteFeatures(String(msg.from ?? msg.nodeId ?? id ?? ""), payload as Record<string, unknown>);
       if (Array.isArray(payload.consumed) || Number(msg.id) === 0) {
         this.broker.noteQuorumPeer(String(msg.from ?? msg.nodeId ?? ""));
       }
       return;
     }
-    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats") {
+    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats" || op === "delete" || op === "settle" || op === "requeue" || op === "set-args" || op === "join" || op === "forget") {
       void this.handle(op, msg).then(
         (payload) => write({ op: "reply", id: msg.id, ok: true, payload, from: this.broker.cfg.nodeId }),
         (err) => write({ op: "reply", id: msg.id, ok: false, error: String(err), from: this.broker.cfg.nodeId }),
@@ -316,6 +338,7 @@ export class Cluster {
           if (left != null) left = Math.max(0, left - 1);
           const deliveryId = this.nextDelivery++;
           this.remoteAcks.set(`${vhost}\0${queue}\0${deliveryId}`, m.id);
+          this.remoteSessions.set(`${vhost}\0${queue}\0${deliveryId}`, session);
           const bodyB64 = Buffer.from(m.body).toString("base64");
           const propB64 = Buffer.from(m.propRaw).toString("base64");
           write({
@@ -485,10 +508,59 @@ export class Cluster {
       const queue = String(p.queue);
       const delivery = p.delivery_id ?? p.id;
       const mapped = this.remoteAcks.get(`${vhost}\0${queue}\0${delivery}`);
-      if (mapped != null) this.remoteAcks.delete(`${vhost}\0${queue}\0${delivery}`);
+      if (mapped != null) {
+        this.remoteAcks.delete(`${vhost}\0${queue}\0${delivery}`);
+        this.remoteSessions.delete(`${vhost}\0${queue}\0${delivery}`);
+      }
       const id = mapped ?? String(p.id ?? delivery ?? "");
       if (op === "ack") await this.broker.ack(vhost, queue, id);
       else await this.broker.nack(vhost, queue, id, p.requeue !== false);
+      return true;
+    }
+    if (op === "delete") {
+      // Rust's queue.delete on the home. Same checks as a local delete.
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const vhost = String(p.vhost ?? "/");
+      const queue = String(p.queue ?? p.name ?? "");
+      const q = this.broker.queues.get(this.broker.key(vhost, queue));
+      if (!q) return { message_count: 0 };
+      if (p.if_unused === true && q.consumers.length > 0) throw new Error(`PRECONDITION_FAILED - queue '${queue}' in vhost '${vhost}' in use`);
+      if (p.if_empty === true && q.ready.length > 0) throw new Error(`PRECONDITION_FAILED - queue '${queue}' in vhost '${vhost}' not empty`);
+      return { message_count: await this.broker.deleteQueue(vhost, queue) };
+    }
+    if (op === "settle") {
+      // A no-ack delivery to a remote consumer is settled once written.
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const vhost = String(p.vhost);
+      const queue = String(p.queue);
+      const key = `${vhost}\0${queue}\0${p.delivery_id ?? p.id}`;
+      const id = this.remoteAcks.get(key);
+      if (id == null) return true;
+      this.remoteAcks.delete(key);
+      this.remoteSessions.delete(key);
+      await this.broker.ack(vhost, queue, id);
+      return true;
+    }
+    if (op === "requeue") {
+      // A remote channel closed: requeue what its sessions still hold.
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const vhost = String(p.vhost);
+      const queue = String(p.queue);
+      const sessions = new Set(((p.sessions as unknown[]) ?? []).map(Number));
+      const prefix = `${vhost}\0${queue}\0`;
+      for (const [key, session] of [...this.remoteSessions]) {
+        if (!key.startsWith(prefix) || !sessions.has(session)) continue;
+        const id = this.remoteAcks.get(key);
+        this.remoteAcks.delete(key);
+        this.remoteSessions.delete(key);
+        if (id != null) await this.broker.nack(vhost, queue, id, true);
+      }
+      return true;
+    }
+    if (op === "set-args") {
+      // A Rust policy change for a queue homed here. Bun applies the same
+      // policies from its own table, so this only re-reads them.
+      this.broker.applyPolicies();
       return true;
     }
     if (op === "credit" || op === "set_credit") {
@@ -533,12 +605,20 @@ export class Cluster {
   }
 
   async replicate(kind: string, payload: unknown) {
+    // With Raft on, metadata commits through the meta log (docs/raft.md,
+    // section 5) and is still pushed, so a peer applies it before the next
+    // heartbeat carries the commit. Applying twice is a no-op.
+    const node = this.consensus.node;
+    if (node && kind !== "members") {
+      await node.propose(META, kind, payload).catch((err) => console.error("raft meta proposal", String(err)));
+    }
     await Promise.all(
       [...this.peers.values()].filter((p) => p.id !== this.broker.cfg.nodeId).map((peer) => {
         const id = this.seq++;
         return new Promise((resolve) => {
           armWaiter(peer, id, resolve, () => resolve(null), () => resolve(null));
-          peer.write({ op: "apply", id, kind, payload, from: this.broker.cfg.nodeId });
+          // kind and body inside payload too: PHP reads only payload.kind/body.
+          peer.write({ op: "apply", id, kind, payload: { kind, body: payload }, from: this.broker.cfg.nodeId });
         });
       }),
     );

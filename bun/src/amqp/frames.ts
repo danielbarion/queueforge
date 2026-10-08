@@ -4,7 +4,7 @@
  * Owns the outbound queue and the inbound byte buffer. Method bodies live
  * in the sibling files; this file only frames them.
  */
-import { driveAmqp10 } from "../protocols/index.ts";
+import { Amqp10Session } from "../amqp10/session.ts";
 import { method, methodFrame, R, writeTable } from "../codec.ts";
 import { ChanError } from "../broker/index.ts";
 import { Conn } from "./listen.ts";
@@ -24,6 +24,14 @@ export function send(this: Conn, frame: Uint8Array) {
 
 /** Bytes gathered before one write. A larger burst still flushes in order. */
 const COALESCE_LIMIT = 64 * 1024;
+
+/**
+ * One gather buffer for the whole process. A write finishes synchronously, so
+ * it is free again when `flushCoalesced` returns; a partial write copies its
+ * tail out. A fresh zero-filled buffer per flush showed up in the profile.
+ */
+let gather = new Uint8Array(4 * COALESCE_LIMIT);
+const GATHER_MAX = 1024 * 1024;
 
 /**
  * Queue one microtask that writes every frame staged on this turn.
@@ -75,11 +83,18 @@ function flushCoalesced(this: Conn) {
   this.staged = [];
   this.stagedBytes = 0;
   let buf: Uint8Array;
+  let shared = false;
   if (parts.length === 1) buf = parts[0]!;
   else {
     let n = 0;
     for (let i = 0; i < parts.length; i++) n += parts[i]!.length;
-    buf = new Uint8Array(n);
+    if (this.reuseWrites && n <= GATHER_MAX) {
+      if (gather.length < n) gather = new Uint8Array(Math.min(GATHER_MAX, Math.max(n, gather.length * 2)));
+      buf = gather.subarray(0, n);
+      shared = true;
+    } else {
+      buf = new Uint8Array(n);
+    }
     let o = 0;
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]!;
@@ -92,7 +107,8 @@ function flushCoalesced(this: Conn) {
     this.socket.flush?.();
     return;
   }
-  this.outbound.push(wrote > 0 ? buf.subarray(wrote) : buf);
+  const tail = wrote > 0 ? buf.subarray(wrote) : buf;
+  this.outbound.push(shared ? tail.slice() : tail);
   this.outHead = 0;
 }
 
@@ -181,17 +197,29 @@ const SOCKET_WAIT_MS = 1;
  */
 const HOLD_MS = 20;
 
+/** A connection.close-ok frame (type 1, channel 0, class 10 method 51) in `data`. */
+function hasCloseOk(data: Uint8Array): boolean {
+  for (let i = 0; i + 11 <= data.length; i++) {
+    if (data[i] === 1 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 7] === 0 && data[i + 8] === 10 && data[i + 9] === 0 && data[i + 10] === 51) return true;
+  }
+  return false;
+}
+
 /**
  * Append inbound bytes and handle every complete frame they contain.
  *
  * @param data The next chunk from the socket. It may hold a partial frame.
  * An AMQP 0-9-1 header switches the connection into frame mode and sends
- * `connection.start`. An AMQP 1.0 header is handed to `driveAmqp10`.
+ * `connection.start`. An AMQP 1.0 header hands the connection to `Amqp10Session`.
  * A bad frame end closes the connection. A channel error closes channel 0
  * with that code; any other error closes the connection with 541.
  * A second call while a burst is running queues `data` and shares that run.
  */
 export function push(this: Conn, data: Uint8Array): Promise<void> {
+  if (this.closeOkWait) {
+    if (hasCloseOk(data)) this.closeOkWait();
+    return Promise.resolve();
+  }
   if (data.length) {
     this.fresh.push(data);
     const wake = this.wakeInbound;
@@ -345,6 +373,59 @@ function absorbFresh(this: Conn) {
 }
 
 /**
+ * Move this connection to the queue's home before the naming frame is handled.
+ *
+ * One move per connection. The frame stays in `buf` so the home parses it.
+ * Returns true when the socket has been handed off and this process must stop.
+ */
+function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
+  if (!this.handed || this.migrated || buf.length - at < 11 || buf[at] !== 1) return false;
+  const size = (buf[at + 3]! << 24) | (buf[at + 4]! << 16) | (buf[at + 5]! << 8) | buf[at + 6]!;
+  if (buf.length - at < 8 + size) return false;
+  const cls = (buf[at + 7]! << 8) | buf[at + 8]!;
+  const meth = (buf[at + 9]! << 8) | buf[at + 10]!;
+  const args = new R(buf.subarray(at + 11, at + 7 + size));
+  let queue = "";
+  if (cls === 60 && meth === 40) {
+    args.u16();
+    const exchange = args.shortstr();
+    if (exchange !== "") return false;
+    queue = args.shortstr();
+  } else if (cls === 60 && meth === 20) {
+    args.u16();
+    queue = args.shortstr();
+  } else {
+    return false;
+  }
+  const home = this.broker.homeOf(this.vhost || "/", queue, false);
+  if (!home || this.broker.isLocalHome(home)) return false;
+  // The home parses from the naming frame on.
+  if (at > 0) this.buf = buf.subarray(at);
+  this.migrated = true;
+  this.closed = true;
+  this.connClosed = true;
+  const state = {
+    user: this.user,
+    vhost: this.vhost || "/",
+    channels: [...this.channels.entries()].map(([id, ch]) => ({
+      id,
+      confirm: ch.confirm,
+      prefetch: ch.prefetch,
+    })),
+  };
+  const bytes = Buffer.from(this.buf);
+  const socket = this.handed;
+  this.handed = null;
+  socket.pause();
+  socket.removeAllListeners("data");
+  (process as unknown as { send?: (message: unknown, handle?: unknown) => void }).send?.(
+    { type: "migrate", home, state, bytes },
+    socket,
+  );
+  return true;
+}
+
+/**
  * Handle every complete frame already buffered.
  *
  * @returns Nothing. A partial frame stays in `buf`. Persistent publishes are
@@ -353,7 +434,9 @@ function absorbFresh(this: Conn) {
 async function parseAvailable(this: Conn): Promise<void> {
   absorbFresh.call(this);
   if (this.stage === "amqp10") {
-    this.buf = await driveAmqp10(this.buf, this.amqp10, (frame) => this.socket.write(frame), this.broker);
+    const bytes = this.buf;
+    this.buf = new Uint8Array(0);
+    this.amqp10!.feed(bytes);
     return;
   }
   if (this.stage === "header") {
@@ -362,7 +445,14 @@ async function parseAvailable(this: Conn): Promise<void> {
     const amqp10 = head[0] === 65 && head[1] === 77 && head[2] === 81 && head[3] === 80 && ((head[4] === 3 && head[5] === 1 && head[6] === 0 && head[7] === 0) || (head[4] === 0 && head[5] === 1 && head[6] === 0 && head[7] === 0));
     if (amqp10) {
       this.stage = "amqp10";
-      this.buf = await driveAmqp10(this.buf, this.amqp10, (frame) => this.socket.write(frame), this.broker);
+      this.amqp10 = new Amqp10Session(
+        this.broker,
+        (bytes) => void this.send(bytes),
+        () => this.socket.end(),
+      );
+      const bytes = this.buf;
+      this.buf = new Uint8Array(0);
+      this.amqp10.feed(bytes);
       return;
     }
     const ok = head[0] === 65 && head[1] === 77 && head[2] === 81 && head[3] === 80 && head[4] === 0 && head[5] === 0 && head[6] === 9 && head[7] === 1;
@@ -381,65 +471,113 @@ async function parseAvailable(this: Conn): Promise<void> {
           writeTable(w, [
             ["capabilities", { t: "F", v: [
               ["publisher_confirms", { t: "t", v: true }],
-              ["consumer_cancel_notify", { t: "t", v: true }],
+              ["exchange_exchange_bindings", { t: "t", v: true }],
               ["basic.nack", { t: "t", v: true }],
+              ["consumer_cancel_notify", { t: "t", v: true }],
+              ["connection.blocked", { t: "t", v: true }],
+              ["consumer_priorities", { t: "t", v: true }],
+              ["authentication_failure_close", { t: "t", v: true }],
+              ["per_consumer_qos", { t: "t", v: true }],
+              ["direct_reply_to", { t: "t", v: true }],
             ] }],
+            ["product", { t: "S", v: "QueueForge" }],
+            ["platform", { t: "S", v: `Bun ${Bun.version}` }],
           ]);
-          w.longstr("PLAIN");
+          w.longstr(this.peerCN ? "PLAIN EXTERNAL" : "PLAIN");
           w.longstr("en_US");
         }),
       ),
     );
   }
-  while (!this.connClosed) {
-    absorbFresh.call(this);
-    if (this.buf.length < 7) return;
-    const r = new R(this.buf);
-    const type = r.u8();
-    const channel = r.u16();
-    const size = r.u32();
-    if (this.buf.length < 7 + size + 1) return;
-    const payload = this.buf.subarray(7, 7 + size);
-    const end = this.buf[7 + size];
-    this.buf = this.buf.subarray(8 + size);
-    if (end !== FRAME_END) {
-      await this.connClose(501, "FRAME_ERROR");
-      return;
+  // Frames are read at `pos` in a local view. `this.buf` is written back only
+  // before an await, a handoff, or a return: two views per frame showed up
+  // in the profile.
+  let buf = this.buf;
+  let pos = 0;
+  const commit = () => {
+    if (pos > 0) this.buf = buf.subarray(pos);
+    buf = this.buf;
+    pos = 0;
+  };
+  try {
+    while (!this.connClosed) {
+      if (this.fresh.length) {
+        commit();
+        absorbFresh.call(this);
+        buf = this.buf;
+      }
+      const rest = buf.length - pos;
+      if (rest < 7) return;
+      if (tryMigrate.call(this, buf, pos)) {
+        pos = 0;
+        buf = this.buf;
+        return;
+      }
+      const type = buf[pos]!;
+      const channel = (buf[pos + 1]! << 8) | buf[pos + 2]!;
+      const size = ((buf[pos + 3]! << 24) | (buf[pos + 4]! << 16) | (buf[pos + 5]! << 8) | buf[pos + 6]!) >>> 0;
+      if (rest < 8 + size) return;
+      const start = pos + 7;
+      const payload = buf.subarray(start, start + size);
+      const end = buf[start + size];
+      pos = start + size + 1;
+      if (end !== FRAME_END) {
+        commit();
+        await this.connClose(501, "FRAME_ERROR");
+        return;
+      }
+      if (type === 8) continue;
+      // basic.publish, its header, and its body do not await. Awaiting a resolved
+      // async function still allocates a promise per frame and caps the pipeline.
+      if (
+        type === 1 &&
+        payload.length >= 4 &&
+        payload[0] === 0 &&
+        payload[1] === 60 &&
+        payload[2] === 0 &&
+        payload[3] === 40
+      ) {
+        this.beginPublish(this.ch(channel), payload);
+        continue;
+      }
+      if (
+        type === 1 &&
+        payload.length >= 4 &&
+        payload[0] === 0 &&
+        payload[1] === 60 &&
+        payload[2] === 0 &&
+        payload[3] === 80
+      ) {
+        const ack = this.ack(this.ch(channel), payload);
+        if (ack) {
+          commit();
+          await ack;
+          buf = this.buf;
+        }
+        continue;
+      }
+      if (type === 1) {
+        commit();
+        await this.onMethod(channel, payload);
+        buf = this.buf;
+      } else if (type === 2) {
+        const header = this.onHeader(channel, payload);
+        if (header) {
+          commit();
+          await header;
+          buf = this.buf;
+        }
+      } else if (type === 3) {
+        const body = this.onBody(channel, payload);
+        if (body) {
+          commit();
+          await body;
+          buf = this.buf;
+        }
+      }
     }
-    if (type === 8) continue;
-    // basic.publish, its header, and its body do not await. Awaiting a resolved
-    // async function still allocates a promise per frame and caps the pipeline.
-    if (
-      type === 1 &&
-      payload.length >= 4 &&
-      payload[0] === 0 &&
-      payload[1] === 60 &&
-      payload[2] === 0 &&
-      payload[3] === 40
-    ) {
-      this.beginPublish(this.ch(channel), payload);
-      continue;
-    }
-    if (
-      type === 1 &&
-      payload.length >= 4 &&
-      payload[0] === 0 &&
-      payload[1] === 60 &&
-      payload[2] === 0 &&
-      payload[3] === 80
-    ) {
-      const ack = this.ack(this.ch(channel), payload);
-      if (ack) await ack;
-      continue;
-    }
-    if (type === 1) await this.onMethod(channel, payload);
-    else if (type === 2) {
-      const header = this.onHeader(channel, payload);
-      if (header) await header;
-    } else if (type === 3) {
-      const body = this.onBody(channel, payload);
-      if (body) await body;
-    }
+  } finally {
+    commit();
   }
 }
 

@@ -209,6 +209,8 @@ export type Consumer = {
   addCredit?: (n: number) => void;
   /** Replace remaining credit. Null means unlimited. */
   setCredit?: (n: number | null) => void;
+  /** `x-stream-offset` for a stream consumer. */
+  streamOffset?: Field;
 };
 
 export type QArgs = {
@@ -223,7 +225,7 @@ export type QArgs = {
   maxPriority: number | null;
   singleActive: boolean;
   deliveryLimit: number | null;
-  queueType: "classic" | "quorum";
+  queueType: "classic" | "quorum" | "stream";
 };
 
 export type QueueLive = QueueRow & {
@@ -236,6 +238,8 @@ export type QueueLive = QueueRow & {
   consumers: Consumer[];
   rr: number;
   lastUsed: number;
+  /** Connection id that declared this exclusive queue. Null for a shared queue. */
+  owner?: number | null;
 };
 
 export type Policy = {
@@ -261,6 +265,10 @@ export const BUILTIN: Array<[string, string, boolean]> = [
   ["amq.direct", "direct", false],
   ["amq.fanout", "fanout", false],
   ["amq.topic", "topic", false],
+  ["amq.headers", "headers", false],
+  ["amq.match", "headers", false],
+  ["amq.rabbitmq.trace", "topic", true],
+  ["amq.rabbitmq.event", "topic", true],
 ];
 
 export type Prom = {
@@ -368,3 +376,6 @@ export type TopicPerm = {
   write: string;
   read: string;
 };
+
+/** Told when the memory or disk alarm blocks or unblocks publishes. */
+export type AlarmListener = (blocked: boolean, reason: string) => void;
