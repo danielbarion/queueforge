@@ -1,0 +1,308 @@
+{
+  "Acks, nacks, rejects": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "AMQP 0-9-1": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "AMQP 1.0": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "basic.get": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "basic.recover": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Command-line tool": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "connection.blocked": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Consistent-hash exchange": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Consumer cancel notification": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Dead-letter exchanges": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Definitions import and export": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Delayed messages": {
+    "rabbitmq": "n",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Delivery limit": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Direct reply-to": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Durable classic queues": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Event exchange": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Exchange-to-exchange bindings": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Exclusive, auto-delete, server-named": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Feature flags": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Internal exchanges": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "LDAP": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Length limits": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Local random exchange": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Management HTTP API": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Mandatory returns": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Memory and disk alarms": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Message tracing": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "MQTT 3.1.1": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "MQTT 5.0": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "OAuth 2.0": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Operator policies": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Passive declare, delete if-unused": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Policies": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Prefetch": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Queue expiry": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Queue leader locator": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Queue message TTL": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Quorum queues": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Shovel": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Single active consumer": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "STOMP": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Stream protocol": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Stream queues": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  },
+  "Super streams": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Topic permissions": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Transactions": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Users, vhosts, permissions": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "Validated user-id": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "y"
+  },
+  "Vhost and user limits": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "WebSockets": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "n"
+  },
+  "x.509 client certificates": {
+    "rabbitmq": "y",
+    "rust": "y",
+    "bun": "y",
+    "php": "p"
+  }
+}

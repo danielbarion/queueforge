@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, Gauge } from "lucide-react";
+import { Activity, Gauge, Layers, Server } from "lucide-react";
+import { Throughput } from "@/components/live/Throughput";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { Card, CardBody } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -18,6 +19,7 @@ function probeLabel(value: boolean | null, up: string, down: string): string {
 
 export default function OverviewPage() {
   const broker = useBrokerStore(selectedBroker);
+  const setDemo = useBrokerStore((state) => state.setDemo);
   const live = useLiveStore();
   const counts = totals(live.queues);
   const busiest = [...live.queues].sort((a, b) => b.messagesReady - a.messagesReady).slice(0, 5);
@@ -30,6 +32,24 @@ export default function OverviewPage() {
     live.nudge();
   }
 
+  if (!broker) return (
+    <>
+      <PageHeader title="Your broker workspace" icon={Gauge} detail="Connect a broker to monitor messages, manage queues and keep an eye on your cluster." />
+      <Card className="qf-welcome mb-8">
+        <CardBody className="py-10 sm:p-10">
+          <span className="qf-eyebrow">Get started</span>
+          <div className="qf-welcome-icon"><Server className="size-8" aria-hidden="true" /></div>
+          <h2 className="max-w-lg text-3xl font-semibold tracking-tight">A clear view of your message flow.</h2>
+          <p className="max-w-lg text-sm leading-7 text-muted">Connect QueueForge or RabbitMQ using its management address. Keep your brokers in one workspace and switch between them whenever you need.</p>
+          <div className="flex flex-wrap gap-3"><Link href="/brokers" className="btn btn-primary mt-2 w-fit">Connect a broker <span aria-hidden="true">↗</span></Link><button className="btn btn-ghost mt-2" onClick={() => setDemo(true)}>Try interactive demo</button></div>
+        </CardBody>
+      </Card>
+      <div className="grid gap-4 sm:grid-cols-3">
+        {[{ icon: Server, title: "Connect", text: "Add the management URL of a broker you run." }, { icon: Layers, title: "Operate", text: "Inspect queues, exchanges and connections." }, { icon: Activity, title: "Monitor", text: "Follow message rates, activity and alerts." }].map(({ icon: Icon, title, text }, index) => <Card key={title}><CardBody><span className="qf-eyebrow">0{index + 1}</span><Icon className="size-5 text-primary" aria-hidden="true" /><h3 className="text-base font-semibold">{title}</h3><p className="text-sm leading-6 text-muted">{text}</p></CardBody></Card>)}
+      </div>
+    </>
+  );
+
   return (
     <>
       <PageHeader
@@ -37,17 +57,6 @@ export default function OverviewPage() {
         icon={Gauge}
         detail={broker ? `Watching ${broker.name}.` : "No broker is in use. Add one on the Brokers page."}
       />
-      {!broker && (
-        <Card className="mb-6">
-          <CardBody>
-            <h2 className="text-sm font-semibold">No broker yet</h2>
-            <p className="text-sm text-muted">Brokers are added on their own page. You can keep more than one and choose which is in use.</p>
-            <Link href="/brokers" className="btn btn-primary w-fit">
-              Brokers
-            </Link>
-          </CardBody>
-        </Card>
-      )}
       {broker && live.stale && live.overview && (
         <p className="mb-4 text-sm text-warning">
           {live.error ?? "The broker stopped answering."} These figures are from{" "}
@@ -98,6 +107,7 @@ export default function OverviewPage() {
         <Stat label="Unacked" value={live.overview ? formatCount(counts.unacked) : "—"} />
         <Stat label="Connections" value={live.overview ? formatCount(live.overview.connections) : "—"} />
       </div>
+      <div className="mb-6"><Throughput /></div>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(240px,0.8fr)]">
         <Card>
           <CardBody>
@@ -105,7 +115,7 @@ export default function OverviewPage() {
             {busiest.length === 0 ? (
               <p className="text-sm text-muted">{live.authed ? "No queues on /." : "Log in to read the queues."}</p>
             ) : (
-              <table className="qf-table">
+              <div className="qf-table-scroll" tabIndex={0} role="region" aria-label="Data table"><table className="qf-table">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -126,7 +136,7 @@ export default function OverviewPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             )}
           </CardBody>
         </Card>

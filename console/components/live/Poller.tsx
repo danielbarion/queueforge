@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { isDemo } from "@/lib/demo";
 import { callBroker, sessionBroker } from "@/lib/client";
 import { selectedBroker, useBrokerStore } from "@/stores/broker";
 import { useLiveStore } from "@/stores/live";
@@ -20,6 +21,10 @@ export function Poller() {
 
   useEffect(() => {
     reset(id);
+    if (isDemo(url)) {
+      const at = Date.now();
+      useLiveStore.setState({ history: Array.from({ length: 100 }, (_, i) => ({ at: at - (100 - i) * 3000, publish: 120, deliver: 112, ack: 108 })) });
+    }
   }, [id, url, reset]);
 
   useEffect(() => {

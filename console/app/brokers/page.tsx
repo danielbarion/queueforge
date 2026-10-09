@@ -5,6 +5,7 @@ import { Server } from "lucide-react";
 import { AddBrokerForm } from "@/components/brokers/AddBrokerForm";
 import { Card, CardBody } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { DEMO_PROFILES } from "@/lib/demo";
 import { callBroker, logoutBroker } from "@/lib/client";
 import { useBrokerStore, type BrokerKind } from "@/stores/broker";
 
@@ -26,7 +27,11 @@ function isKind(value: unknown): value is BrokerKind {
 }
 
 export default function BrokersPage() {
-  const targets = useBrokerStore((state) => state.targets);
+  const demo = useBrokerStore((state) => state.demo);
+  const demoKind = useBrokerStore((state) => state.demoKind);
+  const setDemo = useBrokerStore((state) => state.setDemo);
+  const configured = useBrokerStore((state) => state.targets);
+  const targets = demo ? DEMO_PROFILES : configured;
   const selectedId = useBrokerStore((state) => state.selectedId);
   const select = useBrokerStore((state) => state.select);
   const remove = useBrokerStore((state) => state.remove);
@@ -83,7 +88,7 @@ export default function BrokersPage() {
         <Card>
           <CardBody>
             <h2 className="text-sm font-semibold">Add</h2>
-            <AddBrokerForm />
+            {demo ? <p className="text-sm text-muted">Exit demo to manage your saved profiles. They are retained while you explore.</p> : <><AddBrokerForm /><button className="btn btn-ghost" onClick={() => setDemo(true)}>Try interactive demo</button></>}
           </CardBody>
         </Card>
         <Card>
@@ -105,10 +110,10 @@ export default function BrokersPage() {
                       <div className="text-xs text-muted">{line}</div>
                     </div>
                     <div className="flex gap-2">
-                      <button type="button" className="btn btn-ghost btn-sm" disabled={target.id === selectedId} onClick={() => select(target.id)}>
-                        {target.id === selectedId ? "In use" : "Use"}
+                      <button type="button" className="btn btn-ghost btn-sm" disabled={(demo ? target.kind === demoKind : target.id === selectedId)} onClick={() => demo ? setDemo(true, target.kind) : select(target.id)}>
+                        {(demo ? target.kind === demoKind : target.id === selectedId) ? "In use" : "Use"}
                       </button>
-                      <button type="button" className="btn btn-ghost btn-sm text-error" onClick={() => void onRemove(target.id, target.url)}>
+                      <button type="button" className="btn btn-ghost btn-sm text-error" disabled={demo} title={demo ? "Demo profiles cannot be removed" : undefined} onClick={() => void onRemove(target.id, target.url)}>
                         Remove
                       </button>
                     </div>

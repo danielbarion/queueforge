@@ -561,6 +561,23 @@ td .app { display: inline-flex; align-items: center; gap: 8px; }
 td.best { color: var(--accent); font-weight: 500; }
 td.na { color: var(--faint); }
 td.caveat { color: var(--muted); }
+th.scenario {
+  white-space: normal;
+  min-width: 260px;
+  max-width: 420px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.scenario-title { display: block; color: var(--text); font-family: var(--font); font-size: 14px; font-weight: 500; }
+.scenario-real { display: block; margin-top: 4px; color: var(--muted); font-family: var(--font); font-size: 12.5px; line-height: 1.45; }
+thead th .app { display: inline-flex; align-items: center; gap: 8px; }
+.table-heading {
+  margin: 36px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.table-heading + .table-panel { margin-top: 12px; }
 th sup, td sup, .caption sup { font-size: 0.7em; margin-left: 0.15em; color: var(--faint); }
 
 /* Features */
@@ -710,3 +727,82 @@ footer nav a { font-size: 13px; }
   html { scroll-behavior: auto; }
   .btn { transition: none; }
 }
+
+/* Shared visual rhythm and the protocol / engine introduction. */
+:root { --radius: 12px; --line: #233042; --faint: #8b9caf; }
+body { background: #080d14; }
+.wrap { width: min(1280px, 100%); }
+.bar { min-height: 76px; }
+nav a[aria-current="page"] { color: var(--accent); background: rgb(62 224 197 / 0.08); }
+.hero { padding-block: clamp(56px, 8vw, 100px) clamp(48px, 7vw, 80px); }
+.hero-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 72px); align-items: center; }
+.hero-copy { min-width: 0; }
+.hero h1 { font-size: clamp(3.25rem, 6.5vw, 6rem); line-height: 1.04; letter-spacing: -0.055em; max-width: 12ch; }
+.hero .lede { font-size: 1.08rem; line-height: 1.75; max-width: 31rem; }
+.hero .actions { margin-top: 28px; }
+.hero::before { background: radial-gradient(50rem 36rem at 85% 35%, rgb(62 224 197 / 0.11), transparent 65%); opacity: 1; mask-image: none; }
+.protocols { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; margin: 30px 0 0; }
+.protocols li { padding: 5px 9px; border: 1px solid var(--line); border-radius: 5px; font: 11px var(--mono); color: var(--muted); }
+.wire-map { min-width: 0; border: 1px solid var(--line-strong); border-radius: 16px; background: linear-gradient(145deg, #142130, #0c141f 70%); box-shadow: 0 24px 80px rgb(0 0 0 / 0.25); overflow: hidden; }
+.wire-map-heading { display: flex; align-items: center; gap: 9px; padding: 18px 22px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
+.status-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--accent); }
+.wire-version { margin-left: auto; color: var(--accent); font-size: 10px; }
+.wire-client { display: flex; align-items: center; gap: 16px; margin: 30px 28px 0; padding: 20px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg); }
+.wire-client strong, .wire-client div > span { display: block; }
+.wire-client strong { font-size: 15px; font-weight: 500; }
+.wire-client div > span { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.wire-symbol { display: grid; place-items: center; width: 40px; height: 40px; background: rgb(62 224 197 / 0.08); border: 1px solid rgb(62 224 197 / 0.2); border-radius: 8px; color: var(--accent); font: 17px var(--mono); }
+.wire-connector { position: relative; display: flex; justify-content: center; align-items: center; height: 64px; }
+.wire-connector::before { content: ""; position: absolute; height: 100%; width: 1px; background: var(--line-strong); }
+.wire-connector > span { position: relative; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 5px; background: #101b28; color: var(--muted); font: 10px var(--mono); }
+.wire-engines { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 28px 28px; }
+.wire-engine { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 16px 12px; border: 1px solid var(--line-strong); border-top: 2px solid var(--tone); border-radius: 8px; background: #0a111a; }
+.wire-number { color: var(--faint); font: 10px var(--mono); }
+.wire-engine strong { display: flex; align-items: center; gap: 7px; font-size: 16px; font-weight: 500; }
+.wire-engine > span:last-child { font: 10px/1.6 var(--mono); color: var(--muted); }
+.wire-map-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 16px 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.wire-map-foot a { color: var(--accent); text-decoration: none; }
+.scoreboard { padding: clamp(24px, 4vw, 40px); }
+.panel-title, .chart-title { letter-spacing: 0.1em; }
+.figures li { background: var(--bg); }
+.bar-track { height: 8px; }
+.bar-fill { border-radius: 3px; }
+.btn { border-radius: 7px; }
+.btn span { margin-left: 8px; }
+.btn, nav a, button.copy { transition: background 150ms ease, color 150ms ease, border-color 150ms ease; }
+.bench-table thead th { top: 77px; }
+.feature-panel .scroll { max-height: none; overflow-y: visible; }
+.feature-table thead th { position: sticky; top: 0; z-index: 3; }
+.feature-table thead th:first-child { z-index: 4; }
+.feature-table tbody th[scope="row"] { width: 40%; }
+.scroll:focus-visible { outline-offset: -3px; }
+footer { background: #080d14; }
+@media (max-width: 1000px) {
+  .hero-layout { gap: 32px; }
+  .wire-engines { padding-inline: 18px; gap: 7px; }
+  .wire-client { margin-inline: 18px; }
+  .wire-engine { padding: 14px 10px; }
+}
+@media (max-width: 800px) {
+  .hero-layout { grid-template-columns: 1fr; }
+  .hero h1 { max-width: none; }
+  .wire-map { max-width: 560px; width: 100%; }
+  .hero .lede { max-width: 38rem; }
+}
+@media (max-width: 760px) {
+  .bench-table .scroll { overflow-x: auto; }
+  .bench-table thead th { top: 0; }
+}
+@media (max-width: 640px) {
+  .bar { min-height: 92px; padding-block: 12px; gap: 8px; }
+  .hero h1 { font-size: clamp(3rem, 11vw, 4.5rem); }
+  .hero .actions .btn { padding-inline: 14px; font-size: 14px; }
+  .wire-map-heading { padding-inline: 16px; font-size: 10px; }
+  .wire-map-foot { padding-inline: 16px; }
+  .wire-client { padding: 16px; }
+  .wire-engines { padding: 0 16px 22px; }
+  .wire-engine strong { font-size: 14px; }
+  .page-intro h1 { font-size: clamp(2.5rem, 10vw, 4rem); line-height: 1.08; }
+  .feature-panel .scroll { max-height: none; }
+}
+@media (prefers-reduced-motion: reduce) { .btn, nav a, button.copy { transition: none; } }

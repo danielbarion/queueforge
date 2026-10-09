@@ -9,20 +9,32 @@ export default function Page() {
   return (
     <main id="content">
       <section className="hero">
-        <div className="wrap">
-          <p className="kicker">Open source · AMQP 0-9-1 and 1.0 · MQTT · STOMP · Streams</p>
-          <h1>A RabbitMQ-compatible broker in Rust, Bun, and PHP.</h1>
-          <p className="lede">
-            Three processes, one client protocol. You run QueueForge yourself. There is no account
-            and no hosted broker.
-          </p>
-          <div className="actions">
-            <a className="btn" href={GITHUB}>
-              View on GitHub
-            </a>
-            <Link className="btn ghost" href="/benchmark">
-              See the benchmark
-            </Link>
+        <div className="wrap hero-layout">
+          <div className="hero-copy">
+            <p className="kicker">Open source message brokers</p>
+            <h1>One protocol.<br /><em>Three engines.</em></h1>
+            <p className="lede">
+              RabbitMQ features, implemented in Rust, Bun and PHP. Compare their
+              compatibility, explore the tradeoffs, and benchmark them side by side.
+            </p>
+            <div className="actions">
+              <Link className="btn" href="/features">Explore compatibility <span aria-hidden="true">↗</span></Link>
+              <a className="btn ghost" href={GITHUB}>View on GitHub</a>
+            </div>
+            <ul className="protocols" aria-label="Supported client protocols">
+              {["AMQP 0-9-1", "AMQP 1.0", "MQTT", "STOMP", "Streams"].map((protocol) => <li key={protocol}>{protocol}</li>)}
+            </ul>
+          </div>
+          <div className="wire-map" aria-label="One AMQP client protocol with three different broker storage engines">
+            <div className="wire-map-heading"><span className="status-dot" aria-hidden="true" /><span>Built to speak the same language</span><span className="wire-version">AMQP</span></div>
+            <div className="wire-client"><span className="wire-symbol" aria-hidden="true">&gt;_</span><div><strong>Your application</strong><span>Use your existing AMQP client</span></div></div>
+            <div className="wire-connector" aria-hidden="true"><span>one client protocol</span></div>
+            <div className="wire-engines">
+              {[{ name: "Rust", store: "Write-ahead log", tone: "rust", number: "01" }, { name: "Bun", store: "SQLite", tone: "bun", number: "02" }, { name: "PHP", store: "Append-only log", tone: "php", number: "03" }].map((engine) => (
+                <div key={engine.name} className={`wire-engine tone-${engine.tone}`}><span className="wire-number">{engine.number}</span><strong><span className="dot" aria-hidden="true" />{engine.name}</strong><span>{engine.store}</span></div>
+              ))}
+            </div>
+            <div className="wire-map-foot"><span>Different stacks. Measured together.</span><Link href="/benchmark">See the results <span aria-hidden="true">↗</span></Link></div>
           </div>
         </div>
       </section>
@@ -31,7 +43,7 @@ export default function Page() {
         <div className="wrap">
           <div className="panel scoreboard">
             <div>
-              <p className="panel-title">Kept rate versus RabbitMQ 4.3</p>
+              <p className="panel-title">The benchmark · one core</p>
               <ul className="figures" aria-label="Kept rate versus RabbitMQ">
                 {figures.map((row) => (
                   <li key={row.name} className={`tone-${row.tone}`}>
@@ -50,7 +62,7 @@ export default function Page() {
               <Bars rows={paced} unit="/s" base={rabbit} />
               <p className="caption">
                 128 confirms in flight. Durable 256-byte body. Mac client through the published
-                port, 1 CPU / 512 MiB, measured 2026-10-08. A step counts only when confirms and
+                port, 1 CPU / 512 MiB, measured 2026-10-09. A step counts only when confirms and
                 acks both reach 95% of the offer.
               </p>
             </div>
@@ -64,7 +76,7 @@ export default function Page() {
             <p className="kicker">At four cores</p>
             <h2>Bun, Rust and PHP follow the cores when the queues are separate.</h2>
             <p className="section-lead">
-              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-08. Rust is{" "}
+              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-09. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ. Bun, one process per core, is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust. Confirms and deliveries both stay

@@ -1,5 +1,7 @@
 import {
   Activity,
+  ArchiveX,
+  GitCompareArrows,
   ArrowLeftRight,
   Bell,
   Boxes,
@@ -32,6 +34,8 @@ export const NAV: NavGroup[] = [
     section: null,
     items: [
       { href: "/", label: "Overview", icon: Gauge },
+      { href: "/fleet", label: "Fleet", icon: Server },
+      { href: "/compare", label: "Compare", icon: GitCompareArrows },
       { href: "/brokers", label: "Brokers", icon: Boxes },
       { href: "/activity", label: "Activity", icon: Activity },
     ],
@@ -40,6 +44,7 @@ export const NAV: NavGroup[] = [
     section: "Operate",
     items: [
       { href: "/queues", label: "Queues", icon: Layers },
+      { href: "/dead-letters", label: "Dead letters", icon: ArchiveX },
       { href: "/exchanges", label: "Exchanges", icon: ArrowLeftRight },
       { href: "/connections", label: "Connections", icon: Cable },
       { href: "/channels", label: "Channels", icon: Radio },

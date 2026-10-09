@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Layers } from "lucide-react";
+import { MessageInspector } from "@/components/messages/MessageInspector";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { Card, CardBody } from "@/components/ui/Card";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -19,6 +20,8 @@ export default function QueueDetailPage() {
   const name = decodeURIComponent(params.name);
   const router = useRouter();
   const broker = useBrokerStore(selectedBroker);
+  const demo = useBrokerStore((state) => state.demo);
+  const [inspecting, setInspecting] = useState(false);
   const authed = useLiveStore((state) => state.authed);
   const queues = useLiveStore((state) => state.queues);
   const nudge = useLiveStore((state) => state.nudge);
@@ -52,7 +55,7 @@ export default function QueueDetailPage() {
   }, [broker, authed, name]);
 
   async function run() {
-    if (!broker || !pending) return;
+    if (!broker || !pending || demo) return;
     setWorking(true);
     setError(null);
     try {
@@ -126,11 +129,11 @@ export default function QueueDetailPage() {
                 <p className="text-sm text-muted">This queue is not in the latest list.</p>
               )}
               {error && <p className="text-sm text-error">{error}</p>}
-              <div className="flex gap-2">
-                <button type="button" className="btn btn-ghost" disabled={!queue} onClick={() => setPending("purge")}>
+              <div className="flex flex-wrap gap-2"><button className="btn btn-primary" disabled={!queue} onClick={() => setInspecting(true)}>Inspect messages</button>
+                <button type="button" className="btn btn-ghost" disabled={!queue || demo} title={demo ? "Demo mode is read-only" : undefined} onClick={() => setPending("purge")}>
                   Purge
                 </button>
-                <button type="button" className="btn btn-ghost text-error" disabled={!queue} onClick={() => setPending("delete")}>
+                <button type="button" className="btn btn-ghost text-error" disabled={!queue || demo} title={demo ? "Demo mode is read-only" : undefined} onClick={() => setPending("delete")}>
                   Delete
                 </button>
               </div>
@@ -142,7 +145,7 @@ export default function QueueDetailPage() {
               {bindings.length === 0 ? (
                 <p className="text-sm text-muted">No bindings.</p>
               ) : (
-                <table className="qf-table">
+                <div className="qf-table-scroll" tabIndex={0} role="region" aria-label="Data table"><table className="qf-table">
                   <thead>
                     <tr>
                       <th>Exchange</th>
@@ -157,13 +160,14 @@ export default function QueueDetailPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </table></div>
               )}
             </CardBody>
           </Card>
         </div>
       )}
-      {pending && (
+      {inspecting && broker && <MessageInspector key={`${broker.id}:${name}`} broker={broker} queue={{ name, type: queue?.type }} onClose={() => setInspecting(false)} />}
+      {pending && !demo && (
         <ConfirmDialog
           title={pending === "purge" ? `Purge ${name}?` : `Delete ${name}?`}
           body={

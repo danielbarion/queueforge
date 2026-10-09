@@ -1,12 +1,11 @@
 "use client";
 
-import { Monitor, Moon, Sun } from "lucide-react";
+import { Monitor, Moon, Sun, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { NAV } from "@/lib/nav";
 import { useThemeStore, type ThemePreference } from "@/stores/theme";
-import { Badge } from "@/components/ui/Badge";
 
 const THEMES: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },
@@ -45,15 +44,22 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={onClose} />
       )}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-60 shrink-0 flex-col border-r border-base-300 bg-base-200 transition-transform lg:static lg:translate-x-0 ${
-          open ? "translate-x-0" : "-translate-x-full"
+        id="console-navigation"
+        role={open ? "dialog" : undefined}
+        aria-modal={open ? true : undefined}
+        aria-label="Navigation"
+        className={`qf-sidebar fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-base-300 bg-base-200 transition-transform lg:sticky lg:top-0 lg:h-dvh lg:translate-x-0 lg:visible ${
+          open ? "translate-x-0 visible" : "-translate-x-full invisible"
         }`}
       >
-        <div className="flex items-center gap-2 px-5 py-5">
-          <span className="text-lg font-bold tracking-tight">QueueForge</span>
-          <Badge tone="primary">dash</Badge>
+        <div className="flex items-center justify-between gap-2 px-6 py-6">
+          <Link href="/" onClick={onClose} className="flex items-center gap-3" aria-label="QueueForge overview">
+            <span className="qf-mark" aria-hidden="true"><i /><i /><i /></span>
+            <span><span className="block text-lg font-semibold tracking-tight">QueueForge</span><span className="block text-[10px] uppercase tracking-[0.18em] text-faint">Operator console</span></span>
+          </Link>
+          <button type="button" className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={onClose} aria-label="Close navigation"><X className="size-4" /></button>
         </div>
-        <nav className="flex-1 overflow-y-auto px-3 pb-4">
+        <nav aria-label="Console" className="flex-1 overflow-y-auto px-3 pb-4">
           {NAV.map((group) => (
             <div key={group.section ?? "root"} className="mb-4">
               {group.section && (
@@ -68,8 +74,9 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                       key={item.href}
                       href={item.href}
                       onClick={onClose}
+                      aria-current={active ? "page" : undefined}
                       className={`relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium ${
-                        active ? "bg-base-300 text-base-content" : "text-muted hover:bg-base-300/60 hover:text-base-content"
+                        active ? "qf-nav-active text-primary" : "text-muted hover:bg-base-300/60 hover:text-base-content"
                       }`}
                     >
                       {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-primary" />}

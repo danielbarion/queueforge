@@ -1,3 +1,6 @@
+import { useBrokerStore } from "../stores/broker";
+import { demoCall, isDemo } from "./demo";
+
 export type BrokerCall = {
   status: number;
   body: unknown;
@@ -5,6 +8,8 @@ export type BrokerCall = {
 };
 
 export async function callBroker(url: string, method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<BrokerCall> {
+  if (isDemo(url)) return demoCall(url, method, path, body);
+  if (useBrokerStore.getState().demo) throw new Error("Exit demo mode to contact a configured broker.");
   const response = await fetch("/api/brokers/call", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -16,6 +21,8 @@ export async function callBroker(url: string, method: "GET" | "POST" | "PUT" | "
 }
 
 export async function loginBroker(url: string, username: string, password: string): Promise<string> {
+  if (isDemo(url)) return "Demo operator";
+  if (useBrokerStore.getState().demo) throw new Error("Exit demo mode to log in to a broker.");
   const response = await fetch("/api/brokers/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -27,6 +34,7 @@ export async function loginBroker(url: string, username: string, password: strin
 }
 
 export async function logoutBroker(url: string): Promise<void> {
+  if (isDemo(url) || useBrokerStore.getState().demo) return;
   await fetch("/api/brokers/logout", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -35,6 +43,8 @@ export async function logoutBroker(url: string): Promise<void> {
 }
 
 export async function sessionBroker(url: string): Promise<boolean> {
+  if (isDemo(url)) return true;
+  if (useBrokerStore.getState().demo) return false;
   const response = await fetch(`/api/brokers/session?url=${encodeURIComponent(url)}`);
   if (!response.ok) return false;
   const payload = (await response.json()) as { loggedIn?: boolean };

@@ -83,7 +83,7 @@ function ConnectionList() {
       ) : (
         <Card>
           <CardBody>
-            <table className="qf-table">
+            <div className="qf-table-scroll" tabIndex={0} role="region" aria-label="Data table"><table className="qf-table">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -110,7 +110,7 @@ function ConnectionList() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </CardBody>
         </Card>
       )}

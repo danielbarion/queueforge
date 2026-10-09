@@ -30,7 +30,7 @@ export function FeatureTable() {
   return (
     <>
     <div className="panel table-panel feature-panel">
-      <div className="scroll">
+      <div className="scroll" tabIndex={0} role="region" aria-label="Feature comparison">
         <table className="feature-table">
           <thead>
             <tr>

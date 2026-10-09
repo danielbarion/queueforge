@@ -13,12 +13,18 @@ import {
   type Rates,
 } from "@/lib/live-diff";
 import { sumConfirmBeforeFsync } from "@/lib/broker-http";
+import { useBrokerStore } from "@/stores/broker";
 import { useAlertStore } from "@/stores/alerts";
 
 const EMPTY_RATES: Rates = { publish: null, deliver: null, ack: null };
 const ACTIVITY_LIMIT = 100;
+export const RATE_HISTORY_MS = 5 * 60 * 1000;
+const HISTORY_LIMIT = 2048;
+export type RateSample = Rates & { at: number };
+type CounterAvailability = Record<keyof Rates, boolean>;
+const NO_COUNTERS: CounterAvailability = { publish: false, deliver: false, ack: false };
 
-type LiveState = {
+export type LiveState = {
   brokerId: string;
   authed: boolean | null;
   health: boolean | null;
@@ -29,6 +35,8 @@ type LiveState = {
   overview: OverviewSnap | null;
   queues: QueueSnap[];
   rates: Rates;
+  history: RateSample[];
+  counterAvailability: CounterAvailability;
   activity: ActivityEvent[];
   nonce: number;
   reset: (brokerId: string) => void;
@@ -50,6 +58,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   overview: null,
   queues: [],
   rates: EMPTY_RATES,
+  history: [],
+  counterAvailability: NO_COUNTERS,
   activity: [],
   nonce: 0,
   reset: (brokerId) =>
@@ -64,6 +74,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       overview: null,
       queues: [],
       rates: EMPTY_RATES,
+      history: [],
+      counterAvailability: NO_COUNTERS,
       activity: [],
     }),
   setAuthed: (authed) => set({ authed }),
@@ -77,13 +89,23 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     }
     const queues = parseQueues(queueBody);
     const state = get();
-    const rates = state.overview && state.sampledAt ? ratesFrom(state.overview, overview, at - state.sampledAt) : EMPTY_RATES;
+    const stats = (overviewBody as { message_stats?: Record<string, unknown> }).message_stats;
+    const counterAvailability = Object.fromEntries(
+      (["publish", "deliver", "ack"] as const).map((key) => [key, typeof stats?.[key] === "number" && Number.isFinite(stats[key])]),
+    ) as CounterAvailability;
+    const measured = state.overview && state.sampledAt !== null && !state.stale
+      ? ratesFrom(state.overview, overview, at - state.sampledAt)
+      : EMPTY_RATES;
+    const rates = Object.fromEntries(
+      (["publish", "deliver", "ack"] as const).map((key) => [key, counterAvailability[key] && state.counterAvailability[key] ? measured[key] : null]),
+    ) as Rates;
+    const history = [...state.history.filter((sample) => sample.at >= at - RATE_HISTORY_MS && sample.at < at), { at, ...rates }].slice(-HISTORY_LIMIT);
     const events =
       state.overview === null
         ? []
         : diffActivity(state.queues, queues, state.overview.connections, overview.connections, at);
     const counts = totals(queues);
-    useAlertStore.getState().evaluate(
+    if (!useBrokerStore.getState().demo) useAlertStore.getState().evaluate(
       { ready: counts.ready, unacked: counts.unacked, fsync: metrics === null ? null : sumConfirmBeforeFsync(metrics), at },
       false,
     );
@@ -91,6 +113,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       overview,
       queues,
       rates,
+      history,
+      counterAvailability,
       health: true,
       stale: false,
       error: null,
