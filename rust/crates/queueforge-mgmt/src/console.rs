@@ -104,7 +104,8 @@ pub async fn get_queue(
     let (policy, operator_policy) = state.router.matching_policy_names(&vhost, &name);
     let traffic = traffic_totals();
     let consumers = state.connections.list_consumers(Some(&vhost), Some(&name));
-    Ok(Json(json!({
+    let raft = queueforge_core::flags::queue_raft(&vhost, &name);
+    let mut body = json!({
         "name": name,
         "vhost": vhost,
         "durable": handle.info.durable,
@@ -123,7 +124,13 @@ pub async fn get_queue(
         "policy": policy,
         "operator_policy": operator_policy,
         "message_stats": { "publish": traffic.publish, "deliver": traffic.deliver, "ack": traffic.ack },
-    })))
+    });
+    if let Some(raft) = raft {
+        body["leader"] = json!(raft.leader);
+        body["members"] = json!(raft.members);
+        body["raft_group"] = json!(raft.group);
+    }
+    Ok(Json(body))
 }
 
 /// GET /api/connections/{name}
@@ -198,14 +205,50 @@ pub async fn put_topic_permission(
             "exchange and valid write/read patterns are required".into(),
         ));
     }
-    state.connections.put_topic_permission(TopicPermission {
+    let perm = TopicPermission {
         user,
         vhost,
         exchange: body.exchange,
         write: body.write,
         read: body.read,
-    });
+    };
+    let row = crate::settings::topic_row(&perm);
+    let stored = perm.clone();
+    with_store(&state, move |store| {
+        crate::settings::store_topic(store, &stored.user, &stored.vhost, &stored.exchange, Some(&stored))
+    })
+    .await;
+    state.connections.put_topic_permission(perm);
+    crate::mutations::replicate(&state, "topic_permission", row).await;
     Ok(StatusCode::CREATED)
+}
+
+/// Run `f` on the metadata store off the async runtime.
+async fn with_store<T: Send + 'static>(
+    state: &MgmtState,
+    f: impl FnOnce(&queueforge_store::MetadataStore) -> T + Send + 'static,
+) -> Option<T> {
+    queueforge_store::MetadataStore::blocking(std::sync::Arc::clone(&state.store), move |store| Ok(f(store)))
+        .await
+        .ok()
+}
+
+/// Store and replicate `user`'s limits after a change.
+async fn user_limits_changed(state: &MgmtState, user: &str) {
+    let conns = std::sync::Arc::clone(&state.connections);
+    let name = user.to_string();
+    with_store(state, move |store| crate::settings::store_user_limits(&conns, store, &name)).await;
+    let row = crate::settings::user_limits_row(&state.connections, user);
+    crate::mutations::replicate(state, "user_limits", row).await;
+}
+
+/// Store and replicate `vhost`'s limits after a change.
+async fn vhost_limits_changed(state: &MgmtState, vhost: &str) {
+    let conns = std::sync::Arc::clone(&state.connections);
+    let name = vhost.to_string();
+    with_store(state, move |store| crate::settings::store_vhost_limits(&conns, store, &name)).await;
+    let row = crate::settings::vhost_limits_row(&state.connections, vhost);
+    crate::mutations::replicate(state, "vhost_limits", row).await;
 }
 
 /// DELETE /api/topic-permissions/{user}/{vhost}/{exchange}
@@ -223,6 +266,14 @@ pub async fn delete_topic_permission(
     {
         return Err(MgmtError::NotFound("topic permission".into()));
     }
+    let (u, v, e) = (user.clone(), vhost.clone(), exchange.clone());
+    with_store(&state, move |store| crate::settings::store_topic(store, &u, &v, &e, None)).await;
+    crate::mutations::replicate(
+        &state,
+        "delete_topic_permission",
+        json!({"user": user, "vhost": vhost, "exchange": exchange}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -276,6 +327,7 @@ pub async fn put_user_limit(
             ))
         }
     }
+    user_limits_changed(&state, &user).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -302,6 +354,7 @@ pub async fn delete_user_limit(
             ))
         }
     }
+    user_limits_changed(&state, &user).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -334,6 +387,7 @@ pub async fn put_vhost_limit(
             ))
         }
     }
+    vhost_limits_changed(&state, &vhost).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -361,7 +415,30 @@ pub async fn delete_vhost_limit(
             ))
         }
     }
+    vhost_limits_changed(&state, &vhost).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// RabbitMQ 4.3 flags whose behaviour this broker has, with RabbitMQ's text.
+const REQUIRED_FLAGS: &[(&str, &str)] = &[
+    ("quorum_queue", "Support queues of type `quorum`"),
+    ("stream_queue", "Support queues of type `stream`"),
+    ("implicit_default_bindings", "Default bindings are now implicit, instead of being stored in the database"),
+    ("user_limits", "Configure connection and channel limits for a user"),
+];
+
+fn flag_row(name: &str, state: &str, stability: &str, desc: &str, provider: &str) -> Value {
+    json!({
+        "name": name,
+        "desc": desc,
+        "doc_url": "",
+        "state": state,
+        "stability": stability,
+        "require_level": if stability == "required" { "hard" } else { "none" },
+        "experiment_level": "supported",
+        "callbacks": [],
+        "provided_by": provider,
+    })
 }
 
 /// GET /api/feature-flags
@@ -371,24 +448,34 @@ pub async fn list_feature_flags(
 ) -> Result<Json<Value>> {
     let _session = require_session(&state, &headers).await?;
     let transient = state.connections.transient_nonexcl_permitted();
-    let mut items = vec![
-        json!({ "name": "quorum_queues", "state": "enabled", "stability": "stable" }),
-        json!({ "name": "transient_nonexcl_queues", "state": if transient { "enabled" } else { "disabled" }, "stability": "experimental" }),
-    ];
-    // Raft turns itself on once every voter advertises it (docs/raft.md, section 8).
+    let mut items: Vec<Value> = REQUIRED_FLAGS
+        .iter()
+        .map(|(name, desc)| flag_row(name, "enabled", "required", desc, "rabbit"))
+        .collect();
+    // Raft is a feature flag as RabbitMQ's khepri_db: on by itself in a new
+    // cluster, enabled by an operator after an upgrade (docs/raft.md, section 8).
     match queueforge_core::flags::raft() {
         queueforge_core::flags::RaftFlag::Unsupported => {}
-        flag => items.push(json!({
-            "name": "raft",
-            "state": if flag == queueforge_core::flags::RaftFlag::Enabled { "enabled" } else { "disabled" },
-            "stability": "stable",
-            "desc": "Raft consensus for metadata and quorum queues",
-        })),
+        flag => items.push(flag_row(
+            "raft",
+            if flag == queueforge_core::flags::RaftFlag::Enabled { "enabled" } else { "disabled" },
+            "stable",
+            "Raft consensus for metadata and quorum queues",
+            "queueforge",
+        )),
     }
+    items.push(flag_row(
+        "transient_nonexcl_queues",
+        if transient { "enabled" } else { "disabled" },
+        "experimental",
+        "Allow transient non-exclusive queues (a deprecated feature)",
+        "queueforge",
+    ));
+    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(Json(json!({ "items": items })))
 }
 
-/// POST /api/feature-flags/{name}/enable
+/// PUT or POST /api/feature-flags/{name}/enable
 pub async fn enable_feature_flag(
     State(state): State<MgmtState>,
     headers: HeaderMap,
@@ -397,12 +484,15 @@ pub async fn enable_feature_flag(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     match name.as_str() {
+        // quorum_queues is the name QueueForge listed before it used RabbitMQ's.
         "quorum_queues" => Ok(StatusCode::NO_CONTENT),
+        name if REQUIRED_FLAGS.iter().any(|(flag, _)| *flag == name) => Ok(StatusCode::NO_CONTENT),
         "transient_nonexcl_queues" => {
             state.connections.set_transient_nonexcl(true);
             Ok(StatusCode::NO_CONTENT)
         }
-        _ => Err(MgmtError::NotFound(format!("feature flag '{name}'"))),
+        "raft" if queueforge_core::flags::enable_raft() => Ok(StatusCode::NO_CONTENT),
+        _ => Err(MgmtError::BadRequest("unsupported".into())),
     }
 }
 
@@ -415,12 +505,13 @@ pub async fn disable_feature_flag(
     let session = require_session(&state, &headers).await?;
     require_administrator(&session)?;
     match name.as_str() {
-        "quorum_queues" => Err(MgmtError::BadRequest("quorum queues stay available".into())),
+        // The deprecated-feature toggle, kept here as QueueForge always had it.
         "transient_nonexcl_queues" => {
             state.connections.set_transient_nonexcl(false);
             Ok(StatusCode::NO_CONTENT)
         }
-        _ => Err(MgmtError::NotFound(format!("feature flag '{name}'"))),
+        // A RabbitMQ feature flag cannot be turned off once it is enabled.
+        _ => Err(MgmtError::BadRequest("a feature flag cannot be disabled".into())),
     }
 }
 
@@ -585,12 +676,8 @@ fn read_member_rows(dir: &str) -> Option<Vec<Value>> {
 }
 
 async fn write_members(state: &MgmtState, members: Vec<Value>) -> Result<Json<Value>> {
-    let path = std::path::Path::new(&state.config.data_dir).join("members.json");
-    std::fs::write(
-        &path,
-        serde_json::to_string(&members).unwrap_or_else(|_| "[]".into()),
-    )
-    .map_err(|err| MgmtError::Internal(err.to_string()))?;
+    // In a cluster the change commits through the meta log first, so it is
+    // refused (503) without a majority, as RabbitMQ refuses one.
     if let Some(tx) = &state.replicate_tx {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let _ = tx.send(crate::state::ReplicateReq {
@@ -598,8 +685,17 @@ async fn write_members(state: &MgmtState, members: Vec<Value>) -> Result<Json<Va
             payload: Value::Array(members.clone()),
             done: done_tx,
         });
-        let _ = done_rx.await;
+        if let Ok(Err(why)) = done_rx.await {
+            return Err(MgmtError::Unavailable(why));
+        }
+        return Ok(Json(json!({ "members": members })));
     }
+    let path = std::path::Path::new(&state.config.data_dir).join("members.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&members).unwrap_or_else(|_| "[]".into()),
+    )
+    .map_err(|err| MgmtError::Internal(err.to_string()))?;
     Ok(Json(json!({ "members": members })))
 }
 
@@ -644,4 +740,149 @@ fn disk_free_bytes(path: &str) -> u64 {
     let frsize = u64::from_ne_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
     let bavail = u64::from_ne_bytes(buf[32..40].try_into().unwrap_or([0; 8]));
     frsize.saturating_mul(bavail)
+}
+
+/// GET /api/parameters, /api/parameters/{component}, /api/parameters/{component}/{vhost}
+pub async fn list_parameters(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    path: Option<Path<Vec<String>>>,
+) -> Result<Json<Value>> {
+    let _session = require_session(&state, &headers).await?;
+    let parts = path.map(|Path(p)| p).unwrap_or_default();
+    let component = parts.first().cloned();
+    let vhost = match parts.get(1) {
+        Some(v) => Some(decode_vhost(v)?),
+        None => None,
+    };
+    let conns = std::sync::Arc::clone(&state.connections);
+    let rows = with_store(&state, move |store| {
+        crate::settings::list_parameters(&conns, store, component.as_deref(), vhost.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+    Ok(Json(Value::Array(rows)))
+}
+
+/// GET /api/parameters/{component}/{vhost}/{name}
+pub async fn get_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path((component, vhost, name)): Path<(String, String, String)>,
+) -> Result<Json<Value>> {
+    let _session = require_session(&state, &headers).await?;
+    let vhost = decode_vhost(&vhost)?;
+    let conns = std::sync::Arc::clone(&state.connections);
+    let (c, v) = (component.clone(), vhost.clone());
+    let rows = with_store(&state, move |store| crate::settings::list_parameters(&conns, store, Some(&c), Some(&v)))
+        .await
+        .unwrap_or_default();
+    rows.into_iter()
+        .find(|r| r["name"] == name.as_str())
+        .map(Json)
+        .ok_or_else(|| MgmtError::NotFound(format!("parameter {component}/{vhost}/{name}")))
+}
+
+#[derive(Deserialize)]
+pub struct ParameterBody {
+    #[serde(default)]
+    value: Value,
+}
+
+/// PUT /api/parameters/{component}/{vhost}/{name}
+pub async fn put_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path((component, vhost, name)): Path<(String, String, String)>,
+    Json(body): Json<ParameterBody>,
+) -> Result<StatusCode> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let vhost = decode_vhost(&vhost)?;
+    let conns = std::sync::Arc::clone(&state.connections);
+    let (c, v, n, value) = (component.clone(), vhost.clone(), name.clone(), body.value.clone());
+    with_store(&state, move |store| crate::settings::put_parameter(&conns, store, &c, &v, &n, &value)).await;
+    crate::mutations::replicate(
+        &state,
+        "parameter",
+        json!({"component": component, "vhost": vhost, "name": name, "value": body.value}),
+    )
+    .await;
+    Ok(StatusCode::CREATED)
+}
+
+/// DELETE /api/parameters/{component}/{vhost}/{name}
+pub async fn delete_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path((component, vhost, name)): Path<(String, String, String)>,
+) -> Result<StatusCode> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let vhost = decode_vhost(&vhost)?;
+    let conns = std::sync::Arc::clone(&state.connections);
+    let (c, v, n) = (component.clone(), vhost.clone(), name.clone());
+    let had = with_store(&state, move |store| crate::settings::delete_parameter(&conns, store, &c, &v, &n))
+        .await
+        .unwrap_or(false);
+    if !had {
+        return Err(MgmtError::NotFound(format!("parameter {component}/{vhost}/{name}")));
+    }
+    crate::mutations::replicate(&state, "delete_parameter", json!({"component": component, "vhost": vhost, "name": name}))
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/global-parameters
+pub async fn list_global_parameters(State(state): State<MgmtState>, headers: HeaderMap) -> Result<Json<Value>> {
+    let _session = require_session(&state, &headers).await?;
+    let node = state.config.node_name.clone();
+    let rows = with_store(&state, move |store| crate::settings::list_globals(store, &node)).await.unwrap_or_default();
+    Ok(Json(Value::Array(rows)))
+}
+
+/// GET /api/global-parameters/{name}
+pub async fn get_global_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>> {
+    let _session = require_session(&state, &headers).await?;
+    let node = state.config.node_name.clone();
+    let rows = with_store(&state, move |store| crate::settings::list_globals(store, &node)).await.unwrap_or_default();
+    rows.into_iter()
+        .find(|r| r["name"] == name.as_str())
+        .map(Json)
+        .ok_or_else(|| MgmtError::NotFound(format!("global parameter {name}")))
+}
+
+/// PUT /api/global-parameters/{name}
+pub async fn put_global_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<ParameterBody>,
+) -> Result<StatusCode> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let (n, value) = (name.clone(), body.value.clone());
+    with_store(&state, move |store| crate::settings::put_global(store, &n, &value)).await;
+    crate::mutations::replicate(&state, "global_parameter", json!({"name": name, "value": body.value})).await;
+    Ok(StatusCode::CREATED)
+}
+
+/// DELETE /api/global-parameters/{name}
+pub async fn delete_global_parameter(
+    State(state): State<MgmtState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode> {
+    let session = require_session(&state, &headers).await?;
+    require_administrator(&session)?;
+    let n = name.clone();
+    if !with_store(&state, move |store| crate::settings::delete_global(store, &n)).await.unwrap_or(false) {
+        return Err(MgmtError::NotFound(format!("global parameter {name}")));
+    }
+    crate::mutations::replicate(&state, "delete_global_parameter", json!({"name": name})).await;
+    Ok(StatusCode::NO_CONTENT)
 }

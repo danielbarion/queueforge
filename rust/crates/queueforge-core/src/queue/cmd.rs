@@ -289,9 +289,77 @@ pub enum StreamStart {
     AgeMs(u64),
 }
 
+/// One entry of a replicated stream, as its Raft snapshot carries it.
+#[derive(Debug, Clone)]
+pub struct StreamEntryCopy {
+    /// Visible offset (from 0).
+    pub offset: u64,
+    /// Append time, Unix milliseconds.
+    pub at_ms: u64,
+    /// The entry.
+    pub message: Arc<Message>,
+}
+
+/// A replicated stream's state: the retained entries and where it stands.
+#[derive(Debug, Clone, Default)]
+pub struct StreamCopy {
+    /// Oldest retained visible offset.
+    pub first: u64,
+    /// Next visible offset to assign.
+    pub next: u64,
+    /// Raft index of the last applied append.
+    pub raft_index: u64,
+    /// Retained entries, oldest first.
+    pub entries: Vec<StreamEntryCopy>,
+}
+
+/// Commits a client append to a replicated stream through its Raft group.
+///
+/// Set on the registry by the cluster. A stream it replicates appends only
+/// what [`QueueCmd::StreamApply`] hands it, in log order, so every member
+/// assigns the same offsets.
+pub trait StreamReplicator: Send + Sync {
+    /// Whether `key` is a replicated stream.
+    fn replicated(&self, key: &crate::queue::QueueKey) -> bool;
+    /// Commit `msg` in `key`'s group. Resolves once it is applied here.
+    fn append(
+        &self,
+        key: crate::queue::QueueKey,
+        msg: Arc<Message>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + Send>>;
+}
+
+/// Where a stream actor finds the [`StreamReplicator`]. The cluster fills
+/// it after recovered actors are already running.
+pub type ReplicatorSlot = Arc<std::sync::RwLock<Option<Arc<dyn StreamReplicator>>>>;
+
 /// Commands handled by a per-queue actor.
 #[derive(Debug)]
 pub enum QueueCmd {
+    /// Append one committed entry of a replicated stream. An `index` at or
+    /// below the last applied one is a replay and is skipped.
+    StreamApply {
+        /// Raft index of the entry.
+        index: u64,
+        /// Append time from the entry, Unix milliseconds.
+        at_ms: u64,
+        /// The message.
+        msg: Arc<Message>,
+        /// Result once appended (or skipped); storage failure must not advance the applied index.
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// The stream's retained entries, for a Raft snapshot.
+    StreamDump {
+        /// Reply with the copy; other queue types reply the default.
+        reply: oneshot::Sender<StreamCopy>,
+    },
+    /// Replace the stream with a leader's snapshot.
+    StreamInstall {
+        /// The snapshot.
+        copy: StreamCopy,
+        /// Result once installed durably.
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Set where the next consumer registered with `session` starts, for a
     /// stream queue. Other queue types ignore it.
     StreamStart {
@@ -299,6 +367,11 @@ pub enum QueueCmd {
         session: ConsumerSessionId,
         /// Starting point.
         start: StreamStart,
+    },
+    /// Clear every ready and unacked local quorum replica before installing a snapshot.
+    ResetReplicas {
+        /// Completes after the removals have been flushed to the queue log.
+        reply: oneshot::Sender<Result<()>>,
     },
     /// Enqueue a message into the ready set.
     Enqueue {

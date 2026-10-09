@@ -1811,6 +1811,16 @@ async fn definitions_roundtrip(
         imported.status(),
         imported.text().await.unwrap_or_default()
     );
+    // Import replaces the administrator's salted password hash, which revokes
+    // sessions tied to the old credential identity. Authenticate against the
+    // imported account before inspecting the restored topology.
+    let login = http
+        .post(format!("http://127.0.0.1:{mgmt}/api/login"))
+        .json(&serde_json::json!({"username": "admin", "password": "devpassword12"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(login.status().is_success(), "{label} imported account login");
     let listed = http
         .get(format!("http://127.0.0.1:{mgmt}/api/policies/%2F"))
         .send()

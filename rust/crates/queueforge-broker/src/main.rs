@@ -114,7 +114,15 @@ async fn run() -> Result<()> {
     );
 
     // Create data_dir if needed and open (or bootstrap) the metadata store.
+    let fresh = !config
+        .data
+        .dir
+        .join(queueforge_store::metadata::METADATA_DB_FILE)
+        .exists();
     let store = MetadataStore::open(&config.data.dir).context("opening metadata store")?;
+    if fresh {
+        queueforge_broker::cluster::mark_fresh_raft(store.data_dir());
+    }
     info!(
         data_dir = %store.data_dir().display(),
         schema_version = store.schema_version().context("reading schema version")?,
@@ -321,6 +329,8 @@ async fn run() -> Result<()> {
     } else {
         (None, None)
     };
+    // Limits and topic permissions stored by an earlier run.
+    queueforge_mgmt::settings::load(&connections, &store);
     let mut mgmt_state = MgmtState::new(
         Arc::clone(&store),
         Arc::clone(&queues),
@@ -451,11 +461,19 @@ async fn run() -> Result<()> {
     } else {
         None
     };
+    if let Some(cluster) = &cluster {
+        cluster.attach_settings(Arc::clone(&connections));
+    }
     if let (Some(cluster), Some(mut replicate_rx)) = (cluster.clone(), replicate_rx) {
         tokio::spawn(async move {
             while let Some(req) = replicate_rx.recv().await {
-                cluster.replicate_json(&req.kind, req.payload).await;
-                let _ = req.done.send(());
+                let outcome = if req.kind == "members" {
+                    cluster.change_members_json(&req.payload).await
+                } else {
+                    cluster.replicate_json(&req.kind, req.payload).await;
+                    Ok(())
+                };
+                let _ = req.done.send(outcome);
             }
         });
     }
@@ -534,26 +552,51 @@ async fn run() -> Result<()> {
         info!("broker ready (quorum catchup complete)");
     }
     let bridge_port = bridge_listener.as_ref().map_or(amqp_listener.local_addr.port(), |l| l.local_addr.port());
+    // The TLS listeners of the other protocols share the `[tls]` certificate.
+    let protocol_tls = if config.listeners.mqtts.is_some() || config.listeners.stomps.is_some() || config.listeners.stream_tls.is_some() {
+        let cert = config.tls.cert_path_required().context("a TLS protocol listener needs tls.cert_path")?;
+        let key = config.tls.key_path_required().context("a TLS protocol listener needs tls.key_path")?;
+        Some(
+            load_server_config_with_client_ca(cert, key, config.tls.ca_path.as_deref())
+                .with_context(|| format!("loading TLS cert {} / key {}", cert.display(), key.display()))?,
+        )
+    } else {
+        None
+    };
     if let Some(addr) = config.listeners.mqtt {
-        queueforge_broker::protocols::spawn_mqtt(addr, bridge_port);
+        queueforge_broker::protocols::spawn_mqtt(addr, bridge_port, None);
         info!(%addr, "MQTT listening");
     }
+    if let Some(addr) = config.listeners.mqtts {
+        queueforge_broker::protocols::spawn_mqtt(addr, bridge_port, protocol_tls.clone());
+        info!(%addr, "MQTT over TLS listening");
+    }
     if let Some(addr) = config.listeners.stomp {
-        queueforge_broker::protocols::spawn_stomp(addr, bridge_port);
+        queueforge_broker::protocols::spawn_stomp(addr, bridge_port, None);
         info!(%addr, "STOMP listening");
     }
-    if let Some(addr) = config.listeners.stream {
+    if let Some(addr) = config.listeners.stomps {
+        queueforge_broker::protocols::spawn_stomp(addr, bridge_port, protocol_tls.clone());
+        info!(%addr, "STOMP over TLS listening");
+    }
+    let stream_ctx = |addr: std::net::SocketAddr| {
         // Clients reconnect to the advertised address, so a wildcard bind advertises localhost.
         let advertised_host = if addr.ip().is_unspecified() { "localhost".to_string() } else { addr.ip().to_string() };
-        let ctx = queueforge_mgmt::bridge::stream::StreamContext {
+        Arc::new(queueforge_mgmt::bridge::stream::StreamContext {
             store: Arc::clone(&store),
             amqp_port: bridge_port,
             advertised_host,
             advertised_port: addr.port(),
             queues: Some(Arc::clone(&queues)),
-        };
-        queueforge_broker::protocols::spawn_stream(addr, Arc::new(ctx));
+        })
+    };
+    if let Some(addr) = config.listeners.stream {
+        queueforge_broker::protocols::spawn_stream(addr, stream_ctx(addr), None);
         info!(%addr, "stream listening");
+    }
+    if let Some(addr) = config.listeners.stream_tls {
+        queueforge_broker::protocols::spawn_stream(addr, stream_ctx(addr), protocol_tls.clone());
+        info!(%addr, "stream over TLS listening");
     }
 
     wait_for_shutdown().await?;

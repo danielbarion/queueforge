@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::proxy::proxy_loop;
 use super::state::remember_consumed;
+use super::raft_node::RaftNode;
 use super::wire::{encode_quorum_append, replica_key, wire_forget};
 use super::{Cluster, Inner, Msg};
 use crate::quorum_confirm::{durable_majority, MemberCopy};
@@ -163,15 +164,24 @@ impl Cluster {
     ///
     /// `drop_local` removes this node's replica log only. The leader's unacked
     /// entry stays until the client acks or nacks.
-    pub async fn claim_for_handoff(&self, key: &QueueKey, message_id: &str, drop_local: bool) {
+    ///
+    /// `settled` is true for a delivery that needs no ack (noAck consume or
+    /// get). With Raft on, a delivery that waits for an ack commits nothing
+    /// here: its drop commits when the ack or reject settles it, so a new
+    /// leader still has the message if this one dies first (docs/raft.md,
+    /// section 6).
+    pub async fn claim_for_handoff(&self, key: &QueueKey, message_id: &str, drop_local: bool, settled: bool) {
         if let Some(node) = super::consensus::node(&self.inner) {
-            // The drop commits before the body is written (docs/raft.md, section 6).
+            if !settled {
+                return;
+            }
+            // The drop commits before the body is written.
             if drop_local {
                 self.inner.replicas.lock().await.remove(&replica_key(key, message_id));
                 self.forget_local(key, message_id).await;
             }
             let data = serde_json::json!({"vhost": key.vhost.as_str(), "queue": key.name.as_str(), "ids": [message_id]});
-            if let Err(err) = node.propose(super::raft_node::QUORUM, "drop", data).await {
+            if let Err(err) = node.propose(&self.quorum_group(key), "drop", data).await {
                 tracing::warn!(queue = %key, error = %err, "quorum drop did not commit; delivering anyway");
             }
             return;
@@ -187,6 +197,32 @@ impl Cluster {
             self.forget_local(key, message_id).await;
         }
         self.quorum_forget(key, message_id).await;
+    }
+
+    /// Remove a settled quorum message (acked, or rejected without requeue)
+    /// from every member. With Raft on, the drop is committed in the queue's
+    /// group; otherwise followers are told directly.
+    pub async fn settle_quorum(&self, key: &QueueKey, message_id: &str) {
+        if super::consensus::node(&self.inner).is_some() {
+            commit_drop(&self.inner, key, message_id).await;
+            return;
+        }
+        self.quorum_forget(key, message_id).await;
+    }
+
+    /// The Raft group that holds `key`'s messages.
+    pub(super) fn quorum_group(&self, key: &QueueKey) -> String {
+        quorum_group_of(&self.inner, key)
+    }
+
+    /// The leader of `key`: with Raft, its group's (its own, or the shared
+    /// `quorum` group's); without it, the shared choice below.
+    pub fn quorum_leader_for(&self, key: &QueueKey) -> String {
+        if super::consensus::node(&self.inner).is_some() {
+            // Set by the applier after everything committed before it.
+            return super::qgroups::leader_of(&self.inner, key);
+        }
+        self.quorum_leader()
     }
 
     /// Lowest reachable member once a majority is up. That node pushes quorum deliveries.
@@ -216,14 +252,14 @@ impl Cluster {
     ///
     /// A consume or get that arrives during an election would otherwise be
     /// routed to an empty home. Without Raft there is always a leader.
-    pub async fn wait_quorum_leader(&self) {
+    pub async fn wait_quorum_leader(&self, key: &QueueKey) {
         if super::consensus::node(&self.inner).is_none() {
             return;
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(super::raft::ELECTION_MAX_MS * 2);
         // A leader that is not connected is the one that just died; a new one is being elected.
         loop {
-            let leader = self.quorum_leader();
+            let leader = self.quorum_leader_for(key);
             let usable = !leader.is_empty() && (leader == self.inner.node_id || self.inner.peers.lock().await.contains_key(&leader));
             if usable || tokio::time::Instant::now() >= deadline {
                 return;
@@ -232,9 +268,9 @@ impl Cluster {
         }
     }
 
-    /// Whether this process is the quorum leader.
-    pub fn is_quorum_leader(&self) -> bool {
-        self.quorum_leader() == self.inner.node_id
+    /// Whether this process leads `key`.
+    pub fn is_quorum_leader(&self, key: &QueueKey) -> bool {
+        self.quorum_leader_for(key) == self.inner.node_id
     }
 
     /// Mailbox that runs consume, ack, and nack on the quorum leader.
@@ -243,11 +279,11 @@ impl Cluster {
     /// would deliver the same body from every ready queue.
     pub fn leader_consume_handle(&self, key: &QueueKey) -> Option<QueueHandle> {
         let local = self.inner.queues.get(key)?;
-        if self.is_quorum_leader() {
+        if self.is_quorum_leader(key) {
             return Some(local);
         }
         let mut queue = local.info.to_domain();
-        queue.home = Some(CompactString::from(self.quorum_leader()));
+        queue.home = Some(CompactString::from(self.quorum_leader_for(key)));
         let (tx, rx) = mpsc::channel(64);
         let handle = QueueHandle {
             tx,
@@ -266,7 +302,7 @@ impl Cluster {
     /// on top of the others, and the call is `quorum_drop` so it cannot be
     /// read as a membership change.
     pub async fn quorum_forget(&self, key: &QueueKey, message_id: &str) {
-        let leader = self.quorum_leader();
+        let leader = self.quorum_leader_for(key);
         let peers = self.live_peers().await;
         let wire = serde_json::json!({
             "vhost": key.vhost.as_str(),
@@ -335,39 +371,65 @@ impl Cluster {
     }
 }
 
+/// A quorum publish already handed to the cluster; resolves with its confirm.
+pub type QuorumPublish = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
+
 impl Cluster {
-    /// Raft quorum publish: store locally and commit an `enq` in the quorum
-    /// group. The confirm is the commit, so a majority has the entry on disk.
+    /// Start a quorum publish now and confirm it later. With Raft the `enq`
+    /// is submitted before this returns, so publishes started in turn are
+    /// committed, and delivered, in that order.
+    pub fn quorum_start(&self, key: &QueueKey, message: Arc<Message>) -> QuorumPublish {
+        if let Some(node) = super::consensus::node(&self.inner).cloned() {
+            let submitted = self.quorum_submit_raft(&node, key, message);
+            let key = key.clone();
+            return Box::pin(async move {
+                RaftNode::settled(submitted)
+                    .await
+                    .map_err(|why| Error::Unavailable(format!("quorum queue {key} has no majority: {why}")))
+            });
+        }
+        let cluster = Cluster { inner: Arc::clone(&self.inner) };
+        let key = key.clone();
+        Box::pin(async move { cluster.quorum_enqueue(&key, message).await })
+    }
+
+    /// Raft quorum publish: commit an `enq` in the queue's group. Every
+    /// member, this one included, stores the message when the entry
+    /// applies, so each queue holds messages in log order. The confirm is
+    /// the commit, so a majority has the entry on disk.
     async fn quorum_enqueue_raft(&self, key: &QueueKey, message: Arc<Message>) -> Result<(), Error> {
         let node = super::consensus::node(&self.inner).cloned().ok_or_else(|| Error::Unavailable("raft is not running".into()))?;
+        RaftNode::settled(self.quorum_submit_raft(&node, key, message))
+            .await
+            .map_err(|why| Error::Unavailable(format!("quorum has no majority: {why}")))
+    }
+
+    fn quorum_submit_raft(
+        &self,
+        node: &RaftNode,
+        key: &QueueKey,
+        message: Arc<Message>,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let mut owned = (*message).clone();
         if owned.message_id.is_none() {
             let n = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
             owned.message_id = Some(CompactString::from(format!("q{n}-{}", self.inner.node_id)));
         }
-        let message = Arc::new(owned);
-        let message_id = message.message_id.clone().unwrap_or_default();
-        let data = encode_quorum_append(key, &message);
-        let rk = replica_key(key, message_id.as_str());
-        // Known before the commit applies here, so that apply is a no-op.
-        self.inner.quorum_live.lock().await.insert(rk.clone(), data.clone());
-        // The Raft log is the durable copy (a restart replays it), so the
-        // local queue log's fsync is not waited for here.
-        let (local, committed) = tokio::join!(
-            local_accept(&self.inner, key, Arc::clone(&message)),
-            node.propose(super::raft_node::QUORUM, "enq", data),
-        );
-        match (local, committed) {
-            (Ok(_), Ok(())) => Ok(()),
-            (local, committed) => {
-                self.inner.quorum_live.lock().await.remove(&rk);
-                if local.is_ok() {
-                    let _ = local_forget(&self.inner, key, message_id.as_str()).await;
-                }
-                let why = committed.err().unwrap_or_else(|| "local append failed".into());
-                Err(Error::Unavailable(format!("quorum has no majority: {why}")))
-            }
-        }
+        let data = encode_quorum_append(key, &owned);
+        node.submit(&quorum_group_of(&self.inner, key), "enq", data)
+    }
+}
+
+pub(super) use super::qgroups::quorum_group_of;
+
+/// Commit the drop of a settled quorum message in its group. A failure is
+/// logged: the message is then delivered again after a failover, which a
+/// consumer sees as `redelivered`.
+pub(super) async fn commit_drop(inner: &Arc<Inner>, key: &QueueKey, message_id: &str) {
+    let Some(node) = super::consensus::node(inner).cloned() else { return };
+    let data = serde_json::json!({"vhost": key.vhost.as_str(), "queue": key.name.as_str(), "ids": [message_id]});
+    if let Err(err) = node.propose(&quorum_group_of(inner, key), "drop", data).await {
+        tracing::warn!(queue = %key, error = %err, "quorum settle did not commit");
     }
 }
 
@@ -398,25 +460,6 @@ pub(super) async fn local_enqueue(
         .await
         .map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
     Ok(completion.offset)
-}
-
-/// Append `message` to the local queue `key` and return once the actor took
-/// it, without waiting for its fsync.
-pub(super) async fn local_accept(inner: &Inner, key: &QueueKey, message: Arc<Message>) -> Result<(), Error> {
-    let handle = inner
-        .queues
-        .get(key)
-        .ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    handle
-        .tx
-        .send(QueueCmd::Enqueue { msg: message, reply: reply_tx })
-        .await
-        .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
-    reply_rx
-        .await
-        .map_err(|_| Error::Unavailable(format!("queue {key} is down")))??;
-    Ok(())
 }
 
 /// In-flight appends allowed on a peer the majority does not need.

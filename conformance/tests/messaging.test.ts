@@ -1,5 +1,28 @@
 import { expect, test } from "bun:test";
+import type { Message } from "amqplib";
 import { channel, closeCode, collect, confirmChannel, connect, eventually, nextMessage, rpc, sleep, uniq } from "../lib.ts";
+
+test("Mandatory returns :: an unroutable message returns before its publisher confirm", async () => {
+  const ch = await confirmChannel();
+  const key = uniq("unroutable");
+  const exchange = uniq("unroutable-exchange");
+  await ch.assertExchange(exchange, "direct", { durable: false });
+  const events: string[] = [];
+  let returned: (Message & { fields: Message["fields"] & { replyCode: number } }) | undefined;
+  ch.on("return", (message) => { returned = message; events.push("return"); });
+  await new Promise<void>((resolve, reject) => {
+    ch.publish(exchange, key, Buffer.from("unroutable-body"), { mandatory: true, correlationId: "return-id" }, (error) => {
+      events.push("confirm");
+      if (error) reject(error); else resolve();
+    });
+  });
+  expect(events).toEqual(["return", "confirm"]);
+  expect(returned?.fields.replyCode).toBe(312);
+  expect(returned?.fields.routingKey).toBe(key);
+  expect(returned?.content.toString()).toBe("unroutable-body");
+  expect(returned?.properties.correlationId).toBe("return-id");
+  await ch.deleteExchange(exchange);
+});
 
 test("Acks, nacks, rejects :: a nack with requeue redelivers with the redelivered flag", async () => {
   const ch = await channel();

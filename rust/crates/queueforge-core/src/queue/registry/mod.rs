@@ -164,6 +164,7 @@ impl QueueInfo {
             auto_delete: self.auto_delete,
             args: self.args.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             home: None,
+            raft_group: None,
         }
     }
 }
@@ -243,6 +244,8 @@ pub struct QueueRegistry {
     local_node: Option<String>,
     /// Dead-letter router (set after construction to break Arc cycles).
     dlx: RwLock<Option<Arc<DlxRouter>>>,
+    /// Commits appends to replicated streams (set by the cluster).
+    stream_replicator: crate::queue::ReplicatorSlot,
     /// Fan-in of per-actor `x-expires` notifications.
     expired_tx: mpsc::UnboundedSender<QueueKey>,
     /// Receiver side held until [`Self::take_expired_rx`] is called.
@@ -264,6 +267,7 @@ impl QueueRegistry {
             durability_policy: DurabilityPolicy::default(),
             local_node: None,
             dlx: RwLock::new(None),
+            stream_replicator: Default::default(),
             expired_tx,
             expired_rx: AsyncMutex::new(Some(expired_rx)),
         }
@@ -301,6 +305,15 @@ impl QueueRegistry {
     /// Install the dead-letter router (typically after the exchange router is ready).
     pub fn set_dlx(&self, dlx: Arc<DlxRouter>) {
         *self.dlx.write().expect("dlx lock poisoned") = Some(dlx);
+    }
+
+    /// Install the hook that commits appends to replicated streams.
+    pub fn set_stream_replicator(&self, replicator: Arc<dyn crate::queue::StreamReplicator>) {
+        *self.stream_replicator.write().expect("replicator lock poisoned") = Some(replicator);
+    }
+
+    pub(super) fn stream_replicator(&self) -> Option<crate::queue::ReplicatorSlot> {
+        Some(Arc::clone(&self.stream_replicator))
     }
 
     /// Take the `x-expires` notification receiver (at most once).

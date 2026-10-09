@@ -42,6 +42,20 @@ The management listener also serves the shared SPA from `rust/ui/dist` when that
 
 Leave `[cluster].members` empty for a single node. Otherwise every process uses the same static member list and its own `node_id` and `listen` address.
 
-Classic queues have one home node. Peers forward operations there.
+Classic queues have one home node, the shared home hash of [docs/raft.md](../docs/raft.md) section 9, or the member `x-queue-leader-locator` names: `client-local` is the node the client is connected to, `balanced` the member homing the fewest queues. Peers forward operations there.
 
-A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have fsynced the body into their own store. This process records the body and waits for the flush before it acks the peer. Rust members of the same list fsync their write-ahead log before the copy counts. Once a majority is reachable, the live leader is the lowest member id among the reachable members. Publishing to any member is enough. `POST /api/nodes` adds a member and `DELETE /api/nodes/{id}` removes one that homes no classic queue. The [repository README](../README.md) shows a three-member list.
+Raft ([docs/raft.md](../docs/raft.md)) is a feature flag. A cluster created by this build turns it on by itself once every member supports it. After an upgrade from a build without it, enable it with `PUT /api/feature-flags/raft/enable` once the last node runs the new build; until then the cluster keeps the behaviour below.
+
+With Raft on, every quorum queue and stream has its own Raft group, on Bun and Rust members alike, as RabbitMQ runs one Ra cluster per queue. A publish is confirmed once it commits on a majority. Each queue elects its own leader, so losing a member fails over only the queues it led. A message delivered and not yet acked when its leader dies is delivered again by the next one. A stream is copied to every member with the same offsets, and a consumer reads on whichever member it is connected to.
+
+Without Raft, a durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have fsynced the body into their own store. This process records the body and waits for the flush before it acks the peer. Rust members of the same list fsync their write-ahead log before the copy counts. Once a majority is reachable, the live leader is the lowest member id among the reachable members. Publishing to any member is enough.
+
+`POST /api/nodes` adds a member and `DELETE /api/nodes/{id}` removes one that homes no classic queue. With Raft on, the change commits through the metadata log and needs a majority; without one it is refused with 503. The [repository README](../README.md) shows a three-member list.
+
+## Cores and TLS
+
+On a host whose cgroup grants more than one core (or with `QUEUEFORGE_CORES` set), a parent process accepts AMQP and AMQPS sockets and hands each one to a child per core, unread; a child runs the TLS handshake itself. `[listeners]` also takes `mqtts`, `stomps` and `stream_tls`, which use the `[tls]` certificate.
+
+## Stored settings
+
+User and vhost limits, topic permissions, runtime parameters (`/api/parameters`) and global parameters (`/api/global-parameters`, including `cluster_name`) are stored in SQLite, replicated to the other members, and included in the definitions export and import.

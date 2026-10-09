@@ -57,6 +57,9 @@ pub fn encode_quorum_append(key: &QueueKey, message: &Message) -> Value {
         "persistent": message.persistent,
         "routing_key": message.routing_key.as_str(),
         "exchange": message.exchange.as_str(),
+        // The properties, so a follower that becomes leader delivers the
+        // message as published. Bun writes and reads the same field.
+        "propRaw": BASE64.encode(crate::connection::headers::message_props_raw(message)),
     })
 }
 
@@ -79,6 +82,9 @@ pub fn decode_quorum_append(payload: &Value) -> Result<(QueueKey, Message), Stri
         let id = json_str(payload, "message_id");
         if !id.is_empty() {
             message.message_id = Some(CompactString::from(id));
+        }
+        if let Ok(raw) = BASE64.decode(json_str(payload, "propRaw").as_bytes()) {
+            crate::connection::headers::apply_props_raw(&mut message, &raw);
         }
         return Ok((QueueKey::new(vhost, queue), message));
     }
@@ -149,13 +155,16 @@ pub(super) fn message_to_wire(message: &Message) -> WireMessage {
         timestamp: message.timestamp,
         expires_unix_ms: message.expires_unix_ms,
         headers: message.headers.clone(),
+        // Bun reads the properties from this, as it writes them.
+        prop_raw: Some(BASE64.encode(crate::connection::headers::message_props_raw(message))),
     }
 }
 
 /// Convert `wire` back into a queue message. Returns the message a peer append stores. Header fields the sender omitted stay empty.
 pub(super) fn wire_to_message(wire: WireMessage) -> Message {
     let body = BASE64.decode(wire.body_b64.as_bytes()).unwrap_or_default();
-    Message {
+    let raw = wire.prop_raw.as_deref().and_then(|b| BASE64.decode(b.as_bytes()).ok()).filter(|r| r.len() >= 2);
+    let mut message = Message {
         exchange: CompactString::from(wire.exchange),
         routing_key: CompactString::from(wire.routing_key),
         body: Bytes::from(body),
@@ -174,7 +183,12 @@ pub(super) fn wire_to_message(wire: WireMessage) -> Message {
         timestamp: wire.timestamp,
         expires_unix_ms: wire.expires_unix_ms,
         headers: wire.headers,
+    };
+    // Bun sends its properties only as the AMQP property section.
+    if let Some(raw) = raw {
+        crate::connection::headers::apply_props_raw(&mut message, &raw);
     }
+    message
 }
 
 /// Copy `value` into an owned `String`. Returns `None` when the compact string is absent.

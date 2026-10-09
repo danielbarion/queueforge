@@ -51,4 +51,19 @@ impl MetadataStore {
         }
         Ok(out)
     }
+
+    /// The components that have at least one parameter, sorted.
+    pub fn list_parameter_components(&self) -> Result<Vec<String>> {
+        let txn = self.read_txn()?;
+        let table = txn.open_table(PARAMETERS)?;
+        let mut out: Vec<String> = Vec::new();
+        for item in table.iter()? {
+            let (key, _) = item?;
+            let (c, _, _) = key.value();
+            if out.last().map(String::as_str) != Some(c) {
+                out.push(c.to_string());
+            }
+        }
+        Ok(out)
+    }
 }

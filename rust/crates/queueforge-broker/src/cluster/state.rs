@@ -39,7 +39,7 @@ pub(super) async fn snapshot(inner: &Inner) -> Value {
         })
     })
     .await;
-    serde_json::to_value(snap.unwrap_or(Snapshot {
+    let mut value = serde_json::to_value(snap.unwrap_or(Snapshot {
         users: Vec::new(),
         vhosts: Vec::new(),
         permissions: Vec::new(),
@@ -47,7 +47,21 @@ pub(super) async fn snapshot(inner: &Inner) -> Value {
         queues: Vec::new(),
         bindings: Vec::new(),
     }))
-    .unwrap_or(Value::Null)
+    .unwrap_or(Value::Null);
+    // Limits, topic permissions and parameters, in Bun's field names.
+    if let Some(conns) = inner.settings.get().cloned() {
+        let settings = MetadataStore::blocking(Arc::clone(&inner.store), move |store| {
+            Ok(queueforge_mgmt::settings::snapshot(&conns, store))
+        })
+        .await
+        .unwrap_or(Value::Null);
+        if let (Some(out), Some(extra)) = (value.as_object_mut(), settings.as_object()) {
+            for (k, v) in extra {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    value
 }
 
 /// Record `message_id` as consumed on `key` in `inner`. A later snapshot must not resurrect that id on this node.
@@ -89,6 +103,14 @@ pub(super) async fn apply_consumed(inner: &Arc<Inner>, value: &Value) {
 
 /// Replace local replicated topology with the peer snapshot in `value`. `inner` is the node being updated. A malformed snapshot leaves the previous rows.
 pub(super) async fn apply_snapshot(inner: &Arc<Inner>, value: &Value) {
+    if let Some(conns) = inner.settings.get().cloned() {
+        let value = value.clone();
+        let _ = MetadataStore::blocking(Arc::clone(&inner.store), move |store| {
+            queueforge_mgmt::settings::install_missing(&conns, store, &value);
+            Ok(())
+        })
+        .await;
+    }
     let Ok(snap) = serde_json::from_value::<Snapshot>(value.clone()) else {
         return;
     };

@@ -86,9 +86,19 @@ struct Inner {
     raft: std::sync::OnceLock<Arc<raft_node::RaftNode>>,
     /// Members whose hello advertised `raft`.
     raft_peers: std::sync::Mutex<HashSet<String>>,
+    /// Peers whose data directory lets the cluster turn Raft on without an operator.
+    raft_auto_peers: std::sync::Mutex<HashSet<String>>,
     /// Quorum messages the `quorum` group holds, by replica key, as their
     /// `enq` data. It makes a replayed `enq` a no-op and is the snapshot.
     quorum_live: Mutex<HashMap<String, Value>>,
+    /// Queues with their own Raft group, and that group (docs/raft.md, section 2).
+    qgroups: std::sync::Mutex<HashMap<QueueKey, String>>,
+    /// Each queue group's leader, as the applier last announced it.
+    qleaders: std::sync::Mutex<HashMap<String, String>>,
+    /// Members whose hello advertised `raft_qgroups`.
+    raft_qgroup_peers: std::sync::Mutex<HashSet<String>>,
+    /// Limits and topic permissions in force, for the settings kinds.
+    settings: std::sync::OnceLock<Arc<queueforge_mgmt::ConnectionTracker>>,
 }
 
 /// Refused connects before a member is treated as down.
@@ -245,6 +255,9 @@ struct WireMessage {
     expires_unix_ms: Option<u64>,
     #[serde(default)]
     headers: queueforge_core::MessageHeaders,
+    /// Bun's AMQP property section (base64), when it sent one.
+    #[serde(default, rename = "propRaw", skip_serializing_if = "Option::is_none")]
+    prop_raw: Option<String>,
 }
 
 struct SubOpen {
@@ -269,6 +282,7 @@ impl Inner {
 }
 
 mod consensus;
+pub use consensus::mark_fresh as mark_fresh_raft;
 mod dispatch;
 mod forward;
 mod ingress;
@@ -276,6 +290,7 @@ mod lifecycle;
 mod membership;
 mod net;
 mod proxy;
+mod qgroups;
 mod quorum;
 pub(crate) mod raft;
 mod raft_apply;

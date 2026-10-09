@@ -248,6 +248,8 @@ export function setUserLimit(this: Broker, user: string, connections: number | n
   else this.userConnLimit.set(user, connections);
   if (channels == null) this.userChanLimit.delete(user);
   else this.userChanLimit.set(user, channels);
+  if (connections == null && channels == null) this.store.deleteParameter(USER_LIMITS, "", user);
+  else this.store.putParameter(USER_LIMITS, "", user, JSON.stringify({ "max-connections": connections, "max-channels": channels }));
 }
 
 /**
@@ -263,6 +265,62 @@ export function setVhostLimit(this: Broker, vhost: string, connections: number |
   else this.vhostConnLimit.set(vhost, connections);
   if (queues == null) this.vhostQueueLimit.delete(vhost);
   else this.vhostQueueLimit.set(vhost, queues);
+  if (connections == null && queues == null) this.store.deleteParameter(VHOST_LIMITS, vhost, "limits");
+  else this.store.putParameter(VHOST_LIMITS, vhost, "limits", JSON.stringify({ "max-connections": connections, "max-queues": queues }));
+}
+
+/** Parameter components the limits are stored under. RabbitMQ names its vhost one the same way. */
+export const USER_LIMITS = "user-limits";
+export const VHOST_LIMITS = "vhost-limits";
+
+function limitValue(value: unknown): number | null {
+  const n = Number(value);
+  return value == null || !Number.isFinite(n) || n < 0 ? null : n;
+}
+
+/**
+ * Load the stored limits into the in-memory tables.
+ *
+ * @returns Nothing. A row that does not parse is skipped.
+ */
+export function loadLimits(this: Broker) {
+  for (const row of this.store.listParameters(USER_LIMITS)) {
+    try {
+      const v = JSON.parse(row.value) as Record<string, unknown>;
+      const c = limitValue(v["max-connections"]);
+      const ch = limitValue(v["max-channels"]);
+      if (c != null) this.userConnLimit.set(row.name, c);
+      if (ch != null) this.userChanLimit.set(row.name, ch);
+    } catch {
+      /* skipped */
+    }
+  }
+  for (const row of this.store.listParameters(VHOST_LIMITS)) {
+    try {
+      const v = JSON.parse(row.value) as Record<string, unknown>;
+      const c = limitValue(v["max-connections"]);
+      const q = limitValue(v["max-queues"]);
+      if (c != null) this.vhostConnLimit.set(row.vhost, c);
+      if (q != null) this.vhostQueueLimit.set(row.vhost, q);
+    } catch {
+      /* skipped */
+    }
+  }
+}
+
+/**
+ * Apply a limits row a peer replicated, or a row from a snapshot or definitions file.
+ *
+ * @param kind `"user_limits"` or `"vhost_limits"`.
+ * @param row `{ user | vhost, "max-connections", "max-channels" | "max-queues" }`. A missing or negative value clears it.
+ * @returns Nothing.
+ */
+export function applyLimitsRow(this: Broker, kind: string, row: Record<string, unknown>) {
+  if (kind === "user_limits" && typeof row.user === "string") {
+    this.setUserLimit(row.user, limitValue(row["max-connections"]), limitValue(row["max-channels"]));
+  } else if (kind === "vhost_limits" && typeof row.vhost === "string") {
+    this.setVhostLimit(row.vhost, limitValue(row["max-connections"]), limitValue(row["max-queues"]));
+  }
 }
 
 /**
@@ -310,6 +368,7 @@ export function putTopicPerm(this: Broker, perm: TopicPerm) {
     (p) => !(p.user === perm.user && p.vhost === perm.vhost && p.exchange === perm.exchange),
   );
   this.topicPerms.push(perm);
+  this.storeTopicPerm(perm);
 }
 
 /**
@@ -323,6 +382,7 @@ export function putTopicPerm(this: Broker, perm: TopicPerm) {
 export function deleteTopicPerm(this: Broker, user: string, vhost: string, exchange: string): boolean {
   const before = this.topicPerms.length;
   this.topicPerms = this.topicPerms.filter((p) => !(p.user === user && p.vhost === vhost && p.exchange === exchange));
+  this.unstoreTopicPerm(user, vhost, exchange);
   return this.topicPerms.length !== before;
 }
 
@@ -400,6 +460,8 @@ Broker.prototype.queueAllowed = queueAllowed;
 Broker.prototype.setUserLimit = setUserLimit;
 Broker.prototype.setVhostLimit = setVhostLimit;
 Broker.prototype.listUserLimits = listUserLimits;
+Broker.prototype.loadLimits = loadLimits;
+Broker.prototype.applyLimitsRow = applyLimitsRow;
 Broker.prototype.listVhostLimits = listVhostLimits;
 Broker.prototype.putTopicPerm = putTopicPerm;
 Broker.prototype.deleteTopicPerm = deleteTopicPerm;
@@ -428,6 +490,8 @@ declare module "./class.ts" {
     setUserLimit: typeof setUserLimit;
     setVhostLimit: typeof setVhostLimit;
     listUserLimits: typeof listUserLimits;
+    loadLimits: typeof loadLimits;
+    applyLimitsRow: typeof applyLimitsRow;
     listVhostLimits: typeof listVhostLimits;
     putTopicPerm: typeof putTopicPerm;
     deleteTopicPerm: typeof deleteTopicPerm;

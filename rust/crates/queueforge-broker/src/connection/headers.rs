@@ -53,7 +53,7 @@ fn field_value_bytes(v: &FieldValue) -> u64 {
     }
 }
 
-pub(super) fn message_to_properties(msg: &queueforge_core::Message) -> BasicProperties {
+pub(crate) fn message_to_properties(msg: &queueforge_core::Message) -> BasicProperties {
     BasicProperties {
         content_type: msg.content_type.as_ref().map(|s| s.to_string()),
         content_encoding: msg.content_encoding.as_ref().map(|s| s.to_string()),
@@ -225,4 +225,43 @@ pub(super) fn death_headers_to_field_table(
         table.insert("x-first-death-exchange", FieldValue::long_str(e.as_str()));
     }
     Some(table)
+}
+
+/// The AMQP basic property section (flags, then the present fields) of `msg`,
+/// as Bun's `propRaw` carries it on the cluster wire.
+pub(crate) fn message_props_raw(msg: &queueforge_core::Message) -> Vec<u8> {
+    let mut enc = queueforge_amqp::Encoder::new();
+    if message_to_properties(msg).encode_into(&mut enc).is_err() {
+        return Vec::new();
+    }
+    enc.finish()
+}
+
+/// Fill `msg`'s properties from a `propRaw` property section. An unreadable
+/// one leaves `msg` as it was.
+pub(crate) fn apply_props_raw(msg: &mut queueforge_core::Message, raw: &[u8]) {
+    if raw.len() < 2 {
+        return;
+    }
+    let mut dec = queueforge_amqp::Decoder::new(raw);
+    let Ok(props) = BasicProperties::decode_from(&mut dec) else {
+        return;
+    };
+    let s = |v: &Option<String>| v.as_deref().map(compact_str::CompactString::from);
+    msg.content_type = s(&props.content_type);
+    msg.content_encoding = s(&props.content_encoding);
+    msg.correlation_id = s(&props.correlation_id);
+    if props.message_id.is_some() && msg.message_id.is_none() {
+        msg.message_id = s(&props.message_id);
+    }
+    msg.reply_to = s(&props.reply_to);
+    msg.expiration = s(&props.expiration);
+    msg.app_id = s(&props.app_id);
+    msg.user_id = s(&props.user_id);
+    msg.type_ = s(&props.type_);
+    msg.priority = props.priority;
+    msg.timestamp = props.timestamp;
+    if let Some(table) = props.headers.as_ref() {
+        msg.headers.app = field_table_to_app_headers(table);
+    }
 }

@@ -44,6 +44,8 @@ export function load(this: Broker) {
   this.e2e = this.store.listExchangeBindings();
   for (const p of this.store.listPolicies() as Policy[]) this.policies.push(p);
   this.applyPolicies();
+  this.loadLimits();
+  this.loadTopicPerms();
   const otherMembers = this.cfg.members.some((member) => member.id !== this.cfg.nodeId);
   let recoveredQuorum = false;
   for (const row of this.store.listMessages()) {
@@ -140,7 +142,7 @@ export function ensureBuiltins(this: Broker, vhost: string) {
  */
 export async function verify(this: Broker, user: string, password: string): Promise<boolean> {
   const row = this.users.get(user);
-  if (row && rabbitPasswordHashMatches(password, row.hash)) return true;
+  if (row) return rabbitPasswordHashMatches(password, row.hash);
   // The next backends, in RabbitMQ's auth_backends order: OAuth 2.0, then LDAP.
   if (this.oauth && password.split(".").length === 3) {
     const got = await this.oauth.login(password);
@@ -214,6 +216,28 @@ export function homeOf(this: Broker, vhost: string, name: string, exclusive: boo
 }
 
 /**
+ * Choose the home of a new queue, as RabbitMQ's `x-queue-leader-locator` does.
+ *
+ * @param locator `client-local` is this node. `balanced` is the member that
+ *   homes the fewest queues, ties to the lowest id. Anything else uses the
+ *   home hash, which every implementation computes the same way.
+ * @returns Null when the broker has no cluster members.
+ */
+export function placeQueue(this: Broker, vhost: string, name: string, exclusive: boolean, locator: unknown): string | null {
+  if (this.cfg.members.length === 0) return null;
+  if (exclusive || locator === "client-local") return this.cfg.nodeId || null;
+  if (locator === "balanced") {
+    const counts = new Map<string, number>(this.cfg.members.map((m) => [m.id, 0]));
+    for (const q of this.queues.values()) {
+      if (q.home && counts.has(q.home)) counts.set(q.home, counts.get(q.home)! + 1);
+    }
+    const ids = [...counts.keys()].sort();
+    return ids.reduce((best, id) => (counts.get(id)! < counts.get(best)! ? id : best), ids[0]!);
+  }
+  return this.homeOf(vhost, name, false);
+}
+
+/**
  * Report whether this process should serve a queue.
  *
  * @param home Home node id, or null when the queue is local.
@@ -231,6 +255,7 @@ Broker.prototype.principalOf = principalOf;
 Broker.prototype.can = can;
 Broker.prototype.hasVhostAccess = hasVhostAccess;
 Broker.prototype.homeOf = homeOf;
+Broker.prototype.placeQueue = placeQueue;
 Broker.prototype.isLocalHome = isLocalHome;
 
 declare module "./class.ts" {
@@ -243,6 +268,7 @@ declare module "./class.ts" {
     can: typeof can;
     hasVhostAccess: typeof hasVhostAccess;
     homeOf: typeof homeOf;
+    placeQueue: typeof placeQueue;
     isLocalHome: typeof isLocalHome;
   }
 }

@@ -150,9 +150,10 @@ where
                     let tx = self.handoff_tx.clone();
                     let key = info.queue_key.clone();
                     let drop_local = !local_holder;
+                    let settled = info.no_ack;
                     tokio::spawn(async move {
                         cluster
-                            .claim_for_handoff(&key, message_id.as_str(), drop_local)
+                            .claim_for_handoff(&key, message_id.as_str(), drop_local, settled)
                             .await;
                         let _ = tx.send(handoff);
                     });
@@ -224,6 +225,7 @@ where
         let props = message_to_properties(&delivery.message.message);
         let body = delivery.message.message.body.clone();
         let redelivered = delivery.message.message.redelivered;
+        self.trace_delivery(info.queue_key.name.as_str(), &delivery.message.message);
 
         self.send_method(
             info.channel,
@@ -255,6 +257,14 @@ where
                 .await;
         }
         Ok(())
+    }
+
+    /// Copy a delivery to the firehose when tracing is on for this vhost.
+    pub(in crate::connection) fn trace_delivery(&self, queue: &str, message: &queueforge_core::Message) {
+        let vhost = self.vhost.as_deref().unwrap_or("/");
+        if self.connections.tracing(vhost) {
+            queueforge_core::events::trace_deliver(&self.router, &self.queues, vhost, queue, "queueforge", message);
+        }
     }
 
     async fn nack_reserved(&mut self, channel: u16, tag: u64) {

@@ -156,7 +156,7 @@ where
                         .unwrap_or_else(|err| err.into_inner())
                         .queue_type
                         == Some(QueueType::Quorum);
-                    if quorum && !cluster.is_quorum_leader() {
+                    if quorum && !cluster.is_quorum_leader(&queue_key) {
                         if let Some(proxied) = cluster.leader_consume_handle(&queue_key) {
                             handle = proxied;
                         }
@@ -197,7 +197,7 @@ where
                             let key = queue_key.clone();
                             let id = message_id;
                             tokio::spawn(async move {
-                                cluster.quorum_forget(&key, id.as_str()).await;
+                                cluster.settle_quorum(&key, id.as_str()).await;
                             });
                         }
                     }

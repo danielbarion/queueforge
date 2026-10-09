@@ -262,6 +262,7 @@ mod tests {
             auto_delete: false,
             args: Default::default(),
             home: None,
+            raft_group: None,
         };
         store.create_queue(&q).unwrap();
         {
@@ -316,6 +317,7 @@ mod tests {
             auto_delete: false,
             args: Default::default(),
             home: None,
+            raft_group: None,
         };
         store.create_queue(&q).unwrap();
         {

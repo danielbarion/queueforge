@@ -23,6 +23,7 @@ pub(super) fn ensure_durable_meta_sync(
         auto_delete: opts.auto_delete,
         args: opts.args.clone(),
         home: opts.home.clone(),
+        raft_group: None,
     };
 
     match meta.create_queue(&domain) {

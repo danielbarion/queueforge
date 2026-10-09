@@ -397,7 +397,9 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   } else {
     return false;
   }
-  const home = this.broker.homeOf(this.vhost || "/", queue, false);
+  // A known queue keeps the home it was placed on; a locator may have moved it off the hash.
+  const known = this.broker.queues.get(this.broker.key(this.vhost || "/", queue));
+  const home = known ? known.home : this.broker.homeOf(this.vhost || "/", queue, false);
   if (!home || this.broker.isLocalHome(home)) return false;
   // The home parses from the naming frame on.
   if (at > 0) this.buf = buf.subarray(at);

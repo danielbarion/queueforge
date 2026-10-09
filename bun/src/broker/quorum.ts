@@ -9,7 +9,7 @@ import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
-import { QUORUM } from "../raft/node.ts";
+import { QUORUM, type Group } from "../raft/node.ts";
 import { durableMajority, selectQuorumPeers, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
@@ -52,6 +52,10 @@ export async function enqueueQuorum(this: Broker,
     exchange: src.exchange,
     routingKey: src.routingKey,
     persistent: src.persistent,
+    headers: src.headers,
+    propRaw: src.propRaw,
+    priority: src.priority,
+    expiration: src.expiration,
   });
   const acked: string[] = [];
   const copies: MemberCopy[] = [];
@@ -142,6 +146,10 @@ export async function enqueueQuorumRaft(this: Broker, q: QueueLive, src: Paramet
     exchange: src.exchange,
     routingKey: src.routingKey,
     persistent: src.persistent,
+    headers: src.headers,
+    propRaw: src.propRaw,
+    priority: src.priority,
+    expiration: src.expiration,
   }) as Record<string, unknown>;
   const key = `${q.vhost}\0${q.name}\0${qid}`;
   // Known before the commit applies here, so that apply is a no-op.
@@ -152,7 +160,7 @@ export async function enqueueQuorumRaft(this: Broker, q: QueueLive, src: Paramet
     return false;
   }
   try {
-    await node.propose(QUORUM, "enq", payload);
+    await node.propose(quorumGroupOf(q), "enq", payload);
   } catch {
     consensus.live.delete(key);
     this.dropLocal(q.vhost, q.name, qid);
@@ -164,15 +172,24 @@ export async function enqueueQuorumRaft(this: Broker, q: QueueLive, src: Paramet
   return true;
 }
 
+/** The Raft group that holds `q`: its own, or the shared `quorum` group. */
+export function quorumGroupOf(q: QueueLive | null | undefined): Group {
+  return q?.raftGroup || QUORUM;
+}
+
 /**
- * Name the current quorum leader.
+ * Name the current quorum leader of `q`.
  *
- * @returns The lowest sorted member id that is up when a majority of members are up. With no members, returns this node's id. Without a live majority, returns the lowest configured id even if that node is down.
+ * @param q The queue. Omitted names the shared `quorum` group's leader.
+ * @returns With Raft, the group's elected leader, or "" during an election.
+ *   Without it, the lowest sorted member id that is up when a majority of
+ *   members are up; with no members, this node's id; without a live
+ *   majority, the lowest configured id even if that node is down.
  */
-export function quorumLeader(this: Broker): string {
-  // With Raft on, the quorum group's election names it.
+export function quorumLeader(this: Broker, q?: QueueLive | null): string {
+  // With Raft on, the group's election names it.
   const node = this.cluster?.consensus?.node;
-  if (node) return node.leader(QUORUM) ?? "";
+  if (node) return node.leader(quorumGroupOf(q)) ?? "";
   const ids = this.cfg.members.map((member) => member.id);
   if (!ids.length) return this.cfg.nodeId;
   ids.sort();
@@ -186,29 +203,43 @@ export function quorumLeader(this: Broker): string {
 }
 
 /**
- * Wait, up to two election timeouts, for the quorum group to have a leader.
+ * Wait, up to two election timeouts, for `q`'s group to have a leader.
  *
  * @returns Nothing. Without Raft there is always a leader, so it returns at once. A consume or get during an election would otherwise go to an empty home.
  */
-export async function waitQuorumLeader(this: Broker): Promise<void> {
+export async function waitQuorumLeader(this: Broker, q?: QueueLive | null): Promise<void> {
   const node = this.cluster?.consensus?.node;
   if (!node) return;
   const deadline = Date.now() + 4000;
+  const group = quorumGroupOf(q);
   // A leader that is not connected is the one that just died; a new one is being elected.
   const usable = () => {
-    const leader = node.leader(QUORUM);
+    const leader = node.leader(group);
     return leader !== null && (leader === this.cfg.nodeId || this.cluster!.peers.has(leader));
   };
   while (!usable() && Date.now() < deadline) await Bun.sleep(20);
 }
 
 /**
- * Report whether this process may confirm quorum publishes.
+ * Report whether this process may confirm and deliver for `q`.
  *
- * @returns True when the cluster has no members, or when `quorumLeader` is this node. A follower must not serve the ready queue.
+ * @returns True when the cluster has no members, or when `quorumLeader(q)` is this node. A follower must not serve the ready queue.
  */
-export function isQuorumLeader(this: Broker): boolean {
-  return !this.cfg.members.length || this.quorumLeader() === this.cfg.nodeId;
+export function isQuorumLeader(this: Broker, q?: QueueLive | null): boolean {
+  return !this.cfg.members.length || this.quorumLeader(q) === this.cfg.nodeId;
+}
+
+/**
+ * Run a quorum queue's own group here, as every member does once the queue
+ * row names it.
+ *
+ * @param lead This member was chosen to lead it, so it campaigns at once.
+ */
+export function startQueueGroup(this: Broker, group: Group, lead: boolean) {
+  const node = this.cluster?.consensus?.node;
+  if (!node) return;
+  node.addGroup(group);
+  if (lead) node.expedite(group);
 }
 
 /** Move follower copies into the ready queue once this process is the live leader. */
@@ -218,11 +249,16 @@ export function isQuorumLeader(this: Broker): boolean {
  *
  * @returns Nothing. A follower returns immediately and leaves `replicas` in place. Each promoted queue is pumped.
  */
-export function promoteIfLeader(this: Broker) {
-  if (this.quorumHold || !this.isQuorumLeader()) return;
-  for (const q of this.queues.values()) {
+export function promoteIfLeader(this: Broker, only?: QueueLive | null) {
+  if (this.quorumHold) return;
+  for (const q of only ? [only] : this.queues.values()) {
     if (q.argsParsed.queueType !== "quorum" || q.replicas.size === 0) continue;
-    for (const replica of q.replicas.values()) q.ready.push(replica);
+    if (!this.isQuorumLeader(q)) continue;
+    // A copy kept by a follower may have been delivered by the leader it replaces.
+    for (const replica of q.replicas.values()) {
+      replica.redelivered = true;
+      q.ready.push(replica);
+    }
     q.replicas.clear();
     this.pump(q);
   }
@@ -295,7 +331,7 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
   const node = this.cluster?.consensus?.node;
   if (node) {
     // Committed before the body is written (docs/raft.md, section 6).
-    return node.propose(QUORUM, "drop", { vhost: q.vhost, queue: q.name, ids: [id] }).then(
+    return node.propose(quorumGroupOf(q), "drop", { vhost: q.vhost, queue: q.name, ids: [id] }).then(
       () => true,
       () => false,
     );
@@ -371,6 +407,7 @@ Broker.prototype.enqueueQuorum = enqueueQuorum;
 Broker.prototype.enqueueQuorumRaft = enqueueQuorumRaft;
 Broker.prototype.quorumLeader = quorumLeader;
 Broker.prototype.isQuorumLeader = isQuorumLeader;
+Broker.prototype.startQueueGroup = startQueueGroup;
 Broker.prototype.waitQuorumLeader = waitQuorumLeader;
 Broker.prototype.promoteIfLeader = promoteIfLeader;
 Broker.prototype.noteQuorumPeer = noteQuorumPeer;
@@ -388,6 +425,7 @@ declare module "./class.ts" {
     enqueueQuorumRaft: typeof enqueueQuorumRaft;
     quorumLeader: typeof quorumLeader;
     isQuorumLeader: typeof isQuorumLeader;
+    startQueueGroup: typeof startQueueGroup;
     waitQuorumLeader: typeof waitQuorumLeader;
     promoteIfLeader: typeof promoteIfLeader;
     noteQuorumPeer: typeof noteQuorumPeer;

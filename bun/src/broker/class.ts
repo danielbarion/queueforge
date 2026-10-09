@@ -40,6 +40,8 @@ export class Broker {
   mgmtChannels = new Map<string, MgmtChannel>();
   mgmtConsumers: MgmtConsumer[] = [];
   topicPerms: TopicPerm[] = [];
+  /** At-least-once dead letters sent to a remote home and not yet accepted. */
+  dlxPending = 0;
   userConnLimit = new Map<string, number>();
   userChanLimit = new Map<string, number>();
   vhostConnLimit = new Map<string, number>();

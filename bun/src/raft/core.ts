@@ -231,6 +231,16 @@ export class RaftCore {
     this.broadcastAppend(now);
   }
 
+  /** Start the election timer from `now`: a group opened after the node started. */
+  startTimer(now: number) {
+    this.resetElection(now);
+  }
+
+  /** Campaign at the next tick, when there is no leader: the member a new queue should be led by. */
+  expedite() {
+    if (this.role !== "leader" && this.leader === null) this.electionDeadline = 0;
+  }
+
   tick(now: number) {
     if (this.role === "leader") {
       if (now >= this.heartbeatDue) this.broadcastAppend(now);

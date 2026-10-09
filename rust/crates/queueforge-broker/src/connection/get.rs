@@ -82,9 +82,9 @@ where
                 .queue_type
                 == Some(QueueType::Quorum);
             if quorum {
-                cluster.wait_quorum_leader().await;
+                cluster.wait_quorum_leader(&key).await;
             }
-            if quorum && !cluster.is_quorum_leader() {
+            if quorum && !cluster.is_quorum_leader(&key) {
                 if let Some(proxied) = cluster.leader_consume_handle(&key) {
                     handle = proxied;
                 }
@@ -133,9 +133,9 @@ where
                 if quorum {
                     if let Some(message_id) = qm.message.message_id.clone() {
                         if let Some(cluster) = &self.cluster {
-                            let drop_local = !cluster.is_quorum_leader();
+                            let drop_local = !cluster.is_quorum_leader(&key);
                             cluster
-                                .claim_for_handoff(&key, message_id.as_str(), drop_local)
+                                .claim_for_handoff(&key, message_id.as_str(), drop_local, get.no_ack)
                                 .await;
                         }
                     }
@@ -161,6 +161,7 @@ where
                 let props = message_to_properties(&qm.message);
                 let body = qm.message.body.clone();
                 let redelivered = qm.message.redelivered;
+                self.trace_delivery(key.name.as_str(), &qm.message);
 
                 self.send_method(
                     channel,

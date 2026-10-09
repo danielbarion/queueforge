@@ -7,6 +7,13 @@
  * credit only. Retention drops the oldest entries past `x-max-length-bytes`
  * or `x-max-age`. Entries are stored in sqlite, so a stream survives a
  * restart; every delivery carries its `x-stream-offset` header.
+ *
+ * When the cluster runs queue groups, a stream is replicated as RabbitMQ's
+ * are: it has its own Raft group, a publish is confirmed once its `sappend`
+ * commits on a majority, and every member applies the same appends in the
+ * same order, so offsets agree and a consumer reads on whichever member it
+ * is connected to. The group's leader is the writer; losing it elects
+ * another.
  */
 import { W, writeTable, type Field } from "../codec.ts";
 import { ChanError } from "../errors.ts";
@@ -21,6 +28,8 @@ export type StreamEntry = {
   routingKey: string;
   headers: Array<[string, Field]>;
   propRaw: Uint8Array;
+  /** Raft index of the `sappend` that wrote it, on a replicated stream. */
+  raftIndex?: number;
 };
 
 export type StreamState = {
@@ -31,6 +40,8 @@ export type StreamState = {
   next: number;
   bytes: number;
   readers: Array<{ consumer: Consumer; cursor: number }>;
+  /** Highest Raft index applied, so a replay after a restart is skipped. */
+  raftIndex: number;
 };
 
 /** `x-max-age` as RabbitMQ writes it: a number and a unit, Y M D h m s. */
@@ -50,7 +61,8 @@ export function streamOf(this: Broker, q: QueueLive): StreamState {
   const log = this.store.listStreamEntries(q.vhost, q.name);
   const first = log[0]?.offset ?? this.store.streamNextOffset(q.vhost, q.name);
   const next = log.length ? log[log.length - 1]!.offset + 1 : first;
-  s = { log, first, next, bytes: log.reduce((n, e) => n + e.body.length, 0), readers: [] };
+  const applied = Number(this.store.listParameters("stream-raft").find((p) => p.vhost === q.vhost && p.name === q.name)?.value ?? 0);
+  s = { log, first, next, bytes: log.reduce((n, e) => n + e.body.length, 0), readers: [], raftIndex: Math.max(applied, log[log.length - 1]?.raftIndex ?? 0) };
   this.streams.set(this.key(q.vhost, q.name), s);
   return s;
 }
@@ -69,6 +81,115 @@ export function appendStream(
   this.trimStream(q);
   this.pumpStream(q);
   return entry.offset;
+}
+
+/**
+ * Publish to a replicated stream: commit an `sappend` in its Raft group.
+ *
+ * @returns True once committed and applied on the leader; false otherwise.
+ */
+export async function enqueueStreamRaft(
+  this: Broker,
+  q: QueueLive,
+  src: { body: Uint8Array; exchange: string; routingKey: string; headers: Array<[string, Field]>; propRaw: Uint8Array },
+): Promise<boolean> {
+  const node = this.cluster?.consensus?.node;
+  if (!node || !q.raftGroup) return false;
+  try {
+    await node.propose(q.raftGroup, "sappend", {
+      vhost: q.vhost,
+      queue: q.name,
+      ts: Date.now(),
+      body_b64: Buffer.from(src.body).toString("base64"),
+      exchange: src.exchange,
+      routing_key: src.routingKey,
+      headers: src.headers,
+      propRaw: Buffer.from(src.propRaw).toString("base64"),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Apply one committed `sappend` here. Every member assigns the same offset,
+ * as it applies the same entries in the same order.
+ *
+ * @param index The entry's Raft index; one at or below the last applied is a replay.
+ */
+export function applyStreamAppend(this: Broker, q: QueueLive, index: number, data: Record<string, unknown>) {
+  const s = this.streamOf(q);
+  if (index <= s.raftIndex) return;
+  s.raftIndex = index;
+  const entry: StreamEntry = {
+    offset: s.next++,
+    ts: Number(data.ts ?? Date.now()),
+    body: new Uint8Array(Buffer.from(String(data.body_b64 ?? ""), "base64")),
+    exchange: String(data.exchange ?? ""),
+    routingKey: String(data.routing_key ?? ""),
+    headers: (data.headers as StreamEntry["headers"]) ?? [],
+    propRaw: new Uint8Array(Buffer.from(String(data.propRaw ?? ""), "base64")),
+    raftIndex: index,
+  };
+  s.log.push(entry);
+  s.bytes += entry.body.length;
+  this.store.appendStreamEntry(q.vhost, q.name, entry);
+  this.trimStream(q);
+  this.pumpStream(q);
+}
+
+/** A replicated stream as its Raft snapshot: the retained entries and where it stands. */
+export function streamSnapshot(this: Broker, q: QueueLive) {
+  const s = this.streamOf(q);
+  return {
+    stream: {
+      vhost: q.vhost,
+      queue: q.name,
+      first: s.first,
+      next: s.next,
+      raftIndex: s.raftIndex,
+      entries: s.log.map((e) => ({
+        offset: e.offset,
+        ts: e.ts,
+        body_b64: Buffer.from(e.body).toString("base64"),
+        exchange: e.exchange,
+        routing_key: e.routingKey,
+        headers: e.headers,
+        propRaw: Buffer.from(e.propRaw).toString("base64"),
+      })),
+    },
+  };
+}
+
+/** Replace this member's copy of a replicated stream with a snapshot from its leader. */
+export function installStreamSnapshot(this: Broker, q: QueueLive, state: unknown) {
+  const snap = (state as { stream?: { first?: number; next?: number; raftIndex?: number; entries?: Array<Record<string, unknown>> } } | null)?.stream;
+  if (!snap) return;
+  const s = this.streamOf(q);
+  this.store.deleteStreamLog(q.vhost, q.name);
+  s.log = [];
+  s.bytes = 0;
+  for (const e of snap.entries ?? []) {
+    const entry: StreamEntry = {
+      offset: Number(e.offset),
+      ts: Number(e.ts),
+      body: new Uint8Array(Buffer.from(String(e.body_b64 ?? ""), "base64")),
+      exchange: String(e.exchange ?? ""),
+      routingKey: String(e.routing_key ?? ""),
+      headers: (e.headers as StreamEntry["headers"]) ?? [],
+      propRaw: new Uint8Array(Buffer.from(String(e.propRaw ?? ""), "base64")),
+    };
+    s.log.push(entry);
+    s.bytes += entry.body.length;
+    this.store.appendStreamEntry(q.vhost, q.name, entry);
+  }
+  s.first = Number(snap.first ?? s.log[0]?.offset ?? 0);
+  s.next = Number(snap.next ?? s.first);
+  s.raftIndex = Number(snap.raftIndex ?? 0);
+  this.store.deleteStreamEntriesBefore(q.vhost, q.name, s.first);
+  this.store.putParameter("stream-raft", q.vhost, q.name, String(s.raftIndex));
+  this.pumpStream(q);
 }
 
 /** Apply `x-max-length-bytes` and `x-max-age`. The newest entry always stays. */
@@ -189,6 +310,10 @@ Broker.prototype.trimStream = trimStream;
 Broker.prototype.addStreamReader = addStreamReader;
 Broker.prototype.removeStreamReader = removeStreamReader;
 Broker.prototype.pumpStream = pumpStream;
+Broker.prototype.enqueueStreamRaft = enqueueStreamRaft;
+Broker.prototype.applyStreamAppend = applyStreamAppend;
+Broker.prototype.streamSnapshot = streamSnapshot;
+Broker.prototype.installStreamSnapshot = installStreamSnapshot;
 
 declare module "./class.ts" {
   interface Broker {
@@ -198,5 +323,9 @@ declare module "./class.ts" {
     addStreamReader: typeof addStreamReader;
     removeStreamReader: typeof removeStreamReader;
     pumpStream: typeof pumpStream;
+    enqueueStreamRaft: typeof enqueueStreamRaft;
+    applyStreamAppend: typeof applyStreamAppend;
+    streamSnapshot: typeof streamSnapshot;
+    installStreamSnapshot: typeof installStreamSnapshot;
   }
 }

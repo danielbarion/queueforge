@@ -248,6 +248,7 @@ impl QueueRegistry {
         if let Some(dlx) = self.dlx.read().expect("dlx lock poisoned").clone() {
             boot = boot.with_dlx(dlx);
         }
+        boot.replicator = self.stream_replicator();
         if opts.durable {
             if let Some(factory) = &self.durable_factory {
                 // Issue 3: always recover_messages on open — never spawn an empty
@@ -267,6 +268,7 @@ impl QueueRegistry {
         if let Some(dlx) = self.dlx.read().expect("dlx lock poisoned").clone() {
             boot = boot.with_dlx(dlx);
         }
+        boot.replicator = self.stream_replicator();
         boot
     }
 

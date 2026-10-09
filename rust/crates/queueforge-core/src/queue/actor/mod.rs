@@ -417,6 +417,14 @@ pub async fn run(
 
         match cmd {
             QueueCmd::StreamStart { .. } => {}
+            QueueCmd::StreamApply { reply, .. } | QueueCmd::StreamInstall { reply, .. } => {
+                let _ = reply.send(Err(Error::PreconditionFailed(
+                    "replicated stream command on a non-stream queue".into(),
+                )));
+            }
+            QueueCmd::StreamDump { reply } => {
+                let _ = reply.send(Default::default());
+            }
             QueueCmd::Enqueue { msg, reply } => {
                 if msg.persistent {
                     last_enqueue_at = Some(Instant::now());
@@ -531,6 +539,19 @@ pub async fn run(
             QueueCmd::Purge { reply } => {
                 let _ = reply.send(state.purge());
             }
+            QueueCmd::ResetReplicas { reply } => {
+                // Wait for any parked log before persisting snapshot removals.
+                if let Some((started, handle, _)) = interval_fsync.take() {
+                    state.finish_interval_fsync(handle.await, started);
+                }
+                state.purge();
+                let unacked: Vec<_> = state.unacked.keys().copied().collect();
+                for id in unacked {
+                    state.ack(id);
+                }
+                let result = state.fsync_now().await;
+                let _ = reply.send(result);
+            }
             QueueCmd::StreamOffsets { reply } => {
                 let _ = reply.send(None);
             }
@@ -614,6 +635,16 @@ pub async fn run(
             }
             QueueCmd::StreamOffsets { reply } => {
                 let _ = reply.send(None);
+            }
+            QueueCmd::StreamApply { reply, .. }
+            | QueueCmd::StreamInstall { reply, .. }
+            | QueueCmd::ResetReplicas { reply } => {
+                let _ = reply.send(Err(Error::Unavailable(
+                    "queue actor is shutting down".into(),
+                )));
+            }
+            QueueCmd::StreamDump { reply } => {
+                let _ = reply.send(Default::default());
             }
             QueueCmd::Stats { reply } => {
                 let _ = reply.send(state.stats());

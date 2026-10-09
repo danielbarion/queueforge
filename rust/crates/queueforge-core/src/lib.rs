@@ -74,6 +74,6 @@ pub use queue::{
     DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
 };
 pub use queue::parse_age as queue_parse_age;
-pub use queue::StreamStart;
+pub use queue::{ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart};
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};
 pub use sysinfo::{disk_free_bytes, system_total_memory_bytes};

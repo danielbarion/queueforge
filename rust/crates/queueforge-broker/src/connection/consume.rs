@@ -181,7 +181,7 @@ where
             == Some(QueueType::Quorum);
         if quorum {
             if let Some(cluster) = &self.cluster {
-                cluster.wait_quorum_leader().await;
+                cluster.wait_quorum_leader(&key).await;
             }
         }
         let handle = if quorum {

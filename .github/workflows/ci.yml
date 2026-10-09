@@ -35,9 +35,18 @@ jobs:
         working-directory: rust
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install Bun broker dependencies
+        working-directory: bun
+        run: bun install --frozen-lockfile
+
       - name: cargo test
         working-directory: rust
-        run: cargo test --workspace
+        # Integration tests share a RabbitMQ fixture and use fixed broker ports.
+        run: cargo test --workspace -- --test-threads=1
 
   audit:
     name: cargo audit
@@ -146,3 +155,81 @@ jobs:
             kill -TERM "$BROKER_PID" 2>/dev/null || true
             wait "$BROKER_PID" 2>/dev/null || true
           fi
+
+  bun:
+    name: Bun broker and console tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Build Rust peer for mixed-stack tests
+        working-directory: rust
+        run: cargo build -p queueforge-broker
+      - name: Bun broker tests
+        working-directory: bun
+        run: |
+          bun install --frozen-lockfile
+          bun test
+      - name: Console tests
+        working-directory: console
+        run: |
+          bun install --frozen-lockfile
+          bun test
+      - name: Conformance runner regression tests
+        working-directory: conformance
+        run: |
+          bun install --frozen-lockfile
+          bun test run.test.ts
+
+  php:
+    name: PHP broker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PHP CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli
+      - name: PHP broker tests
+        working-directory: php
+        run: php test/run.php
+
+  conformance:
+    name: RabbitMQ and cross-stack conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install PHP CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli
+      - name: Build Rust broker
+        working-directory: rust
+        run: cargo build -p queueforge-broker
+      - name: Install Bun broker dependencies
+        working-directory: bun
+        run: bun install --frozen-lockfile
+      - name: Run conformance against RabbitMQ, Rust, Bun and PHP
+        working-directory: conformance
+        run: |
+          bun install --frozen-lockfile
+          bun run run.ts
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: conformance/results/

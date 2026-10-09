@@ -30,7 +30,7 @@ mod deliver;
 mod exchange;
 mod get;
 mod handshake;
-mod headers;
+pub(crate) mod headers;
 mod helpers;
 mod open;
 mod publish;

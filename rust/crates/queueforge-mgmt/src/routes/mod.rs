@@ -123,7 +123,7 @@ pub fn router(state: MgmtState) -> Router {
         )
         .route(
             "/api/feature-flags/{name}/enable",
-            post(crate::console::enable_feature_flag),
+            post(crate::console::enable_feature_flag).put(crate::console::enable_feature_flag),
         )
         .route(
             "/api/feature-flags/{name}/disable",
@@ -165,6 +165,22 @@ pub fn router(state: MgmtState) -> Router {
         .route(
             "/api/policies/{vhost}/{name}",
             put(put_policy).delete(delete_policy),
+        )
+        .route("/api/parameters", get(crate::console::list_parameters))
+        .route("/api/parameters/{component}", get(crate::console::list_parameters))
+        .route("/api/parameters/{component}/{vhost}", get(crate::console::list_parameters))
+        .route(
+            "/api/parameters/{component}/{vhost}/{name}",
+            get(crate::console::get_parameter)
+                .put(crate::console::put_parameter)
+                .delete(crate::console::delete_parameter),
+        )
+        .route("/api/global-parameters", get(crate::console::list_global_parameters))
+        .route(
+            "/api/global-parameters/{name}",
+            get(crate::console::get_global_parameter)
+                .put(crate::console::put_global_parameter)
+                .delete(crate::console::delete_global_parameter),
         )
         .route(
             "/api/parameters/shovel/{vhost}/{name}",
@@ -248,6 +264,8 @@ struct QueueItem {
     durable: bool,
     exclusive: bool,
     auto_delete: bool,
+    /// Member that homes the queue, as RabbitMQ's `node`.
+    node: String,
     state: String,
     messages: u64,
     messages_ready: u64,
@@ -256,6 +274,13 @@ struct QueueItem {
     #[serde(rename = "type")]
     queue_type: String,
     arguments: serde_json::Value,
+    /// Quorum queue or replicated stream: its leader, voters and group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leader: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    members: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raft_group: Option<String>,
 }
 
 // ── Exchanges ───────────────────────────────────────────────────────────

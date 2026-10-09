@@ -39,8 +39,8 @@ pub(super) fn install_members(inner: &Inner, members: Vec<ClusterMember>) {
     super::consensus::members_changed(inner);
 }
 
-/// Add `id` at `addr`, or refresh its address. Returns the list peers should install.
-pub(super) fn join_member(inner: &Inner, id: &str, addr: SocketAddr) -> Vec<ClusterMember> {
+/// `members` with `id` added at `addr`, or its address refreshed.
+pub(super) fn joined(inner: &Inner, id: &str, addr: SocketAddr) -> Vec<ClusterMember> {
     let mut members = inner.member_list();
     if let Some(existing) = members.iter_mut().find(|member| member.id == id) {
         existing.addr = addr;
@@ -51,8 +51,35 @@ pub(super) fn join_member(inner: &Inner, id: &str, addr: SocketAddr) -> Vec<Clus
         });
     }
     members.sort_by(|a, b| a.id.cmp(&b.id));
-    install_members(inner, members.clone());
     members
+}
+
+/// Change the member list. With Raft on, the list commits through the meta
+/// log first (docs/raft.md, section 7), so a change without a majority is
+/// refused. Then this node installs it and pushes it to the old and new
+/// members, which apply it before the next heartbeat carries the commit.
+pub(super) async fn change_members(inner: &Arc<Inner>, members: Vec<ClusterMember>) -> Result<Vec<ClusterMember>, Error> {
+    if members.is_empty() {
+        return Err(Error::PreconditionFailed("the member list cannot become empty".into()));
+    }
+    let before = inner.member_list();
+    if let Some(node) = super::consensus::node(inner) {
+        node.propose(super::raft_node::META, "members", members_json(&members))
+            .await
+            .map_err(|why| Error::Unavailable(format!("membership change did not commit: {why}")))?;
+    }
+    install_members(inner, members.clone());
+    let mut targets: Vec<String> = before.iter().chain(members.iter()).map(|m| m.id.clone()).collect();
+    targets.sort();
+    targets.dedup();
+    let cluster = super::Cluster { inner: Arc::clone(inner) };
+    let body = serde_json::json!({"kind": "members", "body": members_json(&members)});
+    for id in targets {
+        if id != inner.node_id {
+            let _ = cluster.call(&id, "apply", body.clone()).await;
+        }
+    }
+    Ok(members)
 }
 
 /// Remove `id` when no stored queue names it as home. Returns the new list, or the error.
@@ -77,7 +104,6 @@ pub(super) fn forget_member(inner: &Inner, id: &str) -> Result<Vec<ClusterMember
             "the member list cannot become empty".into(),
         ));
     }
-    install_members(inner, members.clone());
     Ok(members)
 }
 
@@ -125,6 +151,11 @@ fn parse_members(text: &str) -> Option<Vec<ClusterMember>> {
     Some(members)
 }
 
+/// Read `[{id, addr}]`. Rows without a readable address are skipped.
+pub(super) fn members_from(value: &Value) -> Vec<ClusterMember> {
+    parse_members(&value.to_string()).unwrap_or_default()
+}
+
 /// Read a join or forget body. `inner` is unused except to keep the helper next to the ops.
 pub(super) fn addr_of(payload: &Value) -> Option<SocketAddr> {
     payload
@@ -159,25 +190,3 @@ pub(super) fn reload_from_disk(inner: &Inner) {
     *inner.members.lock().unwrap_or_else(|err| err.into_inner()) = members;
 }
 
-/// Tell connected peers to install `members`. A full mailbox drops that peer's copy until the next join.
-pub(super) async fn broadcast_members(inner: &Arc<Inner>, members: &[ClusterMember]) {
-    use std::sync::atomic::Ordering;
-    let payload = serde_json::json!({"kind": "members", "body": members_json(members)});
-    let peers: Vec<_> = inner.peers.lock().await.values().cloned().collect();
-    for peer in peers {
-        let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let line = serde_json::to_string(&super::Msg {
-            id,
-            op: "apply".into(),
-            ok: false,
-            error: String::new(),
-            payload: payload.clone(),
-            v: 1,
-            node_id: inner.node_id.clone(),
-            from: inner.node_id.clone(),
-            kind: "members".into(),
-        })
-        .unwrap_or_default();
-        let _ = peer.tx.try_send(line);
-    }
-}

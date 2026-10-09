@@ -1187,6 +1187,8 @@ final class Server
             return;
         }
         $this->conns[$id]->user = $user;
+        // Register the user with broker for topic permissions.
+        $this->broker->userByConn[$id] = $user;
         $this->conns[$id]->send(Codec::connectionTune());
     }
 
@@ -1411,10 +1413,16 @@ final class Server
             return;
         }
         $tag = $ch->confirm ? $ch->nextPub++ : 0;
-        if (!$this->broker->topicWriteAllowed($sock->user, $sock->vhost, $pub['exchange'], $pub['key'])) {
-            $sock->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - write access to topic refused', 60, 40));
-            return;
+        
+        // Enforce topic write permissions for non-empty exchanges.
+        $user = $this->userByConn[$id] ?? $sock->user;
+        if ($pub['exchange'] !== '') {
+            if (!$this->broker->topicWriteAllowed($user, $sock->vhost, $pub['exchange'], $pub['key'])) {
+                $sock->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - write access to topic refused', 60, 40));
+                return;
+            }
         }
+        
         try {
             $result = $this->broker->publish(
                 $id,
@@ -1527,7 +1535,8 @@ final class Server
             }
         }
         try {
-            $this->broker->bind($queue, $exchange, $key, $args);
+            $sock = $this->conns[$id];
+            $this->broker->bind($queue, $exchange, $key, $args, $sock->user, $sock->vhost);
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 50, 20);
             return;

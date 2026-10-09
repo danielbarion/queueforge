@@ -12,6 +12,7 @@ import { encodeQuorumAppend } from "../wire.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
+import { durableMeta } from "./publish.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
@@ -71,7 +72,7 @@ export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: numb
     if (!dest || dest === q) continue;
     if (!this.isLocalHome(dest.home)) {
       accepted = true;
-      void this.enqueue(q.vhost, name, {
+      const copy = {
         body: msg.body,
         exchange: q.argsParsed.dlx,
         routingKey: rk,
@@ -80,7 +81,15 @@ export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: numb
         persistent: msg.persistent,
         priority: msg.priority,
         expiration: "",
-      }).catch(() => {});
+      };
+      if (q.argsParsed.dlxStrategy === "at-least-once") {
+        // Kept until the home accepts it: stored when the source is durable,
+        // and retried while the home is down, as RabbitMQ keeps it in the source.
+        const rowId = q.durable && msg.persistent ? this.store.insertMessage(q.vhost, DLX_PENDING + name, copy.body, durableMeta(copy, null)) : null;
+        this.forwardDeadLetter(q.vhost, name, copy, rowId, 0);
+      } else {
+        void this.enqueue(q.vhost, name, copy).catch(() => {});
+      }
     } else if (
       this.enqueueLocal(
         dest,
@@ -103,6 +112,67 @@ export function deadLetter(this: Broker, q: QueueLive, msg: LiveMsg, depth: numb
   return accepted || q.argsParsed.dlxStrategy !== "at-least-once";
 }
 
+/** Store queue prefix of an at-least-once dead letter its remote home has not accepted. */
+export const DLX_PENDING = "\0dlx\0";
+
+type DeadCopy = {
+  body: Uint8Array;
+  exchange: string;
+  routingKey: string;
+  headers: Array<[string, Field]>;
+  propRaw: Uint8Array;
+  persistent: boolean;
+  priority: number;
+  expiration: string;
+};
+
+/**
+ * Send an at-least-once dead letter to its remote home, retrying until it is accepted.
+ *
+ * @param rowId Stored pending row, deleted once the home accepts. Null for a transient copy.
+ * @param attempt Retries so far. The delay doubles from 100 ms up to 10 s.
+ * @returns Nothing. A deleted destination queue drops the copy, as RabbitMQ does once the target is gone.
+ */
+export function forwardDeadLetter(this: Broker, vhost: string, dest: string, copy: DeadCopy, rowId: number | null, attempt: number) {
+  this.dlxPending++;
+  const done = () => {
+    this.dlxPending--;
+    if (rowId != null) this.store.deleteMessage(rowId);
+  };
+  void this.enqueue(vhost, dest, copy).then(done, (err) => {
+    if (!this.queues.has(this.key(vhost, dest)) || (err instanceof ChanError && err.code === 404)) {
+      done();
+      return;
+    }
+    this.dlxPending--;
+    const timer = setTimeout(() => this.forwardDeadLetter(vhost, dest, copy, rowId, attempt + 1), Math.min(10_000, 100 * 2 ** attempt));
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
+/**
+ * Resume dead letters a restart left pending.
+ *
+ * @returns Nothing. Each stored copy is sent again until its home accepts it.
+ */
+export function resumeDeadLetters(this: Broker) {
+  for (const row of this.store.listMessages()) {
+    if (!row.queue.startsWith(DLX_PENDING)) continue;
+    const meta = JSON.parse(row.meta) as { exchange: string; routingKey: string; headers: Array<[string, Field]>; propRaw: string; persistent: boolean; priority: number };
+    const body = row.body instanceof Uint8Array ? row.body : new Uint8Array(row.body as ArrayBuffer);
+    this.forwardDeadLetter(row.vhost, row.queue.slice(DLX_PENDING.length), {
+      body,
+      exchange: meta.exchange,
+      routingKey: meta.routingKey,
+      headers: meta.headers ?? [],
+      propRaw: new Uint8Array(Buffer.from(meta.propRaw, "base64")),
+      persistent: meta.persistent,
+      priority: meta.priority ?? 0,
+      expiration: "",
+    }, row.id, 0);
+  }
+}
+
 /**
  * Deliver ready messages to consumers that still want one.
  *
@@ -120,6 +190,16 @@ export function pump(this: Broker, q: QueueLive) {
     this.materialize(msg);
     if (!chosen.noAck) q.unacked.set(msg.id, msg);
     else if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
+    // With Raft, a message a consumer must ack stays in the log until it is
+    // settled, as RabbitMQ's quorum queues keep it: a leader that dies with
+    // it unacked leaves it on the followers, and the next leader delivers it
+    // again. An auto-ack delivery is settled now, so it is dropped first.
+    if (q.argsParsed.queueType === "quorum" && !chosen.noAck && this.cluster?.consensus?.node) {
+      this.noteDeliver(false, msg.redelivered);
+      if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
+      chosen.deliver(msg);
+      continue;
+    }
     if (q.argsParsed.queueType === "quorum") {
       // `deliver` runs after the follower drop. Reserve prefetch now so the
       // next pump sees the claim and leaves the rest of the ready set alone.
@@ -223,13 +303,13 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
   if (!q) return;
   if (q.argsParsed.queueType === "stream") return this.pumpStream(q);
   const consumer = q.consumers.find((c) => c.session === session);
-  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader();
-  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
+  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader(q);
+  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
     if (!consumer) return;
     q.consumers = q.consumers.filter((c) => c.session !== session);
     this.remoteQuorum.set(`${vhost}\0${queue}\0${consumer.tag}`, session);
     await this.cluster!.subscribe(
-      this.quorumLeader(),
+      this.quorumLeader(q),
       { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive },
       (msg) => consumer.deliver(msg),
     );
@@ -267,8 +347,8 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
   q.consumers = q.consumers.filter((c) => c.tag !== tag);
   const session = consumer?.session ?? this.remoteQuorum.get(`${vhost}\0${queue}\0${tag}`);
   this.remoteQuorum.delete(`${vhost}\0${queue}\0${tag}`);
-  if (session != null && q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
-    await this.cluster!.call(this.quorumLeader(), "unsub", { vhost, queue, session });
+  if (session != null && q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
+    await this.cluster!.call(this.quorumLeader(q), "unsub", { vhost, queue, session });
   }
   // An auto-delete queue goes once the last consumer it ever had is gone.
   if (consumer && q.autoDelete && q.consumers.length === 0 && this.isLocalHome(q.home)) {
@@ -292,8 +372,11 @@ export function ack(this: Broker, vhost: string, queue: string, id: string): Pro
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     return this.cluster!.call(q.home!, "ack", { vhost, queue, id }).then(() => undefined);
   }
-  if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader()) {
-    return this.cluster!.call(this.quorumLeader(), "ack", { vhost, queue, id }).then(() => undefined);
+  if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader(q)) {
+    // The settle is committed here too: a drop applies once however often it commits.
+    return this.cluster!.call(this.quorumLeader(q), "ack", { vhost, queue, id }).then(async () => {
+      if (this.cluster?.consensus?.node) await this.quorumDrop(q, id).catch(() => false);
+    });
   }
   const msg = q.unacked.get(id);
   if (!msg) return;
@@ -326,8 +409,10 @@ export function nack(this: Broker, vhost: string, queue: string, id: string, req
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     return this.cluster!.call(q.home!, "nack", { vhost, queue, id, requeue }).then(() => undefined);
   }
-  if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader()) {
-    return this.cluster!.call(this.quorumLeader(), "nack", { vhost, queue, id, requeue }).then(() => undefined);
+  if (q.argsParsed.queueType === "quorum" && !q.unacked.has(id) && !this.isQuorumLeader(q)) {
+    return this.cluster!.call(this.quorumLeader(q), "nack", { vhost, queue, id, requeue }).then(async () => {
+      if (!requeue && this.cluster?.consensus?.node) await this.quorumDrop(q, id).catch(() => false);
+    });
   }
   const msg = q.unacked.get(id);
   if (!msg) return;
@@ -374,14 +459,14 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${queue}`);
   if (q.argsParsed.queueType === "stream") throw new ChanError(540, "NOT_IMPLEMENTED - basic.get is not supported by stream queues");
-  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader();
-  if (q.argsParsed.queueType === "quorum") this.promoteIfLeader();
-  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
+  if (q.argsParsed.queueType === "quorum") await this.waitQuorumLeader(q);
+  if (q.argsParsed.queueType === "quorum") this.promoteIfLeader(q);
+  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
     try {
-      const raw = (await this.cluster!.call(this.quorumLeader(), "get", { vhost, queue, noAck, no_ack: noAck })) as {
+      const raw = (await this.cluster!.call(this.quorumLeader(q), "get", { vhost, queue, noAck, no_ack: noAck })) as {
         empty?: boolean;
         msg?: { id?: string; body?: string; propRaw?: string; exchange?: string; routingKey?: string; persistent?: boolean; priority?: number; redelivered?: boolean };
-        message?: { message_id?: string; body_b64?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
+        message?: { message_id?: string; body_b64?: string; propRaw?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
       } | null;
       if (!raw || raw.empty) return null;
       const bunMsg = raw.msg;
@@ -390,10 +475,16 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
       if (!bodyB64) return null;
       const id = String(bunMsg?.id ?? rustMsg?.message_id ?? "");
       this.dropLocal(vhost, queue, id);
-      const leader = this.quorumLeader();
-      const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId && peer !== leader) ?? [];
-      await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost, queue, id }).catch(() => null)));
-      const propRawB64 = bunMsg?.propRaw ?? "";
+      if (this.cluster?.consensus?.node) {
+        // A leader of the other implementation may hand out a get without
+        // committing it; commit the settle here so every member forgets it.
+        if (noAck && id) await this.quorumDrop(q, id).catch(() => false);
+      } else {
+        const leader = this.quorumLeader(q);
+        const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId && peer !== leader) ?? [];
+        await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost, queue, id }).catch(() => null)));
+      }
+      const propRawB64 = bunMsg?.propRaw ?? rustMsg?.propRaw ?? "";
       return {
         id,
         rowId: null,
@@ -417,7 +508,7 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
         empty?: boolean;
         delivery_id?: number;
         msg?: LiveMsg & { body: string; propRaw: string };
-        message?: { message_id?: string; body_b64?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
+        message?: { message_id?: string; body_b64?: string; propRaw?: string; exchange?: string; routing_key?: string; persistent?: boolean; redelivered?: boolean };
       } | null;
       if (!raw || raw.empty) return null;
       if (raw.msg?.body) {
@@ -438,7 +529,7 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
         exchange: String(rustMsg.exchange ?? ""),
         routingKey: String(rustMsg.routing_key ?? ""),
         headers: [],
-        propRaw: new Uint8Array(),
+        propRaw: new Uint8Array(Buffer.from(rustMsg.propRaw ?? "", "base64")),
         persistent: rustMsg.persistent !== false,
         priority: 0,
         expiresAt: null,
@@ -465,7 +556,8 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   this.materialize(msg);
   if (!noAck) q.unacked.set(msg.id, msg);
   else if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
-  if (q.argsParsed.queueType === "quorum") await this.quorumDrop(q, msg.id);
+  // With Raft, an unacked get stays in the log until it is settled (see `pump`).
+  if (q.argsParsed.queueType === "quorum" && (noAck || !this.cluster?.consensus?.node)) await this.quorumDrop(q, msg.id);
   return msg;
 }
 
@@ -516,6 +608,8 @@ export async function purge(this: Broker, vhost: string, queue: string): Promise
 
 Broker.prototype.expire = expire;
 Broker.prototype.deadLetter = deadLetter;
+Broker.prototype.forwardDeadLetter = forwardDeadLetter;
+Broker.prototype.resumeDeadLetters = resumeDeadLetters;
 Broker.prototype.pump = pump;
 Broker.prototype.noteDeliver = noteDeliver;
 Broker.prototype.claimThenDeliver = claimThenDeliver;
@@ -534,6 +628,8 @@ declare module "./class.ts" {
   interface Broker {
     expire: typeof expire;
     deadLetter: typeof deadLetter;
+    forwardDeadLetter: typeof forwardDeadLetter;
+    resumeDeadLetters: typeof resumeDeadLetters;
     pump: typeof pump;
     noteDeliver: typeof noteDeliver;
     claimThenDeliver: typeof claimThenDeliver;

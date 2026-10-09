@@ -17,6 +17,7 @@ import "./accounts.ts";
 import "./alarms.ts";
 import "./events.ts";
 import "./shovel.ts";
+import "./params.ts";
 import "./stream.ts";
 
 export { ChanError } from "../errors.ts";

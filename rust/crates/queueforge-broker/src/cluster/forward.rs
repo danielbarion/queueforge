@@ -32,6 +32,16 @@ pub(super) async fn forward_nowait(
 
 /// Apply one replicated mutation of `kind` with JSON `body` on `inner`. Unknown kinds are ignored so a newer peer cannot crash an older node.
 pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
+    if queueforge_mgmt::settings::KINDS.contains(&kind) {
+        if let Some(conns) = inner.settings.get().cloned() {
+            let (kind, body) = (kind.to_string(), body.clone());
+            let _ = MetadataStore::blocking(Arc::clone(&inner.store), move |store| {
+                Ok(queueforge_mgmt::settings::apply(&conns, store, &kind, &body))
+            })
+            .await;
+        }
+        return;
+    }
     match kind {
         "members" => {
             super::membership::apply_members(inner, body);
@@ -39,6 +49,13 @@ pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
         "queue" => {
             let normalized = normalize_queue_json(body);
             if let Ok(queue) = serde_json::from_value::<Queue>(normalized) {
+                // The queue's own group starts on every member; the one the
+                // leader locator named campaigns at once.
+                if let Some(group) = &queue.raft_group {
+                    let key = QueueKey::new(queue.vhost.as_str(), queue.name.as_str());
+                    let lead = json_str(body, "raftLeader") == inner.node_id;
+                    super::qgroups::register(inner, &key, group.as_str(), lead);
+                }
                 if queue.durable {
                     let _ = MetadataStore::blocking(Arc::clone(&inner.store), {
                         let queue = queue.clone();
@@ -115,11 +132,16 @@ pub(super) async fn apply_one(inner: &Arc<Inner>, kind: &str, body: &Value) {
         }
         "delete_queue" => {
             let vhost = json_str(body, "vhost");
-            let name = json_str(body, "queue");
+            // Rust sends `queue`, Bun `name`.
+            let name = match json_str(body, "queue") {
+                q if q.is_empty() => json_str(body, "name"),
+                q => q,
+            };
             let key = QueueKey::new(vhost.as_str(), name.as_str());
             if inner.queues.get(&key).is_some() {
                 let _ = inner.queues.delete(&key, false, false).await;
             }
+            super::qgroups::unregister(inner, &key);
             let _ = MetadataStore::blocking(Arc::clone(&inner.store), move |store| {
                 store.delete_queue(&vhost, &name)
             })
@@ -302,6 +324,7 @@ pub(super) fn normalize_queue_json(body: &Value) -> Value {
         "exclusive",
         "auto_delete",
         "home",
+        "raftGroup",
     ] {
         if let Some(value) = obj.get(key) {
             out.insert(key.to_string(), value.clone());
@@ -351,6 +374,19 @@ pub(super) fn normalize_queue_json(body: &Value) -> Value {
             if let Some(value) = raw.get(*from) {
                 args.insert((*to).to_string(), value.clone());
             }
+        }
+        // Bun keeps argument values as strings or numbers.
+        if let Some(value) = args.get("single_active").cloned() {
+            let on = value.as_bool().unwrap_or(value.as_str() == Some("true") || value.as_u64() == Some(1));
+            args.insert("single_active".into(), Value::Bool(on));
+        }
+        if let Some(age) = raw.get("max_age_ms").cloned().or_else(|| {
+            raw.get("x-max-age").and_then(|v| v.as_str()).and_then(queueforge_core::queue_parse_age).map(Value::from)
+        }) {
+            args.insert("max_age_ms".into(), age);
+        }
+        if let Some(locator) = raw.get("leader_locator").or_else(|| raw.get("x-queue-leader-locator")) {
+            args.insert("leader_locator".into(), locator.clone());
         }
     }
     if !args.is_empty() {

@@ -1,5 +1,7 @@
 // Feature support, read from each broker's source on 2026-10-07 and updated
-// on 2026-10-08 after the Raft and PHP work. "p" is
+// on 2026-10-08 after the Raft and PHP work, then again for the Bun work
+// (per-queue Raft groups, replicated streams, stored limits and parameters,
+// TLS on every listener and core, feature flags an operator enables). "p" is
 // partial: the note says what is missing. RabbitMQ notes name the plugin
 // a feature needs; core features carry no note.
 //
@@ -99,8 +101,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Encrypted client listeners",
         cells: {
           mq: "y",
-          rust: ["p", "AMQP and HTTPS"],
-          bun: ["p", "AMQP and HTTPS, one process"],
+          rust: ["y", "AMQP, HTTPS, MQTT, STOMP, streams"],
+          bun: ["y", "AMQP, HTTPS, MQTT, STOMP, streams"],
           php: ["p", "AMQP only"],
         },
       },
@@ -195,8 +197,8 @@ export const featureGroups: FeatureGroup[] = [
         code: ["x-queue-type=quorum"],
         cells: {
           mq: "y",
-          rust: ["p", "one Raft group for every queue"],
-          bun: ["p", "one Raft group for every queue"],
+          rust: ["y", "a Raft group per queue; shared with Bun"],
+          bun: ["y", "a Raft group per queue; shared with Rust"],
           php: ["p", "majority ack, no Raft"],
         },
       },
@@ -204,7 +206,7 @@ export const featureGroups: FeatureGroup[] = [
         name: "Stream queues",
         detail: "Append-only log, consume from an offset",
         code: ["x-queue-type=stream"],
-        cells: { mq: "y", rust: ["p", "one node, not replicated"], bun: ["p", "one node, not replicated"], php: ["p", "1 of 5 tests pass"] },
+        cells: { mq: "y", rust: ["y", "Raft-replicated; shared with Bun"], bun: ["y", "Raft-replicated; shared with Rust"], php: ["p", "1 of 5 tests pass"] },
       },
       {
         name: "Super streams",
@@ -267,7 +269,7 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: ["y", "quorum queues"],
           rust: "y",
-          bun: ["p", "remote DLX not retried"],
+          bun: "y",
           php: ["p", "no redelivery"],
         },
       },
@@ -308,7 +310,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Queue leader locator",
         detail: "Choose which node a new queue lives on",
-        cells: { mq: "y", rust: ["p", "validated, not used"], bun: ["p", "validated, not used"], php: "y" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
     ],
   },
@@ -436,8 +438,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Caps on connections, channels and queues",
         cells: {
           mq: "y",
-          rust: ["p", "enforced, not stored"],
-          bun: ["p", "enforced, not stored"],
+          rust: "y",
+          bun: "y",
           php: ["n", "0 of 2 tests pass"],
         },
       },
@@ -496,8 +498,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Topology as JSON",
         cells: {
           mq: "y",
-          rust: ["p", "no parameters"],
-          bun: ["p", "no parameters"],
+          rust: "y",
+          bun: "y",
           php: ["p", "no users or policies"],
         },
       },
@@ -554,7 +556,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Message tracing",
         detail: "The firehose tracer",
-        cells: { mq: "y", rust: ["p", "publish only"], bun: "y", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "n" },
       },
       {
         name: "Event exchange",
@@ -566,8 +568,8 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Turn on new behaviour across a cluster",
         cells: {
           mq: "y",
-          rust: ["p", "three flags; raft turns itself on"],
-          bun: ["p", "three flags; raft turns itself on"],
+          rust: ["y", "raft and four RabbitMQ flags"],
+          bun: ["y", "raft and four RabbitMQ flags"],
           php: ["p", "fixed list"],
         },
       },
@@ -599,27 +601,32 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Raft consensus",
         detail: "Elections and terms for replicated state",
-        cells: { mq: "y", rust: ["p", "two groups: meta and quorum"], bun: ["p", "two groups: meta and quorum"], php: ["p", "core only, not wired in"] },
+        cells: { mq: "y", rust: ["y", "meta, and a group per queue"], bun: ["y", "meta, and a group per queue"], php: ["p", "core only, not wired in"] },
       },
       {
         name: "Replicated metadata store",
         detail: "Khepri in RabbitMQ 4.3",
         cells: {
           mq: "y",
-          rust: ["p", "Raft log; membership is pushed"],
-          bun: ["p", "Raft log; membership is pushed"],
+          rust: ["y", "Raft log, membership included"],
+          bun: ["y", "Raft log, membership included"],
           php: ["n", "merged snapshots"],
         },
       },
       {
         name: "Peer discovery",
-        detail: "Kubernetes, Consul, etcd, DNS, AWS",
-        cells: { mq: "y", rust: ["p", "config, env and DNS"], bun: ["p", "config, env and DNS"], php: "n" },
+        detail: "Classic config and DNS, both in the RabbitMQ core",
+        cells: { mq: "y", rust: ["y", "config, env and DNS"], bun: ["y", "config, env and DNS"], php: "n" },
+      },
+      {
+        name: "Cloud peer discovery",
+        detail: "Kubernetes, Consul, etcd, AWS",
+        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
       },
       {
         name: "Rolling upgrades",
         detail: "Upgrade one node at a time",
-        cells: { mq: "y", rust: ["p", "raft waits for every member"], bun: ["p", "raft waits for every member"], php: "n" },
+        cells: { mq: "y", rust: ["y", "enable raft after the last node"], bun: ["y", "enable raft after the last node"], php: "n" },
       },
       {
         name: "Uses every core",
@@ -643,8 +650,19 @@ export function note(cell: Cell): string | undefined {
   return typeof cell === "string" ? undefined : cell[1];
 }
 
+/** A row RabbitMQ covers without a plugin. Only these are counted in the tallies. */
+export function isStandard(row: Feature): boolean {
+  return !(note(row.cells.mq) ?? "").includes("plugin");
+}
+
+export function standardCount(): number {
+  return featureGroups.reduce((sum, group) => sum + group.rows.filter(isStandard).length, 0);
+}
+
 export function tally(broker: Broker) {
-  const cells = featureGroups.flatMap((group) => group.rows.map((row) => level(row.cells[broker])));
+  const cells = featureGroups.flatMap((group) =>
+    group.rows.filter(isStandard).map((row) => level(row.cells[broker])),
+  );
   return {
     y: cells.filter((value) => value === "y").length,
     p: cells.filter((value) => value === "p").length,

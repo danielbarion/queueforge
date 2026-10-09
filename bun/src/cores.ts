@@ -79,6 +79,9 @@ export function memberList(plans: ChildPlan[]): Array<{ id: string; addr: string
 
 /** Cores this process may use. One when the host has no cgroup, as on a Mac. */
 export function grantedCores(): number {
+  // QUEUEFORGE_CORES overrides the cgroup, for hosts without one (macOS) and tests.
+  const forced = Number(process.env.QUEUEFORGE_CORES);
+  if (Number.isInteger(forced) && forced > 0) return forced;
   const read = (path: string): string | null => {
     try {
       return readFileSync(path, "utf8");

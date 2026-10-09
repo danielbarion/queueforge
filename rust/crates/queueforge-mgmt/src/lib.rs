@@ -34,6 +34,7 @@ mod mutations;
 mod pagination;
 mod routes;
 mod session;
+pub mod settings;
 mod spa;
 mod state;
 

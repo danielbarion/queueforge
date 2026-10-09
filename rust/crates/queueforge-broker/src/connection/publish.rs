@@ -471,17 +471,16 @@ where
                 // fsync is still running. tx.commit still waits inline.
                 if let Some(seq) = confirm_seq {
                     if !self.tx_applying {
-                        let cluster = Arc::clone(cluster);
-                        let keys: Vec<_> = destinations
+                        // Started here, in publish order; only the confirm waits.
+                        let started: Vec<_> = destinations
                             .iter()
-                            .map(|handle| handle.info.key.clone())
+                            .map(|handle| cluster.quorum_start(&handle.info.key, Arc::clone(&msg)))
                             .collect();
-                        let msg = Arc::clone(&msg);
                         let tx = self.confirm_tx.clone();
                         tokio::spawn(async move {
                             let mut failed = false;
-                            for key in &keys {
-                                if cluster.quorum_enqueue(key, Arc::clone(&msg)).await.is_err() {
+                            for publish in started {
+                                if publish.await.is_err() {
                                     failed = true;
                                 }
                             }

@@ -166,6 +166,19 @@ impl Core {
         self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
+    /// Start the election timer from `now`: a group opened after the node started.
+    pub fn start_timer(&mut self, now: u64) {
+        self.reset_election(now);
+    }
+
+    /// Campaign at the next tick, when there is no leader: the member a new
+    /// queue should be led by.
+    pub fn expedite(&mut self) {
+        if self.role != Role::Leader && self.leader.is_none() {
+            self.election_deadline = 0;
+        }
+    }
+
     fn reset_election(&mut self, now: u64) {
         let span = ELECTION_MAX_MS - ELECTION_MIN_MS;
         self.election_deadline = now + ELECTION_MIN_MS + self.rand() % span;

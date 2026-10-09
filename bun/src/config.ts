@@ -7,6 +7,10 @@ export type Config = {
   mqtt: string | null;
   stomp: string | null;
   stream: string | null;
+  /** TLS listeners for the other protocols, as RabbitMQ's `*.listeners.ssl` (8883, 61614, 5551). */
+  mqtts?: string | null;
+  stomps?: string | null;
+  streamTls?: string | null;
   /** A TLS AMQP listener next to the plain one; uses the [tls] certificate. */
   amqps?: string | null;
   dataDir: string;
@@ -49,6 +53,9 @@ export function parseConfig(text: string): Config {
     mqtt: null,
     stomp: null,
     stream: null,
+    mqtts: null,
+    stomps: null,
+    streamTls: null,
     amqps: null,
     dataDir: "./data",
     fsync: "every_n_ms",
@@ -101,6 +108,9 @@ export function parseConfig(text: string): Config {
     if (section === "listeners" && key === "mqtt") cfg.mqtt = val;
     if (section === "listeners" && key === "stomp") cfg.stomp = val;
     if (section === "listeners" && key === "stream") cfg.stream = val;
+    if (section === "listeners" && key === "mqtts") cfg.mqtts = val;
+    if (section === "listeners" && key === "stomps") cfg.stomps = val;
+    if (section === "listeners" && key === "stream_tls") cfg.streamTls = val;
     if (section === "listeners" && key === "amqps") cfg.amqps = val;
     if (section === "tls" && key === "ca_path") cfg.tlsCa = val;
     if (section === "auth.oauth2") {

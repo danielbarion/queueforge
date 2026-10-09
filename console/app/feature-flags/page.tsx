@@ -10,7 +10,7 @@ export default function FeatureFlagsPage() {
       <PageHeader
         title="Feature flags"
         icon={Flag}
-        detail="Flags this broker supports. On a QueueForge cluster, raft turns on by itself once every member advertises it."
+        detail="Flags this broker supports. A new QueueForge cluster turns raft on by itself; after an upgrade an administrator enables it with PUT /api/feature-flags/raft/enable."
       />
       <GatedList
         path="/api/feature-flags"

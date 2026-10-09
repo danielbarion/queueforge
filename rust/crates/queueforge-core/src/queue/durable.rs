@@ -122,6 +122,8 @@ pub struct QueueActorBootstrap {
     pub dlx: Option<Arc<DlxRouter>>,
     /// Notify registry when `x-expires` fires.
     pub expired_tx: Option<mpsc::UnboundedSender<QueueKey>>,
+    /// Commits appends to a replicated stream (`None` off a Raft cluster).
+    pub replicator: Option<crate::queue::ReplicatorSlot>,
 }
 
 impl Default for QueueActorBootstrap {
@@ -156,6 +158,7 @@ impl QueueActorBootstrap {
             args: QueueArgs::default(),
             dlx: None,
             expired_tx: None,
+            replicator: None,
         }
     }
 

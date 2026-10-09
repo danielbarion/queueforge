@@ -60,7 +60,12 @@ impl Cluster {
             catchup: tokio::sync::Notify::new(),
             raft: std::sync::OnceLock::new(),
             raft_peers: std::sync::Mutex::new(std::collections::HashSet::new()),
+            raft_auto_peers: std::sync::Mutex::new(std::collections::HashSet::new()),
             quorum_live: Mutex::new(HashMap::new()),
+            qgroups: std::sync::Mutex::new(HashMap::new()),
+            qleaders: std::sync::Mutex::new(HashMap::new()),
+            raft_qgroup_peers: std::sync::Mutex::new(std::collections::HashSet::new()),
+            settings: std::sync::OnceLock::new(),
         });
         super::consensus::start(&inner);
         let cluster = Arc::new(Self {
@@ -187,6 +192,44 @@ impl Cluster {
         queue_home(&self.inner.member_list(), vhost, queue).to_string()
     }
 
+    /// Home for a new queue. `x-queue-leader-locator` decides as in RabbitMQ:
+    /// `client-local` is this node, `balanced` the member that homes the fewest
+    /// queues (ties go to the lowest id). With no locator the home hash decides,
+    /// so every implementation agrees without asking.
+    async fn place(&self, vhost: &str, name: &str, opts: &QueueDeclareOpts) -> String {
+        if opts.exclusive {
+            return self.inner.node_id.clone();
+        }
+        match opts.args.leader_locator.as_deref() {
+            Some("client-local") => self.inner.node_id.clone(),
+            Some("balanced") => {
+                let mut members: Vec<String> = self.inner.member_list().into_iter().map(|m| m.id).collect();
+                if members.is_empty() {
+                    return self.inner.node_id.clone();
+                }
+                members.sort();
+                let homes = MetadataStore::blocking(Arc::clone(&self.inner.store), |store| {
+                    let mut homes = Vec::new();
+                    for vh in store.list_vhosts()? {
+                        for q in store.list_queues(vh.name.as_str())? {
+                            if let Some(home) = q.home {
+                                homes.push(home.to_string());
+                            }
+                        }
+                    }
+                    Ok(homes)
+                })
+                .await
+                .unwrap_or_default();
+                members
+                    .into_iter()
+                    .min_by_key(|id| homes.iter().filter(|h| *h == id).count())
+                    .unwrap_or_else(|| self.inner.node_id.clone())
+            }
+            _ => self.home_of(vhost, name, false),
+        }
+    }
+
     /// Whether the queue actor should live in this process.
     pub fn is_local(&self, vhost: &str, queue: &str, exclusive: bool) -> bool {
         self.home_of(vhost, queue, exclusive) == self.inner.node_id
@@ -199,11 +242,65 @@ impl Cluster {
         name: &str,
         mut opts: QueueDeclareOpts,
     ) -> Result<queueforge_core::DeclareResult, Error> {
-        let home = self.home_of(vhost, name, opts.exclusive);
+        let key = QueueKey::new(vhost, name);
+        // A queue that exists keeps its home: a locator may have put it off the hash.
+        let stored = self.stored_home(&key).await;
+        let home = match stored.clone() {
+            Some(home) if !opts.exclusive => home,
+            _ => self.place(vhost, name, &opts).await,
+        };
         opts.home = Some(CompactString::from(home.as_str()));
         let quorum = opts.args.queue_type == Some(queueforge_core::QueueType::Quorum);
+        let stream = opts.args.queue_type == Some(queueforge_core::QueueType::Stream);
         if quorum {
             opts.home = Some(CompactString::from(self.inner.node_id.as_str()));
+        }
+        // A new quorum queue or stream gets its own Raft group when the
+        // cluster runs them. A replicated stream has a copy on every member,
+        // so it has no single home. The leader locator picks the member that
+        // campaigns first.
+        let had_group = super::qgroups::group_of(&self.inner, &key);
+        let fresh = had_group.is_none() && stored.is_none() && self.inner.queues.get(&key).is_none();
+        let new_group = if fresh && !opts.passive && (quorum || stream) {
+            super::qgroups::group_for_new_queue(&self.inner, vhost, name)
+        } else {
+            None
+        };
+        if let Some(group) = had_group.clone().or(new_group.clone()) {
+            let leader = new_group.as_ref().map(|_| super::qgroups::choose_leader(&self.inner, opts.args.leader_locator.as_deref()));
+            if leader.is_some() {
+                super::qgroups::register(&self.inner, &key, &group, false);
+            }
+            if stream {
+                opts.home = None;
+            }
+            let durable = opts.durable;
+            let result = match self.inner.queues.declare(vhost, name, opts).await {
+                Ok(result) => result,
+                Err(err) => {
+                    if new_group.is_some() {
+                        super::qgroups::unregister(&self.inner, &key);
+                    }
+                    return Err(err);
+                }
+            };
+            let queue = self.queue_row(&result.handle);
+            if durable {
+                let row = queue.clone();
+                let _ = MetadataStore::blocking(Arc::clone(&self.inner.store), move |store| store.put_queue(&row)).await;
+            }
+            let mut payload = serde_json::to_value(&queue).unwrap_or(Value::Null);
+            if let Some(leader) = &leader {
+                payload["raftLeader"] = Value::from(leader.as_str());
+            }
+            self.broadcast_apply("queue", payload).await;
+            // Campaign once the members have the queue, and so its group: a
+            // vote asked before that is ignored and another member may win.
+            if leader.as_deref() == Some(self.inner.node_id.as_str()) {
+                super::qgroups::register(&self.inner, &key, &group, true);
+            }
+            super::qgroups::wait_group_leader(&self.inner, &group).await;
+            return Ok(result);
         }
         if quorum || home == self.inner.node_id {
             let result = self.inner.queues.declare(vhost, name, opts).await?;
@@ -296,12 +393,15 @@ impl Cluster {
         if_unused: bool,
         if_empty: bool,
     ) -> Result<u32, Error> {
+        let grouped = super::qgroups::group_of(&self.inner, key).is_some();
         let home = self
             .stored_home(key)
             .await
             .unwrap_or_else(|| self.home_of(key.vhost.as_str(), key.name.as_str(), false));
-        if home == self.inner.node_id {
+        // A queue with its own group has a copy here; deleting it stops the group.
+        if grouped || home == self.inner.node_id {
             let count = self.inner.queues.delete(key, if_unused, if_empty).await?;
+            super::qgroups::unregister(&self.inner, key);
             self.broadcast_apply(
                 "delete_queue",
                 serde_json::json!({"vhost": key.vhost.as_str(), "queue": key.name.as_str()}),
@@ -337,6 +437,22 @@ impl Cluster {
         Ok(reply.payload["message_count"].as_u64().unwrap_or(0) as u32)
     }
 
+    /// Change the member list from the management API's `[{id, addr}]`.
+    /// `Err` names why the cluster refused it (no majority with Raft on).
+    pub async fn change_members_json(&self, members: &Value) -> Result<(), String> {
+        let members = super::membership::members_from(members);
+        super::membership::change_members(&self.inner, members)
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    /// The registry whose limits and topic permissions the replicated
+    /// settings kinds update (`user_limits`, `topic_permission`, ...).
+    pub fn attach_settings(&self, connections: Arc<queueforge_mgmt::ConnectionTracker>) {
+        let _ = self.inner.settings.set(connections);
+    }
+
     /// Push an exchange or binding so peers can route without declaring again.
     pub async fn replicate_json(&self, kind: &str, payload: Value) {
         self.broadcast_apply(kind, payload).await;
@@ -346,6 +462,11 @@ impl Cluster {
     pub(super) fn queue_row(&self, handle: &QueueHandle) -> Queue {
         let mut queue = handle.info.to_domain();
         queue.home = Some(CompactString::from(self.inner.node_id.as_str()));
+        let key = QueueKey::new(queue.vhost.as_str(), queue.name.as_str());
+        queue.raft_group = super::qgroups::group_of(&self.inner, &key).map(CompactString::from);
+        if queue.raft_group.is_some() && queue.args.queue_type == Some(queueforge_core::QueueType::Stream) {
+            queue.home = None;
+        }
         queue
     }
 

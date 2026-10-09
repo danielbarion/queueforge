@@ -14,7 +14,7 @@ import { metricsText } from "./metrics.ts";
 import { MqttSession } from "../protocols/mqtt.ts";
 import { StompSession } from "../protocols/stomp.ts";
 import { availableBytes } from "../disk.ts";
-import { cookieNameFromHost, requireUser, sessions, tokenOf, verifyBasic } from "./session.ts";
+import { cookieNameFromHost, requireUser as requireSession, sessions, tokenOf, verifyBasic, SESSION_LIFETIME_MS, type Session } from "./session.ts";
 
 /** Sessions behind each management WebSocket. */
 const wsSessions = new WeakMap<object, MqttSession | StompSession>();
@@ -45,11 +45,132 @@ function permTarget(broker: Broker, first: string, second: string): { user: stri
  * Cookie names come from the request Host header. Login tokens live in the
  * process-local session map.
  */
+/** RabbitMQ's `leader` and `members` of a quorum queue or replicated stream row. */
+function quorumMembers(broker: Broker, q: Parameters<Broker["quorumLeader"]>[0]) {
+  if (!q || (q.argsParsed.queueType !== "quorum" && !(q.argsParsed.queueType === "stream" && q.raftGroup))) return {};
+  const node = broker.cluster?.consensus?.node;
+  const members = node ? node.members(q.raftGroup || "quorum") : broker.cfg.members.map((m) => m.id);
+  return {
+    leader: broker.quorumLeader(q) || null,
+    members: members.length ? members : [broker.cfg.nodeId || "queueforge"],
+    raft_group: q.raftGroup || "quorum",
+  };
+}
+
+/** RabbitMQ 4.3 flags whose behaviour this broker has, plus QueueForge's raft. */
+const REQUIRED_FLAGS: Array<{ name: string; desc: string }> = [
+  { name: "quorum_queue", desc: "Support queues of type `quorum`" },
+  { name: "stream_queue", desc: "Support queues of type `stream`" },
+  { name: "implicit_default_bindings", desc: "Default bindings are now implicit, instead of being stored in the database" },
+  { name: "user_limits", desc: "Configure connection and channel limits for a user" },
+];
+
+function featureFlags(broker: Broker) {
+  const flag = (name: string, state: string, stability: string, desc: string, provider = "rabbit") => ({
+    name,
+    desc,
+    doc_url: "",
+    state,
+    stability,
+    require_level: stability === "required" ? "hard" : "none",
+    experiment_level: "supported",
+    callbacks: [],
+    provided_by: provider,
+  });
+  const items = REQUIRED_FLAGS.map((f) => flag(f.name, "enabled", "required", f.desc));
+  // Raft is a feature flag as RabbitMQ's khepri_db: on by itself in a new
+  // cluster, enabled by an operator after an upgrade (docs/raft.md, section 8).
+  const raft = broker.cluster?.consensus?.flag() ?? "unsupported";
+  if (raft !== "unsupported") items.push(flag("raft", raft, "stable", "Raft consensus for metadata and quorum queues", "queueforge"));
+  items.push(flag("transient_nonexcl_queues", broker.transientNonexcl ? "enabled" : "disabled", "experimental", "Allow transient non-exclusive queues (a deprecated feature)", "queueforge"));
+  return items.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function managementApp(broker: Broker, spaDir: string) {
+  const hasManagement = (tags: string[]) => tags.some((tag) => ["administrator", "management", "monitoring"].includes(tag));
+  const identityOf = (user: string): string | null => {
+    const row = broker.users.get(user);
+    if (row) return row.hash;
+    const principal = broker.principalOf(user);
+    if (!principal) return null;
+    // Equivalent re-logins keep existing sessions; a change in scopes or expiry invalidates them.
+    return JSON.stringify({ ...principal, scopes: principal.scopes?.map((scope) => ({
+      ...scope, vhost: scope.vhost.toString(), resource: scope.resource.toString(), routingKey: scope.routingKey?.toString() ?? null,
+    })) ?? null });
+  };
+  const sessionOf = (user: string): Session | null => {
+    const row = broker.users.get(user);
+    const principal = row ? null : broker.principalOf(user);
+    const tags = broker.userTags(user);
+    if ((!row && !principal) || !hasManagement(tags)) return null;
+    const now = Date.now();
+    const expiresAt = Math.min(now + SESSION_LIFETIME_MS, principal?.expiresAt ?? Infinity);
+    if (expiresAt <= now) return null;
+    return { user, tags, identity: identityOf(user), expiresAt, lastSeen: now };
+  };
+  const validSession = (session: Session): boolean => {
+    const row = broker.users.get(session.user);
+    const principal = row ? null : broker.principalOf(session.user);
+    if (session.identity !== identityOf(session.user) || (!row && !principal)) return false;
+    if (principal?.expiresAt != null && principal.expiresAt <= Date.now()) return false;
+    session.tags = broker.userTags(session.user);
+    return hasManagement(session.tags);
+  };
+  const requireUser = (cookie: string | null, host: string | null, authorization: string | null = null) =>
+    requireSession(cookie, host, authorization, validSession);
+  const access = (request: Request, set: { status?: number | string }, vhost: string, checks: Array<["configure" | "write" | "read", string]>) => {
+    const session = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+    if (!session) {
+      set.status = 401;
+      return { error: "unauthorized" };
+    }
+    if (!broker.hasVhostAccess(session.user, vhost) || checks.some(([kind, resource]) => !broker.can(session.user, vhost, kind, resource))) {
+      set.status = 403;
+      return { error: "forbidden" };
+    }
+    return null;
+  };
+  const enableFlag = (name: string, request: Request, set: { status?: number | string }) => {
+    const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+    if (!s?.tags.includes("administrator")) {
+      set.status = s ? 403 : 401;
+      return { error: "forbidden" };
+    }
+    if (name === "transient_nonexcl_queues") {
+      broker.transientNonexcl = true;
+      set.status = 204;
+      return "";
+    }
+    // quorum_queues is the name QueueForge listed before it used RabbitMQ's.
+    if (name === "quorum_queues" || REQUIRED_FLAGS.some((f) => f.name === name)) {
+      set.status = 204;
+      return "";
+    }
+    if (name === "raft" && broker.cluster) {
+      if (!broker.cluster.consensus.enableNow()) {
+        set.status = 400;
+        return { error: "bad_request", reason: "unsupported" };
+      }
+      broker.cluster.broadcastFeature("raft");
+      set.status = 204;
+      return "";
+    }
+    set.status = 400;
+    return { error: "bad_request", reason: "unsupported" };
+  };
   return new Elysia()
     // RabbitMQ tools authenticate with HTTP Basic. Check it before the route runs.
     .onRequest(async ({ request }) => {
-      await verifyBasic(request.headers.get("authorization"), (u, p) => broker.verify(u, p), (u) => broker.userTags(u));
+      await verifyBasic(request.headers.get("authorization"), (u, p) => broker.verify(u, p), sessionOf, validSession);
+    })
+    .onBeforeHandle(({ request, params, set }) => {
+      if (!/^\/api\/(queues|exchanges|bindings|consumers)\//.test(new URL(request.url).pathname)) return;
+      const vhost = (params as Record<string, string>).vhost;
+      if (vhost == null) return;
+      const session = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!session) { set.status = 401; return { error: "unauthorized" }; }
+      if (request.method === "GET" && (session.tags.includes("administrator") || session.tags.includes("monitoring"))) return;
+      if (!broker.hasVhostAccess(session.user, decodeURIComponent(vhost))) { set.status = 403; return { error: "forbidden" }; }
     })
     // The admin UI reads `{ items }`. RabbitMQ's API answers lists as bare
     // arrays, so a Basic-auth caller gets the array.
@@ -139,7 +260,12 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "forbidden" };
       }
       const token = crypto.randomUUID().replaceAll("-", "");
-      sessions.set(token, { user: username, tags });
+      const session = sessionOf(username);
+      if (!session) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      sessions.set(token, session);
       const name = cookieNameFromHost(request.headers.get("host"));
       set.headers["set-cookie"] = `${name}=${token}; HttpOnly; SameSite=Lax; Path=/`;
       return { name: username, tags };
@@ -299,6 +425,8 @@ export function managementApp(broker: Broker, spaDir: string) {
         durable: q.durable,
         exclusive: q.exclusive,
         auto_delete: q.autoDelete,
+        node: q.home || broker.cfg.nodeId || "queueforge",
+        ...quorumMembers(broker, q),
         state: "running",
         messages: q.ready.length + q.unacked.size,
         messages_ready: q.ready.length,
@@ -320,6 +448,8 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "bad_request", reason: "Feature `transient_nonexcl_queues` is deprecated. By default, this feature is not permitted anymore." };
       }
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["configure", params.name] ]);
+      if (denied) return denied;
       const res = await broker.declareQueue({
         vhost,
         name: params.name,
@@ -337,6 +467,9 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
+      const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["configure", params.name] ]);
+      if (denied) return denied;
       await broker.deleteQueue(decodeURIComponent(params.vhost), params.name);
       set.status = 204;
       return "";
@@ -402,6 +535,8 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const b = (body ?? {}) as { routing_key?: string; payload?: string; payload_encoding?: string };
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["write", params.name] ]);
+      if (denied) return denied;
       if (!broker.topicWriteAllowed(session.user, vhost, params.name, b.routing_key ?? "")) {
         set.status = 403;
         return { error: "forbidden", reason: "write access to topic refused" };
@@ -429,6 +564,8 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const b = (body ?? {}) as { count?: number; ackmode?: string };
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["read", params.name] ]);
+      if (denied) return denied;
       const count = Math.max(1, Math.min(b.count ?? 1, 20));
       const noAck = b.ackmode === "ack_requeue_false" || b.ackmode === "reject_requeue_false";
       const out = [];
@@ -455,6 +592,8 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const b = (body ?? {}) as { type?: string; durable?: boolean; auto_delete?: boolean; internal?: boolean; arguments?: Record<string, string> };
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["configure", params.name] ]);
+      if (denied) return denied;
       await broker.declareExchange(vhost, params.name, b.type ?? "direct", !!b.durable, !!b.auto_delete, !!b.internal, b.arguments?.["alternate-exchange"] ?? null, b.arguments?.["x-delayed-type"] ?? null);
       set.status = 201;
       return { name: params.name, type: b.type ?? "direct" };
@@ -464,6 +603,9 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
+      const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["configure", params.name] ]);
+      if (denied) return denied;
       await broker.deleteExchange(decodeURIComponent(params.vhost), params.name);
       set.status = 204;
       return "";
@@ -474,6 +616,13 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "unauthorized" };
       }
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["read", params.exchange], ["write", params.queue] ]);
+      if (denied) return denied;
+      const user = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))!.user;
+      if (!broker.topicReadAllowed(user, vhost, params.exchange, decodeURIComponent(params.key))) {
+        set.status = 403;
+        return { error: "forbidden", reason: "read access to topic refused" };
+      }
       await broker.unbind(vhost, params.exchange, params.queue, decodeURIComponent(params.key), null);
       set.status = 204;
       return "";
@@ -485,6 +634,13 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const b = body as { source: string; destination: string; routing_key?: string; arguments?: Record<string, string | number> };
       const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["read", b.source], ["write", b.destination] ]);
+      if (denied) return denied;
+      const user = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))!.user;
+      if (!broker.topicReadAllowed(user, vhost, b.source, b.routing_key ?? "")) {
+        set.status = 403;
+        return { error: "forbidden", reason: "read access to topic refused" };
+      }
       const args = Object.entries(b.arguments ?? {}).map(([k, v]) => [k, typeof v === "number" ? { t: "I" as const, v } : { t: "S" as const, v: String(v) }] as [string, { t: "I"; v: number } | { t: "S"; v: string }]);
       await broker.bind(vhost, b.source, b.destination, b.routing_key ?? "", args);
       set.status = 201;
@@ -749,7 +905,10 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "unauthorized" };
       }
       try {
-        await broker.purge(decodeURIComponent(params.vhost), decodeURIComponent(params.name));
+        const vhost = decodeURIComponent(params.vhost);
+      const denied = access(request, set, vhost, [ ["read", params.name] ]);
+      if (denied) return denied;
+      await broker.purge(decodeURIComponent(params.vhost), decodeURIComponent(params.name));
         set.status = 204;
         return "";
       } catch (err) {
@@ -776,6 +935,8 @@ export function managementApp(broker: Broker, spaDir: string) {
         durable: q.durable,
         exclusive: q.exclusive,
         auto_delete: q.autoDelete,
+        node: q.home || broker.cfg.nodeId || "queueforge",
+        ...quorumMembers(broker, q),
         state: "running",
         messages: q.ready.length + q.unacked.size,
         messages_ready: q.ready.length,
@@ -907,6 +1068,8 @@ export function managementApp(broker: Broker, spaDir: string) {
           write: b.write ?? "",
           read: b.read ?? "",
         });
+        const row = broker.listTopicPerms(target.user).find((r) => r.vhost === target.vhost && r.exchange === b.exchange);
+        if (row) void broker.cluster?.replicate("topic_permission", row);
       } catch (err) {
         set.status = 400;
         return { error: err instanceof Error ? err.message : "bad pattern" };
@@ -925,6 +1088,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "not found" };
       }
+      void broker.cluster?.replicate("delete_topic_permission", { user: target.user, vhost: target.vhost, exchange: decodeURIComponent(params.exchange) });
       set.status = 204;
       return "";
     })
@@ -955,6 +1119,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-channels" };
       }
+      void broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
       set.status = 204;
       return "";
     })
@@ -973,6 +1138,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-channels" };
       }
+      void broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
       set.status = 204;
       return "";
     })
@@ -993,6 +1159,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-queues" };
       }
+      void broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
       set.status = 204;
       return "";
     })
@@ -1012,6 +1179,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-queues" };
       }
+      void broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
       set.status = 204;
       return "";
     })
@@ -1020,52 +1188,25 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return {
-        items: [
-          { name: "quorum_queues", state: "enabled", stability: "stable" },
-          { name: "transient_nonexcl_queues", state: broker.transientNonexcl ? "enabled" : "disabled", stability: "experimental" },
-          // Raft turns itself on once every voter advertises it (docs/raft.md, section 8).
-          ...(broker.cluster && broker.cluster.consensus.flag() !== "unsupported"
-            ? [{ name: "raft", state: broker.cluster.consensus.flag(), stability: "stable", desc: "Raft consensus for metadata and quorum queues" }]
-            : []),
-        ],
-      };
+      return { items: featureFlags(broker) };
     })
-    .post("/api/feature-flags/:name/enable", ({ params, request, set }) => {
-      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
-      if (!s?.tags.includes("administrator")) {
-        set.status = s ? 403 : 401;
-        return { error: "forbidden" };
-      }
-      if (params.name === "quorum_queues") {
-        set.status = 204;
-        return "";
-      }
-      if (params.name === "transient_nonexcl_queues") {
-        broker.transientNonexcl = true;
-        set.status = 204;
-        return "";
-      }
-      set.status = 404;
-      return { error: "not found" };
-    })
+    .put("/api/feature-flags/:name/enable", ({ params, request, set }) => enableFlag(params.name, request, set))
+    .post("/api/feature-flags/:name/enable", ({ params, request, set }) => enableFlag(params.name, request, set))
     .post("/api/feature-flags/:name/disable", ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
       }
-      if (params.name === "quorum_queues") {
-        set.status = 400;
-        return { error: "quorum queues stay available" };
-      }
+      // transient_nonexcl_queues is the deprecated-feature toggle, kept here as QueueForge always had it.
       if (params.name === "transient_nonexcl_queues") {
         broker.transientNonexcl = false;
         set.status = 204;
         return "";
       }
-      set.status = 404;
-      return { error: "not found" };
+      // A RabbitMQ feature flag cannot be turned off once it is enabled.
+      set.status = 400;
+      return { error: "bad_request", reason: "a feature flag cannot be disabled" };
     })
     .get("/api/deprecated-features", ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
@@ -1137,10 +1278,11 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const members = broker.cfg.members.filter((member) => member.id !== id);
       members.push({ id, addr });
-      broker.cluster.installMembers(members);
-      for (const member of broker.cfg.members) {
-        if (member.id === broker.cfg.nodeId) continue;
-        await broker.cluster.call(member.id, "apply", { kind: "members", body: broker.cfg.members }).catch(() => null);
+      try {
+        await broker.cluster.changeMembers(members);
+      } catch (err) {
+        set.status = 503;
+        return { error: "no majority to commit the member change", reason: err instanceof Error ? err.message : String(err) };
       }
       set.status = 201;
       return { members: broker.cfg.members };
@@ -1168,10 +1310,11 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "the member list cannot become empty" };
       }
-      broker.cluster.installMembers(members);
-      for (const member of broker.cfg.members) {
-        if (member.id === broker.cfg.nodeId) continue;
-        await broker.cluster.call(member.id, "apply", { kind: "members", body: broker.cfg.members }).catch(() => null);
+      try {
+        await broker.cluster.changeMembers(members);
+      } catch (err) {
+        set.status = 503;
+        return { error: "no majority to commit the member change", reason: err instanceof Error ? err.message : String(err) };
       }
       set.status = 204;
       return "";
@@ -1181,7 +1324,151 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return { name: broker.cfg.nodeId || "queueforge" };
+      return { name: broker.clusterName() };
+    })
+    .put("/api/cluster-name", ({ body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const name = (body as { name?: unknown } | null)?.name;
+      if (typeof name !== "string" || !name) {
+        set.status = 400;
+        return { error: "name is required" };
+      }
+      broker.putGlobalParam("cluster_name", name);
+      void broker.cluster?.replicate("global_parameter", { name: "cluster_name", value: name });
+      set.status = 204;
+      return "";
+    })
+    .get("/api/parameters", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.listRuntimeParams();
+    })
+    .get("/api/parameters/:component", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.listRuntimeParams(decodeURIComponent(params.component));
+    })
+    .get("/api/parameters/:component/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.listRuntimeParams(decodeURIComponent(params.component), decodeURIComponent(params.vhost));
+    })
+    .get("/api/parameters/:component/:vhost/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const name = decodeURIComponent(params.name);
+      const row = broker.listRuntimeParams(decodeURIComponent(params.component), decodeURIComponent(params.vhost)).find((r) => r.name === name);
+      if (!row) {
+        set.status = 404;
+        return { error: "Object Not Found", reason: "Not Found" };
+      }
+      return row;
+    })
+    .put("/api/parameters/:component/:vhost/:name", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!s?.tags.includes("administrator") && !s?.tags.includes("policymaker")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const row = {
+        component: decodeURIComponent(params.component),
+        vhost: decodeURIComponent(params.vhost),
+        name: decodeURIComponent(params.name),
+        value: (body as { value?: unknown } | null)?.value ?? null,
+      };
+      if (!broker.vhosts.has(row.vhost)) {
+        set.status = 400;
+        return { error: "bad_request", reason: `vhost ${row.vhost} does not exist` };
+      }
+      try {
+        broker.putRuntimeParam(row);
+      } catch (err) {
+        set.status = 400;
+        return { error: "bad_request", reason: err instanceof Error ? err.message : "bad value" };
+      }
+      // A shovel runs on the node it was declared on, as a RabbitMQ dynamic shovel does.
+      if (row.component !== "shovel") void broker.cluster?.replicate("parameter", row);
+      set.status = 201;
+      return "";
+    })
+    .delete("/api/parameters/:component/:vhost/:name", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!s?.tags.includes("administrator") && !s?.tags.includes("policymaker")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const row = {
+        component: decodeURIComponent(params.component),
+        vhost: decodeURIComponent(params.vhost),
+        name: decodeURIComponent(params.name),
+      };
+      if (!broker.deleteRuntimeParam(row.component, row.vhost, row.name)) {
+        set.status = 404;
+        return { error: "Object Not Found", reason: "Not Found" };
+      }
+      if (row.component !== "shovel") void broker.cluster?.replicate("delete_parameter", row);
+      set.status = 204;
+      return "";
+    })
+    .get("/api/global-parameters", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.listGlobalParams();
+    })
+    .get("/api/global-parameters/:name", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const name = decodeURIComponent(params.name);
+      const row = broker.listGlobalParams().find((r) => r.name === name);
+      if (!row) {
+        set.status = 404;
+        return { error: "Object Not Found", reason: "Not Found" };
+      }
+      return row;
+    })
+    .put("/api/global-parameters/:name", ({ params, body, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const name = decodeURIComponent(params.name);
+      const value = (body as { value?: unknown } | null)?.value ?? null;
+      broker.putGlobalParam(name, value);
+      void broker.cluster?.replicate("global_parameter", { name, value });
+      set.status = 201;
+      return "";
+    })
+    .delete("/api/global-parameters/:name", ({ params, request, set }) => {
+      const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
+      if (!s?.tags.includes("administrator")) {
+        set.status = s ? 403 : 401;
+        return { error: "forbidden" };
+      }
+      const name = decodeURIComponent(params.name);
+      if (!broker.deleteGlobalParam(name)) {
+        set.status = 404;
+        return { error: "Object Not Found", reason: "Not Found" };
+      }
+      void broker.cluster?.replicate("delete_global_parameter", { name });
+      set.status = 204;
+      return "";
     })
     .get("/api/operator-policies", ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {

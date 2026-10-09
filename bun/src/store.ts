@@ -25,6 +25,8 @@ export type QueueRow = {
   autoDelete: boolean;
   args: Record<string, string | number>;
   home: string | null;
+  /** The quorum queue's own Raft group (`q:<vhost>/<name>`). Absent: the shared `quorum` group. */
+  raftGroup?: string | null;
 };
 export type BindRow = {
   vhost: string;
@@ -172,6 +174,11 @@ export class Store {
     } catch {
       /* the column already exists */
     }
+    try {
+      this.db.exec("ALTER TABLE queues ADD COLUMN raft_group TEXT");
+    } catch {
+      /* the column already exists */
+    }
     const grouped = this.mode === "every_n_ms" || this.mode === "every_n_messages";
     if (grouped) {
       this.fastLog = FastLog.open(this.filePath);
@@ -303,11 +310,11 @@ export class Store {
     const write = () => {
       this.db
         .query(
-          `INSERT INTO queues (vhost, name, durable, exclusive, auto_delete, args, home)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(vhost, name) DO UPDATE SET durable=excluded.durable, exclusive=excluded.exclusive, auto_delete=excluded.auto_delete, args=excluded.args, home=excluded.home`,
+          `INSERT INTO queues (vhost, name, durable, exclusive, auto_delete, args, home, raft_group)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(vhost, name) DO UPDATE SET durable=excluded.durable, exclusive=excluded.exclusive, auto_delete=excluded.auto_delete, args=excluded.args, home=excluded.home, raft_group=excluded.raft_group`,
         )
-        .run(q.vhost, q.name, q.durable ? 1 : 0, q.exclusive ? 1 : 0, q.autoDelete ? 1 : 0, JSON.stringify(q.args), q.home);
+        .run(q.vhost, q.name, q.durable ? 1 : 0, q.exclusive ? 1 : 0, q.autoDelete ? 1 : 0, JSON.stringify(q.args), q.home, q.raftGroup ?? null);
     };
     if (q.durable) this.durableWrite(write);
     else write();
@@ -315,6 +322,7 @@ export class Store {
   deleteStreamLog(vhost: string, queue: string) {
     this.db.query("DELETE FROM stream_messages WHERE vhost=? AND queue=?").run(vhost, queue);
     this.deleteParameter("stream-next", vhost, queue);
+    this.deleteParameter("stream-raft", vhost, queue);
   }
   deleteQueue(vhost: string, name: string) {
     // Rows already in the overwrite log need a delete record there too, or a
@@ -341,7 +349,7 @@ export class Store {
   }
   listQueues(): QueueRow[] {
     const rows = this.db
-      .query("SELECT vhost, name, durable, exclusive, auto_delete, args, home FROM queues")
+      .query("SELECT vhost, name, durable, exclusive, auto_delete, args, home, raft_group FROM queues")
       .all() as Array<{
       vhost: string;
       name: string;
@@ -350,6 +358,7 @@ export class Store {
       auto_delete: number;
       args: string;
       home: string | null;
+      raft_group: string | null;
     }>;
     return rows.map((r) => ({
       vhost: String(r.vhost),
@@ -359,6 +368,7 @@ export class Store {
       autoDelete: !!r.auto_delete,
       args: JSON.parse(String(r.args || "{}")) as QueueRow["args"],
       home: r.home == null ? null : String(r.home),
+      raftGroup: r.raft_group == null ? null : String(r.raft_group),
     }));
   }
   putBinding(b: BindRow) {
@@ -394,16 +404,16 @@ export class Store {
     }));
   }
   /** Append one stream entry. */
-  appendStreamEntry(vhost: string, queue: string, e: { offset: number; ts: number; body: Uint8Array; exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array }) {
-    const meta = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64") });
+  appendStreamEntry(vhost: string, queue: string, e: { offset: number; ts: number; body: Uint8Array; exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array; raftIndex?: number }) {
+    const meta = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64"), ...(e.raftIndex ? { r: e.raftIndex } : {}) });
     this.db.query("INSERT OR REPLACE INTO stream_messages (vhost, queue, offset, ts, body, meta) VALUES (?, ?, ?, ?, ?, ?)").run(vhost, queue, e.offset, e.ts, e.body, meta);
   }
   /** Every stored entry of one stream, oldest first. */
   listStreamEntries(vhost: string, queue: string) {
     const rows = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset").all(vhost, queue) as Array<{ offset: number; ts: number; body: Uint8Array; meta: string }>;
     return rows.map((r) => {
-      const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string };
-      return { offset: Number(r.offset), ts: Number(r.ts), body: new Uint8Array(r.body), exchange: m.x, routingKey: m.k, headers: m.h ?? [], propRaw: new Uint8Array(Buffer.from(m.p, "base64")) };
+      const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string; r?: number };
+      return { offset: Number(r.offset), ts: Number(r.ts), body: new Uint8Array(r.body), exchange: m.x, routingKey: m.k, headers: m.h ?? [], propRaw: new Uint8Array(Buffer.from(m.p, "base64")), raftIndex: m.r ?? 0 };
     });
   }
   /** Where an empty stream continues: one past the last offset it ever stored. */
@@ -423,6 +433,9 @@ export class Store {
   /** Remove one runtime parameter. Returns true when a row was removed. */
   deleteParameter(component: string, vhost: string, name: string): boolean {
     return this.db.query("DELETE FROM parameters WHERE component=? AND vhost=? AND name=?").run(component, vhost, name).changes > 0;
+  }
+  listParameterComponents(): string[] {
+    return (this.db.query("SELECT DISTINCT component FROM parameters").all() as Array<{ component: string }>).map((r) => String(r.component));
   }
   listParameters(component: string): Array<{ vhost: string; name: string; value: string }> {
     const rows = this.db.query("SELECT vhost, name, value FROM parameters WHERE component=?").all(component) as Array<{ vhost: string; name: string; value: string }>;

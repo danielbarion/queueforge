@@ -456,10 +456,11 @@ function readContentType(propRaw: Uint8Array): string {
  * @param port TCP port from config.
  * @param broker Broker that routes and stores the messages.
  */
-export function startStomp(host: string, port: number, broker: Broker) {
+export function startStomp(host: string, port: number, broker: Broker, tls: { cert: string; key: string } | null = null) {
   Bun.listen<StompSession | undefined>({
     hostname: host,
     port,
+    ...(tls ? { tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } } : {}),
     socket: {
       open(socket) {
         socket.data = new StompSession(

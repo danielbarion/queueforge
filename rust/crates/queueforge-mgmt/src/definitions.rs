@@ -38,6 +38,15 @@ pub struct Definitions {
     bindings: Vec<DefBinding>,
     #[serde(default)]
     policies: Vec<DefPolicy>,
+    /// RabbitMQ's topic permission rows.
+    #[serde(default)]
+    topic_permissions: Vec<serde_json::Value>,
+    /// Runtime parameters: `{component, vhost, name, value}`.
+    #[serde(default)]
+    parameters: Vec<serde_json::Value>,
+    /// Global parameters: `{name, value}`.
+    #[serde(default)]
+    global_parameters: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,6 +76,9 @@ struct DefUser {
     password: Option<String>,
     #[serde(default, deserialize_with = "tags_as_csv")]
     tags: String,
+    /// `max-connections` and `max-channels`, as RabbitMQ exports them.
+    #[serde(default)]
+    limits: serde_json::Map<String, serde_json::Value>,
 }
 
 fn tags_as_csv<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -231,16 +243,26 @@ pub async fn export_definitions(
 
     let users = snap_users
         .into_iter()
-        .map(|u| DefUser {
-            name: u.name.to_string(),
-            password_hash: Some(u.password_hash),
-            password: None,
-            tags: u
-                .tags
-                .iter()
-                .map(|t| t.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
+        .map(|u| {
+            let mut limits = serde_json::Map::new();
+            let row = crate::settings::user_limits_row(&state.connections, u.name.as_str());
+            for field in ["max-connections", "max-channels"] {
+                if !row[field].is_null() {
+                    limits.insert(field.into(), row[field].clone());
+                }
+            }
+            DefUser {
+                name: u.name.to_string(),
+                password_hash: Some(u.password_hash),
+                password: None,
+                tags: u
+                    .tags
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                limits,
+            }
         })
         .collect();
 
@@ -458,7 +480,23 @@ pub async fn export_definitions(
         })
         .collect();
 
+    let conns = Arc::clone(&state.connections);
+    let node = state.config.node_name.clone();
+    let (parameters, global_parameters) = queueforge_store::MetadataStore::blocking(Arc::clone(&state.store), move |s| {
+        Ok((crate::settings::list_parameters(&conns, s, None, None), crate::settings::list_globals(s, &node)))
+    })
+    .await?;
+    let topic_permissions = state
+        .connections
+        .list_topic_permissions(None)
+        .iter()
+        .map(crate::settings::topic_row)
+        .collect();
+
     Ok(Json(Definitions {
+        topic_permissions,
+        parameters,
+        global_parameters,
         rabbit_version: "3.13.0".into(),
         queueforge_version: state.config.product_version.clone(),
         users,
@@ -548,6 +586,29 @@ pub async fn import_definitions(
             s.put_permission(&stored)
         })
         .await?;
+    }
+
+    // Limits, topic permissions and parameters, stored and replicated as
+    // their own mutations are.
+    let mut settings: Vec<(&str, serde_json::Value)> = Vec::new();
+    for u in &body.users {
+        if !u.limits.is_empty() {
+            let mut row = serde_json::Value::Object(u.limits.clone());
+            row["user"] = serde_json::json!(u.name);
+            settings.push(("user_limits", row));
+        }
+    }
+    settings.extend(body.topic_permissions.iter().map(|row| ("topic_permission", row.clone())));
+    settings.extend(body.parameters.iter().map(|row| ("parameter", row.clone())));
+    settings.extend(body.global_parameters.iter().map(|row| ("global_parameter", row.clone())));
+    for (kind, row) in settings {
+        let conns = Arc::clone(&state.connections);
+        let applied = row.clone();
+        queueforge_store::MetadataStore::blocking(Arc::clone(&state.store), move |s| {
+            Ok(crate::settings::apply(&conns, s, kind, &applied))
+        })
+        .await?;
+        crate::mutations::replicate(&state, kind, row).await;
     }
 
     // 4. Exchanges

@@ -34,14 +34,14 @@ pub(super) async fn dispatch_op(
                     "join requires id and addr".into(),
                 ));
             }
-            let members = super::membership::join_member(inner, &id, addr);
-            super::membership::broadcast_members(inner, &members).await;
+            let members = super::membership::joined(inner, &id, addr);
+            let members = super::membership::change_members(inner, members).await?;
             Ok(super::membership::members_json(&members))
         }
         "forget" => {
             let id = json_str(&msg.payload, "id");
             let members = super::membership::forget_member(inner, &id)?;
-            super::membership::broadcast_members(inner, &members).await;
+            let members = super::membership::change_members(inner, members).await?;
             Ok(super::membership::members_json(&members))
         }
         "apply" => {
@@ -199,27 +199,22 @@ pub(super) async fn dispatch_op(
         }
         "ack" => {
             let key = key_from(&msg.payload);
-            forward_nowait(
-                &inner.queues,
-                &key,
-                QueueCmd::Ack {
-                    id: ConsumerDeliveryId(delivery_id_of(&msg.payload)),
-                    multiple_to: None,
-                },
-            )
-            .await
+            let id = ConsumerDeliveryId(delivery_id_of(&msg.payload));
+            if raft_quorum(inner, &key) {
+                // A member's client settled a message this node delivered:
+                // its drop commits now (docs/raft.md, section 6).
+                return settle_remote(inner, &key, |reply| QueueCmd::AckReport { id, reply }).await;
+            }
+            forward_nowait(&inner.queues, &key, QueueCmd::Ack { id, multiple_to: None }).await
         }
         "nack" => {
             let key = key_from(&msg.payload);
-            forward_nowait(
-                &inner.queues,
-                &key,
-                QueueCmd::Nack {
-                    id: ConsumerDeliveryId(delivery_id_of(&msg.payload)),
-                    requeue: msg.payload["requeue"].as_bool().unwrap_or(true),
-                },
-            )
-            .await
+            let id = ConsumerDeliveryId(delivery_id_of(&msg.payload));
+            let requeue = msg.payload["requeue"].as_bool().unwrap_or(true);
+            if raft_quorum(inner, &key) {
+                return settle_remote(inner, &key, |reply| QueueCmd::NackReport { id, requeue, reply }).await;
+            }
+            forward_nowait(&inner.queues, &key, QueueCmd::Nack { id, requeue }).await
         }
         "set-args" => {
             let key = key_from(&msg.payload);
@@ -267,26 +262,32 @@ pub(super) async fn dispatch_op(
                 .get(&key)
                 .ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
             let (tx, rx) = oneshot::channel();
+            let no_ack = msg.payload["no_ack"]
+                .as_bool()
+                .or_else(|| msg.payload["noAck"].as_bool())
+                .unwrap_or(false);
             handle
                 .tx
-                .send(QueueCmd::Get {
-                    no_ack: msg.payload["no_ack"]
-                        .as_bool()
-                        .or_else(|| msg.payload["noAck"].as_bool())
-                        .unwrap_or(false),
-                    reply: tx,
-                })
+                .send(QueueCmd::Get { no_ack, reply: tx })
                 .await
                 .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
             match rx
                 .await
                 .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?
             {
-                Some((id, qm, ready)) => Ok(serde_json::json!({
+                Some((id, qm, ready)) => {
+                    // A noAck get settles the message as it leaves.
+                    if no_ack && raft_quorum(inner, &key) {
+                        if let Some(message_id) = qm.message.message_id.as_deref() {
+                            super::quorum::commit_drop(inner, &key, message_id).await;
+                        }
+                    }
+                    Ok(serde_json::json!({
                     "delivery_id": id.0,
                     "message": message_to_wire(&qm.message),
                     "ready": ready,
-                })),
+                    }))
+                }
                 None => Ok(Value::Null),
             }
         }
@@ -480,4 +481,40 @@ fn delivery_id_of(payload: &Value) -> u64 {
         .or_else(|| payload["id"].as_u64())
         .or_else(|| payload["id"].as_str().and_then(|text| text.parse().ok()))
         .unwrap_or(0)
+}
+
+/// A quorum queue on a cluster that runs Raft.
+fn raft_quorum(inner: &Inner, key: &QueueKey) -> bool {
+    super::consensus::node(inner).is_some()
+        && inner.queues.get(key).is_some_and(|h| {
+            h.info.args.lock().unwrap_or_else(|e| e.into_inner()).queue_type == Some(queueforge_core::QueueType::Quorum)
+        })
+}
+
+/// Settle a delivery for a member's client, then commit the drop of a
+/// message the settle removed (acked, or rejected without requeue).
+async fn settle_remote(
+    inner: &Arc<Inner>,
+    key: &QueueKey,
+    cmd: impl FnOnce(oneshot::Sender<Option<CompactString>>) -> QueueCmd,
+) -> Result<Value, Error> {
+    let handle = inner
+        .queues
+        .get(key)
+        .ok_or_else(|| Error::Unavailable(format!("queue {key} is not local")))?;
+    let (tx, rx) = oneshot::channel();
+    handle
+        .tx
+        .send(cmd(tx))
+        .await
+        .map_err(|_| Error::Unavailable(format!("queue {key} is down")))?;
+    if let Ok(Some(message_id)) = rx.await {
+        remember_consumed(inner, key, message_id.as_str()).await;
+        let inner = Arc::clone(inner);
+        let key = key.clone();
+        tokio::spawn(async move {
+            super::quorum::commit_drop(&inner, &key, message_id.as_str()).await;
+        });
+    }
+    Ok(Value::Null)
 }

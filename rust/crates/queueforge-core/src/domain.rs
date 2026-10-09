@@ -268,6 +268,11 @@ pub struct Queue {
     /// `None` on a single-node broker. Peers forward operations to this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<CompactString>,
+    /// The queue's own Raft group (`q:<vhost>/<name>`), when the cluster
+    /// runs one per queue. `None` is the shared `quorum` group. Written as
+    /// `raftGroup`, as Bun names it.
+    #[serde(default, rename = "raftGroup", alias = "raft_group", skip_serializing_if = "Option::is_none")]
+    pub raft_group: Option<CompactString>,
 }
 
 fn is_default_args(args: &crate::queue::QueueArgs) -> bool {
@@ -285,6 +290,7 @@ impl Queue {
             auto_delete: false,
             args: crate::queue::QueueArgs::default(),
             home: None,
+            raft_group: None,
         }
     }
 }

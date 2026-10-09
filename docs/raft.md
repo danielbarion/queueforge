@@ -28,7 +28,42 @@ message names its group in `payload.g`.
 | `quorum` | every quorum queue's messages: appends and drops             |
 
 A group's voters are the cluster members (section 7). Group ids are
-strings; a later version may add one group per quorum queue (`q:<vhost>/<name>`).
+strings.
+
+**Queue groups.** A member that advertises `raft_qgroups` (Rust and Bun) runs one
+more group per quorum queue and per replicated stream, `q:v2:<hex-vhost>:<hex-name>`,
+as RabbitMQ runs one Ra cluster per queue:
+
+The v2 identity hex-encodes each UTF-8 component separately. New groups cannot collide with each other or with legacy `q:<vhost>/<name>` identities. Existing queue rows and group directories keep their stored names; they are read as opaque identities during upgrades and rollback. Previously colliding legacy queues require recovery from their retained data; the upgrade does not guess how to split a shared log.
+
+- A new quorum queue or stream gets its own group when Raft is on and every
+  voter advertises `raft_qgroups`. The queue row carries `raftGroup`, so the
+  queue and its group are created by the same `meta` entry on every member.
+  Otherwise, as in a cluster with an older member, a quorum queue stays in
+  the shared `quorum` group and a stream on its home node.
+  `QUEUEFORGE_RAFT_QGROUPS=0` keeps a member from advertising it.
+- The row may carry `raftLeader`, the member that campaigns at once: the
+  declaring member (`client-local`, the default) or the one leading the
+  fewest queue groups (`balanced`). A declare returns once the group has a
+  leader. Rust's declaring member campaigns once the row is committed and
+  pushed, so the other members run the group when its vote arrives.
+- Each queue group elects its own leader, so losing a member fails over
+  only the queues it led. Deleting the queue stops the group on every
+  member and removes its files.
+- Files are `raft/q-<fnv64 of the group id>/`, with `group.json` naming the
+  group. A message for a queue group a member does not run starts it when
+  the queue exists there (Bun); Rust starts it when the queue row applies,
+  and Raft resends what it missed before that.
+- A queue group of a quorum queue holds the `quorum` entries of section 6
+  for that queue only, and its snapshot only that queue's messages.
+- A queue group of a stream holds `sappend` entries:
+  `{"vhost","queue","ts","body_b64","exchange","routing_key","headers","propRaw"}`.
+  Every member appends each one to its copy of the stream in log order, so
+  offsets agree everywhere and a consumer reads on the member it is
+  connected to. A publish is confirmed once its `sappend` commits. Each
+  stored entry keeps its Raft index, so a replay after a restart is
+  skipped. The snapshot is the retained entries with `first`, `next` and
+  the Raft index.
 
 ## 3. Terms, indexes and the log
 
@@ -151,7 +186,20 @@ parses:
 
 `vhost`, `delete_vhost`, `user`, `delete_user`, `permission`,
 `delete_permission`, `exchange`, `delete_exchange`, `queue`,
-`delete_queue`, `binding`, `unbind`, `policy`, `delete_policy`.
+`delete_queue`, `binding`, `unbind`, `policy`, `delete_policy`,
+`members` (section 7), and the settings kinds:
+
+- `user_limits` `{"user","max-connections","max-channels"}` and
+  `vhost_limits` `{"vhost","max-connections","max-queues"}`, the whole row
+  (`null` clears a limit);
+- `topic_permission` `{"user","vhost","exchange","write","read"}` and
+  `delete_topic_permission` `{"user","vhost","exchange"}`;
+- `parameter` `{"component","vhost","name","value"}` and `delete_parameter`
+  (a `shovel` runs where it was declared and is not replicated);
+- `global_parameter` `{"name","value"}` and `delete_global_parameter`.
+
+`delete_queue` names the queue as `queue` (Rust) or `name` (Bun); both are
+read.
 
 Applying is idempotent: declaring something that exists with the same
 definition, or deleting something missing, is not an error. The node that
@@ -168,7 +216,9 @@ Snapshot `state`, for `snap`:
 
 ```json
 {"vhosts":[...],"users":[...],"permissions":[...],"exchanges":[...],
- "queues":[...],"bindings":[...],"policies":[...]}
+ "queues":[...],"bindings":[...],"policies":[...],
+ "userLimits":[...],"vhostLimits":[...],"topicPermissions":[...],
+ "parameters":[...],"globalParameters":[...]}
 ```
 
 Each list holds `data` values of the matching create command. Installing a
@@ -188,20 +238,32 @@ The quorum append v1 body is the one the brokers already exchange:
 `message_id` is unique cluster-wide; applying an `enq` whose id is known is
 a no-op.
 
-- The leader of the `quorum` group is the leader of every quorum queue. It
-  alone delivers to consumers; consumers on other members are served by it,
-  as today.
+- The leader of a queue's group (its own, or `quorum`) is the queue's
+  leader. It alone delivers to consumers; consumers on other members are
+  served by it.
 - A publish is confirmed when its `enq` commits, so a majority has it on
-  disk.
-- A delivery is preceded by a committed `drop` of that id, so after a
-  failover the new leader cannot deliver it again. A `nack` with requeue
-  needs no entry; the message never left the leader's queue.
+  disk. The body carries `propRaw`, `headers`, `priority` and `expiration`
+  when it has them, so a follower that becomes leader delivers the message
+  as published. A reader that does not know these fields ignores them.
+- **Bun** commits the `drop` when the message is settled: on ack, on a
+  reject without requeue, at delivery for an auto-ack consumer or
+  `basic.get`. A message delivered by a leader that dies before the
+  consumer acks stays on the followers and the next leader delivers it
+  again, with `redelivered` set, as RabbitMQ's quorum queues do. A member
+  that forwards a settle to a leader of the other implementation commits
+  the `drop` itself too; a drop applies once however often it commits.
+- **Rust** does the same: the leader that reports a settle (a local ack or
+  reject, a member's forwarded `ack`/`nack`, or a remote noAck `get`)
+  commits the `drop`, and an auto-ack delivery commits it before the body
+  is written.
+- Proposals made in turn (publishes on one channel) are handed to the
+  driver in that order, and every member enqueues a committed `enq` when it
+  applies, so a queue holds messages in log order. Raft messages to a
+  member keep to one socket while it is open, so a burst forwarded to a
+  leader is not split across a dialed and an accepted connection.
+- A `nack` with requeue needs no entry; the message never left the queue.
 - Followers keep their copies outside the ready queue. A member that
   becomes leader moves them into it.
-- Because the drop commits at delivery, a message delivered by a leader
-  that then dies before the consumer acks is not redelivered by the next
-  leader. RabbitMQ's quorum queues do redeliver it; this is the one place
-  the semantics differ.
 - A consume or `basic.get` that arrives while no connected leader is known
   waits up to two election timeouts for one, instead of failing.
 
@@ -214,6 +276,12 @@ Snapshot `state`, for `snap`: `{"queues":[{"vhost","queue","messages":[<enq data
   Every group starts with the sorted member ids as its voters. When the
   member list changes, the leader appends `config` entries one voter at a
   time.
+- **Membership changes** (`POST /api/nodes`, `DELETE /api/nodes/{name}`, a
+  joining node's `join`) commit a `members` entry, the whole new list,
+  through the `meta` log when Raft is on, and every member installs it from
+  there. Without a majority the change is refused with `503`, as RabbitMQ
+  refuses to forget a node without a Khepri majority. The list is also
+  pushed, for members without Raft. Rust and Bun both commit it.
 - **Timing:** a leader sends `append` (a heartbeat if it has nothing new)
   every 150 ms. A follower that hears nothing from a leader for a random
   1000 to 2000 ms starts a pre-vote, then an election.
@@ -239,13 +307,25 @@ Snapshot `state`, for `snap`: `{"queues":[{"vhost","queue","messages":[<enq data
 - The `hello` payload gains `"features": ["raft"]`, the flags this build
   supports. `QUEUEFORGE_RAFT=0` leaves it out, so a node stays on
   version 1 as a build without Raft would.
-- `raft` is **enabled** once every voter has advertised it in a hello. It is
-  then written to the data directory and never turned off. Until then, the
-  members keep the version 1 behaviour (majority-ack quorum queues and
-  pushed metadata), so a cluster can be upgraded one node at a time, and a
-  member without Raft (PHP today) keeps the whole cluster on it.
+- `raft` behaves as a RabbitMQ feature flag, as `khepri_db` does:
+  - A node whose data directory was new when it started writes `raft/auto`
+    and adds `raft_auto` to its features. A cluster whose voters all
+    advertise `raft` and `raft_auto` turns the flag on by itself.
+  - A node upgraded from a build without Raft has data and no `raft/auto`.
+    The cluster keeps the version 1 behaviour (majority-ack quorum queues
+    and pushed metadata) until an operator sends
+    `PUT /api/feature-flags/raft/enable`. That fails with `400 unsupported`
+    while a voter has not advertised `raft`.
+  - Enabling sends `{"op":"feature","payload":{"name":"raft"}}` to every
+    member, and a node with Raft on adds `raft_on` to its hellos, so a
+    member that was down enables it when it reconnects.
+  - Once on, `raft/enabled` is written and the flag is never turned off.
+    `POST .../disable` answers `400`.
+- A member without Raft (PHP today) keeps the whole cluster on version 1.
 - The management API lists the flags, with `state: "enabled"` or
-  `"disabled"`, at `GET /api/feature-flags`.
+  `"disabled"`, at `GET /api/feature-flags`, next to the RabbitMQ 4.3 flags
+  whose behaviour the broker has (`quorum_queue`, `stream_queue`,
+  `implicit_default_bindings`, `user_limits`).
 - A future incompatible change bumps the envelope `v` and adds a new flag.
   A member accepts any `v` it knows and drops lines with a higher `v`.
 

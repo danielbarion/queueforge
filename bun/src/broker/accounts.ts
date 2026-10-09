@@ -22,11 +22,13 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  *
  * @param name User name.
  * @param password New password, or null to keep the current hash. A new user without a password throws.
- * @param tags Replacement tags. An empty list keeps the current tags.
+ * @param tags Replacement tags. An empty list removes all tags.
  * @param create Returned as-is so the caller can tell a create from an update.
  * @returns The `create` flag. The password is stored as a RabbitMQ SHA-256 hash and replicated.
  */
-export async function putUser(this: Broker, name: string, password: string | null, tags: string[], create: boolean) {
+export async function putUser(this: Broker, name: string, password: string | null, tagsIn: string[] | string, create: boolean) {
+  // RabbitMQ takes tags as a list or as one comma-separated string.
+  const tags = Array.isArray(tagsIn) ? tagsIn.map(String) : String(tagsIn ?? "").split(/[,\s]+/).filter(Boolean);
   const existing = this.users.get(name);
   if (!existing && !password) throw new Error("password required");
   if (password) {
@@ -34,7 +36,7 @@ export async function putUser(this: Broker, name: string, password: string | nul
     if (policy) throw new Error(policy);
   }
   const hash = password ? hashRabbitPassword(password) : existing!.hash;
-  this.users.set(name, { hash, tags: tags.length ? tags : existing?.tags ?? [] });
+  this.users.set(name, { hash, tags });
   this.store.putUser({ name, hash, tags: this.users.get(name)!.tags });
   await this.cluster?.replicate("user", { name, hash, tags: this.users.get(name)!.tags });
   return create;
@@ -96,13 +98,25 @@ export function exportDefinitions(this: Broker) {
   return {
     rabbit_version: "3.13.0",
     queueforge_version: "0.1.0",
-    users: [...this.users.entries()].map(([name, u]) => ({
-      name,
-      password_hash: u.hash,
-      tags: u.tags.join(","),
-    })),
+    users: [...this.users.entries()].map(([name, u]) => {
+      const limits: Record<string, number> = {};
+      const conns = this.userConnLimit.get(name);
+      const chans = this.userChanLimit.get(name);
+      if (conns != null) limits["max-connections"] = conns;
+      if (chans != null) limits["max-channels"] = chans;
+      return {
+        name,
+        password_hash: u.hash,
+        hashing_algorithm: "rabbit_password_hashing_sha256",
+        tags: u.tags.join(","),
+        limits,
+      };
+    }),
     vhosts: [...this.vhosts].map((name) => ({ name })),
     permissions: this.perms.map((p) => ({ ...p })),
+    topic_permissions: this.listTopicPerms().map((p) => ({ ...p })),
+    parameters: this.listRuntimeParams().map((p) => ({ value: p.value, vhost: p.vhost, component: p.component, name: p.name })),
+    global_parameters: this.listGlobalParams(),
     exchanges: [...this.exchanges.values()]
       .filter((e) => e.name !== "")
       .map((e) => ({
@@ -112,6 +126,10 @@ export function exportDefinitions(this: Broker) {
         durable: e.durable,
         auto_delete: e.autoDelete,
         internal: e.internal,
+        arguments: {
+          ...(e.alternate ? { "alternate-exchange": e.alternate } : {}),
+          ...(e.delayedType ? { "x-delayed-type": e.delayedType } : {}),
+        },
       })),
     queues: [...this.queues.values()]
       .filter((q) => !q.exclusive)
@@ -170,7 +188,10 @@ export function exportDefinitions(this: Broker) {
  * @returns Nothing. An `amq.` exchange is skipped. An exclusive queue is skipped. A binding whose destination is not a queue is skipped. A user with only a password hash is stored without verification.
  */
 export async function importDefinitions(this: Broker, body: {
-  users?: Array<{ name: string; password?: string; password_hash?: string; tags?: string | string[] }>;
+  users?: Array<{ name: string; password?: string; password_hash?: string; tags?: string | string[]; limits?: Record<string, unknown> }>;
+  topic_permissions?: Array<{ user: string; vhost: string; exchange: string; write?: string; read?: string }>;
+  parameters?: Array<{ component: string; vhost: string; name: string; value: unknown }>;
+  global_parameters?: Array<{ name: string; value: unknown }>;
   vhosts?: Array<{ name: string }>;
   permissions?: Array<{ user: string; vhost: string; configure: string; write: string; read: string }>;
   exchanges?: Array<{ name: string; vhost: string; type?: string; durable?: boolean; auto_delete?: boolean; internal?: boolean }>;
@@ -188,10 +209,34 @@ export async function importDefinitions(this: Broker, body: {
       this.store.putUser({ name: u.name, hash: u.password_hash, tags });
     }
   }
+  for (const u of body.users ?? []) {
+    if (u.limits && Object.keys(u.limits).length) this.applyLimitsRow("user_limits", { user: u.name, ...u.limits });
+  }
   for (const p of body.permissions ?? []) await this.putPerm(p);
+  for (const p of body.topic_permissions ?? []) {
+    if (!p.user || !p.exchange) continue;
+    try {
+      this.putTopicPerm({ user: p.user, vhost: p.vhost ?? "/", exchange: p.exchange, write: p.write ?? "", read: p.read ?? "" });
+    } catch {
+      /* an invalid pattern is skipped, as one bad row should not stop the rest */
+    }
+  }
+  for (const p of body.parameters ?? []) {
+    if (!p.component || !p.name) continue;
+    this.ensureBuiltins(p.vhost ?? "/");
+    try {
+      this.putRuntimeParam({ component: p.component, vhost: p.vhost ?? "/", name: p.name, value: p.value });
+    } catch {
+      /* a shovel without queues is skipped */
+    }
+  }
+  for (const g of body.global_parameters ?? []) {
+    // RabbitMQ writes a fresh internal_cluster_id itself; importing one would clone the cluster identity.
+    if (g.name && g.name !== "internal_cluster_id") this.putGlobalParam(g.name, g.value);
+  }
   for (const ex of body.exchanges ?? []) {
     if (!ex.name || ex.name.startsWith("amq.")) continue;
-    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, null, (ex as { arguments?: Record<string, unknown> }).arguments?.["x-delayed-type"] as string ?? null);
+    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, ((ex as { arguments?: Record<string, unknown> }).arguments?.["alternate-exchange"] as string) ?? null, (ex as { arguments?: Record<string, unknown> }).arguments?.["x-delayed-type"] as string ?? null);
   }
   for (const p of body.policies ?? []) {
     const apply = p["apply-to"] ?? "all";

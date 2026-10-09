@@ -52,6 +52,15 @@ pub(super) async fn list_queues(
         return Err(MgmtError::NotFound(format!("vhost {vhost}")));
     }
 
+    let vhost_queues = vhost.clone();
+    let stored = db(&state, move |s| s.list_queues(&vhost_queues)).await?;
+    let home_of = |name: &str| {
+        stored
+            .iter()
+            .find(|q| q.name.as_str() == name)
+            .and_then(|q| q.home.as_ref().map(|h| h.to_string()))
+            .unwrap_or_else(|| state.config.node_name.clone())
+    };
     let keys = state.queues.list_keys();
     let mut items = Vec::new();
     for key in keys {
@@ -62,6 +71,7 @@ pub(super) async fn list_queues(
             continue;
         };
         let stats = query_stats(&handle.tx).await.unwrap_or_default();
+        let raft = queueforge_core::flags::queue_raft(key.vhost.as_str(), key.name.as_str());
         let state_str = match handle.info.state() {
             queueforge_core::QueueActorState::Running => "running",
             queueforge_core::QueueActorState::Unavailable => "unavailable",
@@ -72,6 +82,7 @@ pub(super) async fn list_queues(
             durable: handle.info.durable,
             exclusive: handle.info.exclusive,
             auto_delete: handle.info.auto_delete,
+            node: home_of(key.name.as_str()),
             state: state_str.into(),
             messages: (stats.messages_ready as u64) + (stats.messages_unacked as u64),
             messages_ready: stats.messages_ready as u64,
@@ -94,12 +105,14 @@ pub(super) async fn list_queues(
                 .lock()
                 .map(|a| serde_json::to_value(&*a).unwrap_or(serde_json::json!({})))
                 .unwrap_or(serde_json::json!({})),
+            leader: raft.as_ref().map(|r| r.leader.clone()),
+            members: raft.as_ref().map(|r| r.members.clone()),
+            raft_group: raft.map(|r| r.group),
         });
     }
 
     // Include durable queues present only in metadata (not yet live).
-    let vhost_queues = vhost.clone();
-    for q in db(&state, move |s| s.list_queues(&vhost_queues)).await? {
+    for q in stored.iter() {
         let key = QueueKey::new(q.vhost.as_str(), q.name.as_str());
         if state.queues.get(&key).is_some() {
             continue;
@@ -110,6 +123,7 @@ pub(super) async fn list_queues(
             durable: q.durable,
             exclusive: q.exclusive,
             auto_delete: q.auto_delete,
+            node: q.home.as_ref().map(|h| h.to_string()).unwrap_or_else(|| state.config.node_name.clone()),
             state: "idle".into(),
             messages: 0,
             messages_ready: 0,
@@ -122,6 +136,9 @@ pub(super) async fn list_queues(
                 .as_str()
                 .to_string(),
             arguments: serde_json::to_value(&q.args).unwrap_or(serde_json::json!({})),
+            leader: None,
+            members: None,
+            raft_group: None,
         });
     }
 

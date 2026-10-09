@@ -13,8 +13,9 @@ pub struct ReplicateReq {
     pub kind: String,
     /// JSON body the peer applies.
     pub payload: serde_json::Value,
-    /// Completed after peers have applied the record.
-    pub done: oneshot::Sender<()>,
+    /// Completed after peers have applied the record; `Err` when the
+    /// cluster refused it (a membership change without a majority).
+    pub done: oneshot::Sender<Result<(), String>>,
 }
 
 use crate::connections::ConnectionTracker;

@@ -49,7 +49,7 @@ docker compose -f docker-compose.bench.yml run --rm --no-deps \
 
 Leave `[cluster].members` empty for a single node. For several processes, put the same member list on every node, including itself. Membership is that static list.
 
-Classic queues have one home node, chosen by a hash of the vhost and queue name. Peers forward operations there, and the messages stay in that node's local engine. Rust hashes bytes with a 64-bit FNV; Bun and PHP use a 32-bit FNV-1a, so a mixed list does not agree on classic homes. Quorum queues are unaffected, being homed where they are declared.
+Classic queues have one home node, chosen by a hash of the vhost and queue name that every implementation computes the same way ([docs/raft.md](docs/raft.md), section 9), or by `x-queue-leader-locator` (`client-local` or `balanced`) on Rust and Bun. Peers forward operations there, and the messages stay in that node's local engine. The home is stored with the queue. Quorum queues are homed where they are declared.
 
 A durable quorum queue (`x-queue-type` = `quorum`, durable, non-exclusive) confirms a persistent publish after a majority of the members have the body in their own durable store and that copy has been fsynced. The client can publish to whichever member is up. Each member writes the body into its own engine: the Rust write-ahead log, Bun SQLite, or the PHP append-only log. A node keeps its own data directory. All three encode and decode cluster protocol version 1, so a member list can mix the binaries. Once a majority is reachable, the live leader is the lowest member id among those peers.
 

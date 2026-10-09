@@ -16,7 +16,7 @@ pub use args::{
     ArgValue, DeadLetterStrategy, OverflowPolicy, QueueArgs, QueueType, DEFAULT_MAX_DEATH_HOPS,
 };
 pub use cmd::{
-    StreamStart,
+    ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart,
     AppHeaderValue, ConsumerDeliveryId, ConsumerSessionId, DlxFailAction, EnqueueCompletion,
     Message, MessageHeaders, QueueCmd, QueueDelivery, QueueMessage, QueueOffset, QueueStats,
 };

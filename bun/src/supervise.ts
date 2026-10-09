@@ -71,28 +71,34 @@ export async function supervise(configPath: string, dev: boolean, cfg: Config): 
   while (ready < plans.length && Date.now() < deadline) await Bun.sleep(20);
   if (ready < plans.length) console.error(`queueforge-bun parent ready ${ready}/${plans.length}`);
 
-  const amqp = splitHost(cfg.amqp);
   let next = 0;
-  const server = net.createServer((socket) => {
-    const plan = plans[next % plans.length]!;
-    next++;
-    socket.setNoDelay(true);
-    socket.pause();
-    const child = kids.get(plan.id);
-    try {
-      (child as unknown as { send: (message: unknown, handle?: unknown) => void } | undefined)?.send({ type: "conn" }, socket);
-    } catch {
-      socket.destroy();
-    }
-  });
-  server.listen(amqp.port, amqp.host);
+  // The parent reads no bytes, TLS or not; a child runs the TLS handshake.
+  const listen = (address: string, tls: boolean) => {
+    const at = splitHost(address);
+    const server = net.createServer((socket) => {
+      const plan = plans[next % plans.length]!;
+      next++;
+      socket.setNoDelay(true);
+      socket.pause();
+      const child = kids.get(plan.id);
+      try {
+        (child as unknown as { send: (message: unknown, handle?: unknown) => void } | undefined)?.send({ type: "conn", tls }, socket);
+      } catch {
+        socket.destroy();
+      }
+    });
+    server.listen(at.port, at.host);
+    return server;
+  };
+  const servers = [listen(cfg.amqp, !!cfg.tls)];
+  if (cfg.amqps) servers.push(listen(cfg.amqps, true));
   serveMetrics(cfg, plans);
   console.log(`queueforge-bun parent cores=${cores}`);
 
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    server.close();
+    for (const server of servers) server.close();
     for (const child of kids.values()) child.kill("SIGTERM");
   };
   process.on("SIGTERM", () => {

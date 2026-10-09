@@ -52,7 +52,7 @@ function localClassicFast(
   if (input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
   if (fedLinks.some((link) => link.upstream === input.vhost)) return SLOW;
   const q = this.queues.get(this.key(input.vhost, input.routingKey));
-  if (!q || q.argsParsed.queueType === "quorum" || !this.isLocalHome(q.home)) return SLOW;
+  if (!q || q.argsParsed.queueType === "quorum" || q.raftGroup || !this.isLocalHome(q.home)) return SLOW;
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;
   this.prom.routed++;
@@ -233,6 +233,7 @@ export async function enqueue(this: Broker,
   const q = this.queues.get(this.key(vhost, name));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${name}`);
   if (q.argsParsed.queueType === "quorum") return this.enqueueQuorum(q, src);
+  if (q.argsParsed.queueType === "stream" && q.raftGroup) return this.enqueueStreamRaft(q, src);
   if (!this.isLocalHome(q.home)) {
     try {
       await this.cluster!.call(q.home!, "enqueue", {
@@ -279,7 +280,7 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /** Stored meta for a durable message. The plain shape matches JSON.parse on recovery. */
-function durableMeta(
+export function durableMeta(
   src: {
     id?: string;
     exchange: string;
@@ -362,7 +363,9 @@ export function enqueueLocal(this: Broker,
   depth: number,
 ): boolean {
   if (q.argsParsed.queueType === "stream") {
-    this.appendStream(q, src);
+    // A replicated stream takes appends only through its log (a dead letter or shovel lands here).
+    if (q.raftGroup) void this.enqueueStreamRaft(q, src);
+    else this.appendStream(q, src);
     return true;
   }
   this.expire(q);
@@ -440,7 +443,7 @@ export function enqueueLocal(this: Broker,
     msg.routingKey = "";
     msg.slim = true;
   }
-  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader()) {
+  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
     q.replicas.set(msg.id, msg);
     return true;
   }
@@ -454,7 +457,7 @@ export function enqueueLocal(this: Broker,
     q.ready.push(msg);
   }
   // A quorum confirm releases `confirmGate` and pumps after the peer fsync.
-  if (!src.confirmGate && (q.argsParsed.queueType !== "quorum" || this.isQuorumLeader())) this.pump(q);
+  if (!src.confirmGate && (q.argsParsed.queueType !== "quorum" || this.isQuorumLeader(q))) this.pump(q);
   return true;
 }
 

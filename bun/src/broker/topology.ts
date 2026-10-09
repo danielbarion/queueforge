@@ -77,8 +77,8 @@ export async function declareQueue(this: Broker, opts: {
 }): Promise<{ name: string; messages: number; consumers: number }> {
   let name = opts.name;
   if (!name) name = `amq.gen-${crypto.randomUUID()}`;
-  const home = this.homeOf(opts.vhost, name, opts.exclusive);
   const existing = this.queues.get(this.key(opts.vhost, name));
+  const home = existing ? existing.home : this.placeQueue(opts.vhost, name, opts.exclusive, opts.args["x-queue-leader-locator"]);
   if (opts.passive) {
     if (!existing) throw new ChanError(404, `NOT_FOUND - queue ${opts.vhost}/${name}`);
     // RabbitMQ counts a passive declare as use of the queue for x-expires.
@@ -126,10 +126,27 @@ export async function declareQueue(this: Broker, opts: {
     args,
     home,
   };
-  if (queueType === "quorum") {
+  let raftLeader: string | null = null;
+  if (queueType === "quorum" || queueType === "stream") {
     // Every member stores a quorum queue. Waiting on the classic-hash node
     // fails the declare when that node is the other implementation or slow.
-    row.home = this.cfg.nodeId;
+    if (queueType === "quorum") row.home = this.cfg.nodeId;
+    // Its own Raft group when the cluster runs them; a replicated stream has
+    // a copy on every member, so it has no single home. The leader locator
+    // picks the member that campaigns first: this one (client-local, the
+    // default) or the one leading the fewest queues (balanced).
+    const group = this.cluster?.consensus?.groupForNewQueue(opts.vhost, name) ?? null;
+    if (group) {
+      if (queueType === "stream") row.home = null;
+      row.raftGroup = group;
+      raftLeader = this.cfg.nodeId;
+      if (locator === "balanced") {
+        const led = this.cluster!.consensus.node!.queueLeaders();
+        const ids = this.cfg.members.map((m) => m.id).sort();
+        raftLeader = ids.reduce((best, id) => ((led.get(id) ?? 0) < (led.get(best) ?? 0) ? id : best), ids[0] ?? this.cfg.nodeId);
+      }
+      this.startQueueGroup(group, raftLeader === this.cfg.nodeId);
+    }
   }
   if (queueType !== "quorum" && !this.isLocalHome(row.home)) {
     try {
@@ -144,7 +161,9 @@ export async function declareQueue(this: Broker, opts: {
   live.owner = opts.exclusive ? (opts.owner ?? null) : null;
   this.queues.set(this.key(opts.vhost, name), live);
   if (opts.durable) this.store.putQueue(row);
-  await this.cluster?.replicate("queue", row);
+  await this.cluster?.replicate("queue", raftLeader ? { ...row, raftLeader } : row);
+  // A declare returns once the queue's group has a leader, as RabbitMQ's does once its Ra cluster started.
+  if (row.raftGroup) await this.waitQuorumLeader(live);
   this.prom.queuesDeclared++;
   this.prom.queuesCreated++;
   this.emitEvent("queue.created", opts.vhost, { name, durable: opts.durable, auto_delete: opts.autoDelete, exclusive: opts.exclusive });
@@ -168,6 +187,7 @@ export async function deleteQueue(this: Broker, vhost: string, name: string): Pr
   for (const c of q.consumers) c.onCancel?.();
   q.consumers = [];
   this.queues.delete(this.key(vhost, name));
+  if (q.raftGroup) this.cluster?.consensus?.node?.dropGroup(q.raftGroup);
   if (this.streams.delete(this.key(vhost, name)) || q.argsParsed.queueType === "stream") this.store.deleteStreamLog(vhost, name);
   this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.queue === name));
   this.store.deleteQueue(vhost, name);

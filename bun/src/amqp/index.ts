@@ -4,7 +4,7 @@
  * `startAmqp` is the public entry. The sibling modules install their methods
  * on {@link Conn} when this folder is imported.
  */
-export { adoptNodeSocket, adoptMigrated, startAmqp } from "./listen.ts";
+export { adoptNodeSocket, adoptMigrated, adoptTlsSocket, startAmqp } from "./listen.ts";
 import "./frames.ts";
 import "./connection.ts";
 import "./channel.ts";

@@ -14,6 +14,7 @@ import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
+import type { RuntimeParam } from "./params.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
@@ -51,7 +52,12 @@ function queueFromWire(payload: Record<string, unknown>): QueueRow {
   take("x-delivery-limit", "x-delivery-limit");
   take("delivery_limit", "x-delivery-limit");
   const qtype = String(argsIn["x-queue-type"] ?? argsIn.queue_type ?? "").toLowerCase();
-  if (qtype === "quorum" || qtype === "classic") args["x-queue-type"] = qtype;
+  if (qtype === "quorum" || qtype === "classic" || qtype === "stream") args["x-queue-type"] = qtype;
+  // Rust's names for the rest of its arguments.
+  if (typeof argsIn.max_age_ms === "number" && args["x-max-age"] == null) args["x-max-age"] = `${Math.ceil(argsIn.max_age_ms / 1000)}s`;
+  if (typeof argsIn.leader_locator === "string") args["x-queue-leader-locator"] = argsIn.leader_locator;
+  if (argsIn.single_active === true) args["x-single-active-consumer"] = "true";
+  if (argsIn.dead_letter_strategy === "at-least-once") args["x-dead-letter-strategy"] = "at-least-once";
   for (const [key, value] of Object.entries(argsIn)) {
     if (key.startsWith("x-") && (typeof value === "string" || typeof value === "number") && args[key] == null) args[key] = value;
   }
@@ -64,6 +70,7 @@ function queueFromWire(payload: Record<string, unknown>): QueueRow {
     autoDelete: payload.autoDelete === true || payload.auto_delete === true,
     args,
     home,
+    raftGroup: typeof payload.raftGroup === "string" ? payload.raftGroup : null,
   };
 }
 
@@ -135,9 +142,12 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
       this.queues.set(this.key(row.vhost, row.name), this.makeQueue(row, !this.isLocalHome(row.home)));
     }
     if (row.durable) this.store.putQueue(row);
+    if (row.raftGroup) this.startQueueGroup(row.raftGroup, payload.raftLeader === this.cfg.nodeId);
   } else if (kind === "delete_queue") {
     const vhost = String(payload.vhost);
     const name = String(payload.name ?? payload.queue);
+    const group = this.queues.get(this.key(vhost, name))?.raftGroup;
+    if (group) this.cluster?.consensus?.node?.dropGroup(group);
     this.queues.delete(this.key(vhost, name));
     this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.queue === name));
     this.store.deleteQueue(vhost, name);
@@ -186,6 +196,28 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
   } else if (kind === "delete_permission") {
     this.perms = this.perms.filter((p) => !(p.user === payload.user && p.vhost === payload.vhost));
     this.store.deletePerm(String(payload.user), String(payload.vhost));
+  } else if (kind === "user_limits" || kind === "vhost_limits") {
+    this.applyLimitsRow(kind, payload);
+  } else if (kind === "topic_permission") {
+    try {
+      this.putTopicPerm(payload as unknown as TopicPerm);
+    } catch {
+      /* the sender validated the patterns */
+    }
+  } else if (kind === "delete_topic_permission") {
+    this.deleteTopicPerm(String(payload.user), String(payload.vhost), String(payload.exchange));
+  } else if (kind === "parameter") {
+    try {
+      this.putRuntimeParam(payload as unknown as RuntimeParam);
+    } catch {
+      /* the sender validated the value */
+    }
+  } else if (kind === "delete_parameter") {
+    this.deleteRuntimeParam(String(payload.component), String(payload.vhost), String(payload.name));
+  } else if (kind === "global_parameter") {
+    this.putGlobalParam(String(payload.name), payload.value);
+  } else if (kind === "delete_global_parameter") {
+    this.deleteGlobalParam(String(payload.name));
   } else if (kind === "vhost") {
     this.ensureBuiltins(String(payload.name));
   } else if (kind === "delete_vhost") {
@@ -213,9 +245,15 @@ export function snapshot(this: Broker) {
       autoDelete: q.autoDelete,
       args: q.args,
       home: q.home,
+      raftGroup: q.raftGroup ?? null,
     })),
     bindings: this.bindings,
     consumed: this.consumed,
+    userLimits: this.listUserLimits(),
+    vhostLimits: this.listVhostLimits(),
+    topicPermissions: this.listTopicPerms(),
+    parameters: this.listRuntimeParams().filter((p) => p.component !== "vhost-limits" && p.component !== "shovel"),
+    globalParameters: this.listGlobalParams().filter((p) => this.store.listParameters("global").some((row) => row.name === p.name)),
   };
 }
 
@@ -250,10 +288,38 @@ export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]>
     }
   }
   this.applyConsumed(snap.consumed);
+  // Limits a member already has are kept; only missing rows are taken.
+  for (const row of snap.userLimits ?? []) {
+    if (!this.userConnLimit.has(row.user) && !this.userChanLimit.has(row.user)) this.applyLimitsRow("user_limits", row);
+  }
+  for (const row of snap.vhostLimits ?? []) {
+    if (!this.vhostConnLimit.has(row.vhost) && !this.vhostQueueLimit.has(row.vhost)) this.applyLimitsRow("vhost_limits", row);
+  }
   for (const b of snap.bindings ?? []) {
     this.bindings.push(b);
     this.store.putBinding(b);
   }
+  // Topic permissions and parameters this member does not have.
+  const topics = this.listTopicPerms();
+  for (const p of snap.topicPermissions ?? []) {
+    if (topics.some((t) => t.user === p.user && t.vhost === p.vhost && t.exchange === p.exchange)) continue;
+    try {
+      this.putTopicPerm(p);
+    } catch {
+      /* the sender validated the patterns */
+    }
+  }
+  const params = this.listRuntimeParams();
+  for (const p of snap.parameters ?? []) {
+    if (params.some((r) => r.component === p.component && r.vhost === p.vhost && r.name === p.name)) continue;
+    try {
+      this.putRuntimeParam(p);
+    } catch {
+      /* the sender validated the value */
+    }
+  }
+  const globals = new Set(this.store.listParameters("global").map((row) => row.name));
+  for (const p of snap.globalParameters ?? []) if (!globals.has(p.name)) this.putGlobalParam(p.name, p.value);
 }
 
 Broker.prototype.applyRemote = applyRemote;

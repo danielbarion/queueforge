@@ -63,7 +63,7 @@ pub(super) async fn attach_peer(
                 op: "hello".into(),
                 ok: false,
                 error: String::new(),
-                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features()}),
+                payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features(&inner)}),
                 v: 1,
                 node_id: inner.node_id.clone(),
                 from: inner.node_id.clone(),
@@ -78,6 +78,13 @@ pub(super) async fn attach_peer(
         let Ok(msg) = serde_json::from_str::<Msg>(&line) else {
             continue;
         };
+        if msg.op == "feature" {
+            // A member enabled a feature flag; only raft is cluster-wide.
+            if msg.payload.get("name").and_then(|v| v.as_str()) == Some("raft") {
+                super::consensus::enable_now(&inner);
+            }
+            continue;
+        }
         if msg.op == "raft" {
             // One-way (docs/raft.md, section 1): never answered with a reply.
             if let Some(node) = super::consensus::node(&inner) {
@@ -145,7 +152,7 @@ pub(super) async fn attach_peer(
                         op: "reply".into(),
                         ok: true,
                         error: String::new(),
-                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features()}),
+                        payload: serde_json::json!({"v": 1, "node": inner.node_id, "snapshot": snapshot(&inner).await, "consumed": inner.consumed.lock().await.clone(), "features": super::consensus::features(&inner)}),
                         v: 1,
                         node_id: inner.node_id.clone(),
                         from: inner.node_id.clone(),
@@ -219,7 +226,29 @@ pub(super) async fn refresh_leader(inner: &Arc<Inner>) {
 
 /// Ask `inner` to serve quorum replicas when this node becomes leader. Queues that already have a local actor are left running.
 pub(super) async fn promote_replicas(inner: &Arc<Inner>) {
-    let replicas: Vec<(String, Arc<Message>)> = inner.replicas.lock().await.drain().collect();
+    promote_replicas_of(inner, None).await;
+}
+
+/// Serve the quorum replicas of `only` (every queue in the shared group when
+/// `None`) now that this node leads it.
+pub(super) async fn promote_replicas_of(inner: &Arc<Inner>, only: Option<&QueueKey>) {
+    let replicas: Vec<(String, Arc<Message>)> = {
+        let mut held = inner.replicas.lock().await;
+        let prefix = only.map(|k| format!("{}\0{}\0", k.vhost, k.name));
+        let picked: Vec<String> = held
+            .keys()
+            .filter(|rk| match &prefix {
+                Some(p) => rk.starts_with(p.as_str()),
+                None => {
+                    let mut parts = rk.split('\0');
+                    let key = QueueKey::new(parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                    super::qgroups::group_of(inner, &key).is_none()
+                }
+            })
+            .cloned()
+            .collect();
+        picked.into_iter().filter_map(|rk| held.remove(&rk).map(|m| (rk, m))).collect()
+    };
     for (key, message) in replicas {
         let mut parts = key.split('\0');
         let Some(vhost) = parts.next() else { continue };

@@ -4,7 +4,7 @@ import type { Broker, LiveMsg } from "./broker/index.ts";
 import { decodeQuorumAppend } from "./wire.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";
-import { Consensus, helloFeatures } from "./raft/glue.ts";
+import { Consensus } from "./raft/glue.ts";
 import { META } from "./raft/node.ts";
 
 type Waiter = {
@@ -79,13 +79,25 @@ export class Cluster {
 
   /** Raft groups, once every voter advertises the `raft` feature. */
   consensus: Consensus;
+  /** Tokens of peer sockets that have closed. */
+  private closedTokens = new WeakSet<object>();
 
   constructor(private broker: Broker) {
     const self = () => this.broker.cfg.nodeId;
     // One-way (docs/raft.md, section 1). A peer that is not connected misses it; Raft resends.
-    this.consensus = new Consensus(broker, (to, payload) =>
-      this.peers.get(to)?.write({ v: 1, op: "raft", id: 0, from: self(), nodeId: self(), payload }),
-    );
+    // Raft messages to a member keep to one socket while it is open: a peer
+    // reachable on a dialed and an accepted socket would otherwise get a burst
+    // split across both, and proposals forwarded to a leader appended out of order.
+    const routes = new Map<string, Peer>();
+    this.consensus = new Consensus(broker, (to, payload) => {
+      let peer = routes.get(to);
+      if (!peer || this.closedTokens.has(peer.token)) {
+        peer = this.peers.get(to);
+        if (peer) routes.set(to, peer);
+        else routes.delete(to);
+      }
+      peer?.write({ v: 1, op: "raft", id: 0, from: self(), nodeId: self(), payload });
+    });
   }
 
   start() {
@@ -109,6 +121,7 @@ export class Cluster {
         this.sockets = this.sockets.filter((open) => open !== socket);
         const id = st.peerId;
         const token = st.token;
+        if (token) this.closedTokens.add(token);
         if (id && token && this.peers.get(id)?.token === token) this.peers.delete(id);
         this.broker.promoteIfLeader();
       });
@@ -119,6 +132,27 @@ export class Cluster {
     this.consensus.start();
     this.dialTimer = setInterval(() => this.dial(), 200);
     this.dial();
+  }
+
+  /**
+   * Change the member list for the whole cluster. With Raft on it is
+   * committed through the meta log first, as RabbitMQ's Khepri does, and
+   * fails without a majority. It is then pushed to every member, so one
+   * without Raft (PHP) or still connecting has it at once.
+   *
+   * @returns The installed list. Throws when the commit failed.
+   */
+  async changeMembers(members: Array<{ id: string; addr: string }>) {
+    const before = this.broker.cfg.members;
+    const node = this.consensus.node;
+    if (node) await node.propose(META, "members", members);
+    this.installMembers(members);
+    const targets = new Map([...before, ...this.broker.cfg.members].map((m) => [m.id, m]));
+    for (const member of targets.values()) {
+      if (member.id === this.broker.cfg.nodeId) continue;
+      await this.call(member.id, "apply", { kind: "members", body: this.broker.cfg.members }).catch(() => null);
+    }
+    return this.broker.cfg.members;
   }
 
   /** Replace the member list from a join, forget, or `members.json`. */
@@ -176,9 +210,10 @@ export class Cluster {
         const peer: Peer = { id: member.id, write, pending: new Map(), token };
         this.peers.set(member.id, peer);
         this.broker.promoteIfLeader();
-        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: helloFeatures() } });
+        write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: this.consensus.features() } });
       });
       const dropIfCurrent = () => {
+        this.closedTokens.add(token);
         if (this.peers.get(member.id)?.token === token) this.peers.delete(member.id);
         this.broker.promoteIfLeader();
       };
@@ -268,9 +303,14 @@ export class Cluster {
         ok: true,
         from: this.broker.cfg.nodeId,
         nodeId: this.broker.cfg.nodeId,
-        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: helloFeatures() },
+        payload: { v: 1, node: this.broker.cfg.nodeId, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: this.consensus.features() },
       });
       this.consensus.noteFeatures(id, payload);
+      return;
+    }
+    if (op === "feature") {
+      // A member enabled a feature flag; only raft is cluster-wide.
+      if ((msg.payload as { name?: unknown } | undefined)?.name === "raft") this.consensus.enableNow();
       return;
     }
     if (op === "raft") {
@@ -426,8 +466,7 @@ export class Cluster {
       const payload = (msg.payload ?? {}) as { id?: string; addr?: string };
       const members = this.broker.cfg.members.filter((member) => member.id !== payload.id);
       members.push({ id: String(payload.id ?? ""), addr: String(payload.addr ?? "") });
-      this.installMembers(members);
-      return this.broker.cfg.members;
+      return this.changeMembers(members);
     }
     if (op === "forget") {
       const payload = (msg.payload ?? {}) as { id?: string };
@@ -438,8 +477,7 @@ export class Cluster {
       }
       const members = this.broker.cfg.members.filter((member) => member.id !== id);
       if (members.length === 0) throw new Error("the member list cannot become empty");
-      this.installMembers(members);
-      return this.broker.cfg.members;
+      return this.changeMembers(members);
     }
     if (op === "unsub") {
       const body = (msg.payload ?? msg) as Record<string, unknown>;
@@ -602,6 +640,14 @@ export class Cluster {
     });
     peer.write({ op, id, payload, from: this.broker.cfg.nodeId });
     return result;
+  }
+
+  /** Tell every connected member to enable a feature flag. */
+  broadcastFeature(name: string) {
+    for (const peer of this.peers.values()) {
+      if (peer.id === this.broker.cfg.nodeId) continue;
+      peer.write({ v: 1, op: "feature", id: 0, from: this.broker.cfg.nodeId, payload: { name } });
+    }
   }
 
   async replicate(kind: string, payload: unknown) {

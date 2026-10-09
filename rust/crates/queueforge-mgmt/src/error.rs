@@ -34,6 +34,9 @@ pub enum MgmtError {
     /// Conflict (already exists).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The cluster cannot commit the change now (no majority).
+    #[error("service unavailable: {0}")]
+    Unavailable(String),
     /// Internal / store / auth failures.
     ///
     /// The payload is logged server-side only; clients receive a stable
@@ -63,6 +66,7 @@ impl IntoResponse for MgmtError {
                 Some(r.clone()),
             ),
             MgmtError::Conflict(r) => (StatusCode::CONFLICT, "conflict", Some(r.clone())),
+            MgmtError::Unavailable(r) => (StatusCode::SERVICE_UNAVAILABLE, "service unavailable", Some(r.clone())),
             MgmtError::TooManyRequests => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many login failures",

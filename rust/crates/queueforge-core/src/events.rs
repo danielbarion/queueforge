@@ -112,3 +112,41 @@ pub fn trace_publish(
     ];
     publish_internal(router, queues, vhost, TRACE_EXCHANGE, &format!("publish.{exchange}"), headers, body);
 }
+
+/// Copy one delivery from `queue` to `amq.rabbitmq.trace` as
+/// `deliver.<queue>`, as RabbitMQ's firehose does. A message published to
+/// the trace exchange itself is not traced again.
+#[allow(clippy::too_many_arguments)]
+pub fn trace_deliver(
+    router: &ExchangeRouter,
+    queues: &Arc<QueueRegistry>,
+    vhost: &str,
+    queue: &str,
+    node: &str,
+    message: &crate::Message,
+) {
+    if message.exchange.as_str() == TRACE_EXCHANGE {
+        return;
+    }
+    let props = message
+        .headers
+        .app
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect::<Vec<_>>();
+    let headers = vec![
+        (CompactString::from("exchange_name"), AppHeaderValue::Str(message.exchange.to_string())),
+        (
+            CompactString::from("routing_keys"),
+            AppHeaderValue::Array(vec![AppHeaderValue::Str(message.routing_key.to_string())]),
+        ),
+        (
+            CompactString::from("properties"),
+            AppHeaderValue::Table(vec![("headers".to_string(), AppHeaderValue::Table(props))]),
+        ),
+        (CompactString::from("node"), AppHeaderValue::Str(node.to_string())),
+        (CompactString::from("redelivered"), AppHeaderValue::Bool(message.redelivered)),
+        (CompactString::from("vhost"), AppHeaderValue::Str(vhost.to_string())),
+    ];
+    publish_internal(router, queues, vhost, TRACE_EXCHANGE, &format!("deliver.{queue}"), headers, message.body.clone());
+}

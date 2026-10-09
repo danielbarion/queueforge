@@ -48,6 +48,9 @@ final class Broker
     public array $fedUpstreams = [];
     /** @var list<string> */
     public array $vhosts = ['/'];
+    /** @var array<int, string> Connection ID to authenticated username. */
+    public array $userByConn = [];
+    public array $currentUsers = [];
     /**
      * Feature flags. Named after Bun's set so the management UI sees the same
      * shape; this broker has no code paths keyed off them.
@@ -463,7 +466,7 @@ final class Broker
      * @param list<array{0:string,1:mixed}> $args
      * @throws RuntimeException with the reply code as the exception code
      */
-    public function bind(string $queue, string $exchange, string $key, array $args = []): void
+    public function bind(string $queue, string $exchange, string $key, array $args = [], ?string $user = null, string $vhost = '/'): void
     {
         if (!isset($this->queues[$queue])) {
             throw new RuntimeException("NOT_FOUND - no queue '$queue'", 404);
@@ -471,6 +474,17 @@ final class Broker
         if ($exchange !== '' && !isset($this->exchanges[$exchange])) {
             throw new RuntimeException("NOT_FOUND - no exchange '$exchange'", 404);
         }
+        
+        // Protocol callers supply their authenticated identity; internal
+        // topology restoration has no user. Only topic exchanges use keys
+        // as an additional authorization boundary.
+        if ($user !== null && ($this->exchanges[$exchange] ?? null) === 'topic' && !$this->topicReadAllowed($user, $vhost, $exchange, $key)) {
+            throw new RuntimeException(
+                "ACCESS_REFUSED - cannot bind queue without topic read permission for '$exchange' key '$key'",
+                403
+            );
+        }
+        
         foreach ($this->bindings as $row) {
             if ($row['queue'] === $queue && $row['exchange'] === $exchange && $row['key'] === $key && $row['args'] === $args) {
                 return;
@@ -629,6 +643,18 @@ final class Broker
         if ($exchange === '' && !isset($this->queues[$key])) {
             throw new RuntimeException("NOT_FOUND - no queue '$key'", 404);
         }
+        
+        // Enforce topic write permission for non-empty exchanges.
+        if ($exchange !== '') {
+            $user = $this->currentUsers[$conn] ?? 'guest';
+            if (!$this->topicWriteAllowed($user, '/', $exchange, $key)) {
+                throw new RuntimeException(
+                    "ACCESS_REFUSED - topic permission denied for '$exchange' key '$key'",
+                    403
+                );
+            }
+        }
+        
         $dests = $this->route($exchange, $key, $headers);
         foreach (['CC', 'BCC'] as $name) {
             foreach (self::headerList($headers, $name) as $extra) {
@@ -900,6 +926,20 @@ final class Broker
             return false;
         }
         return @preg_match('/' . str_replace('/', '\/', $pattern) . '/', $key) === 1;
+    }
+
+    /** Binding a topic routing key requires its read permission. */
+    public function topicReadAllowed(string $user, string $vhost, string $exchange, string $key): bool
+    {
+        $row = $this->topicPermissions[$user][$exchange] ?? null;
+        if ($row === null) {
+            return true;
+        }
+        $pattern = (string) ($row['read'] ?? '');
+        if ($pattern === '') {
+            return false;
+        }
+        return @preg_match('~' . str_replace('~', '\\~', $pattern) . '~', $key) === 1;
     }
 
     /**

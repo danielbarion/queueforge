@@ -7,6 +7,7 @@
 import type { Broker, LiveMsg } from "../broker/index.ts";
 import { ChanError } from "../broker/index.ts";
 import type { Socket as NodeSocket } from "node:net";
+import tls from "node:tls";
 import type { Amqp10Session } from "../amqp10/session.ts";
 import { emptyProps, R } from "../codec.ts";
 
@@ -282,7 +283,7 @@ export function startAmqp(host: string, port: number, broker: Broker, reusePort 
 }
 
 /** Run one adopted TCP socket as an AMQP connection. The parent already accepted it. */
-export function adoptNodeSocket(broker: Broker, socket: NodeSocket) {
+export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = true): Conn {
   socket.setNoDelay(true);
   socket.resume();
   const wrapper: AmqpSocket = {
@@ -301,7 +302,8 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket) {
     remotePort: socket.remotePort,
   };
   const conn = new Conn(wrapper, broker);
-  conn.handed = socket;
+  // A TLS session cannot move to another process; its queues are reached through the cluster.
+  conn.handed = migrate ? socket : null;
   const fail = () => {
     conn.closed = true;
     conn.connClosed = true;
@@ -322,6 +324,29 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket) {
     void conn.dropConsumers().then(() => conn.requeueAll()).then(() => conn.dropExclusive()).finally(() => conn.unwatchAlarms()).catch(() => {});
   });
   socket.on("error", fail);
+  return conn;
+}
+
+/**
+ * Run one adopted TCP socket as an AMQPS connection: this child does the TLS
+ * handshake on the socket the parent accepted.
+ *
+ * @param requestCert Ask for a client certificate, as `startAmqp` does with a
+ *   CA: optional, and an untrusted one closes the connection.
+ */
+export function adoptTlsSocket(broker: Broker, raw: NodeSocket, context: tls.SecureContext, requestCert: boolean) {
+  const secure = new tls.TLSSocket(raw, { isServer: true, secureContext: context, requestCert, rejectUnauthorized: false });
+  const conn = adoptNodeSocket(broker, secure as unknown as NodeSocket, false);
+  secure.on("secure", () => {
+    if (!requestCert) return;
+    const subject = secure.getPeerCertificate()?.subject as { CN?: string } | undefined;
+    if (subject && Object.keys(subject).length && !secure.authorized) {
+      secure.end();
+      return;
+    }
+    if (subject?.CN) conn.peerCN = subject.CN;
+  });
+  raw.resume();
 }
 
 type MigratedState = {

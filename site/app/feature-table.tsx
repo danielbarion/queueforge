@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { BROKERS, featureGroups, level, note, tally, type Cell, type Level } from "./features";
+import { BROKERS, featureGroups, level, note, standardCount, tally, type Cell, type Level } from "./features";
 
 const LABEL: Record<Level, string> = { y: "Yes", p: "Partial", n: "No" };
 
@@ -95,6 +95,7 @@ export function FeatureTable() {
 
 export function Tallies() {
   return (
+    <>
     <ul className="tallies" aria-label="Support counts">
       {BROKERS.map((broker) => {
         const { y, p, total } = tally(broker.key);
@@ -108,11 +109,16 @@ export function Tallies() {
               {y}
               <small> / {total}</small>
             </strong>
-            <span className="tally-sub">supported, {p} partial</span>
+            <span className="tally-sub">core features, {p} partial</span>
           </li>
         );
       })}
     </ul>
+    <p className="caption">
+      Counts cover the {standardCount()} rows RabbitMQ ships in its core. Rows that need a RabbitMQ
+      plugin are listed in the table but not counted.
+    </p>
+    </>
   );
 }
 
@@ -124,8 +130,8 @@ export function FeatureTease() {
         <h2>What it does, and what it does not.</h2>
         <p className="section-lead">
           A checked list of RabbitMQ features, read from each broker&apos;s source. Not every
-          RabbitMQ 4.3 feature. QueueForge covers the AMQP 0-9-1 core and confirms after the fsync.
-          Stream queues, Raft, LDAP, OAuth and MQTT 5 are not there yet.
+          RabbitMQ 4.3 feature. Bun covers every core row; Rust has gaps in replication and
+          storage. LDAP, OAuth, MQTT 5 and the other plugin rows are partial on both.
         </p>
         <Tallies />
         <p>

@@ -9,7 +9,17 @@
 export const COOKIE = "queueforge_session";
 
 /** In-memory login tokens. Lost on process restart, matching the previous module. */
-export const sessions = new Map<string, { user: string; tags: string[] }>();
+export type Session = {
+  user: string;
+  tags: string[];
+  /** Internal password hash or a fingerprint of the authenticated external principal. */
+  identity: string | null;
+  expiresAt: number;
+  lastSeen: number;
+};
+export const SESSION_IDLE_MS = 8 * 60 * 60 * 1000;
+export const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000;
+export const sessions = new Map<string, Session>();
 
 /**
  * Pick the session cookie name for this request host.
@@ -56,18 +66,35 @@ export function tokenOf(header: string | null, name: string): string | null {
  * {@link verifyBasic} already checked are accepted, as RabbitMQ's API does.
  * @returns The session user and tags, or null when neither is valid.
  */
-export function requireUser(header: string | null, host: string | null, authorization: string | null = null) {
+export function requireUser(
+  header: string | null,
+  host: string | null,
+  authorization: string | null = null,
+  valid: (session: Session) => boolean = () => false,
+) {
+  const now = Date.now();
+  const usable = (session: Session) => session.expiresAt > now && now - session.lastSeen < SESSION_IDLE_MS && valid(session);
   const token = tokenOf(header, cookieNameFromHost(host));
   const fromCookie = token ? sessions.get(token) : undefined;
-  if (fromCookie) return fromCookie;
+  if (fromCookie) {
+    if (usable(fromCookie)) {
+      fromCookie.lastSeen = now;
+      return fromCookie;
+    }
+    sessions.delete(token!);
+  }
   if (!authorization) return null;
   const basic = basicSessions.get(authorization);
-  if (!basic || basic.until < Date.now()) return null;
+  if (!basic || basic.until < now || !usable(basic.who)) {
+    basicSessions.delete(authorization);
+    return null;
+  }
+  basic.who.lastSeen = now;
   return basic.who;
 }
 
 /** Verified Basic headers. A hash check per request would cost a PBKDF2 round each time. */
-const basicSessions = new Map<string, { who: { user: string; tags: string[] }; until: number }>();
+const basicSessions = new Map<string, { who: Session; until: number }>();
 const BASIC_TTL_MS = 5_000;
 const BASIC_MAX = 1024;
 
@@ -78,11 +105,13 @@ const BASIC_MAX = 1024;
 export async function verifyBasic(
   authorization: string | null,
   verify: (user: string, password: string) => Promise<boolean>,
-  tags: (user: string) => string[],
+  session: (user: string) => Session | null,
+  valid: (session: Session) => boolean,
 ): Promise<void> {
   if (!authorization || !authorization.startsWith("Basic ")) return;
   const cached = basicSessions.get(authorization);
-  if (cached && cached.until >= Date.now()) return;
+  if (cached && cached.until >= Date.now() && cached.who.expiresAt > Date.now() && valid(cached.who)) return;
+  basicSessions.delete(authorization);
   let decoded = "";
   try {
     decoded = atob(authorization.slice(6).trim());
@@ -97,8 +126,8 @@ export async function verifyBasic(
     basicSessions.delete(authorization);
     return;
   }
-  const userTags = tags(user);
-  if (!userTags.includes("administrator") && !userTags.includes("management") && !userTags.includes("monitoring")) return;
+  const who = session(user);
+  if (!who) return;
   if (basicSessions.size >= BASIC_MAX) basicSessions.clear();
-  basicSessions.set(authorization, { who: { user, tags: userTags }, until: Date.now() + BASIC_TTL_MS });
+  basicSessions.set(authorization, { who, until: Date.now() + BASIC_TTL_MS });
 }

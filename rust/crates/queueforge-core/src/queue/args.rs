@@ -131,6 +131,10 @@ pub struct QueueArgs {
     /// Stream `x-max-age` in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_ms: Option<u64>,
+    /// `x-queue-leader-locator`: `client-local` or `balanced`. `None` places
+    /// the queue on the cluster's home hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_locator: Option<CompactString>,
 }
 
 fn default_max_death_hops() -> u32 {
@@ -154,6 +158,7 @@ impl Default for QueueArgs {
             queue_type: None,
             dead_letter_strategy: DeadLetterStrategy::AtMostOnce,
             max_age_ms: None,
+            leader_locator: None,
         }
     }
 }
@@ -260,7 +265,9 @@ impl QueueArgs {
                 "x-queue-leader-locator" => {
                     // RabbitMQ accepts these two and refuses anything else.
                     match shortstr(value, "x-queue-leader-locator")? {
-                        "client-local" | "balanced" => {}
+                        locator @ ("client-local" | "balanced") => {
+                            args.leader_locator = Some(CompactString::from(locator));
+                        }
                         other => {
                             return Err(Error::PreconditionFailed(format!(
                                 "invalid arg 'x-queue-leader-locator': {other}"

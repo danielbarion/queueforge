@@ -194,6 +194,7 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                                     timestamp: None,
                                     expires_unix_ms: None,
                                     headers: Default::default(),
+                                    prop_raw: None,
                                 },
                             ))
                         } else if let Some(body_b64) =
@@ -227,6 +228,19 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
                                     .and_then(|v| v.as_str())
                                     .unwrap_or(""),
                             );
+                            message.redelivered = msg
+                                .payload
+                                .pointer("/msg/redelivered")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if let Some(raw) = msg
+                                .payload
+                                .pointer("/msg/propRaw")
+                                .and_then(|v| v.as_str())
+                                .and_then(|b| BASE64.decode(b.as_bytes()).ok())
+                            {
+                                crate::connection::headers::apply_props_raw(&mut message, &raw);
+                            }
                             message
                         } else {
                             let _ = reply.send(None);
@@ -365,6 +379,16 @@ pub(super) async fn proxy_loop(inner: Arc<Inner>, queue: Queue, mut rx: mpsc::Re
             }
             QueueCmd::StreamOffsets { reply } => {
                 let _ = reply.send(None);
+            }
+            QueueCmd::StreamApply { reply, .. }
+            | QueueCmd::StreamInstall { reply, .. }
+            | QueueCmd::ResetReplicas { reply } => {
+                let _ = reply.send(Err(Error::Unavailable(
+                    "replica state belongs on its local actor".into(),
+                )));
+            }
+            QueueCmd::StreamDump { reply } => {
+                let _ = reply.send(Default::default());
             }
             QueueCmd::Stats { reply } => {
                 drain_forwarded(&mut inflight).await;

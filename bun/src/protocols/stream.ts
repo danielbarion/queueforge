@@ -661,6 +661,7 @@ export class StreamSession {
     const q = pub ? this.queue(pub.stream) : null;
     const confirmed: bigint[] = [];
     const failed: Array<[bigint, number]> = [];
+    const commits: Promise<void>[] = [];
     let last = pub?.ref ? this.sequence(pub.stream, pub.ref) : -1n;
     const lastBefore = last;
     for (let i = 0; i < count; i++) {
@@ -682,19 +683,36 @@ export class StreamSession {
       }
       try {
         const msg = inbound(payload);
-        this.broker.appendStream(q, {
+        const src = {
           body: msg.body,
           exchange: "",
           routingKey: pub.stream,
           headers: msg.props.headers,
           propRaw: writeProps(msg.props),
-        });
+        };
         if (pub.ref) last = publishingId;
+        if (q.raftGroup) {
+          // A replicated stream confirms once the append committed on a majority.
+          commits.push(this.broker.enqueueStreamRaft(q, src).then((ok) => {
+            if (ok) confirmed.push(publishingId);
+            else failed.push([publishingId, INTERNAL_ERROR]);
+          }));
+          continue;
+        }
+        this.broker.appendStream(q, src);
         confirmed.push(publishingId);
       } catch {
         failed.push([publishingId, INTERNAL_ERROR]);
       }
     }
+    if (commits.length) {
+      void Promise.all(commits).then(() => this.finishPublish(id, pub, last, lastBefore, confirmed, failed));
+      return;
+    }
+    this.finishPublish(id, pub, last, lastBefore, confirmed, failed);
+  }
+
+  private finishPublish(id: number, pub: { stream: string; ref: string | null } | undefined, last: bigint, lastBefore: bigint, confirmed: bigint[], failed: Array<[bigint, number]>) {
     if (pub?.ref && last !== lastBefore) this.broker.store.putParameter(SEQUENCES, this.vhost, `${pub.stream}\0${pub.ref}`, last.toString());
     if (confirmed.length) {
       this.write(
@@ -948,11 +966,12 @@ function flushOut(socket: Socket<Conn>, conn: Conn) {
  * @param host Listen address. Clients are told to reconnect to it, so a
  * wildcard address is advertised as `localhost`.
  */
-export function startStream(host: string, port: number, broker: Broker) {
+export function startStream(host: string, port: number, broker: Broker, tls: { cert: string; key: string } | null = null) {
   const advertised = { host: host === "0.0.0.0" || host === "::" ? "localhost" : host, port };
   Bun.listen<Conn>({
     hostname: host,
     port,
+    ...(tls ? { tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } } : {}),
     socket: {
       open(socket) {
         socket.setNoDelay(true);

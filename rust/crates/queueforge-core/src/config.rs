@@ -261,6 +261,15 @@ pub struct ListenersConfig {
     /// A TLS AMQP listener next to the plain one, with the `[tls]` certificate.
     #[serde(default)]
     pub amqps: Option<SocketAddr>,
+    /// MQTT over TLS (RabbitMQ's `mqtt.listeners.ssl`, usually 8883).
+    #[serde(default)]
+    pub mqtts: Option<SocketAddr>,
+    /// STOMP over TLS (RabbitMQ's `stomp.listeners.ssl`, usually 61614).
+    #[serde(default)]
+    pub stomps: Option<SocketAddr>,
+    /// The stream protocol over TLS (RabbitMQ's `stream.listeners.ssl`, usually 5551).
+    #[serde(default)]
+    pub stream_tls: Option<SocketAddr>,
 }
 
 /// WAL fsync / group-commit policy.
@@ -387,6 +396,9 @@ impl Default for ListenersConfig {
             stomp: None,
             stream: None,
             amqps: None,
+            mqtts: None,
+            stomps: None,
+            stream_tls: None,
         }
     }
 }

@@ -1,5 +1,5 @@
 import { LdapBackend, OauthBackend } from "./auth/backends.ts";
-import { adoptMigrated, adoptNodeSocket, startAmqp } from "./amqp/index.ts";
+import { adoptMigrated, adoptNodeSocket, adoptTlsSocket, startAmqp } from "./amqp/index.ts";
 import { startMqtt, startStomp, startStream } from "./protocols/index.ts";
 import { Broker } from "./broker/index.ts";
 import { Cluster } from "./cluster.ts";
@@ -9,6 +9,9 @@ import { managementApp, metricsText } from "./http/index.ts";
 import { Store } from "./store.ts";
 import { supervise } from "./supervise.ts";
 import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { createSecureContext } from "node:tls";
+import { markFreshRaft } from "./raft/glue.ts";
 import { hashRabbitPassword } from "./broker/auth.ts";
 
 const args = process.argv.slice(2);
@@ -23,13 +26,13 @@ if (!configPath) {
   process.exit(2);
 }
 const cfg = parseConfig(await Bun.file(configPath).text());
-if ((cfg.tls || cfg.amqps) && (!cfg.tlsCert || !cfg.tlsKey)) {
+if ((cfg.tls || cfg.amqps || cfg.mqtts || cfg.stomps || cfg.streamTls) && (!cfg.tlsCert || !cfg.tlsKey)) {
   console.error("[tls] enabled or listeners.amqps needs cert_path and key_path (PEM)");
   process.exit(2);
 }
 const tls = cfg.tls ? { cert: cfg.tlsCert!, key: cfg.tlsKey!, ca: cfg.tlsCa } : null;
-// The per-core parent hands plain sockets to its children, so TLS runs in one process.
-if (process.env.QUEUEFORGE_CHILD !== "1" && grantedCores() > 1 && !tls && !cfg.amqps) {
+// The per-core parent hands each accepted socket, TLS or not, to a child.
+if (process.env.QUEUEFORGE_CHILD !== "1" && grantedCores() > 1) {
   await supervise(configPath, dev, cfg);
   process.exit(0);
 }
@@ -39,7 +42,9 @@ if (dnsSelf && cfg.dnsName) {
   cfg.nodeId = dnsSelf.id;
   cfg.members = await dnsMembers(cfg.dnsName, cfg.dnsPort ?? splitHost(cfg.clusterListen!).port, dnsSelf);
 }
+const freshData = !existsSync(join(cfg.dataDir, "bun.sqlite"));
 const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs, cfg.fsyncEveryN);
+if (freshData) markFreshRaft(cfg.dataDir);
 const broker = new Broker(cfg, store);
 if (cfg.oauth?.jwksUrl) broker.oauth = new OauthBackend(cfg.oauth);
 if (cfg.ldap?.userDnPattern) broker.ldap = new LdapBackend(cfg.ldap);
@@ -67,6 +72,7 @@ if (dnsSelf && cfg.dnsName) {
 }
 setInterval(() => broker.sweep(), 200);
 broker.resumeShovels();
+broker.resumeDeadLetters();
 
 const amqp = splitHost(cfg.amqp);
 const mgmt = splitHost(cfg.management);
@@ -80,24 +86,47 @@ if (!adopt) {
     startAmqp(amqps.host, amqps.port, broker, false, { cert: cfg.tlsCert!, key: cfg.tlsKey!, ca: cfg.tlsCa });
   }
 } else {
-  process.on("message", (message: { type?: string; state?: { user: string; vhost: string; channels: Array<{ id: number; confirm: boolean; prefetch: number }> }; bytes?: Uint8Array }, handle?: unknown) => {
+  // The parent does no TLS: a child handed an AMQPS socket runs the handshake itself.
+  const secureContext = cfg.tlsCert && cfg.tlsKey
+    ? createSecureContext({ cert: readFileSync(cfg.tlsCert), key: readFileSync(cfg.tlsKey), ...(cfg.tlsCa ? { ca: readFileSync(cfg.tlsCa) } : {}) })
+    : null;
+  process.on("message", (message: { type?: string; tls?: boolean; state?: { user: string; vhost: string; channels: Array<{ id: number; confirm: boolean; prefetch: number }> }; bytes?: Uint8Array }, handle?: unknown) => {
     if (message?.type !== "conn" || !handle || typeof (handle as { on?: unknown }).on !== "function") return;
     const socket = handle as import("node:net").Socket;
-    if (message.state && message.bytes) adoptMigrated(broker, socket, message.state, message.bytes);
+    if (message.tls) {
+      if (secureContext) adoptTlsSocket(broker, socket, secureContext, !!cfg.tlsCa);
+      else socket.destroy();
+    } else if (message.state && message.bytes) adoptMigrated(broker, socket, message.state, message.bytes);
     else adoptNodeSocket(broker, socket);
   });
 }
-if (cfg.mqtt) {
+// With one child per core, only the first runs the other protocols' listeners;
+// the cluster reaches queues on the other children.
+if (bindMgmt && cfg.mqtt) {
   const mqtt = splitHost(cfg.mqtt);
   startMqtt(mqtt.host, mqtt.port, broker);
 }
-if (cfg.stomp) {
+if (bindMgmt && cfg.stomp) {
   const stomp = splitHost(cfg.stomp);
   startStomp(stomp.host, stomp.port, broker);
 }
-if (cfg.stream) {
+if (bindMgmt && cfg.stream) {
   const stream = splitHost(cfg.stream);
   startStream(stream.host, stream.port, broker);
+}
+// TLS listeners for MQTT, STOMP and streams use the [tls] certificate.
+const protocolTls = cfg.tlsCert && cfg.tlsKey ? { cert: cfg.tlsCert, key: cfg.tlsKey } : null;
+if (bindMgmt && cfg.mqtts && protocolTls) {
+  const at = splitHost(cfg.mqtts);
+  startMqtt(at.host, at.port, broker, protocolTls);
+}
+if (bindMgmt && cfg.stomps && protocolTls) {
+  const at = splitHost(cfg.stomps);
+  startStomp(at.host, at.port, broker, protocolTls);
+}
+if (bindMgmt && cfg.streamTls && protocolTls) {
+  const at = splitHost(cfg.streamTls);
+  startStream(at.host, at.port, broker, protocolTls);
 }
 const peers = cfg.members.length ? `${cluster.peers.size}/${cfg.members.length - 1}` : "solo";
 if (bindMgmt) {

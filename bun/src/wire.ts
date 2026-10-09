@@ -23,6 +23,10 @@ export function encodeQuorumAppend(src: {
   exchange: string;
   routingKey: string;
   persistent: boolean;
+  headers?: Array<[string, unknown]>;
+  propRaw?: Uint8Array;
+  priority?: number;
+  expiration?: string;
 }): Record<string, unknown> {
   return {
     v: 1,
@@ -33,6 +37,12 @@ export function encodeQuorumAppend(src: {
     persistent: src.persistent,
     routing_key: src.routingKey,
     exchange: src.exchange,
+    // Properties, so a follower that becomes leader delivers the message as published.
+    // Readers that do not know these fields ignore them.
+    ...(src.propRaw && src.propRaw.length ? { propRaw: Buffer.from(src.propRaw).toString("base64") } : {}),
+    ...(src.headers && src.headers.length ? { headers: src.headers } : {}),
+    ...(src.priority ? { priority: src.priority } : {}),
+    ...(src.expiration ? { expiration: src.expiration } : {}),
   };
 }
 
