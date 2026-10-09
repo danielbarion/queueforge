@@ -9,6 +9,7 @@ require dirname(__DIR__) . '/src/Codec.php';
 require dirname(__DIR__) . '/src/Auth.php';
 require dirname(__DIR__) . '/src/Store.php';
 require dirname(__DIR__) . '/src/Cluster.php';
+require dirname(__DIR__) . '/src/Discovery.php';
 require dirname(__DIR__) . '/src/Broker.php';
 require dirname(__DIR__) . '/src/Http.php';
 require dirname(__DIR__) . '/src/Protocols.php';
@@ -37,6 +38,9 @@ if ($configPath === '' || !is_file($configPath)) {
 
 $cfg = [
     'amqp' => '127.0.0.1:5675',
+    'amqps' => '',
+    'ca' => '',
+    'auth' => [],
     'dir' => './data',
     'fsync_ms' => 10,
     'management' => '',
@@ -46,6 +50,7 @@ $cfg = [
     'stream' => '',
     'cluster' => '',
     'node_id' => 'queueforge',
+    'node_id_explicit' => false,
     'members' => [],
     'tls' => false,
     'cert' => '',
@@ -77,17 +82,20 @@ foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
         $cfg['fsync_ms'] = max(1, (int) $value);
     }
     if ($section === 'cluster' && $key === 'node_id') {
-        $cfg['node_id'] = $value;
+        $cfg['node_id'] = $value; $cfg['node_id_explicit'] = true;
     }
     if ($section === 'cluster' && $key === 'listen') {
         $cfg['cluster'] = $value;
     }
+    if ($section === 'cluster' && in_array($key, ['discovery','dns_name','dns_port'], true)) $cfg[$key] = $key === 'dns_port' ? (int)$value : $value;
     if ($section === 'tls' && $key === 'enabled') {
         $cfg['tls'] = $value === 'true';
     }
     if ($section === 'tls' && $key === 'cert_path') {
         $cfg['cert'] = $value;
     }
+    if ($section === 'tls' && $key === 'ca_path') $cfg['ca']=$value;
+    if (str_starts_with($section,'auth.')) $cfg['auth'][substr($section,5)][$key]=$value;
     if ($section === 'tls' && $key === 'key_path') {
         $cfg['key'] = $value;
     }
@@ -120,7 +128,7 @@ if (getenv('QUEUEFORGE_DATA_DIR')) {
     $cfg['dir'] = (string) getenv('QUEUEFORGE_DATA_DIR');
 }
 if (getenv('QUEUEFORGE_NODE_ID')) {
-    $cfg['node_id'] = (string) getenv('QUEUEFORGE_NODE_ID');
+    $cfg['node_id'] = (string) getenv('QUEUEFORGE_NODE_ID'); $cfg['node_id_explicit'] = true;
 }
 if (getenv('QUEUEFORGE_CLUSTER')) {
     $cfg['cluster'] = (string) getenv('QUEUEFORGE_CLUSTER');
@@ -131,10 +139,14 @@ if (getenv('QUEUEFORGE_MEMBERS')) {
         $cfg['members'] = $parsed;
     }
 }
+if (($cfg['discovery'] ?? '') === 'dns' && !$cfg['node_id_explicit']) $cfg['node_id'] = '';
+if (getenv('QUEUEFORGE_CHILD') !== '1') {
+    try { $cfg = Discovery::resolve($cfg); } catch (RuntimeException $error) { fwrite(STDERR, $error->getMessage()."\n"); exit(2); }
+}
 if (getenv('QUEUEFORGE_BIND_MGMT') === '0') {
     $cfg['management'] = '';
 }
-if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1 && !$cfg['tls']) {
+if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1 && !$cfg['tls'] && $cfg['amqps'] === '') {
     Supervise::run(__FILE__, $configPath, $dev, $cfg);
     exit(0);
 }
@@ -143,8 +155,11 @@ $dir = $cfg['dir'];
 if (!str_starts_with($dir, '/')) {
     $dir = dirname($configPath) . '/' . $dir;
 }
+$cfg['dir']=$dir;
+$cfg['fresh']=!is_file($dir.'/messages.log')&&!is_file($dir.'/users.json')&&!is_file($dir.'/topology.json');
 $store = new Store($dir . '/messages.log');
 $broker = new Broker($store, $dir . '/users.json');
+$broker->authConfig=$cfg['auth'];
 if ($dev) {
     $broker->bootstrap('devpassword12');
 }
@@ -153,12 +168,19 @@ $addr = $cfg['amqp'];
 $context = stream_context_create([]);
 $scheme = 'tcp';
 if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
-    $scheme = 'tls';
+    $scheme = 'tcp';
     $context = stream_context_create(['ssl' => [
+        'crypto_method' => STREAM_CRYPTO_METHOD_TLS_SERVER,
+        'queueforge_tls' => true,
+        'capture_peer_cert_chain' => true,
         'local_cert' => $cfg['cert'],
         'local_pk' => $cfg['key'],
-        'verify_peer' => false,
-        'allow_self_signed' => true,
+        'cafile' => $cfg['ca'] !== '' ? $cfg['ca'] : null,
+        'verify_peer' => $cfg['ca'] !== '',
+        // Server-side client verification checks the chain, not a client DNS name.
+        'verify_peer_name' => false,
+        'allow_self_signed' => false,
+        'capture_peer_cert' => true,
     ]]);
 }
 $listen = null;

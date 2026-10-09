@@ -81,6 +81,10 @@ final class Store
                     $o += 4;
                     if ($metaLen > 0) {
                         $decoded = json_decode(substr($payload, $o, $metaLen), true);
+                        if (is_array($decoded) && ($decoded['qf_encoding'] ?? '') === 'php-serialized-v1') {
+                            $raw = base64_decode((string) ($decoded['data'] ?? ''), true);
+                            $decoded = $raw === false ? null : unserialize($raw, ['allowed_classes' => false]);
+                        }
                         $meta = is_array($decoded) ? $decoded : [];
                     }
                 }
@@ -108,10 +112,16 @@ final class Store
      *
      * @param array<string, mixed> $meta
      */
+    private static function encodeMetadata(array $meta): string
+    {
+        try { return json_encode($meta, JSON_THROW_ON_ERROR); }
+        catch (JsonException) { return json_encode(['qf_encoding'=>'php-serialized-v1','data'=>base64_encode(serialize($meta))], JSON_THROW_ON_ERROR); }
+    }
+
     public function appendPublish(int $id, string $queue, string $body, int $mode, ?string $propRaw = null, array $meta = []): int
     {
         $props = $propRaw ?? '';
-        $encoded = $meta === [] ? '' : (string) json_encode($meta);
+        $encoded = $meta === [] ? '' : self::encodeMetadata($meta);
         $payload = Codec::u64($id)
             . Codec::shortstr($queue)
             . pack('N', strlen($body)) . $body
@@ -180,7 +190,7 @@ final class Store
         foreach ($live as $msg) {
             $props = $msg['propRaw'] ?? '';
             $meta = $msg['meta'] ?? [];
-            $encoded = $meta === [] ? '' : (string) json_encode($meta);
+            $encoded = $meta === [] ? '' : self::encodeMetadata($meta);
             $payload = Codec::u64($msg['id'])
                 . Codec::shortstr($msg['queue'])
                 . pack('N', strlen($msg['body'])) . $msg['body']

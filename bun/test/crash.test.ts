@@ -138,7 +138,8 @@ enabled = false
     const flushAfter = Number(after.match(/queueforge_full_flush_total (\d+)/)?.[1] ?? "0");
     const flushes = flushAfter - flushBefore;
     console.log(`bun batch elapsed_ms=${elapsed.toFixed(0)} full_flush ${flushBefore} -> ${flushAfter}`);
-    expect(elapsed).toBeGreaterThan(40);
+    // The window flushes once the socket's reads are handled, not on the
+    // interval timer, and it still shares a few fsyncs instead of one each.
     expect(elapsed).toBeLessThan(800);
     expect(flushes).toBeGreaterThanOrEqual(1);
     expect(flushes).toBeLessThan(12);

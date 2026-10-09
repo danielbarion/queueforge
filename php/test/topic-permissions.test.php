@@ -10,6 +10,8 @@ foreach (['Routing', 'Features', 'Policy', 'Codec', 'Auth', 'Store', 'Cluster', 
 $dir = sys_get_temp_dir() . '/qf-topic-' . bin2hex(random_bytes(6));
 $store = new Store("$dir/messages.log");
 $broker = new Broker($store, "$dir/users.json");
+$broker->putUser("alice", "test-password", []);
+$broker->setPermissions("alice", "/", ".*", ".*", ".*");
 
 Harness::guard('topic permission patterns', static function () use ($broker): void {
     Harness::eq('no rule allows publishing', true, $broker->topicWriteAllowed('alice', '/', 'logs', 'private.entry'));

@@ -28,9 +28,26 @@ pub const BUILTIN_EXCHANGE_NAMES: &[&str] = &[
 
 /// A virtual host isolating exchanges, queues, and bindings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "VhostWire")]
 pub struct Vhost {
     /// Vhost name (e.g. `/`).
     pub name: CompactString,
+}
+
+// Bun and PHP use string names in portable snapshots; Rust uses named rows.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum VhostWire {
+    Name(CompactString),
+    Row { name: CompactString },
+}
+impl From<VhostWire> for Vhost {
+    fn from(wire: VhostWire) -> Self {
+        let name = match wire {
+            VhostWire::Name(name) | VhostWire::Row { name } => name,
+        };
+        Self { name }
+    }
 }
 
 impl Vhost {
@@ -271,7 +288,12 @@ pub struct Queue {
     /// The queue's own Raft group (`q:<vhost>/<name>`), when the cluster
     /// runs one per queue. `None` is the shared `quorum` group. Written as
     /// `raftGroup`, as Bun names it.
-    #[serde(default, rename = "raftGroup", alias = "raft_group", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "raftGroup",
+        alias = "raft_group",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub raft_group: Option<CompactString>,
 }
 
@@ -550,6 +572,18 @@ mod tests {
         assert!(dbg.contains("[redacted]"));
         assert!(!dbg.contains("secret-material"));
         assert!(!dbg.contains("$argon2id$"));
+    }
+
+    #[test]
+    fn portable_snapshot_vhosts_accept_both_shapes() {
+        let names: Vec<Vhost> = serde_json::from_str(r#"["/", "tenant"]"#).unwrap();
+        let rows: Vec<Vhost> = serde_json::from_str(r#"[{"name":"/"},{"name":"tenant"}]"#).unwrap();
+        assert_eq!(names, rows);
+        assert_eq!(
+            serde_json::to_value(&rows).unwrap(),
+            serde_json::json!([{"name":"/"},{"name":"tenant"}])
+        );
+        assert!(serde_json::from_str::<Vhost>(r#"{"name":42}"#).is_err());
     }
 
     #[test]

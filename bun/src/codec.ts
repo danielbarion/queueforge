@@ -426,15 +426,36 @@ export function contentHeaderFrame(channel: number, bodySize: number, propRaw: U
 }
 
 /** One body frame. An empty body gets no frame, as the spec requires. */
-export function bodyFrame(channel: number, body: Uint8Array): Uint8Array {
+/** The frame-max this broker proposes in connection.tune. */
+export const FRAME_MAX = 131072;
+
+/**
+ * Body frames for one message, split so no frame exceeds `frameMax`.
+ *
+ * A frame is 7 header bytes, the payload, and the end byte. A client that
+ * negotiated 131072 closes the connection on a larger frame, so a 1 MiB body
+ * goes out as nine frames, as RabbitMQ sends it.
+ */
+export function bodyFrame(channel: number, body: Uint8Array, frameMax = FRAME_MAX): Uint8Array {
   if (body.length === 0) return new Uint8Array(0);
-  const f = new W();
-  f.u8(3);
-  f.u16(channel);
-  f.u32(body.length);
-  f.bytes(body);
-  f.u8(0xce);
-  return f.concat();
+  const chunk = Math.max(1, (frameMax > 0 ? frameMax : FRAME_MAX) - 8);
+  const frames = Math.ceil(body.length / chunk);
+  const out = new Uint8Array(body.length + frames * 8);
+  let o = 0;
+  for (let at = 0; at < body.length; at += chunk) {
+    const n = Math.min(chunk, body.length - at);
+    out[o] = 3;
+    out[o + 1] = channel >> 8;
+    out[o + 2] = channel & 0xff;
+    out[o + 3] = (n >>> 24) & 0xff;
+    out[o + 4] = (n >>> 16) & 0xff;
+    out[o + 5] = (n >>> 8) & 0xff;
+    out[o + 6] = n & 0xff;
+    out.set(body.subarray(at, at + n), o + 7);
+    out[o + 7 + n] = 0xce;
+    o += n + 8;
+  }
+  return out;
 }
 
 export function replaceHeaderTable(propRaw: Uint8Array, headers: Array<[string, Field]>): Uint8Array {
@@ -493,18 +514,22 @@ export function encodeSettle(channel: number, deliveryTag: number, nack: boolean
 
 /**
  * basic.deliver, content header, and body as one buffer.
- * Returns null when a shortstr would not fit, so the caller uses the generic builder.
+ * Returns null when a shortstr would not fit or the body needs more than one
+ * frame, so the caller uses the generic builder.
  */
 export function encodeDeliver(
   channel: number,
   tag: string,
   deliveryTag: number,
   msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array },
+  frameMax = FRAME_MAX,
 ): Uint8Array | null {
   const tagB = enc.encode(tag);
   const exB = enc.encode(msg.exchange);
   const rkB = enc.encode(msg.routingKey);
   if (tagB.length > 255 || exB.length > 255 || rkB.length > 255) return null;
+  // A body past one frame goes through `bodyFrame`, which splits it at frame-max.
+  if (msg.body.length + 8 > frameMax) return null;
   const prop = msg.propRaw.length ? msg.propRaw : EMPTY_PROPS;
   const methodLen = 16 + tagB.length + exB.length + rkB.length;
   const headerLen = 12 + prop.length;

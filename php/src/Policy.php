@@ -22,6 +22,8 @@ final class Policy
         'alternate-exchange',
         'max-priority',
         'queue-mode',
+        'federation-upstream',
+        'federation-upstream-set',
     ];
 
     /** Policy definition key to the queue argument it fills. */
@@ -84,7 +86,7 @@ final class Policy
     public static function resolve(array $declared, ?array $user, ?array $operator): array
     {
         $out = $declared;
-        foreach ([$user, $operator] as $policy) {
+        foreach ([$user, $operator] as $position => $policy) {
             if ($policy === null) {
                 continue;
             }
@@ -93,8 +95,9 @@ final class Policy
                 if (!array_key_exists($key, $definition)) {
                     continue;
                 }
-                // A value the client declared is never replaced.
-                if (array_key_exists($arg, $declared) && $declared[$arg] !== '') {
+                if ($position === 0 && array_key_exists($arg, $declared) && $declared[$arg] !== '') continue;
+                if ($position === 1 && isset($out[$arg]) && is_numeric($out[$arg]) && is_numeric($definition[$key])) {
+                    $out[$arg] = min($out[$arg], $definition[$key]);
                     continue;
                 }
                 $value = $definition[$key];

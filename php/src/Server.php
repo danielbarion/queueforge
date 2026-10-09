@@ -1,12 +1,18 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . "/Metadata.php";
+
 final class Chan
 {
     public bool $confirm = false;
     public int $nextPub = 1;
     public int $nextDel = 1;
     public int $prefetch = 0;
+    public ?string $replyAddress = null;
+    public ?string $replyTag = null;
+    public bool $metaPending = false;
+    public array $metaFrames = [];
     /** @var array<int, int> */
     public array $unacked = [];
     public ?string $consumer = null;
@@ -66,10 +72,15 @@ final class Sock
     public bool $gone = false;
     /** The authenticated user, set at connection.start-ok. */
     public string $user = '';
+    /** Verified certificate identity, populated only from an established TLS stream. */
+    public ?string $peerCN = null;
+    public bool $tls = false;
     /** The vhost from connection.open. */
     public string $vhost = '/';
     /** True once a frame has named a queue. The connection is not moved again. */
     public bool $settled = false;
+    public ?string $metadataQueue = null;
+    public float $metadataDeadline = 0;
     /** @var array<int, Chan> */
     public array $channels = [];
     /** @var array<string, mixed> AMQP 1.0 phase and link state */
@@ -134,6 +145,39 @@ final class Server
         $this->nextBeat = microtime(true) + self::BEAT_SECONDS;
         $this->bootAt = microtime(true);
         $this->amqp10 = new Amqp10($broker);
+        $broker->onDeleteQueue = function (string $vhost, string $name, array $consumers): void {
+            foreach ($consumers as $consumer) {
+                $client = $this->conns[$consumer['conn']] ?? null;
+                if ($client === null || $client->gone || $client->vhost !== $vhost || $consumer['ch'] < 0) continue;
+                $client->send(Codec::method($consumer['ch'], 60, 30, Codec::shortstr($consumer['tag']) . chr(1)));
+                $client->flush();
+            }
+        };
+        $broker->onDeleteVhost = function (string $vhost): void {
+            foreach ($this->conns as $id => $sock) if ($sock->vhost === $vhost && !$sock->gone) {
+                $sock->send(Codec::connectionClose(320, 'CONNECTION_FORCED - vhost deleted', 0, 0));
+                $sock->flush(); $this->drop($id);
+            }
+        };
+        if ($extras !== null) $extras->onAmqp = fn($fp) => $this->take($fp);
+        if ($extras !== null) {
+            $extras->http->onConnections = function (): array {
+                $rows = [];
+                foreach ($this->conns as $id => $sock) if (!$sock->gone && $sock->user !== '') $rows[] = [
+                    'name' => (string) $id, 'user' => $this->broker->identityName($sock->user), 'vhost' => $sock->vhost,
+                    'channels' => count($sock->channels), 'state' => 'running', 'protocol' => $sock->stage === 'amqp10' ? 'AMQP 1.0' : 'AMQP 0-9-1',
+                ];
+                return $rows;
+            };
+            $extras->http->onChannels = function (): array {
+                $rows = [];
+                foreach ($this->conns as $id => $sock) foreach ($sock->channels as $channel => $ch) $rows[] = [
+                    'name' => "$id:$channel", 'number' => $channel, 'user' => $this->broker->identityName($sock->user), 'vhost' => $sock->vhost,
+                    'prefetch_count' => $ch->prefetch, 'messages_unacknowledged' => count($ch->unacked), 'state' => 'running',
+                ];
+                return $rows;
+            };
+        }
     }
 
     private Amqp10 $amqp10;
@@ -153,7 +197,7 @@ final class Server
                     $read[] = $fp;
                 }
             }
-            $write = [];
+            $write = $this->extras?->writes() ?? [];
             foreach ($this->conns as $sock) {
                 if ($sock->gone) {
                     continue;
@@ -167,6 +211,8 @@ final class Server
             $left = $this->nextSync - microtime(true);
             $wait = $this->broker->waiting === [] ? 1.0 : max(0.001, $left);
             $wait = min($wait, max(0.001, $this->nextSweep - microtime(true)));
+            // Consensus and chained metadata callbacks need ticks even without socket activity.
+            if ($this->extras?->cluster->raftEnabled()) $wait = min($wait, 0.01);
             if ($this->handoff !== null) {
                 $wait = min($wait, 0.002);
                 $this->closeRetired();
@@ -183,7 +229,11 @@ final class Server
                     continue;
                 }
                 if ($fp === $this->listen) {
-                    $client = @stream_socket_accept($this->listen, 0);
+                    $listenerMeta = stream_get_meta_data($this->listen);
+                    $secureListener = str_contains($listenerMeta['stream_type'] ?? '', 'ssl');
+                    if ($secureListener) { stream_set_blocking($this->listen, true); stream_set_timeout($this->listen, 5); }
+                    $client = @stream_socket_accept($this->listen, $secureListener ? 1 : 0);
+                    if ($secureListener) stream_set_blocking($this->listen, false);
                     if ($client !== false) {
                         $this->take($client);
                     }
@@ -204,6 +254,7 @@ final class Server
                 $this->onData($id, $chunk);
             }
             foreach ($write as $fp) {
+                if ($this->extras !== null && $this->extras->owns($fp)) { $this->extras->flush($fp); continue; }
                 $id = $this->idOf($fp);
                 if ($id !== null) {
                     $this->conns[$id]->flush();
@@ -215,9 +266,20 @@ final class Server
             $this->pullHandoff();
             $this->announce();
             $this->beat();
-            $this->broker->maybeCompact();
+            foreach ($this->broker->allBrokers() as $scope) $scope->maybeCompact();
+            foreach ($this->conns as $sock) if ($sock->stage === 'amqp10' && !$sock->gone) { $sock->send($this->amqp10->tick($sock->amqp10)); $sock->flush(); }
             if ($this->extras !== null) {
                 $this->extras->tick();
+            }
+            foreach(array_keys($this->conns)as$id){
+                $sock=$this->conns[$id]??null;if($sock===null||$sock->gone)continue;
+                if($sock->metadataQueue!==null)$this->onData($id,'');
+                elseif($this->handoff!==null&&$sock->stage==='header'){
+                    // Probe newly adopted sockets without blocking until their real header arrives.
+                    $chunk=@fread($sock->fp,65536);
+                    if($chunk!==false&&$chunk!=='')$this->onData($id,$chunk);
+                    elseif(feof($sock->fp))$this->drop($id);
+                }
             }
         }
     }
@@ -225,12 +287,19 @@ final class Server
     /** @param resource $fp */
     private function take($fp, ?array $state = null, string $bytes = ''): void
     {
+        if (!self::acceptTls($fp)) { fclose($fp); return; }
         stream_set_blocking($fp, false);
-        $this->tune($fp);
+        $initial = stream_get_meta_data($fp);
+        if (!isset($initial['crypto'])) $this->tune($fp);
         $id = $this->nextConn++;
         $sock = new Sock($fp);
+        $meta = stream_get_meta_data($fp);
+        $sock->tls = isset($meta['crypto']);
+        $sock->peerCN = $this->verifiedPeerCN($fp);
+
         if ($state !== null) {
             $sock->stage = 'frames';
+            if(is_string($state['metadataQueue']??null)){$sock->metadataQueue=$state['metadataQueue'];$sock->metadataDeadline=microtime(true)+2;}
             $sock->user = (string) ($state['user'] ?? '');
             $sock->vhost = (string) ($state['vhost'] ?? '/');
             foreach ($state['channels'] ?? [] as $item) {
@@ -250,7 +319,40 @@ final class Server
         $this->broker->prom['connectionsOpened']++;
         if ($state !== null) {
             $this->onData($id, '');
+        } elseif ($this->handoff !== null) {
+            // Consume any header bytes already waiting on the newly adopted socket.
+            $chunk=@fread($fp,65536);
+            if($chunk!==false&&$chunk!=='')$this->onData($id,$chunk);
+            elseif(feof($fp))$this->drop($id);
         }
+    }
+
+    /** Complete explicitly configured TLS endpoints; ordinary TCP is never upgraded. */
+    public static function acceptTls($fp): bool
+    {
+        $ssl = stream_context_get_options($fp)['ssl'] ?? [];
+        if (($ssl['queueforge_tls'] ?? false) !== true || isset(stream_get_meta_data($fp)['crypto'])) return true;
+        stream_set_blocking($fp, false);
+        $deadline = microtime(true) + 5;
+        do {
+            $result = @stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_SERVER);
+            if ($result !== 0) return $result === true && isset(stream_get_meta_data($fp)['crypto']);
+            $read = [$fp]; $write = []; $except = [];
+            if (@stream_select($read, $write, $except, 0, 10000) === false) return false;
+        } while (microtime(true) < $deadline);
+        return false;
+    }
+
+    /** Context verification happened during accept; a captured certificate alone proves nothing. */
+    private function verifiedPeerCN($fp): ?string
+    {
+        $meta = stream_get_meta_data($fp);
+        $ssl = stream_context_get_options($fp)['ssl'] ?? [];
+        if ((!isset($meta['crypto']) && !str_contains($meta['stream_type'] ?? '', 'ssl')) || ($ssl['verify_peer'] ?? false) !== true || ($ssl['allow_self_signed'] ?? false) === true
+            || !is_string($ssl['cafile'] ?? null) || $ssl['cafile'] === '' || !isset($ssl['peer_certificate'])) return null;
+        $cert = openssl_x509_parse($ssl['peer_certificate']);
+        $cn = $cert['subject']['CN'] ?? null;
+        return is_string($cn) && $cn !== '' && !str_contains($cn, "\0") ? $cn : null;
     }
 
     private function pullHandoff(): void
@@ -283,7 +385,7 @@ final class Server
         }
         $need = max(0, count($this->broker->members) - 1);
         $have = $this->extras === null ? 0 : count($this->extras->cluster->peerIds());
-        if ($have < $need && microtime(true) < $this->bootAt + 8) {
+        if (($have < $need || !($this->extras?->peersReady() ?? true)) && microtime(true) < $this->bootAt + 8) {
             return;
         }
         $this->announced = $this->handoff->send(['type' => 'ready']);
@@ -298,11 +400,12 @@ final class Server
      */
     private function maybeMigrate(int $id): string
     {
+        $broker = $this->brokerFor($id);
         if ($this->handoff === null || !isset($this->conns[$id])) {
             return 'no';
         }
         $sock = $this->conns[$id];
-        if ($sock->settled || $sock->stage !== 'frames') {
+        if ($sock->tls || $sock->settled || $sock->stage !== 'frames') {
             return 'no';
         }
         // Bytes still in the kernel buffer travel with the passed socket, so
@@ -313,12 +416,12 @@ final class Server
         if ($queue === null) {
             return 'no';
         }
-        if (($this->broker->queues[$queue]['args']['queueType'] ?? 'classic') === 'quorum') {
+        if (($broker->queues[$queue]['args']['queueType'] ?? 'classic') === 'quorum') {
             $sock->settled = true;
             return 'no';
         }
-        $home = $this->broker->home($queue);
-        if ($home === '' || $home === $this->broker->nodeId) {
+        $home = $broker->home($queue);
+        if ($home === '' || $home === $broker->nodeId) {
             $sock->settled = true;
             return 'no';
         }
@@ -335,6 +438,7 @@ final class Server
             'state' => [
                 'user' => $sock->user,
                 'vhost' => $sock->vhost,
+                'metadataQueue' => $broker->cluster?->raftEnabled() && isset($broker->queues[$queue]) ? $queue : null,
                 'channels' => $channels,
             ],
             'bytes' => base64_encode(substr($sock->in, $sock->inAt)),
@@ -367,12 +471,13 @@ final class Server
      */
     private function forget(int $id): void
     {
+        $broker = $this->brokerFor($id);
         $sock = $this->conns[$id] ?? null;
         if ($sock === null) {
             return;
         }
         unset($this->byFp[(int) $sock->fp], $this->conns[$id]);
-        $this->broker->prom['connections']--;
+        $broker->prom['connections']--;
         $this->retired[] = [$sock->fp, microtime(true) + 1.0];
     }
 
@@ -468,7 +573,7 @@ final class Server
         // and max-length until something happens to dequeue it.
         if ($now >= $this->nextSweep) {
             $this->nextSweep = $now + self::SWEEP_SECONDS;
-            $this->broker->sweep();
+            foreach ($this->broker->allBrokers() as $scope) $scope->sweep();
             $this->pump();
         }
         if ($now < $this->nextBeat) {
@@ -489,32 +594,34 @@ final class Server
 
     private function drop(int $id): void
     {
+        $broker = $this->brokerFor($id);
         if (!isset($this->conns[$id])) {
             return;
         }
         $sock = $this->conns[$id];
+        if ($sock->stage === 'amqp10') $this->amqp10->closed($sock->amqp10);
         $sock->gone = true;
         unset($this->byFp[(int) $sock->fp]);
         @fclose($sock->fp);
-        $this->broker->prom['connections']--;
-        $this->broker->prom['connectionsClosed']++;
-        $this->broker->prom['channels'] -= count($sock->channels);
-        $this->broker->prom['channelsClosed'] += count($sock->channels);
+        $broker->prom['connections']--;
+        $broker->prom['connectionsClosed']++;
+        $broker->prom['channels'] -= count($sock->channels);
+        $broker->prom['channelsClosed'] += count($sock->channels);
         foreach (array_keys($sock->channels) as $channel) {
             $this->releaseChannel($id, $channel);
         }
-        foreach ($this->broker->queues as $name => $q) {
+        foreach ($broker->queues as $name => $q) {
             $before = count($q['consumers']);
-            $this->broker->queues[$name]['consumers'] = array_values(array_filter(
+            $broker->queues[$name]['consumers'] = array_values(array_filter(
                 $q['consumers'],
                 static fn (array $c): bool => $c['conn'] !== $id,
             ));
-            $this->broker->prom['consumers'] -= $before - count($this->broker->queues[$name]['consumers']);
+            $broker->prom['consumers'] -= $before - count($broker->queues[$name]['consumers']);
         }
         // An exclusive queue goes with the connection that declared it.
-        foreach ($this->broker->queues as $name => $q) {
+        foreach ($broker->queues as $name => $q) {
             if (($q['owner'] ?? null) === $id) {
-                $this->broker->deleteQueue($name);
+                $broker->deleteQueue($name);
             }
         }
         unset($this->conns[$id]);
@@ -528,6 +635,7 @@ final class Server
      */
     private function releaseChannel(int $id, int $channel): void
     {
+        $broker = $this->brokerFor($id);
         $ch = $this->conns[$id]->channels[$channel] ?? null;
         if ($ch === null) {
             return;
@@ -535,35 +643,36 @@ final class Server
         foreach (array_reverse(array_keys($ch->unacked)) as $dtag) {
             $msgId = $ch->settle($dtag);
             if ($msgId !== null) {
-                $this->broker->requeue($msgId);
+                $broker->requeue($msgId);
             }
         }
         $ch->txPub = [];
         $ch->txAcks = [];
         $touched = [];
-        foreach ($this->broker->queues as $name => $q) {
+        foreach ($broker->queues as $name => $q) {
             $before = count($q['consumers']);
-            $this->broker->queues[$name]['consumers'] = array_values(array_filter(
+            $broker->queues[$name]['consumers'] = array_values(array_filter(
                 $q['consumers'],
                 static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel),
             ));
-            $removed = $before - count($this->broker->queues[$name]['consumers']);
+            $removed = $before - count($broker->queues[$name]['consumers']);
             if ($removed > 0) {
-                $this->broker->prom['consumers'] -= $removed;
+                $broker->prom['consumers'] -= $removed;
                 $touched[] = $name;
             }
         }
         foreach ($touched as $name) {
-            $this->autoDelete($name);
+            $this->autoDelete($name, $broker);
         }
     }
 
     /** Delete an auto-delete queue once its last consumer is gone. */
-    private function autoDelete(string $name): void
+    private function autoDelete(string $name, ?Broker $scope = null): void
     {
-        $q = $this->broker->queues[$name] ?? null;
+        $broker = $scope ?? $this->broker;
+        $q = $broker->queues[$name] ?? null;
         if ($q !== null && ($q['autoDelete'] ?? false) && ($q['hadConsumer'] ?? false) && $q['consumers'] === []) {
-            $this->broker->deleteQueue($name);
+            $broker->deleteQueue($name);
         }
     }
 
@@ -573,7 +682,8 @@ final class Server
      */
     private function locked(int $id, int $channel, string $queue, int $class, int $method): bool
     {
-        $owner = $this->broker->queues[$queue]['owner'] ?? null;
+        $broker = $this->brokerFor($id);
+        $owner = $broker->queues[$queue]['owner'] ?? null;
         if ($owner === null || $owner === $id) {
             return false;
         }
@@ -583,8 +693,16 @@ final class Server
 
     private function onData(int $id, string $data): void
     {
+        $broker = $this->brokerFor($id);
         $sock = $this->conns[$id];
         $sock->in .= $data;
+        if($sock->metadataQueue!==null){
+            if(!isset($broker->queues[$sock->metadataQueue])){
+                if(microtime(true)>=$sock->metadataDeadline){$sock->send(Codec::connectionClose(541,'INTERNAL_ERROR - queue metadata unavailable',0,0));$sock->flush();$this->drop($id);}
+                return;
+            }
+            $sock->metadataQueue=null;
+        }
         if ($sock->stage === 'header') {
             if (strlen($sock->in) < 8) {
                 return;
@@ -595,6 +713,7 @@ final class Server
             // 1.0 shim rather than dropped.
             if ($head === "AMQP\x00\x01\x00\x00" || $head === "AMQP\x03\x01\x00\x00") {
                 $sock->stage = 'amqp10';
+                $sock->amqp10['conn'] = $id;
                 $sock->send($this->amqp10->drive($sock->in, $sock->amqp10));
                 $sock->flush();
                 if (($sock->amqp10['closing'] ?? false) === true) {
@@ -608,7 +727,7 @@ final class Server
             }
             $sock->inAt = 8;
             $sock->stage = 'frames';
-            $sock->send(Codec::connectionStart());
+            $sock->send(Codec::connectionStart($sock->peerCN !== null ? 'PLAIN EXTERNAL' : 'PLAIN'));
         }
         if ($sock->stage === 'amqp10') {
             $sock->send($this->amqp10->drive($sock->in, $sock->amqp10));
@@ -660,11 +779,13 @@ final class Server
 
     private function onFrame(int $id, int $type, int $channel, string $payload): void
     {
+        $broker = $this->brokerFor($id);
         $sock = $this->conns[$id];
         if ($type === 8) {
             return;
         }
         $ch = $sock->channels[$channel] ?? null;
+        if ($ch?->metaPending) { $ch->metaFrames[] = [$type, $channel, $payload]; return; }
         if ($type === 2 && $ch !== null && $ch->pub !== null && strlen($payload) >= 12) {
             $ch->pub['need'] = Codec::readU64($payload, 4);
             // Keep the property bytes from the flag word on so they can be
@@ -742,6 +863,37 @@ final class Server
         $class = unpack('n', substr($payload, 0, 2))[1];
         $method = unpack('n', substr($payload, 2, 2))[1];
         $o = 4;
+        if ($ch?->metaPending) { $ch->metaFrames[] = [$type, $channel, $payload]; return; }
+        if ($ch !== null && $broker->cluster?->raftEnabled()) {
+            try { $stage = Metadata::amqp($broker, $id, $channel, $class, $method, $payload, $sock->user); }
+            catch (RuntimeException $error) { $this->fail($id, $channel, $error, $class, $method); return; }
+            if ($stage !== null) {
+                $commands = $stage['commands'];
+                $ch->metaPending = true;
+                $respond = function (bool $ok) use ($id, $channel, $class, $method, $stage): void {
+                    $client = $this->conns[$id] ?? null;
+                    if ($client === null || $client->gone || !isset($client->channels[$channel])) return;
+                    $client->send($ok ? $stage['response'] : Codec::channelClose($channel, 541, 'INTERNAL_ERROR - metadata commit failed', $class, $method));
+                    $client->flush();
+                    $state = $client->channels[$channel];
+                    $state->metaPending = false;
+                    if (!$ok) { $state->metaFrames = []; return; }
+                    while (!$state->metaPending && $state->metaFrames !== []) {
+                        [$frameType, $frameChannel, $framePayload] = array_shift($state->metaFrames);
+                        $this->onFrame($id, $frameType, $frameChannel, $framePayload);
+                    }
+                };
+                $submit = function (int $at) use (&$submit, $commands, $broker, $respond): void {
+                    if ($at === count($commands)) { $respond(true); return; }
+                    $command = $commands[$at];
+                    $broker->cluster->proposeMeta($command['kind'], $command['data'], function (bool $ok, ?string $error) use ($at, &$submit, $respond): void {
+                        if ($ok) $submit($at + 1); else $respond(false);
+                    });
+                };
+                $submit(0);
+                return;
+            }
+        }
         if ($class === 10 && $method === 11) {
             $this->startOk($id, $payload, $o);
         } elseif ($class === 10 && $method === 31) {
@@ -750,16 +902,15 @@ final class Server
             // connection.open names the vhost. Access is checked here, so a
             // user with no permission on it is refused rather than silently
             // landing on the default namespace.
-            $o += 2;
             $vhost = Codec::readShortstr($payload, $o);
             $vhost = $vhost === '' ? '/' : $vhost;
-            if (!$this->broker->hasVhostAccess($sock->user ?? '', $vhost)) {
+            if (!$broker->hasVhostAccess($sock->user ?? '', $vhost)) {
                 $sock->send(Codec::connectionClose(403, "ACCESS_REFUSED - vhost '$vhost'", 10, 40));
                 $sock->flush();
                 $this->drop($id);
                 return;
             }
-            if (!$this->broker->connectionAllowed($sock->user ?? '', $vhost, $this->broker->prom['connections'])) {
+            if (!$broker->connectionAllowed($sock->user ?? '', $vhost, count(array_filter($this->conns, static fn($c) => $c->user === $sock->user && !$c->gone)))) {
                 $sock->send(Codec::connectionClose(403, 'ACCESS_REFUSED - connection limit', 10, 40));
                 $sock->flush();
                 $this->drop($id);
@@ -772,20 +923,20 @@ final class Server
             $sock->flush();
             $this->drop($id);
         } elseif ($class === 20 && $method === 10) {
-            if (!$this->broker->channelAllowed($sock->user ?? '', $this->broker->prom['channels'])) {
+            if (!$broker->channelAllowed($sock->user ?? '', array_sum(array_map(static fn($c) => $c->user === $sock->user ? count($c->channels) : 0, $this->conns)))) {
                 $sock->send(Codec::connectionClose(403, 'ACCESS_REFUSED - channel limit', 20, 10));
                 $sock->flush();
                 $this->drop($id);
                 return;
             }
             $sock->channels[$channel] = new Chan();
-            $this->broker->prom['channels']++;
-            $this->broker->prom['channelsOpened']++;
+            $broker->prom['channels']++;
+            $broker->prom['channelsOpened']++;
             $sock->send(Codec::channelOpenOk($channel));
         } elseif ($class === 20 && $method === 40) {
             if (isset($sock->channels[$channel])) {
-                $this->broker->prom['channels']--;
-                $this->broker->prom['channelsClosed']++;
+                $broker->prom['channels']--;
+                $broker->prom['channelsClosed']++;
                 $this->releaseChannel($id, $channel);
             }
             unset($sock->channels[$channel]);
@@ -859,25 +1010,26 @@ final class Server
 
     private function cancel(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $tag = Codec::readShortstr($payload, $o);
         $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
         $ch = $this->conns[$id]->channels[$channel];
         // A consumer served by another node is unsubscribed there.
         if (isset($ch->remote[$tag]) && $this->extras !== null) {
             $this->extras->cluster->request($ch->remote[$tag]['peer'], 'unsub', [
-                'vhost' => '/',
+                'vhost' => $broker->vhost,
                 'session' => $ch->remote[$tag]['session'],
             ]);
             unset($ch->remote[$tag]);
         }
         $touched = [];
-        foreach ($this->broker->queues as $name => $queue) {
+        foreach ($broker->queues as $name => $queue) {
             $before = count($queue['consumers']);
-            $this->broker->queues[$name]['consumers'] = array_values(array_filter(
+            $broker->queues[$name]['consumers'] = array_values(array_filter(
                 $queue['consumers'],
                 static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel && $c['tag'] === $tag),
             ));
-            if (count($this->broker->queues[$name]['consumers']) !== $before) {
+            if (count($broker->queues[$name]['consumers']) !== $before) {
                 $touched[] = $name;
             }
         }
@@ -889,14 +1041,17 @@ final class Server
             $this->conns[$id]->send(Codec::cancelOk($channel, $tag));
         }
         foreach ($touched as $name) {
-            $this->autoDelete((string) $name);
+            $this->autoDelete((string) $name, $broker);
         }
     }
 
     private function get(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "read", $queue, 60, 70)) return;
+        if (($broker->queues[$queue]["args"]["queueType"] ?? "") === "stream") { $this->conns[$id]->send(Codec::channelClose($channel,540,"NOT_IMPLEMENTED - basic.get on stream queue",60,70));return; }
         $noAck = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
         if ($this->locked($id, $channel, $queue, 60, 70)) {
             return;
@@ -906,14 +1061,14 @@ final class Server
         // A classic queue homed elsewhere is asked over the cluster link. The
         // reply comes back through the select loop, so the client's answer is
         // written from the callback rather than blocking here.
-        $home = $this->remoteHome($queue);
+        $home = $this->remoteHome($queue, $broker);
         if ($home !== null && $this->extras !== null) {
             $this->extras->cluster->request(
                 $home,
                 'get',
-                ['vhost' => '/', 'queue' => $queue, 'noAck' => $noAck],
+                ['vhost' => $broker->vhost, 'queue' => $queue, 'noAck' => $noAck],
                 '',
-                function (?array $reply) use ($id, $channel, $queue, $noAck): void {
+                function (?array $reply) use ($id, $channel, $queue, $noAck, $broker): void {
                     $sock = $this->conns[$id] ?? null;
                     $ch = $sock?->channels[$channel] ?? null;
                     if ($sock === null || $ch === null) {
@@ -923,7 +1078,7 @@ final class Server
                     if ($reply === null || $msg === null) {
                         // A timeout and an empty queue are both reported as
                         // empty; the alternative is leaving the client hanging.
-                        $this->broker->prom['getEmpty']++;
+                        $broker->prom['getEmpty']++;
                         $sock->send(Codec::getEmpty($channel));
                         $sock->flush();
                         return;
@@ -942,23 +1097,23 @@ final class Server
                         null,
                     ));
                     $sock->flush();
-                    $this->broker->prom['delivered']++;
-                    $this->broker->prom[$noAck ? 'deliveredGetAuto' : 'deliveredGetManual']++;
+                    $broker->prom['delivered']++;
+                    $broker->prom[$noAck ? 'deliveredGetAuto' : 'deliveredGetManual']++;
                 },
             );
             return;
         }
         // basic.get counts as use for x-expires, as on RabbitMQ.
-        if (isset($this->broker->queues[$queue])) {
-            $this->broker->queues[$queue]['lastUsed'] = microtime(true);
+        if (isset($broker->queues[$queue])) {
+            $broker->queues[$queue]['lastUsed'] = microtime(true);
         }
-        $msgId = $this->broker->getReady($queue);
+        $msgId = $broker->getReady($queue);
         if ($msgId === null) {
-            $this->broker->prom['getEmpty']++;
+            $broker->prom['getEmpty']++;
             $sock->send(Codec::getEmpty($channel));
             return;
         }
-        $msg = $this->broker->msgs[$msgId];
+        $msg = $broker->msgs[$msgId];
         $dtag = $ch->nextDel++;
         if (!$noAck) {
             $ch->unacked[$dtag] = $msgId;
@@ -969,24 +1124,25 @@ final class Server
             $msg['redelivered'] ?? false,
             $msg['exchange'] ?? '',
             $msg['key'] ?? $queue,
-            $this->broker->readyCount($queue),
+            $broker->readyCount($queue),
             $msg['mode'],
             $msg['body'],
             $msg['propRaw'] ?? null,
             is_array($msg['headers'] ?? null) ? $msg['headers'] : [],
         ));
-        $this->broker->prom['delivered']++;
-        $this->broker->prom[$noAck ? 'deliveredGetAuto' : 'deliveredGetManual']++;
+        $broker->prom['delivered']++;
+        $broker->prom[$noAck ? 'deliveredGetAuto' : 'deliveredGetManual']++;
         if (($msg['redelivered'] ?? false) === true) {
-            $this->broker->prom['redelivered']++;
+            $broker->prom['redelivered']++;
         }
         if ($noAck) {
-            $this->broker->drop($msgId);
+            $broker->drop($msgId);
         }
     }
 
     private function reject(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         if (strlen($payload) < $o + 9) {
             return;
         }
@@ -998,15 +1154,16 @@ final class Server
         }
         $msgId = $ch->settle($tag);
         if ($requeue) {
-            $this->broker->requeue($msgId);
+            $broker->requeue($msgId);
         } else {
-            $this->broker->deadLetter($msgId);
+            $broker->deadLetter($msgId);
         }
         $this->pump();
     }
 
     private function recover(int $id, int $channel, string $payload, int $o, int $method): void
     {
+        $broker = $this->brokerFor($id);
         $requeue = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
         $sock = $this->conns[$id];
         if (!$requeue) {
@@ -1019,7 +1176,7 @@ final class Server
         foreach (array_reverse(array_keys($ch->unacked)) as $tag) {
             $msgId = $ch->settle($tag);
             if ($msgId !== null) {
-                $this->broker->requeue($msgId);
+                $broker->requeue($msgId);
             }
         }
         if ($method === 110) {
@@ -1030,18 +1187,20 @@ final class Server
 
     private function queuePurge(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "read", $queue, 50, 30)) return;
         $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
         if ($this->locked($id, $channel, $queue, 50, 30)) {
             return;
         }
         // Purging a queue homed elsewhere has to reach the node holding it.
-        $home = $this->remoteHome($queue);
+        $home = $this->remoteHome($queue, $broker);
         if ($home !== null && $this->extras !== null) {
-            $this->extras->cluster->request($home, 'purge', ['vhost' => '/', 'queue' => $queue]);
+            $this->extras->cluster->request($home, 'purge', ['vhost' => $broker->vhost, 'queue' => $queue]);
         }
-        $n = $this->broker->purge($queue);
+        $n = $broker->purge($queue);
         if (!$nowait) {
             $this->conns[$id]->send(Codec::purgeOk($channel, $n));
         }
@@ -1049,8 +1208,10 @@ final class Server
 
     private function queueDelete(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "configure", $queue, 50, 40)) return;
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
         $ifUnused = ($bits & 1) === 1;
         $ifEmpty = ($bits & 2) === 2;
@@ -1058,18 +1219,18 @@ final class Server
         if ($this->locked($id, $channel, $queue, 50, 40)) {
             return;
         }
-        $q = $this->broker->queues[$queue] ?? null;
+        $q = $broker->queues[$queue] ?? null;
         if ($q !== null && $ifUnused && $q['consumers'] !== []) {
             $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - queue '$queue' in vhost '/' in use", 50, 40));
             return;
         }
-        if ($q !== null && $ifEmpty && $this->broker->readyCount($queue) > 0) {
+        if ($q !== null && $ifEmpty && $broker->readyCount($queue) > 0) {
             $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - queue '$queue' in vhost '/' not empty", 50, 40));
             return;
         }
-        $home = $this->remoteHome($queue);
+        $home = $this->remoteHome($queue, $broker);
         if ($home !== null && $this->extras !== null) {
-            $this->extras->cluster->request($home, 'delete_queue', ['vhost' => '/', 'queue' => $queue]);
+            $this->extras->cluster->request($home, 'delete_queue', ['vhost' => $broker->vhost, 'queue' => $queue]);
         }
         // Consumers of a deleted queue are told with basic.cancel, as RabbitMQ
         // does for clients that advertise consumer_cancel_notify.
@@ -1085,7 +1246,7 @@ final class Server
                 $peer->queue = null;
             }
         }
-        $n = $this->broker->deleteQueue($queue);
+        $n = $broker->deleteQueue($queue);
         if (!$nowait) {
             $this->conns[$id]->send(Codec::queueDeleteOk($channel, $n));
         }
@@ -1093,21 +1254,25 @@ final class Server
 
     private function queueUnbind(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
         $exchange = Codec::readShortstr($payload, $o);
         $key = Codec::readShortstr($payload, $o);
-        $this->broker->unbind($queue, $exchange, $key);
+        if (!$this->allowed($id, $channel, "write", $queue, 50, 20) || !$this->allowed($id, $channel, "read", $exchange, 50, 20)) return;
+        $broker->unbind($queue, $exchange, $key);
         $this->conns[$id]->send(Codec::unbindOk($channel));
     }
 
     private function exchangeDelete(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $name = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "configure", $name, 40, 20)) return;
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
         $nowait = ($bits & 2) === 2;
-        $this->broker->deleteExchange($name);
+        $broker->deleteExchange($name);
         if (!$nowait) {
             $this->conns[$id]->send(Codec::method($channel, 40, 21));
         }
@@ -1115,14 +1280,15 @@ final class Server
 
     private function exchangeBind(int $id, int $channel, string $payload, int $o, bool $bind): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $destination = Codec::readShortstr($payload, $o);
         $source = Codec::readShortstr($payload, $o);
         $key = Codec::readShortstr($payload, $o);
         if ($bind) {
-            $this->broker->bindExchange($destination, $source, $key);
+            $broker->bindExchange($destination, $source, $key);
         } else {
-            $this->broker->unbindExchange($destination, $source, $key);
+            $broker->unbindExchange($destination, $source, $key);
         }
         $this->conns[$id]->send(Codec::method($channel, 40, $bind ? 31 : 51));
     }
@@ -1135,6 +1301,7 @@ final class Server
      */
     private function transaction(int $id, int $channel, int $method): void
     {
+        $broker = $this->brokerFor($id);
         $sock = $this->conns[$id];
         $ch = $sock->channels[$channel];
         if ($method === 10) {
@@ -1169,33 +1336,56 @@ final class Server
         $sock->send(Codec::method($channel, 90, $method + 1));
     }
 
+    private function brokerFor(int $id): Broker { return $this->broker->forVhost($this->conns[$id]->vhost ?? '/'); }
+    private function allowed(int $id, int $channel, string $operation, string $name, int $class, int $method): bool
+    {
+        $sock = $this->conns[$id];
+        if ($this->broker->resourceAllowed($sock->user, $sock->vhost, $operation, $name)) return true;
+        $sock->send(Codec::channelClose($channel, 403, "ACCESS_REFUSED - $operation access to '$name'", $class, $method));
+        $this->releaseChannel($id, $channel);
+        return false;
+    }
+
     private function startOk(int $id, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $table = unpack('N', substr($payload, $o, 4))[1];
         $o += 4 + $table;
         $mech = Codec::readShortstr($payload, $o);
         $resp = Codec::readLongstr($payload, $o);
-        if ($mech !== 'PLAIN') {
-            $this->drop($id);
-            return;
-        }
-        $parts = explode("\0", $resp);
-        $user = count($parts) >= 3 ? $parts[1] : ($parts[0] ?? '');
-        $pass = count($parts) >= 3 ? $parts[2] : ($parts[1] ?? '');
-        if (!$this->broker->verify($user, $pass)) {
+        if ($mech === 'EXTERNAL') {
+            $user = $this->conns[$id]->peerCN;
+            // The authorization identity follows the trusted common name; no password fallback.
+            if ($user === null || !array_key_exists($user, $broker->users)) {
+                $this->conns[$id]->send(Codec::connectionClose(403, 'ACCESS_REFUSED - EXTERNAL login refused', 10, 11));
+                $this->conns[$id]->flush();
+                $this->drop($id);
+                return;
+            }
+        } elseif ($mech === 'PLAIN') {
+            $parts = explode("\0", $resp);
+            $user = count($parts) >= 3 ? $parts[1] : ($parts[0] ?? '');
+            $pass = count($parts) >= 3 ? $parts[2] : ($parts[1] ?? '');
+            $user = $broker->authenticate($user, $pass);
+            if ($user === null) { $this->drop($id); return; }
+        } else {
+            $this->conns[$id]->send(Codec::connectionClose(403, 'ACCESS_REFUSED - mechanism', 10, 11));
+            $this->conns[$id]->flush();
             $this->drop($id);
             return;
         }
         $this->conns[$id]->user = $user;
         // Register the user with broker for topic permissions.
-        $this->broker->userByConn[$id] = $user;
+        $broker->userByConn[$id] = $user;
         $this->conns[$id]->send(Codec::connectionTune());
     }
 
     private function declare(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $name = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "configure", $name, 50, 10)) return;
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
         $passive = ($bits & 1) === 1;
         $durable = ($bits & 2) === 2;
@@ -1219,68 +1409,58 @@ final class Server
             $this->conns[$id]->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - invalid arg 'x-queue-leader-locator' for queue '$name' in vhost '/': \"$locator\" is not one of [client-local, balanced]", 50, 10));
             return;
         }
-        if (!$passive && !isset($this->broker->queues[$name])
-            && !$this->broker->queueAllowed($this->conns[$id]->vhost)) {
+        if (!$passive && !isset($broker->queues[$name])
+            && !$broker->queueAllowed($this->conns[$id]->vhost)) {
             $this->conns[$id]->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - queue limit', 50, 10));
             return;
         }
-        $isNew = !isset($this->broker->queues[$name]);
+        $isNew = !isset($broker->queues[$name]);
         try {
-            $state = $this->broker->declareQueue($name, $args, $durable, $exclusive, $passive, $autoDelete);
+            $state = $broker->declareQueue($name, $args, $durable, $exclusive, $passive, $autoDelete);
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 50, 10);
             return;
         }
-        if ($isNew && !$passive) {
-            $this->broker->emitEvent('queue.created', [
-                ['name', $name],
-                ['durable', $durable],
-                ['auto_delete', $autoDelete],
-                ['exclusive', $exclusive],
-            ]);
-        }
-        if ($exclusive && !isset($this->broker->queues[$name]['owner'])) {
-            $this->broker->queues[$name]['owner'] = $id;
+        if ($exclusive && !isset($broker->queues[$name]['owner'])) {
+            $broker->queues[$name]['owner'] = $id;
         }
         if (!$passive) {
-            $this->replicateQueue($name, $args);
+            try{$this->replicateQueue($broker,$name,$args);}catch(RuntimeException $error){$this->fail($id,$channel,$error,50,10);return;}
         }
         $this->conns[$id]->send(Codec::queueDeclareOk($channel, $name, $state['messages'], $state['consumers']));
     }
 
     /** Creates the queue on every peer before the client is told the declare finished. */
-    private function replicateQueue(string $name, array $args): void
+    private function replicateQueue(Broker $broker,string $name,array $args): void
     {
         if ($this->extras === null || count($this->broker->members) < 2) {
             return;
         }
-        $pending = 0;
-        $done = 0;
-        foreach ($this->extras->cluster->peerIds() as $peer) {
+        $pending=0;$done=0;$failed=false;
+        foreach($this->extras->cluster->peerIds()as$peer){
             $id = $this->extras->cluster->request($peer, 'declare_queue', [
-                'queue' => $name,
-                'args' => $args,
-            ], '', static function () use (&$done): void {
-                $done++;
+                'vhost'=>$broker->vhost,'queue'=>$name,'args'=>$args,
+            ], '', static function ($reply) use (&$done,&$failed): void {
+                $done++;if($reply===null)$failed=true;
             });
-            if ($id !== 0) {
-                $pending++;
-            }
+            if($id!==0)$pending++;else $failed=true;
         }
         $deadline = microtime(true) + 0.5;
         while ($done < $pending && microtime(true) < $deadline) {
             $read = $this->extras->reads();
-            $write = [];
+            $write = $this->extras->writes();
             $except = [];
             if ($read === [] || @stream_select($read, $write, $except, 0, 20000) === false) {
                 break;
             }
+            foreach ($write as $fp) $this->extras->flush($fp);
             foreach ($read as $fp) {
                 if ($this->extras->owns($fp)) {
                     $this->extras->onRead($fp);
                 }
             }
         }
+        if($failed||$done!==$pending)throw new RuntimeException('INTERNAL_ERROR - metadata replication failed',541);
     }
 
     /**
@@ -1290,6 +1470,7 @@ final class Server
      */
     private function fail(int $id, int $channel, RuntimeException $err, int $class, int $method): void
     {
+        $broker = $this->brokerFor($id);
         $code = $err->getCode();
         $code = $code >= 300 && $code < 600 ? $code : 406;
         $sock = $this->conns[$id] ?? null;
@@ -1307,8 +1488,10 @@ final class Server
 
     private function consume(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "read", $queue, 60, 20)) return;
         $tag = Codec::readShortstr($payload, $o);
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
         $noAck = ($bits & 2) === 2;
@@ -1320,10 +1503,22 @@ final class Server
             $tag = 'amq.ctag-' . bin2hex(random_bytes(8));
         }
         $priority = 0;
+        $args = [];
         if (isset($payload[$o])) {
             $o++;
             $args = Codec::readTable($payload, $o);
             $priority = (int) ($args['x-priority'] ?? 0);
+        }
+        if ($queue === 'amq.rabbitmq.reply-to') {
+            $ch = $this->conns[$id]->channels[$channel];
+            if (!$noAck || $ch->replyAddress !== null) {
+                $this->conns[$id]->send(Codec::channelClose($channel, 406, 'PRECONDITION_FAILED - reply-to requires no-ack and one consumer', 60, 20));
+                return;
+            }
+            $ch->replyAddress = 'amq.rabbitmq.reply-to.' . bin2hex(random_bytes(16));
+            $ch->replyTag = $tag;
+            if (!$nowait) $this->conns[$id]->send(Codec::consumeOk($channel, $tag));
+            return;
         }
         if ($this->locked($id, $channel, $queue, 60, 20)) {
             return;
@@ -1331,11 +1526,11 @@ final class Server
         $ch = $this->conns[$id]->channels[$channel];
         // A classic queue homed elsewhere is subscribed to over the cluster
         // link; the home node then pushes deliver frames back.
-        $home = $this->remoteHome($queue);
+        $home = $this->remoteHome($queue, $broker);
         if ($home !== null && $this->extras !== null) {
-            $session = $this->broker->nextSession();
+            $session = $broker->nextSession();
             $this->extras->cluster->request($home, 'sub', [
-                'vhost' => '/',
+                'vhost' => $broker->vhost,
                 'queue' => $queue,
                 'session' => $session,
                 'noAck' => $noAck,
@@ -1351,7 +1546,14 @@ final class Server
             return;
         }
         try {
-            $this->broker->addConsumer($queue, $id, $channel, $tag, $noAck, $exclusive, $priority);
+            $stream = ($broker->queues[$queue]['args']['queueType'] ?? '') === 'stream';
+            if ($stream && ($ch->prefetch === 0 || $noAck)) throw new RuntimeException('PRECONDITION_FAILED - stream consume requires prefetch and manual acknowledgements',406);
+            $broker->addConsumer($queue, $id, $channel, $tag, $noAck, $exclusive, $priority);
+            $consumer = array_key_last($broker->queues[$queue]['consumers']);
+            $broker->queues[$queue]['consumers'][$consumer]['readyFn'] = function()use($id,$channel,$tag):bool { $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;return $ch!==null&&!$sock->gone&&($ch->prefetch===0||($ch->held[$tag]??0)<$ch->prefetch); };
+            $broker->queues[$queue]['consumers'][$consumer]['deliverFn'] = function(array $msg,int $msgId)use($id,$channel,$tag,$noAck,$broker):void { $this->deliverMessage($broker,$id,$channel,$tag,$noAck,$msg,$msgId); };
+            if($stream){$offset=$args['x-stream-offset']??'next';$cursor=is_int($offset)?max($broker->streamFirst($queue),$offset):match($offset){'first'=>$broker->streamFirst($queue),'last'=>max($broker->streamFirst($queue),$broker->streamNext($queue)-1),default=>$broker->streamNext($queue)};$broker->queues[$queue]['consumers'][$consumer]['streamOffset']=$cursor;}
+
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 60, 20);
             return;
@@ -1359,7 +1561,7 @@ final class Server
         $ch->consumer = $tag;
         $ch->queue = $queue;
         $ch->noAck[$tag] = $noAck;
-        $this->broker->queues[$queue]['hadConsumer'] = true;
+        $broker->queues[$queue]['hadConsumer'] = true;
         if (!$nowait) {
             $this->conns[$id]->send(Codec::consumeOk($channel, $tag));
         }
@@ -1396,6 +1598,7 @@ final class Server
 
     private function finishPublish(int $id, int $channel): void
     {
+        $broker = $this->brokerFor($id);
         $ch = $this->conns[$id]->channels[$channel];
         if ($ch->pub === null) {
             return;
@@ -1404,27 +1607,45 @@ final class Server
         $ch->pub = null;
         $sock = $this->conns[$id];
         // RabbitMQ refuses a user-id property that is not the login.
-        if (isset($pub['userId']) && $pub['userId'] !== ($sock->user ?? '')) {
-            $sock->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - user_id property set to '{$pub['userId']}' but authenticated user was '{$sock->user}'", 60, 40));
+        $identity = $broker->identityName($sock->user ?? '');
+        if (isset($pub['userId']) && $pub['userId'] !== $identity) {
+            $sock->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - user_id property set to '{$pub['userId']}' but authenticated user was '$identity'", 60, 40));
             return;
         }
         if ($ch->tx && !$this->replaying) {
             $ch->txPub[] = $pub;
             return;
         }
+        if (!$this->allowed($id, $channel, "write", $pub["exchange"], 60, 40)) return;
         $tag = $ch->confirm ? $ch->nextPub++ : 0;
         
         // Enforce topic write permissions for non-empty exchanges.
-        $user = $this->userByConn[$id] ?? $sock->user;
+        $user = $broker->userByConn[$id] ?? $sock->user;
         if ($pub['exchange'] !== '') {
-            if (!$this->broker->topicWriteAllowed($user, $sock->vhost, $pub['exchange'], $pub['key'])) {
+            if (!$broker->topicWriteAllowed($user, $sock->vhost, $pub['exchange'], $pub['key'])) {
                 $sock->send(Codec::channelClose($channel, 403, 'ACCESS_REFUSED - write access to topic refused', 60, 40));
                 return;
             }
         }
         
+        if (($pub['propRaw'] ?? null) !== null) {
+            $props = Amqp10::readProps($pub['propRaw']);
+            if (($props['replyTo'] ?? null) === 'amq.rabbitmq.reply-to' && $ch->replyAddress !== null) {
+                $props['replyTo'] = $ch->replyAddress;
+                $pub['propRaw'] = Amqp10::writeProps($props, array_map(static fn($key, $value) => [$key, $value], array_keys($props['headers']), array_values($props['headers'])));
+            }
+        }
+        if ($pub['exchange'] === '' && str_starts_with($pub['key'], 'amq.rabbitmq.reply-to.')) {
+            foreach ($this->conns as $recipient) if (!$recipient->gone && $recipient->vhost === $sock->vhost) foreach ($recipient->channels as $target => $reply) {
+                if ($reply->replyAddress !== $pub['key']) continue;
+                $recipient->send(Codec::deliver($target, $reply->replyTag, $reply->nextDel++, $pub['key'], $pub['mode'], $pub['got'], false, '', $pub['propRaw']));
+                $recipient->flush();
+            }
+            if ($tag > 0) $sock->send(Codec::basicAck($channel, $tag));
+            return;
+        }
         try {
-            $result = $this->broker->publish(
+            $result = $broker->publish(
                 $id,
                 $channel,
                 $tag,
@@ -1445,12 +1666,12 @@ final class Server
         }
         if ($result === 'return') {
             if ($pub['mandatory']) {
-                $this->broker->prom['unroutableReturned']++;
+                $broker->prom['unroutableReturned']++;
                 $ret = Codec::method($channel, 60, 50, pack('n', 312) . Codec::shortstr('NO_ROUTE') . Codec::shortstr($pub['exchange']) . Codec::shortstr($pub['key']));
                 $header = Codec::contentHeader(strlen($pub['got']), $pub['mode'], $pub['propRaw'] ?? null);
                 $this->conns[$id]->send($ret . Codec::frame(2, $channel, $header) . Codec::frame(3, $channel, $pub['got']));
             } else {
-                $this->broker->prom['unroutableDropped']++;
+                $broker->prom['unroutableDropped']++;
             }
         }
         if ($result === 'return' && $tag > 0) {
@@ -1464,6 +1685,7 @@ final class Server
 
     private function ack(int $id, int $channel, string $payload, int $o, bool $negative = false): void
     {
+        $broker = $this->brokerFor($id);
         if (strlen($payload) < $o + 9) {
             return;
         }
@@ -1483,12 +1705,12 @@ final class Server
                     continue;
                 }
                 if ($negative && $requeue) {
-                    $this->broker->requeue($msg);
+                    $broker->requeue($msg);
                 } elseif ($negative) {
-                    $this->broker->prom['dlxRejected']++;
-                    $this->broker->deadLetter($msg, 'rejected');
+                    $broker->prom['dlxRejected']++;
+                    $broker->deadLetter($msg, 'rejected');
                 } else {
-                    $this->broker->ack($msg);
+                    $broker->ack($msg);
                 }
             }
         }
@@ -1497,8 +1719,10 @@ final class Server
 
     private function exchangeDeclare(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $name = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "configure", $name, 40, 10)) return;
         $kind = Codec::readShortstr($payload, $o);
         $bits = isset($payload[$o]) ? ord($payload[$o]) : 0;
         $passive = ($bits & 1) === 1;
@@ -1513,7 +1737,7 @@ final class Server
             $alternate = is_scalar($value) ? (string) $value : null;
         }
         try {
-            $this->broker->declareExchange($name, $kind, $durable, $autoDelete, $internal, $alternate, $passive);
+            $broker->declareExchange($name, $kind, $durable, $autoDelete, $internal, $alternate, $passive, $args ?? []);
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 40, 10);
             return;
@@ -1523,10 +1747,12 @@ final class Server
 
     private function queueBind(int $id, int $channel, string $payload, int $o): void
     {
+        $broker = $this->brokerFor($id);
         $o += 2;
         $queue = Codec::readShortstr($payload, $o);
         $exchange = Codec::readShortstr($payload, $o);
         $key = Codec::readShortstr($payload, $o);
+        if (!$this->allowed($id, $channel, "write", $queue, 50, 20) || !$this->allowed($id, $channel, "read", $exchange, 50, 20)) return;
         $args = [];
         if (isset($payload[$o])) {
             $o++;
@@ -1536,7 +1762,7 @@ final class Server
         }
         try {
             $sock = $this->conns[$id];
-            $this->broker->bind($queue, $exchange, $key, $args, $sock->user, $sock->vhost);
+            $broker->bind($queue, $exchange, $key, $args, $sock->user, $sock->vhost);
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 50, 20);
             return;
@@ -1564,29 +1790,29 @@ final class Server
         // A quorum publish whose replication timed out is rolled back before
         // the confirms are considered, so it leaves as a nack.
         if ($this->extras !== null && $this->extras->cluster->timedOut !== []) {
-            foreach ($this->extras->cluster->timedOut as $qid) {
-                $this->broker->failQuorum($qid);
-            }
             $this->extras->cluster->timedOut = [];
         }
-        if ($this->broker->waiting === []) {
-            return;
+        foreach ($this->broker->allBrokers() as $broker) {
+        if ($broker->waiting === []) {
+            continue;
         }
-        $small = count($this->broker->waiting) <= self::FLUSH_SMALL;
+        $small = count($broker->waiting) <= self::FLUSH_SMALL;
         if (!$idle && !$small && microtime(true) < $this->nextSync) {
-            return;
+            continue;
         }
         $dirty = [];
-        foreach ($this->broker->flush() as $ack) {
+        foreach ($broker->flush() as $ack) {
             if ($ack['tag'] <= 0 || !isset($this->conns[$ack['conn']])) {
                 continue;
             }
             $sock = $this->conns[$ack['conn']];
-            if (($ack['nack'] ?? false) === true) {
+            if ($sock->stage === 'amqp10') {
+                $sock->send($this->amqp10->confirmed($sock->amqp10, $ack['tag'], ($ack['nack'] ?? false) === true));
+            } elseif (($ack['nack'] ?? false) === true) {
                 $sock->send(Codec::basicNack($ack['ch'], $ack['tag']));
             } else {
                 $sock->send(Codec::basicAck($ack['ch'], $ack['tag']));
-                $this->broker->prom['confirmed']++;
+                $broker->prom['confirmed']++;
             }
             $dirty[$ack['conn']] = $sock;
         }
@@ -1595,6 +1821,7 @@ final class Server
         }
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
         $this->pump();
+        }
     }
 
     /**
@@ -1613,17 +1840,41 @@ final class Server
      * forwarded. Publishing forwards per destination inside the broker,
      * since one publish can fan out to queues with different homes.
      */
-    private function remoteHome(string $queue): ?string
+    private function remoteHome(string $queue, ?Broker $scope = null): ?string
     {
-        return $this->extras === null ? null : $this->broker->remoteHomeOf($queue);
+        return $this->extras === null ? null : ($scope ?? $this->broker)->remoteHomeOf($queue);
+    }
+
+    private function deliverMessage(Broker $broker,int $id,int $channel,string $tag,bool $noAck,array $msg,int $msgId):void
+    {
+        $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId>=0)$broker->requeue($msgId);return;}
+        $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;}
+        $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[]));$sock->flush();
+        $broker->prom['delivered']++;$broker->prom[$noAck?'deliveredConsumeAuto':'deliveredConsumeManual']++;if($msg['redelivered']??false)$broker->prom['redelivered']++;
+    }
+    private function pumpStream(Broker $broker,string $name):void
+    {
+        $remaining=128;
+        foreach($broker->queues[$name]['consumers'] as $i=>$consumer) {
+            if(!isset($consumer['streamOffset'],$consumer['readyFn'])||!isset($this->conns[$consumer['conn']]))continue;
+            while($remaining>0 && ($consumer['readyFn'])()) {
+                $offset=$broker->queues[$name]['consumers'][$i]['streamOffset'];$messages=$broker->streamRead($name,$offset,1);if($messages===[])break;$record=$messages[0];
+                $props=Amqp10::readProps($record['propRaw']);$headers=$props['headers'];$headers['x-stream-offset']=$record['offset'];$headers=array_map(static fn($key,$value)=>[$key,$value],array_keys($headers),array_values($headers));
+                $msg=['queue'=>$name,'key'=>$name,'body'=>$record['body'],'mode'=>2,'propRaw'=>Amqp10::writeProps($props,$headers),'headers'=>$headers];
+                $broker->queues[$name]['consumers'][$i]['streamOffset']=$record['offset']+1;$remaining--;
+                $this->deliverMessage($broker,$consumer['conn'],$consumer['ch'],$consumer['tag'],false,$msg,-1);
+            }
+        }
     }
 
     private function pump(): void
     {
-        foreach ($this->broker->queues as $name => $q) {
-            while (($this->broker->queues[$name]['ready'] ?? []) !== []
-                && ($this->broker->queues[$name]['consumers'] ?? []) !== []) {
-                $pick = $this->broker->pickConsumer($name, function (array $cons): bool {
+        foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $name => $q) {
+            if (($q["args"]["queueType"] ?? "") === "stream") { $this->pumpStream($broker,$name); continue; }
+            while (($broker->queues[$name]['ready'] ?? []) !== []
+                && ($broker->queues[$name]['consumers'] ?? []) !== []) {
+                $pick = $broker->pickConsumer($name, function (array $cons): bool {
+                    if(isset($cons['readyFn']))return ($cons['readyFn'])();
                     if (($cons['peer'] ?? '') !== '') {
                         // A consumer on another node. Credit of zero means
                         // unlimited, matching the prefetch convention.
@@ -1641,26 +1892,28 @@ final class Server
                 if ($pick === null) {
                     break;
                 }
-                $head = $this->broker->queues[$name]['ready'][0] ?? null;
+                $head = $broker->queues[$name]['ready'][0] ?? null;
                 // A gated quorum body is not deliverable yet, and the queue
                 // is ordered, so nothing behind it is either.
-                if (is_int($head) && $this->broker->isGated($head)) {
+                if (is_int($head) && $broker->isGated($head)) {
                     break;
                 }
-                $msgId = array_shift($this->broker->queues[$name]['ready']);
-                if ($msgId === null || !isset($this->broker->msgs[$msgId])) {
+                $msgId = $broker->getReady($name);
+                if ($msgId === null) break;
+                if (!isset($broker->msgs[$msgId])) {
                     continue;
                 }
-                $this->broker->noteConsumed($name, (string) ($this->broker->msgs[$msgId]['qid'] ?? ''));
-                if ($this->broker->expired($msgId)) {
-                    $this->broker->prom['dlxExpired']++;
-                    $this->broker->deadLetter($msgId, 'expired');
+                $broker->noteConsumed($name, (string) ($broker->msgs[$msgId]['qid'] ?? ''));
+                if ($broker->expired($msgId)) {
+                    $broker->prom['dlxExpired']++;
+                    $broker->deadLetter($msgId, 'expired');
                     continue;
                 }
-                $cons = $this->broker->queues[$name]['consumers'][$pick];
+                $cons = $broker->queues[$name]['consumers'][$pick];
                 $noAck = ($cons['noAck'] ?? false) === true;
+                if(isset($cons['deliverFn'])) { ($cons['deliverFn'])($broker->msgs[$msgId],$msgId);if($noAck&&isset($broker->msgs[$msgId]))$broker->ack($msgId);continue; }
                 if (($cons['peer'] ?? '') !== '' && $this->extras !== null) {
-                    $msg = $this->broker->msgs[$msgId];
+                    $msg = $broker->msgs[$msgId];
                     $this->extras->cluster->deliverTo(
                         (string) $cons['peer'],
                         $name,
@@ -1670,9 +1923,9 @@ final class Server
                         $noAck,
                     );
                     if ($noAck) {
-                        $this->broker->drop($msgId);
+                        $broker->drop($msgId);
                     }
-                    $this->broker->prom['delivered']++;
+                    $broker->prom['delivered']++;
                     continue;
                 }
                 $sock = $this->conns[$cons['conn']];
@@ -1683,7 +1936,7 @@ final class Server
                     $ch->tagOf[$dtag] = $cons['tag'];
                     $ch->held[$cons['tag']] = ($ch->held[$cons['tag']] ?? 0) + 1;
                 }
-                $msg = $this->broker->msgs[$msgId];
+                $msg = $broker->msgs[$msgId];
                 $sock->send(Codec::deliver(
                     $cons['ch'],
                     $cons['tag'],
@@ -1697,13 +1950,13 @@ final class Server
                     is_array($msg['headers'] ?? null) ? $msg['headers'] : [],
                 ));
                 $sock->flush();
-                $this->broker->prom['delivered']++;
-                $this->broker->prom[$noAck ? 'deliveredConsumeAuto' : 'deliveredConsumeManual']++;
+                $broker->prom['delivered']++;
+                $broker->prom[$noAck ? 'deliveredConsumeAuto' : 'deliveredConsumeManual']++;
                 if (($msg['redelivered'] ?? false) === true) {
-                    $this->broker->prom['redelivered']++;
+                    $broker->prom['redelivered']++;
                 }
                 if ($noAck) {
-                    $this->broker->drop($msgId);
+                    $broker->drop($msgId);
                 }
             }
         }

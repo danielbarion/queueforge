@@ -36,7 +36,7 @@ The management listener also serves the shared SPA from `rust/ui/dist` when that
 
 `[data].fsync_policy` accepts `never`, `every_n_ms`, and `always`. The example uses `every_n_ms` with `fsync_interval_ms` of 100.
 
-`every_n_ms` stages durable rows and returns the publisher confirm after the timer transaction runs `PRAGMA synchronous=FULL`. `always` and `every_n_messages` also wait for that flush. A confirmed durable publish is in the SQLite file.
+`every_n_ms` stages durable rows and returns the publisher confirm after the fsync of the message log (`<db>.dlog`) that covers them. SQLite catches up afterwards and is not on the confirm path. The fsync runs when a read has finished and at most 16 confirms are waiting, when 128 are waiting, or on the `fsync_interval_ms` timer, whichever comes first. So a few channels with one confirm each do not wait for the timer, and a deep window still shares one fsync. `always` and `every_n_messages` also wait for their flush. A confirmed durable publish survives `kill -9`.
 
 ## Cluster
 

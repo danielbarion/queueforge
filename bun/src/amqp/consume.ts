@@ -175,7 +175,7 @@ export function flushParked(this: Conn, c: Ch) {
  * @param msg Message body, properties, and routing fields from the broker.
  */
 export function deliver(this: Conn, channel: number, tag: string, dtag: number, msg: LiveMsg): void {
-  const hot = encodeDeliver(channel, tag, dtag, msg);
+  const hot = encodeDeliver(channel, tag, dtag, msg, this.frameMax);
   if (hot) {
     void this.send(hot);
     return;
@@ -192,7 +192,7 @@ export function deliver(this: Conn, channel: number, tag: string, dtag: number, 
       }),
     ),
     contentHeaderFrame(channel, msg.body.length, msg.propRaw.length ? msg.propRaw : emptyProps()),
-    bodyFrame(channel, msg.body),
+    bodyFrame(channel, msg.body, this.frameMax),
   ]);
 }
 
@@ -347,7 +347,7 @@ export async function get(this: Conn, channel: number, c: Ch, payload: Uint8Arra
       }),
     ),
     contentHeaderFrame(channel, msg.body.length, msg.propRaw.length ? msg.propRaw : emptyProps()),
-    bodyFrame(channel, msg.body),
+    bodyFrame(channel, msg.body, this.frameMax),
   ]);
 }
 

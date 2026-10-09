@@ -1,7 +1,10 @@
 <?php
 declare(strict_types=1);
 
-/** Newline JSON cluster protocol version 1, the same envelope Rust and Bun speak. */
+require_once __DIR__ . '/Raft.php';
+require_once __DIR__ . '/RaftNode.php';
+
+/** Shared v1 envelope, with negotiated v2 capability/consensus payloads. */
 final class Cluster
 {
     /** How long a request waits for its reply, matching Bun's 3000 ms. */
@@ -23,6 +26,105 @@ final class Cluster
      */
     private array $pending = [];
     private int $seq = 1;
+    public ?RaftNode $raft = null;
+    private array $peerFeatures = [];
+    private bool $startingRaft = false;
+
+    private function raftDir(): string { return $this->broker->dataDir() . '/raft'; }
+    private function supported(): bool { return getenv('QUEUEFORGE_RAFT') !== '0'; }
+    public function raftEnabled(): bool { return $this->raft !== null; }
+    public function raftFeatures(): array
+    {
+        if (!$this->supported()) return [];
+        $out = ['raft'];
+        if ($this->raft !== null || is_file($this->raftDir() . '/auto')) $out[] = 'raft_auto';
+        if ($this->raft !== null || is_file($this->raftDir() . '/enabled')) $out[] = 'raft_on';
+        if (getenv('QUEUEFORGE_RAFT_QGROUPS') !== '0') $out[] = 'raft_qgroups';
+        return $out;
+    }
+    public function markFreshRaft(): void
+    {
+        if ($this->supported()) RaftNode::atomic($this->raftDir(), 'auto', true);
+    }
+    private function voters(): array
+    {
+        $ids = array_map(static fn (array $m): string => (string) $m['id'], $this->broker->members);
+        return $ids === [] ? [$this->nodeId] : $ids;
+    }
+    private function allHave(string $feature): bool
+    {
+        foreach ($this->voters() as $id) if ($id !== $this->nodeId && !in_array($feature, $this->peerFeatures[$id] ?? [], true)) return false;
+        return true;
+    }
+    /** Explicit activation requires known support from every configured voter. */
+    public function enableRaft(): bool
+    {
+        if ($this->raft !== null) return true;
+        if (!$this->supported() || !$this->allHave('raft')) return false;
+        $this->activateRaft();
+        foreach ($this->peerIds() as $peer) $this->send($peer, ['v' => 1, 'op' => 'feature', 'id' => 0, 'from' => $this->nodeId, 'payload' => ['name' => 'raft', 'enabled' => true]]);
+        return true;
+    }
+    private function activateRaft(): void
+    {
+        if ($this->raft !== null || $this->startingRaft || !$this->supported()) return;
+        $this->startingRaft = true;
+        try {
+            RaftNode::atomic($this->raftDir(), 'enabled', true);
+            $this->raft = new RaftNode($this->nodeId, $this->raftDir(), $this->voters(),
+                fn (string $peer, array $msg) => $this->send($peer, ['v' => 1, 'op' => 'raft', 'id' => 0, 'from' => $this->nodeId, 'nodeId' => $this->nodeId, 'payload' => $msg]),
+                function (string $group, array $entry): void {
+                    $this->broker->applyRaft($group, $entry['kind'], $entry['data'], $entry['i']);
+                    if ($group === 'meta' && $entry['kind'] === 'members') $this->reconfigureMembers($this->broker->members);
+                },
+                fn (string $group, mixed $state) => $this->broker->installRaftState($group, $state),
+                fn (string $group) => $this->broker->raftState($group),
+                function (string $group, ?string $leader): void {
+                    if (method_exists($this->broker, 'raftLeaderChanged')) $this->broker->raftLeaderChanged($group, $leader);
+                },
+                function (string $group): bool {
+                    foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $q) if (($q['raftGroup'] ?? $q['args']['raftGroup'] ?? null) === $group) return true;
+                    return false;
+                });
+            foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $q) {
+                $group = $q['raftGroup'] ?? $q['args']['raftGroup'] ?? null;
+                if (is_string($group) && str_starts_with($group, 'q:')) $this->raft->addGroup($group);
+            }
+        } finally { $this->startingRaft = false; }
+    }
+    private function noteFeatures(string $peer, array $payload): void
+    {
+        $features = is_array($payload['features'] ?? null) ? $payload['features'] : [];
+        $this->peerFeatures[$peer] = $features;
+        if (!$this->supported() || !in_array($peer, $this->voters(), true)) return;
+        if (in_array('raft_on', $features, true)) $this->activateRaft();
+        $this->maybeEnable();
+    }
+    private function maybeEnable(): void
+    {
+        if (!$this->supported() || $this->raft !== null) return;
+        if (is_file($this->raftDir() . '/enabled') || (is_file($this->raftDir() . '/auto') && $this->allHave('raft') && $this->allHave('raft_auto'))) $this->activateRaft();
+    }
+    public function propose(string $group, string $kind, mixed $data, callable $done): bool
+    {
+        if ($this->raft === null) { $done(false, 'Raft is not enabled'); return false; }
+        return $this->raft->propose($group, $kind, $data, $done);
+    }
+    public function proposeMeta(string $kind, mixed $data, callable $done): bool { return $this->propose('meta', $kind, $data, $done); }
+    public function queueGroup(string $vhost, string $name): ?string
+    {
+        return $this->raft !== null && getenv('QUEUEFORGE_RAFT_QGROUPS') !== '0' && $this->allHave('raft_qgroups') ? RaftNode::queueGroup($vhost, $name) : null;
+    }
+    public function quorumGroup(string $vhost, string $name): string
+    {
+        $q = $this->broker->forVhost($vhost)->queues[$name] ?? [];
+        return is_string($q['raftGroup'] ?? $q['args']['raftGroup'] ?? null) ? ($q['raftGroup'] ?? $q['args']['raftGroup']) : 'quorum';
+    }
+    public function queueLeader(string $vhost, string $name): ?string { return $this->raft?->leader($this->quorumGroup($vhost, $name)); }
+    public function registerQueueGroup(string $group, bool $lead = false): void { $this->raft?->addGroup($group, $lead); }
+    public function dropQueueGroup(string $group): void { $this->raft?->dropGroup($group); }
+    public function reconfigureMembers(array $members): void { $this->raft?->setVoters(array_map(static fn (array $m): string => (string) $m['id'], $members)); $this->maybeEnable(); }
+
     public string $buf = '';
     /**
      * Remote delivery ids this node handed out, keyed
@@ -59,24 +161,50 @@ final class Cluster
             'nodeId' => $this->nodeId,
             'from' => $this->nodeId,
             'kind' => '',
-            'payload' => ['v' => 1, 'node' => $this->nodeId, 'snapshot' => $this->snapshot(), 'consumed' => $this->broker->consumedList()],
+            'payload' => ['v' => 1, 'features' => $this->raftFeatures(), 'node' => $this->nodeId, 'snapshot' => $this->snapshot(), 'consumed' => $this->consumedList()],
         ];
     }
 
     /** @return array<string, mixed> */
     public function snapshot(): array
     {
-        $queues = [];
-        foreach ($this->broker->queues as $name => $queue) {
-            $queues[] = ['vhost' => '/', 'name' => $name, 'type' => $queue['args']['queueType'] ?? 'classic'];
+        $queues = []; $exchanges = []; $bindings = [];
+        foreach ($this->broker->allBrokers() as $broker) {
+            foreach ($broker->queues as $name => $queue) {
+                $queues[] = ['vhost' => $broker->vhost, 'name' => $name,
+                    'durable' => (bool) ($queue['durable'] ?? true),
+                    'exclusive' => (bool) ($queue['exclusive'] ?? false),
+                    'autoDelete' => (bool) ($queue['autoDelete'] ?? false),
+                    'type' => $queue['args']['queueType'] ?? 'classic',
+                    'args' => $queue['declaredArgs'] ?? $queue['args'], 'home' => $broker->home($name),
+                    'raftGroup' => $queue['raftGroup'] ?? $queue['args']['raftGroup'] ?? null];
+            }
+            foreach ($broker->exchanges as $name => $type) {
+                $exchanges[] = ['vhost' => $broker->vhost, 'name' => $name, 'type' => $type] + ($broker->exchangeRows[$name] ?? []);
+            }
+            foreach ($broker->bindings as $row) $bindings[] = ['vhost' => $broker->vhost] + $row;
         }
-        return [
-            'users' => $this->broker->users,
-            'vhosts' => ['/'],
-            'exchanges' => $this->broker->exchanges,
-            'queues' => $queues,
-            'bindings' => $this->broker->bindings,
-        ];
+        $users = []; $permissions = [];
+        foreach ($this->broker->users as $name => $hash) $users[] = ['name' => $name, 'hash' => $hash, 'tags' => $this->broker->tags[$name] ?? []];
+        foreach ($this->broker->permissions as $user => $hosts) foreach ($hosts as $vhost => $rules) $permissions[] = ['user' => $user, 'vhost' => $vhost] + $rules;
+        return ['users' => $users, 'vhosts' => $this->broker->vhosts, 'permissions' => $permissions,
+            'exchanges' => $exchanges, 'queues' => $queues, 'bindings' => $bindings, 'consumed' => $this->consumedList()];
+    }
+    private function consumedList(): array
+    {
+        $out = [];
+        foreach ($this->broker->allBrokers() as $broker) foreach ($broker->consumedList() as $row) {
+            if (is_array($row)) $out[] = ['vhost' => $broker->vhost, 'queue' => $row['queue'] ?? $row[0] ?? '', 'id' => $row['id'] ?? $row[1] ?? ''];
+        }
+        return $out;
+    }
+    private function applyConsumed(array $rows): void
+    {
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $vhost = (string) ($row['vhost'] ?? '/');
+            $this->broker->forVhost($vhost)->applyConsumed([[(string) ($row['queue'] ?? $row[0] ?? ''), (string) ($row['id'] ?? $row[1] ?? '')]]);
+        }
     }
 
     /** @param callable(string):void $write */
@@ -89,7 +217,7 @@ final class Cluster
     public function detach(string $id): void
     {
         unset($this->peers[$id]);
-        $this->broker->dropPeerConsumers($id);
+        foreach ($this->broker->allBrokers() as $broker) $broker->dropPeerConsumers($id);
         foreach ($this->pending as $correlation => $row) {
             if ($row['peer'] === $id) {
                 unset($this->pending[$correlation]);
@@ -104,6 +232,8 @@ final class Cluster
      */
     public function tick(): void
     {
+        $this->maybeEnable();
+        $this->raft?->tick();
         $now = microtime(true);
         foreach ($this->pending as $correlation => $row) {
             if ($row['deadline'] > $now) {
@@ -112,6 +242,7 @@ final class Cluster
             unset($this->pending[$correlation]);
             if ($row['qid'] !== '') {
                 $this->timedOut[] = $row['qid'];
+                $this->broker->forVhost($row['vhost'] ?? '/')->failQuorum($row['qid']);
             }
             // A waiting caller is told the request failed rather than being
             // left with a client that never gets an answer.
@@ -183,6 +314,7 @@ final class Cluster
         $correlation = $this->seq++;
         $this->pending[$correlation] = [
             'op' => $op,
+            'vhost' => (string) ($payload['vhost'] ?? '/'),
             'qid' => $qid,
             'deadline' => microtime(true) + self::REQUEST_TIMEOUT,
             'peer' => $peer,
@@ -219,10 +351,10 @@ final class Cluster
      *
      * @param array<string, mixed> $msg
      */
-    public function deliverTo(string $peer, string $queue, int $session, array $msg, int $localId, bool $settlesOnWrite): void
+    public function deliverTo(string $peer, string $queue, int $session, array $msg, int $localId, bool $settlesOnWrite, string $vhost = '/'): void
     {
         $delivery = $this->nextDelivery++;
-        $this->remoteDeliveries[$queue . "\0" . $peer . "\0" . $delivery] = $localId;
+        $this->remoteDeliveries[$vhost . "\0" . $queue . "\0" . $peer . "\0" . $delivery] = $localId;
         $body = base64_encode((string) ($msg['body'] ?? ''));
         $this->send($peer, [
             'v' => 1,
@@ -231,7 +363,7 @@ final class Cluster
             'from' => $this->nodeId,
             'nodeId' => $this->nodeId,
             'payload' => [
-                'vhost' => '/',
+                'vhost' => $vhost,
                 'queue' => $queue,
                 'session' => $session,
                 'delivery_id' => $delivery,
@@ -244,6 +376,8 @@ final class Cluster
                     'persistent' => ($msg['mode'] ?? 2) === 2,
                     'redelivered' => (bool) ($msg['redelivered'] ?? false),
                     'message_id' => (string) $localId,
+                    'propRaw' => base64_encode((string) ($msg['propRaw'] ?? '')),
+                    'headers' => $msg['headers'] ?? [],
                 ],
                 'msg' => [
                     'id' => (string) $localId,
@@ -293,20 +427,22 @@ final class Cluster
                 }];
                 $this->broker->refreshRole();
             }
-            if (is_array($payload['snapshot'] ?? null)) {
+            if ($this->raft === null && is_array($payload['snapshot'] ?? null)) {
                 $this->broker->applySnapshot($payload['snapshot']);
             }
+            $this->noteFeatures($id, $payload);
             // A peer's consumed set names quorum bodies it already handed
             // out, so anything we recovered for those ids is discarded
             // rather than delivered a second time.
             if (is_array($payload['consumed'] ?? null)) {
-                $this->broker->applyConsumed($payload['consumed']);
+                $this->applyConsumed($payload['consumed']);
             }
             return $this->reply((int) ($msg['id'] ?? 0), true, [
                 'v' => 1,
+                'features' => $this->raftFeatures(),
                 'node' => $this->nodeId,
                 'snapshot' => $this->snapshot(),
-                'consumed' => $this->broker->consumedList(),
+                'consumed' => $this->consumedList(),
             ]);
         }
         if ($op === 'reply') {
@@ -314,14 +450,16 @@ final class Cluster
             $row = $this->pending[$id] ?? null;
             unset($this->pending[$id]);
             $payload = is_array($msg['payload'] ?? null) ? $msg['payload'] : [];
-            if (is_array($payload['snapshot'] ?? null)) {
+            $peer = (string) ($msg['from'] ?? $msg['nodeId'] ?? ($row['peer'] ?? ''));
+            if ($peer !== '' && array_key_exists('features', $payload)) $this->noteFeatures($peer, $payload);
+            if ($this->raft === null && is_array($payload['snapshot'] ?? null)) {
                 $this->broker->applySnapshot($payload['snapshot']);
             }
             if (is_array($payload['consumed'] ?? null)) {
-                $this->broker->applyConsumed($payload['consumed']);
+                $this->applyConsumed($payload['consumed']);
             }
             if ($row !== null && ($msg['ok'] ?? false) === true && $row['qid'] !== '') {
-                $this->broker->noteCopy($row['qid']);
+                $this->broker->forVhost($row['vhost'] ?? '/')->noteCopy($row['qid']);
             }
             if ($row !== null && ($row['onReply'] ?? null) !== null) {
                 ($row['onReply'])(($msg['ok'] ?? false) === true ? $payload : null);
@@ -330,6 +468,14 @@ final class Cluster
         }
         $payload = is_array($msg['payload'] ?? null) ? $msg['payload'] : $msg;
         $from = (string) ($msg['from'] ?? $msg['nodeId'] ?? '');
+        if ($op === 'raft') {
+            if ($this->raft !== null) $this->raft->step($from, $payload);
+            return null;
+        }
+        if ($op === 'feature') {
+            if (($payload['name'] ?? '') === 'raft' && ($payload['enabled'] ?? true) === true && in_array($from, $this->voters(), true)) $this->activateRaft();
+            return null;
+        }
         try {
             $body = $this->handle($op, $payload, $from);
         } catch (RuntimeException $err) {
@@ -344,16 +490,21 @@ final class Cluster
     /** @param array<string, mixed> $payload */
     private function handle(string $op, array $payload, string $from = ''): mixed
     {
+        $vhost = (string) ($payload['vhost'] ?? '/');
+        $broker = $this->broker->forVhost($vhost);
+        if ($this->raft !== null && in_array($op, ['quorum_append', 'declare_queue', 'declare', 'delete_queue', 'purge', 'quorum_drop', 'apply', 'join', 'forget'], true)) throw new RuntimeException('RAFT_REQUIRED');
         $queueOf = static fn (array $p): string => (string) ($p['queue'] ?? $p['name'] ?? '');
         if ($op === 'quorum_append' || $op === 'enqueue') {
             $decoded = Features::decodeQuorumAppend($payload);
-            $ok = $this->broker->enqueueLocal(
+            $ok = $broker->enqueueLocal(
                 $decoded['queue'],
                 $decoded['messageId'],
                 $decoded['body'],
                 $decoded['exchange'],
                 $decoded['routingKey'],
                 $decoded['persistent'],
+                $this->rawProperties($payload),
+                is_array($payload['headers'] ?? null) ? $payload['headers'] : [],
             );
             if ($op === 'quorum_append' && !$ok) {
                 throw new RuntimeException('NOT_STORED');
@@ -363,26 +514,26 @@ final class Cluster
         if ($op === 'declare_queue' || $op === 'declare') {
             $name = $queueOf($payload);
             $args = is_array($payload['args'] ?? null) ? $payload['args'] : [];
-            $this->broker->declareQueue($name, $args);
-            return ['queue' => ['vhost' => '/', 'name' => $name, 'home' => $this->broker->home($name)]];
+            $broker->declareQueue($name, $args);
+            return ['queue' => ['vhost' => $vhost, 'name' => $name, 'home' => $broker->home($name)]];
         }
         if ($op === 'delete_queue') {
-            return $this->broker->deleteQueue($queueOf($payload)) >= 0;
+            return $broker->deleteQueue($queueOf($payload)) >= 0;
         }
         if ($op === 'purge') {
-            return $this->broker->purge($queueOf($payload));
+            return $broker->purge($queueOf($payload));
         }
         if ($op === 'quorum_drop') {
             $queue = $queueOf($payload);
             $qid = (string) ($payload['id'] ?? $payload['message_id'] ?? $payload['qid'] ?? '');
-            $this->broker->noteConsumed($queue, $qid);
-            $this->broker->dropReplica($queue, $qid);
+            $broker->noteConsumed($queue, $qid);
+            $broker->dropReplica($queue, $qid);
             return true;
         }
         if ($op === 'ack' || $op === 'nack') {
             $queue = $queueOf($payload);
             $delivery = (int) ($payload['delivery_id'] ?? $payload['id'] ?? 0);
-            $key = $queue . "\0" . $from . "\0" . $delivery;
+            $key = $vhost . "\0" . $queue . "\0" . $from . "\0" . $delivery;
             $local = $this->remoteDeliveries[$key] ?? null;
             unset($this->remoteDeliveries[$key]);
             if ($local === null) {
@@ -390,29 +541,33 @@ final class Cluster
             }
             $requeue = $op === 'nack' && ($payload['requeue'] ?? true) !== false;
             if ($requeue) {
-                $this->broker->requeue($local);
+                $broker->requeue($local);
             } else {
-                $this->broker->noteConsumed($queue, (string) ($this->broker->msgs[$local]['qid'] ?? ''));
-                $this->broker->ack($local);
+                $broker->noteConsumed($queue, (string) ($broker->msgs[$local]['qid'] ?? ''));
+                $broker->ack($local);
             }
             return true;
         }
         if ($op === 'get') {
             $queue = $queueOf($payload);
             $noAck = ($payload['noAck'] ?? $payload['no_ack'] ?? false) !== false;
-            $id = $this->broker->getReady($queue);
+            $id = $broker->getReady($queue);
             if ($id === null) {
                 return ['empty' => true];
             }
-            $msg = $this->broker->msgs[$id];
+            $msg = $broker->msgs[$id];
             if ($noAck) {
-                $this->broker->ack($id);
+                $broker->ack($id);
             }
             return ['msg' => [
                 'id' => (string) $id,
                 'exchange' => (string) ($msg['exchange'] ?? ''),
                 'routing_key' => (string) ($msg['key'] ?? $queue),
                 'body_b64' => base64_encode($msg['body']),
+                'body' => base64_encode($msg['body']),
+                'routingKey' => (string) ($msg['key'] ?? $queue),
+                'propRaw' => base64_encode((string) ($msg['propRaw'] ?? '')),
+                'headers' => $msg['headers'] ?? [],
                 'persistent' => ($msg['mode'] ?? 2) === 2,
                 'redelivered' => (bool) ($msg['redelivered'] ?? false),
             ]];
@@ -421,7 +576,7 @@ final class Cluster
             $credit = array_key_exists('credit', $payload) && $payload['credit'] !== null
                 ? (int) $payload['credit']
                 : null;
-            $this->broker->addRemoteConsumer(
+            $broker->addRemoteConsumer(
                 $queueOf($payload),
                 $from,
                 (int) ($payload['session'] ?? 0),
@@ -431,14 +586,14 @@ final class Cluster
             return true;
         }
         if ($op === 'unsub') {
-            $this->broker->removeRemoteConsumer($queueOf($payload), $from, (int) ($payload['session'] ?? 0));
+            $broker->removeRemoteConsumer($queueOf($payload), $from, (int) ($payload['session'] ?? 0));
             return true;
         }
         if ($op === 'credit' || $op === 'set_credit') {
             $credit = array_key_exists('credit', $payload) && $payload['credit'] !== null
                 ? (int) $payload['credit']
                 : null;
-            $this->broker->setRemoteCredit(
+            $broker->setRemoteCredit(
                 $queueOf($payload),
                 $from,
                 (int) ($payload['session'] ?? 0),
@@ -459,12 +614,12 @@ final class Cluster
                 }
                 if ($members !== []) {
                     $this->broker->members = $members;
-                    $this->broker->refreshRole();
+                    $broker->refreshRole();
                 }
                 return true;
             }
             if (is_array($body)) {
-                $this->broker->applySnapshot($body);
+                $broker->applySnapshot($body);
             }
             return true;
         }
@@ -474,7 +629,7 @@ final class Cluster
         }
         if ($op === 'stats') {
             $name = $queueOf($payload);
-            $q = $this->broker->queues[$name] ?? null;
+            $q = $broker->queues[$name] ?? null;
             return [
                 'messages_ready' => $q === null ? 0 : count($q['ready']),
                 'consumer_count' => $q === null ? 0 : count($q['consumers']),
@@ -520,14 +675,27 @@ final class Cluster
         if ($queue === '' || $body === false) {
             return;
         }
-        $this->broker->enqueueLocal(
+        $this->broker->forVhost((string) ($payload['vhost'] ?? '/'))->enqueueLocal(
             $queue,
             (string) ($source['message_id'] ?? $source['id'] ?? ''),
             $body,
             (string) ($source['exchange'] ?? ''),
             (string) ($source['routing_key'] ?? $source['routingKey'] ?? $queue),
             ($source['persistent'] ?? true) !== false,
+            $this->rawProperties($payload),
+            is_array($source['headers'] ?? null) ? $source['headers'] : [],
         );
+    }
+
+    private function rawProperties(array $payload): ?string
+    {
+        foreach ([$payload, $payload['message'] ?? null, $payload['msg'] ?? null] as $source) {
+            if (!is_array($source) || !is_string($source['propRaw'] ?? null)) continue;
+            $raw = base64_decode($source['propRaw'], true);
+            if ($raw === false) throw new RuntimeException('invalid property encoding');
+            return $raw;
+        }
+        return null;
     }
 
     /** @param mixed $payload */

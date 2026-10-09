@@ -120,3 +120,28 @@ test("a record with multibyte names and an id past 2^32 replays exactly", async 
   again.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("a batch larger than one chunk is written after the next chunk was preallocated", async () => {
+  // A 300,000-message backlog hit this: the preallocated 4 MiB chunk was
+  // reused for a bigger batch, the write threw, and the process exited.
+  const dir = mkdtempSync(join(tmpdir(), "qf-big-batch-"));
+  const path = join(dir, "t.sqlite");
+  const store = new Store(path, "every_n_ms", 400);
+  const body = new Uint8Array(BODY).fill(3);
+  // Leave under 2 MiB in the first chunk so the next one is preallocated.
+  for (let i = 0; i < 40; i++) store.insertMessage("/", "q", body, "{}");
+  await store.whenDurable();
+  await Bun.sleep(300);
+  const waits: Promise<void>[] = [];
+  for (let i = 0; i < 100; i++) {
+    store.insertMessage("/", "q", body, "{}");
+    waits.push(store.whenDurable());
+  }
+  await Promise.all(waits);
+  expect(store.confirmsBeforeFsync).toBe(0);
+  store.close();
+  const again = new Store(path, "every_n_ms", 400);
+  expect(again.listMessages()).toHaveLength(140);
+  again.close();
+  rmSync(dir, { recursive: true, force: true });
+});

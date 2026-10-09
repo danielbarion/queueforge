@@ -22,6 +22,8 @@ const GROUPS = [META, QUORUM] as const;
 export type Group = string;
 const TICK_MS = 20;
 const PROPOSE_TIMEOUT_MS = 5000;
+const APPLY_RETRY_MIN_MS = 100;
+const APPLY_RETRY_MAX_MS = 1000;
 
 /** The group of one quorum queue, as docs/raft.md section 2 names it. */
 export function queueGroup(vhost: string, name: string): Group {
@@ -187,6 +189,8 @@ export class RaftNode {
   private scheduled = false;
   private applying: Promise<void> = Promise.resolve();
   private stopped = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private wakeRetry: (() => void) | null = null;
 
   constructor(
     readonly id: string,
@@ -279,6 +283,10 @@ export class RaftNode {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.wakeRetry?.();
+    this.wakeRetry = null;
   }
 
   private now() {
@@ -347,7 +355,29 @@ export class RaftNode {
   }
 
   private enqueueApply(fn: () => Promise<void>) {
-    this.applying = this.applying.then(fn).catch((err) => console.error("raft apply", err));
+    this.applying = this.applying.then(async () => {
+      let delay = APPLY_RETRY_MIN_MS;
+      while (!this.stopped) {
+        try {
+          await fn();
+          return;
+        } catch (err) {
+          // Keep this operation at the head: later applies, announcements and
+          // confirmations must not overtake a failed state-machine install.
+          if (delay === APPLY_RETRY_MIN_MS) console.error("raft apply; retrying", err);
+          if (this.stopped) return;
+          await new Promise<void>((resolve) => {
+            this.wakeRetry = resolve;
+            this.retryTimer = setTimeout(() => {
+              this.retryTimer = null;
+              this.wakeRetry = null;
+              resolve();
+            }, delay);
+          });
+          delay = Math.min(delay * 2, APPLY_RETRY_MAX_MS);
+        }
+      }
+    });
   }
 
   private round() {

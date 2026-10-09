@@ -234,6 +234,8 @@ async fn pipelined_classic_confirms_share_one_fsync() {
         12.0,
     )
     .await;
+    // Bun flushes once the reads that are ready are handled, so it does not
+    // wait for the 80 ms interval and the batch still shares a few fsyncs.
     batch(
         "bun",
         base + 1,
@@ -241,7 +243,7 @@ async fn pipelined_classic_confirms_share_one_fsync() {
         base + 201,
         24,
         80,
-        Duration::from_millis(40),
+        Duration::from_millis(0),
         Duration::from_millis(800),
         12.0,
     )
@@ -268,6 +270,7 @@ async fn one_hundred_twenty_eight_classic_confirms_share_one_fsync() {
         2.0,
     )
     .await;
+    // Bun flushes per read the client's 128 publishes arrive in, not per message.
     batch(
         "bun",
         base + 1,
@@ -277,7 +280,7 @@ async fn one_hundred_twenty_eight_classic_confirms_share_one_fsync() {
         400,
         Duration::from_millis(0),
         Duration::from_millis(80),
-        2.0,
+        24.0,
     )
     .await;
 }

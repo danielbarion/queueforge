@@ -1,5 +1,6 @@
 import { LdapBackend, OauthBackend } from "./auth/backends.ts";
 import { adoptMigrated, adoptNodeSocket, adoptTlsSocket, startAmqp } from "./amqp/index.ts";
+import { flushStagedWrites } from "./amqp/frames.ts";
 import { startMqtt, startStomp, startStream } from "./protocols/index.ts";
 import { Broker } from "./broker/index.ts";
 import { Cluster } from "./cluster.ts";
@@ -44,6 +45,8 @@ if (dnsSelf && cfg.dnsName) {
 }
 const freshData = !existsSync(join(cfg.dataDir, "bun.sqlite"));
 const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs, cfg.fsyncEveryN);
+// A delivery goes out before the fsync its publisher's confirm waits for.
+store.beforeSync = flushStagedWrites;
 if (freshData) markFreshRaft(cfg.dataDir);
 const broker = new Broker(cfg, store);
 if (cfg.oauth?.jwksUrl) broker.oauth = new OauthBackend(cfg.oauth);

@@ -1,0 +1,33 @@
+<?php
+declare(strict_types=1);
+require_once __DIR__.'/lib/Harness.php';
+foreach(['Routing','Features','Policy','Codec','Auth','Store','Cluster','Broker','Streams'] as $class) require_once dirname(__DIR__).'/src/'.$class.'.php';
+Harness::guard('retention checkpoints offsets and dedup durably', static function (): void {
+    $dir=sys_get_temp_dir().'/qf-retention-'.bin2hex(random_bytes(6));
+    $stream=new Streams($dir);$stream->retention(6,null);
+    $stream->append('aaa',[],null,'producer',1);
+    $stream->storeOffset('reader',1);
+    $stream->append('bbb',[],null,'producer',2);
+    $stream->append('ccc',[],null,'producer',3);
+    Harness::eq('byte limit retains contiguous tail', ['bbb','ccc'],array_column($stream->read(0,10),'body'));
+    Harness::eq('first offset advances',1,$stream->first());
+    Harness::eq('next offset never rewinds',3,$stream->next());
+    $restart=new Streams($dir);
+    Harness::eq('trim persisted',1,$restart->first());
+    Harness::eq('reader offset preserved',1,$restart->stored('reader'));
+    Harness::eq('publisher sequence preserved',3,$restart->sequence('producer'));
+    Harness::eq('retry deduplicates after trim/restart',2,$restart->append('duplicate',[],null,'producer',3));
+    Harness::eq('retry does not advance next',3,$restart->next());
+    $replica=new Streams($dir.'-replica');$replica->install($restart->snapshot());
+    Harness::eq('snapshot retains trimmed bounds',1,$replica->first());
+    Harness::eq('snapshot retains producer dedup',3,$replica->sequence('producer'));
+    $replica->retention(0,null);
+    Harness::eq('newest retained even over byte limit',['ccc'],array_column($replica->read(0,10),'body'));
+    $aged=new Streams($dir.'-aged');$old=(int)(microtime(true)*1000)-10000;
+    $aged->append('old',[],null,null,null,null,null,$old);
+    $aged->append('latest',[],null,null,null);
+    $aged->retention(null,1000);
+    Harness::eq('age limit removes old prefix',['latest'],array_column($aged->read(0,10),'body'));
+    Harness::eq('age trim survives restart',1,(new Streams($dir.'-aged'))->first());
+});
+Harness::done();

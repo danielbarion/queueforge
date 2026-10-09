@@ -2,15 +2,21 @@
 declare(strict_types=1);
 
 /** Management, metrics, cluster, MQTT, STOMP, and stream sockets on the broker's select loop. */
+require_once __DIR__ . "/WebSocket.php";
+require_once __DIR__ . "/Integrations.php";
+
 final class Extras
 {
     /** @var array<int, array{kind:string,fp:mixed}> */
     public array $listens = [];
+    private Integrations $integrations;
     /** @var array<int, array{kind:string,fp:mixed,buf:string,conn:int,peer:string,state:array<string, mixed>}> */
     public array $conns = [];
     public Cluster $cluster;
     public Http $http;
     public Protocols $protocols;
+    public $onAmqp = null;
+    private array $cfg = [];
     private float $nextDial = 0.0;
     private string $membersFile = '';
     /**
@@ -81,6 +87,17 @@ final class Extras
         return $members === [] ? $fromConfig : $members;
     }
 
+    /** An attached outbound socket is not a completed peer negotiation. */
+    public function peersReady(): bool
+    {
+        foreach($this->broker->members as$member){
+            if($member['id']===$this->broker->nodeId)continue;
+            $ready=false;foreach($this->conns as$row)if($row['kind']==='cluster'&&($row['peer']??'')===$member['id']&&($row['helloDone']??false)&&!($row['closing']??false)){$ready=true;break;}
+            if(!$ready)return false;
+        }
+        return true;
+    }
+
     /** Writes the member list so a runtime change outlives the process. */
     public function saveMembers(): void
     {
@@ -97,9 +114,12 @@ final class Extras
     /** @param array<string, mixed> $cfg */
     public function __construct(public Broker $broker, array $cfg)
     {
+        $this->cfg = $cfg;
+        $this->integrations = new Integrations($broker);
         $this->cluster = new Cluster($broker, (string) ($cfg['node_id'] ?? 'queueforge'));
         $this->membersFile = rtrim((string) ($cfg['dir'] ?? '.'), '/') . '/members.json';
         $broker->members = $this->loadMembers(is_array($cfg['members'] ?? null) ? $cfg['members'] : []);
+        if ($cfg['fresh'] ?? false) $this->cluster->markFreshRaft();
         $port = self::port((string) ($cfg['management'] ?? '127.0.0.1:15672'));
         $ui = dirname(__DIR__, 2) . '/rust/ui/dist';
         $this->http = new Http($broker, $ui, $port, !empty($cfg['tls']));
@@ -125,13 +145,17 @@ final class Extras
             }
         };
         $this->protocols = new Protocols($broker);
-        foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream'] as $kind) {
+        $this->protocols->onWrite = function($fp,string $bytes):void { $this->send($fp,$bytes); };
+        $this->protocols->onClose = function($fp):void { $this->close((int)$fp); };
+        foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream', 'amqps'] as $kind) {
             $addr = $cfg[$kind] ?? null;
             if (!is_string($addr) || $addr === '') {
                 continue;
             }
-            $scheme = ($kind !== 'metrics' && !empty($cfg['tls'])) ? 'tls' : 'tcp';
-            $fp = stream_socket_server("$scheme://$addr", $errno, $errstr);
+            $secure = $kind === 'amqps' || ($kind !== 'metrics' && $kind !== 'cluster' && !empty($cfg['tls']));
+            $scheme = 'tcp';
+            $context=stream_context_create($secure?['ssl'=>['local_cert'=>$cfg['cert'],'local_pk'=>$cfg['key'],'cafile'=>$cfg['ca']?:null,'verify_peer'=>(bool)($cfg['ca']??''),'verify_peer_name'=>false,'allow_self_signed'=>false,'capture_peer_cert'=>true,'capture_peer_cert_chain'=>true,'crypto_method'=>STREAM_CRYPTO_METHOD_TLS_SERVER,'queueforge_tls'=>true,'fail_if_no_peer_cert'=>false]]:[]);
+            $fp = stream_socket_server("$scheme://$addr", $errno, $errstr, STREAM_SERVER_BIND|STREAM_SERVER_LISTEN,$context);
             if ($fp === false) {
                 fwrite(STDERR, "listen $kind $addr: $errstr\n");
                 continue;
@@ -168,10 +192,13 @@ final class Extras
             if ($client === false) {
                 return;
             }
+            $ssl = stream_context_get_options($client)['ssl'] ?? [];
+            if (($ssl['queueforge_tls'] ?? false) && !Server::acceptTls($client)) { fclose($client); return; }
             stream_set_blocking($client, false);
             $kind = $this->listens[$id]['kind'];
             $conn = $kind === 'mqtt' ? $this->protocols->nextMqtt() : ($kind === 'stomp' ? $this->protocols->nextStomp() : 0);
-            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => []];
+            if ($kind === 'amqps' && $this->onAmqp !== null) { ($this->onAmqp)($client); return; }
+            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => ['fp'=>$client,'advertised'=>['host'=>'127.0.0.1','port'=>self::port($this->cfg['stream']??'')]], 'out'=>'', 'closing'=>false];
             return;
         }
         $row = $this->conns[$id] ?? null;
@@ -182,7 +209,7 @@ final class Extras
         if ($chunk === false || $chunk === '') {
             $meta = stream_get_meta_data($fp);
             if ($meta['eof'] ?? false) {
-                $this->close($id);
+                $this->conns[$id]['closing']=true;
             }
             return;
         }
@@ -193,6 +220,9 @@ final class Extras
     public function tick(): void
     {
         $this->cluster->tick();
+        $this->integrations->tick();
+        $this->protocols->tick();
+        foreach (array_keys($this->conns) as $id) if (isset($this->conns[$id])) $this->flush($this->conns[$id]["fp"]);
         if (microtime(true) < $this->nextDial) {
             return;
         }
@@ -214,14 +244,11 @@ final class Extras
             }
             $this->strikes[$member['id']] = 0;
             stream_set_blocking($fp, false);
-            $this->cluster->attach($member['id'], static function (string $line) use ($fp): void {
-                @fwrite($fp, $line);
-            });
+            $id = (int) $fp;
+            $this->conns[$id] = ['kind' => 'cluster', 'fp' => $fp, 'buf' => '', 'out' => '', 'closing' => false, 'conn' => 0, 'peer' => $member['id'], 'state' => []];
+            $this->cluster->attach($member['id'], function (string $line) use ($id): void { $this->sendRaw($id, $line); });
             $hello = json_encode($this->cluster->hello());
-            if (is_string($hello)) {
-                fwrite($fp, $hello . "\n");
-            }
-            $this->conns[(int) $fp] = ['kind' => 'cluster', 'fp' => $fp, 'buf' => '', 'conn' => 0, 'peer' => $member['id'], 'state' => []];
+            if (is_string($hello)) $this->sendRaw($id, $hello . "\n");
         }
     }
 
@@ -245,6 +272,7 @@ final class Extras
         if ($row['kind'] === 'mqtt') {
             $this->protocols->dropMqtt((int) ($row['conn'] ?? 0));
         }
+        if ($row['kind'] === 'stream') $this->protocols->dropStream($row['state']);
         if ($row['kind'] === 'stomp') {
             $this->protocols->dropStomp((int) ($row['conn'] ?? 0));
         }
@@ -257,6 +285,18 @@ final class Extras
     {
         $row = $this->conns[$id];
         $fp = $row['fp'];
+        if (($row['ws'] ?? false) === true) {
+            try { $decoded=WebSocket::decode($this->conns[$id]['buf'],$this->conns[$id]['wsState']); }
+            catch(RuntimeException){$this->sendRaw($fp,WebSocket::frame(pack('n',1002),8));$this->conns[$id]['closing']=true;return;}
+            if($decoded['reply']!=='')$this->sendRaw($fp,$decoded['reply']);
+            if($decoded['closed']){$this->conns[$id]['closing']=true;return;}
+            $buf=($this->conns[$id]['protocolBuf']??'').implode('',$decoded['messages']);
+            $out=$row['kind']==='mqtt'?$this->protocols->mqtt($buf,$fp,$row['conn']):$this->protocols->stomp($buf,$fp,$row['conn']);
+            $this->conns[$id]['protocolBuf']=$buf;if($out!=='')$this->send($fp,$out);
+            if($row['kind']==='mqtt'&&$this->protocols->mqttClosing){$this->protocols->mqttClosing=false;$this->conns[$id]['closing']=true;}
+            if($row['kind']==='stomp'&&$this->protocols->stompClosing){$this->protocols->stompClosing=false;$this->conns[$id]['closing']=true;}
+            return;
+        }
         if ($row['kind'] === 'management' || $row['kind'] === 'metrics') {
             if (!str_contains($row['buf'], "\r\n\r\n")) {
                 return;
@@ -270,8 +310,20 @@ final class Extras
             if (strlen($raw) < strlen((string) $head) + 4 + $length) {
                 return;
             }
-            self::writeAll($fp, $this->http->handle($raw));
-            $this->close($id);
+            if($row['kind']==='management'&&preg_match('#^GET /ws(?:[? ]|$)#',$head??'')) {
+                $upgrade=WebSocket::upgrade((string)$head);
+                if($upgrade===null){$this->sendRaw($fp,"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");$this->conns[$id]['closing']=true;return;}
+                $this->sendRaw($fp,$upgrade['response']);$this->conns[$id]['kind']=$upgrade['kind'];$this->conns[$id]['ws']=true;$this->conns[$id]['wsState']=[];$this->conns[$id]['buf']=substr($raw,strlen((string)$head)+4);
+                $this->conns[$id]['conn']=$upgrade['kind']==='mqtt'?$this->protocols->nextMqtt():$this->protocols->nextStomp();
+                if($this->conns[$id]['buf']!=='')$this->dispatch($id);return;
+            }
+            if ($row['httpPending'] ?? false) return;
+            $this->conns[$id]['httpPending'] = true;
+            $response = $this->http->handle($raw, function (string $response) use ($id): void {
+                if (!isset($this->conns[$id])) return;
+                $this->sendRaw($id, $response); $this->conns[$id]['closing'] = true;
+            });
+            if ($response !== '') { $this->sendRaw($fp, $response); $this->conns[$id]['closing'] = true; }
             return;
         }
         if ($row['kind'] === 'cluster') {
@@ -284,14 +336,13 @@ final class Extras
                     $peer = (string) ($decoded['nodeId'] ?? $payload['node'] ?? '');
                     if ($peer !== '') {
                         $this->conns[$id]['peer'] = $peer;
-                        $this->cluster->attach($peer, static function (string $out) use ($fp): void {
-                            @fwrite($fp, $out);
-                        });
+                        $this->cluster->attach($peer, function (string $out) use ($id): void { $this->sendRaw($id, $out); });
                     }
                 }
                 $reply = $this->cluster->handleLine($line);
+                if(is_array($decoded)&&(($decoded['op']??'')==='hello'||(($decoded['op']??'')==='reply'&&isset($decoded['payload']['features']))))$this->conns[$id]['helloDone']=true;
                 if ($reply !== null && $reply !== '') {
-                    fwrite($fp, $reply . "\n");
+                    $this->sendRaw($id, $reply . "\n");
                 }
             }
             return;
@@ -303,12 +354,12 @@ final class Extras
             $out = $this->protocols->mqtt($buf, $fp, $row['conn']);
             $this->conns[$id]['buf'] = $buf;
             if ($out !== '') {
-                self::writeAll($fp, $out);
+                $this->send($fp, $out);
             }
             // A DISCONNECT closes the socket rather than leaving it open.
             if ($this->protocols->mqttClosing) {
                 $this->protocols->mqttClosing = false;
-                $this->close($id);
+                $this->conns[$id]['closing']=true;
             }
             return;
         }
@@ -317,11 +368,11 @@ final class Extras
             $out = $this->protocols->stomp($buf, $fp, $row['conn']);
             $this->conns[$id]['buf'] = $buf;
             if ($out !== '') {
-                self::writeAll($fp, $out);
+                $this->send($fp, $out);
             }
             if ($this->protocols->stompClosing) {
                 $this->protocols->stompClosing = false;
-                $this->close($id);
+                $this->conns[$id]['closing']=true;
             }
             return;
         }
@@ -331,17 +382,32 @@ final class Extras
             // remainder stays buffered for the next read.
             $buf = $this->conns[$id]['buf'];
             $state = $this->conns[$id]['state'];
-            $out = $this->protocols->stream($buf, $state);
+            $out = $this->protocols->stream($buf, $state, $fp);
             $this->conns[$id]['buf'] = $buf;
             $this->conns[$id]['state'] = $state;
             if ($out !== '') {
-                self::writeAll($fp, $out);
+                $this->send($fp, $out);
             }
             if ($this->protocols->streamClosing) {
                 $this->protocols->streamClosing = false;
-                $this->close($id);
+                $this->conns[$id]['closing'] = true;
             }
         }
+    }
+
+    public function writes(): array { return array_values(array_map(static fn($row)=>$row['fp'],array_filter($this->conns,static fn($row)=>($row['out']??'')!==''))); }
+    private function sendRaw($fp,string $bytes):void { $id=(int)$fp;if(isset($this->conns[$id]))$this->conns[$id]['out']=($this->conns[$id]['out']??'').$bytes; }
+    public function send($fp,string $bytes):void
+    {
+        $row=$this->conns[(int)$fp]??null;if($row===null)return;
+        if($row['ws']??false)$bytes=WebSocket::frame($bytes,$row['kind']==='mqtt'?2:1);
+        $this->sendRaw($fp,$bytes);
+    }
+    public function flush($fp):void
+    {
+        $id=(int)$fp;if(!isset($this->conns[$id]))return;$out=$this->conns[$id]['out']??'';
+        if($out!==''){$n=@fwrite($fp,substr($out,0,65536));if($n===false){$this->close($id);return;}if($n>0)$this->conns[$id]['out']=substr($out,$n);}
+        if(($this->conns[$id]['out']??'')===''&&($this->conns[$id]['closing']??false))$this->close($id);
     }
 
     /**

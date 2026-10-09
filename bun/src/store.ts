@@ -43,7 +43,25 @@ export type MsgRow = {
   meta: string;
 };
 
+/** Waiters that the end of a burst still flushes at once. See {@link Store.armLoneFlush}. */
+const SMALL_GROUP = 16;
+
 export type FsyncMode = "never" | "every_n_ms" | "always" | "every_n_messages";
+
+/** One `stream_messages` row as a stream entry. */
+function streamRow(r: { offset: number; ts: number; body: Uint8Array; meta: string }) {
+  const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string; r?: number };
+  return {
+    offset: Number(r.offset),
+    ts: Number(r.ts),
+    body: new Uint8Array(r.body),
+    exchange: m.x,
+    routingKey: m.k,
+    headers: m.h ?? [],
+    propRaw: new Uint8Array(Buffer.from(m.p, "base64")),
+    raftIndex: m.r ?? 0,
+  };
+}
 
 export class Store {
   db: Database;
@@ -57,11 +75,15 @@ export class Store {
   private pipelineFlush = false;
   /** Set while a microtask may flush a single waiting confirm. */
   private loneFlushQueued = false;
+  /** Set while a setImmediate will flush a larger group. */
+  private idleFlushQueued = false;
   /**
    * The last classic confirm was alone on the socket. The next one flushes
    * in the caller's turn. A second parked publish clears it.
    */
   immediateLone = false;
+  /** Runs before a group fsync: the AMQP layer writes deliveries staged on this turn. */
+  beforeSync: (() => void) | null = null;
 
   /**
    * Remember that the last classic confirm was alone.
@@ -108,6 +130,8 @@ export class Store {
    * A null value is a synced delete that sqlite has not applied yet.
    */
   private shadow = new Map<number, { id: number; vhost: string; queue: string; body: Uint8Array; meta: string } | null>();
+  /** Body bytes added to `shadow` since the last catch-up. Large bodies catch up sooner. */
+  private shadowBytes = 0;
   private insertRow: ReturnType<Database["query"]> | null = null;
   private deleteRow: ReturnType<Database["query"]> | null = null;
   private flushesSinceCheckpoint = 0;
@@ -198,8 +222,10 @@ export class Store {
     }
     const max = this.db.query("SELECT COALESCE(MAX(id), 0) AS m FROM messages").get() as { m: number };
     this.nextId = Number(max.m) + 1;
+    // A relocated row is appended to the log again while sqlite may already
+    // hold it. The copy is identical, so the catch-up replaces it.
     this.insertRow = this.db.query(
-      "INSERT INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
     );
     this.deleteRow = this.db.query("DELETE FROM messages WHERE id=?");
   }
@@ -411,10 +437,26 @@ export class Store {
   /** Every stored entry of one stream, oldest first. */
   listStreamEntries(vhost: string, queue: string) {
     const rows = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset").all(vhost, queue) as Array<{ offset: number; ts: number; body: Uint8Array; meta: string }>;
-    return rows.map((r) => {
-      const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string; r?: number };
-      return { offset: Number(r.offset), ts: Number(r.ts), body: new Uint8Array(r.body), exchange: m.x, routingKey: m.k, headers: m.h ?? [], propRaw: new Uint8Array(Buffer.from(m.p, "base64")), raftIndex: m.r ?? 0 };
-    });
+    return rows.map((r) => streamRow(r));
+  }
+  /**
+   * Offsets, timestamps and body sizes of one stream, oldest first, without
+   * the bodies; plus the Raft index of the newest entry.
+   */
+  listStreamIndex(vhost: string, queue: string): { rows: Array<{ offset: number; ts: number; size: number }>; raftIndex: number } {
+    const rows = this.db
+      .query("SELECT offset, ts, length(body) AS size FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset")
+      .all(vhost, queue) as Array<{ offset: number; ts: number; size: number }>;
+    const last = rows.length ? this.readStreamEntry(vhost, queue, Number(rows[rows.length - 1]!.offset)) : null;
+    return {
+      rows: rows.map((r) => ({ offset: Number(r.offset), ts: Number(r.ts), size: Number(r.size ?? 0) })),
+      raftIndex: last?.raftIndex ?? 0,
+    };
+  }
+  /** One stored stream entry with its body, or null. */
+  readStreamEntry(vhost: string, queue: string, offset: number) {
+    const r = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? AND offset=?").get(vhost, queue, offset) as { offset: number; ts: number; body: Uint8Array; meta: string } | null;
+    return r ? streamRow(r) : null;
   }
   /** Where an empty stream continues: one past the last offset it ever stored. */
   streamNextOffset(vhost: string, queue: string): number {
@@ -556,13 +598,36 @@ export class Store {
     return this.fullFlushCount > before && !this.stagedWithoutFlush;
   }
 
-  /** Flush a single durable waiter once the current burst has finished. */
+  /**
+   * Flush a group of durable waiters once the current burst has finished.
+   *
+   * A few channels on one connection, each with one confirm in flight, start
+   * their publishes in the same parse. That pair must not wait for the interval
+   * timer. A larger group waits one more turn, until the event loop has read
+   * every socket that is ready, so a confirm window of any size (PerfTest uses
+   * 50, many clients 100) is one fsync instead of a timer tick.
+   */
   private armLoneFlush() {
     if (this.loneFlushQueued || this.closed || this.mode !== "every_n_ms") return;
     this.loneFlushQueued = true;
     queueMicrotask(() => {
       this.loneFlushQueued = false;
-      if (this.closed || this.waiters.length !== 1) return;
+      if (this.closed || this.waiters.length === 0) return;
+      if (this.waiters.length <= SMALL_GROUP) {
+        this.flushGroup();
+        return;
+      }
+      this.armIdleFlush();
+    });
+  }
+
+  /** Flush after the reads that are already ready. See {@link armLoneFlush}. */
+  private armIdleFlush() {
+    if (this.idleFlushQueued || this.closed) return;
+    this.idleFlushQueued = true;
+    setImmediate(() => {
+      this.idleFlushQueued = false;
+      if (this.closed || this.waiters.length === 0) return;
       this.flushGroup();
     });
   }
@@ -609,6 +674,10 @@ export class Store {
       // The confirm waits on the overwrite log. sqlite stays synchronous=OFF
       // and is not on this stack: a group of 128 already-acked bodies used to
       // take a sqlite transaction here and miss the paced fan and durable bars.
+      // A lone or small group goes out to consumers before the fsync. A deep
+      // window keeps its writes for the coalesce microtask: flushing them here
+      // cost the paced 128-confirm run about a tenth of its rate.
+      if (this.waiters.length <= SMALL_GROUP) this.beforeSync?.();
       this.fullFlushCount++;
       this.syncFlushCount++;
       // Deletes of rows in this batch wait until the next call. Writing them
@@ -616,12 +685,26 @@ export class Store {
       // delivers the body again. A crash before that next call keeps it.
       const deleteNext: number[] = [];
       if (this.fastLog) {
-        this.fastLog.syncRows(this.pending, this.pendingDeletes);
+        try {
+          this.fastLog.syncRows(this.pending, this.pendingDeletes);
+        } catch (err) {
+          // The rows stay staged for the next flush. Their confirms are refused
+          // (the channel closes with 541) instead of acked, and a throw from a
+          // timer callback would take the whole process down.
+          console.error("queueforge-bun: durable log write failed", err);
+          const waiting = this.waiters;
+          this.waiters = [];
+          for (const resolve of waiting) resolve(false);
+          return;
+        }
         for (const row of this.pending) {
           if (this.settledPending.has(row.id)) {
             this.shadow.delete(row.id);
             deleteNext.push(row.id);
-          } else this.shadow.set(row.id, row);
+          } else {
+            this.shadow.set(row.id, row);
+            this.shadowBytes += row.body.length;
+          }
         }
         for (const id of this.pendingDeletes) this.shadow.delete(id);
         this.pending = [];
@@ -629,7 +712,7 @@ export class Store {
         this.settledPending.clear();
         this.relocate();
         // Unacked rows only. A catch-up runs if that index ever gets huge.
-        if (this.shadow.size >= 80_000) this.applyShadow();
+        if (this.shadow.size >= 80_000 || this.shadowBytes >= 64 * 1024 * 1024) this.applyShadow();
       } else {
         for (const row of this.pending) {
           if (this.settledPending.has(row.id)) deleteNext.push(row.id);
@@ -702,7 +785,6 @@ export class Store {
   private applyShadow() {
     if (this.shadow.size === 0) return;
     const entries = [...this.shadow.entries()];
-    this.shadow.clear();
     const insert = this.insertRow;
     const remove = this.deleteRow;
     if (!insert || !remove) return;
@@ -712,7 +794,19 @@ export class Store {
         else insert.run(row.id, row.vhost, row.queue, row.body, row.meta);
       }
     });
-    write();
+    try {
+      write();
+    } catch (err) {
+      // The rows are already in the synced log. Keep them readable from the
+      // shadow and retry on the next catch-up instead of exiting.
+      console.error("queueforge-bun: sqlite catch-up failed", err);
+      return;
+    }
+    this.shadowBytes = 0;
+    // Rows synced after `entries` was taken stay for the next catch-up.
+    for (const [id, row] of entries) {
+      if (this.shadow.get(id) === row) this.shadow.delete(id);
+    }
   }
 
   /** Copy WAL pages into the database off the confirm thread. */

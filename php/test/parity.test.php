@@ -20,19 +20,26 @@ Harness::guard('parity', static function (): void {
     $death = Features::deathHeaders([['keep', 'me']], 'q1', 'expired', 'ex', 'rk');
     Harness::eq('unrelated headers survive', 'me', $death[0][1]);
     Harness::eq('x-death is added', 'x-death', $death[1][0]);
-    Harness::eq('it names the queue', 'q1', $death[1][1]['queue']);
-    Harness::eq('and the reason', 'expired', $death[1][1]['reason']);
-    Harness::eq('count is one', 1, $death[1][1]['count']);
-    Harness::eq('the exchange is carried', 'ex', $death[1][1]['exchange']);
-    Harness::eq('routing-keys is a list', ['rk'], $death[1][1]['routing-keys']);
+    Harness::eq('it names the queue', 'q1', $death[1][1][0]['queue']);
+    Harness::eq('and the reason', 'expired', $death[1][1][0]['reason']);
+    Harness::eq('count is one', 1, $death[1][1][0]['count']);
+    Harness::eq('the exchange is carried', 'ex', $death[1][1][0]['exchange']);
+    Harness::eq('routing-keys is a list', ['rk'], $death[1][1][0]['routing-keys']);
     Harness::eq('first death reason', 'expired', $death[2][1]);
-    Harness::eq('first death queue', 'q1', $death[3][1]);
+    Harness::eq('first death queue', 'q1', array_column($death,1,0)['x-first-death-queue']);
 
-    // A prior death is replaced, not accumulated, so count stays at one.
+    // Different deaths retain history; repeated queue/reason pairs increment count.
     $again = Features::deathHeaders($death, 'q2', 'rejected', 'ex2', 'rk2');
     $names = array_map(static fn (array $p): string => $p[0], $again);
     Harness::eq('only one x-death remains', 1, count(array_keys($names, 'x-death', true)));
-    Harness::eq('the newest reason wins', 'rejected', $again[2][1]);
+    Harness::eq('the latest death reason is recorded', 'rejected', array_column($again,1,0)['x-last-death-reason']);
+
+    $history = array_column($again,1,0);
+    Harness::eq('first death reason remains unchanged', 'expired', $history['x-first-death-reason']);
+    Harness::eq('distinct death history is retained', 2, count($history['x-death']));
+    $repeated = array_column(Features::deathHeaders($again, 'q1', 'expired', 'ex', 'rk'),1,0);
+    Harness::eq('repeat death count increments', 2, $repeated['x-death'][0]['count']);
+    Harness::eq('repeat keeps distinct history', 2, count($repeated['x-death']));
 
     // --- Unit: argument parsing ------------------------------------------
     $args = Features::parseArgs([
@@ -48,7 +55,7 @@ Harness::guard('parity', static function (): void {
     Harness::ok('classic is a known type', Features::knownQueueType('classic'));
     Harness::ok('quorum is a known type', Features::knownQueueType('quorum'));
     Harness::ok('an empty type is known', Features::knownQueueType(''));
-    Harness::ok('stream is not', !Features::knownQueueType('stream'));
+    Harness::ok('stream is a known type', Features::knownQueueType('stream'));
 
     // --- Unit: policy matching -------------------------------------------
     $table = [
@@ -72,14 +79,16 @@ Harness::guard('parity', static function (): void {
     Harness::ok('a queue policy matches a queue', Policy::match($onlyQueues, 'x', 'queues') !== null);
     Harness::eq('but not an exchange', null, Policy::match($onlyQueues, 'x', 'exchanges'));
 
-    // Resolution: declared wins, then operator, then user.
+    // Declared values override user defaults; numeric operator policies cap both.
     $resolved = Policy::resolve(
         ['x-message-ttl' => 11],
         ['definition' => ['message-ttl' => 22, 'max-length' => 33]],
         ['definition' => ['max-length' => 44]],
     );
     Harness::eq('a declared value is never overridden', 11, $resolved['x-message-ttl']);
-    Harness::eq('the operator policy beats the user policy', 44, $resolved['x-max-length']);
+    Harness::eq('the lower numeric user value remains under the operator cap', 33, $resolved['x-max-length']);
+    $capped = Policy::resolve(['x-message-ttl' => 11], ['definition' => ['message-ttl' => 22]], ['definition' => ['message-ttl' => 5]]);
+    Harness::eq('numeric operator cap constrains a declared value', 5, $capped['x-message-ttl']);
 
     // Validation.
     Harness::eq('a good policy validates', null, Policy::validate(['pattern' => '.*', 'definition' => ['max-length' => 1]]));
@@ -120,9 +129,14 @@ Harness::guard('parity', static function (): void {
     // An unknown x-queue-type is a 406 rather than being coerced to classic.
     $c = new Amqp('127.0.0.1', $port);
     $c->channel();
-    $c->method(1, 50, 10, pack('n', 0) . Codec::shortstr('typed') . chr(2) . Amqp::table(['x-queue-type' => 'stream']));
+    $c->method(1, 50, 10, pack('n', 0) . Codec::shortstr('typed') . chr(2) . Amqp::table(['x-queue-type' => 'unsupported']));
     $closed = $c->expectClose();
     Harness::eq('an unsupported queue type is 406', 406, $closed['code'] ?? 0);
+    $c->close();
+
+    $c = new Amqp('127.0.0.1', $port); $c->channel();
+    $c->method(1, 50, 10, pack('n', 0) . Codec::shortstr('stream-supported') . chr(2) . Amqp::table(['x-queue-type' => 'stream']));
+    Harness::eq('a durable stream queue is supported', 11, $c->expect(50,11)['method']);
     $c->close();
 
     // A transient non-exclusive queue is the 541 deprecation, and it closes

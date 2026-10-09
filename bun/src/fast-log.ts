@@ -506,7 +506,9 @@ export class FastLog {
       }
     }
     const info = inspect(path);
-    const ready = !!info && info.logical === HEADER && info.size >= Math.min(size, CHUNK);
+    // A batch larger than one chunk (relocated rows can be) needs a file at
+    // least that big. The preallocated next chunk is only CHUNK bytes.
+    const ready = !!info && info.logical === HEADER && info.size >= size;
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
     closeSync(this.active.fd);

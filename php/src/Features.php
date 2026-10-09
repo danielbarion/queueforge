@@ -71,7 +71,7 @@ final class Features
             $overflow = 'drop-head';
         }
         $maxPriority = $num('x-max-priority');
-        $type = $str('x-queue-type') === 'quorum' ? 'quorum' : 'classic';
+        $type = in_array($str('x-queue-type'), ['quorum', 'stream'], true) ? $str('x-queue-type') : 'classic';
         $delivery = $num('x-delivery-limit');
         if ($type === 'quorum' && $delivery === null) {
             $delivery = 20;
@@ -105,38 +105,42 @@ final class Features
      */
     public static function knownQueueType(string $type): bool
     {
-        return $type === '' || $type === 'classic' || $type === 'quorum';
+        return $type === '' || $type === 'classic' || $type === 'quorum' || $type === 'stream';
     }
 
     /**
      * Builds the x-death header set for a dead-lettered message, matching
      * Bun's layout (bun/src/broker/args.ts:49-70): one entry with queue,
      * reason, count of 1, exchange and a single-element routing-keys array,
-     * plus x-first-death-reason and x-first-death-queue. Any prior x-death is
-     * replaced rather than accumulated, so count never exceeds 1.
+     * plus first and last death fields. Repeated deaths for the same queue and
+     * reason increment the count; records for other queues or reasons remain.
      *
      * @param list<array{0:string,1:mixed}> $headers
      * @return list<array{0:string,1:mixed}>
      */
     public static function deathHeaders(array $headers, string $queue, string $reason, string $exchange, string $routingKey): array
     {
-        $rest = array_values(array_filter(
-            $headers,
-            static fn (array $pair): bool => !in_array(
-                $pair[0],
-                ['x-death', 'x-first-death-reason', 'x-first-death-queue'],
-                true,
-            ),
-        ));
-        $rest[] = ['x-death', [
-            'queue' => $queue,
-            'reason' => $reason,
-            'count' => 1,
-            'exchange' => $exchange,
-            'routing-keys' => [$routingKey],
-        ]];
-        $rest[] = ['x-first-death-reason', $reason];
-        $rest[] = ['x-first-death-queue', $queue];
+        $rest = [];
+        $deaths = [];
+        $first = [];
+        foreach ($headers as $pair) {
+            if ($pair[0] === 'x-death') $deaths = is_array($pair[1]) ? $pair[1] : [];
+            elseif (str_starts_with($pair[0], 'x-first-death-')) $first[$pair[0]] = $pair[1];
+            elseif (!str_starts_with($pair[0], 'x-last-death-')) $rest[] = $pair;
+        }
+        if (isset($deaths['queue'])) $deaths = [$deaths];
+        $count = 1;
+        $keep = [];
+        foreach ($deaths as $death) {
+            if (($death['queue'] ?? null) === $queue && ($death['reason'] ?? null) === $reason) $count += (int) ($death['count'] ?? 0);
+            else $keep[] = $death;
+        }
+        $rest[] = ['x-death', [['queue' => $queue, 'reason' => $reason, 'count' => $count,
+            'exchange' => $exchange, 'routing-keys' => [$routingKey]], ...$keep]];
+        foreach (['reason' => $reason, 'queue' => $queue, 'exchange' => $exchange] as $key => $value) {
+            $rest[] = ['x-first-death-' . $key, $first['x-first-death-' . $key] ?? $value];
+            $rest[] = ['x-last-death-' . $key, $value];
+        }
         return $rest;
     }
 

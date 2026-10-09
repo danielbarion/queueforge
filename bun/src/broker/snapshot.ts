@@ -13,7 +13,7 @@ import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
-import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
+import { matchOne, policyItem, policyFromBody, fillPolicyArgs, capOperatorArgs } from "./policy-data.ts";
 import type { RuntimeParam } from "./params.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
@@ -51,12 +51,13 @@ function queueFromWire(payload: Record<string, unknown>): QueueRow {
   take("max_priority", "x-max-priority");
   take("x-delivery-limit", "x-delivery-limit");
   take("delivery_limit", "x-delivery-limit");
+  take("x-max-age", "x-max-age");
   const qtype = String(argsIn["x-queue-type"] ?? argsIn.queue_type ?? "").toLowerCase();
   if (qtype === "quorum" || qtype === "classic" || qtype === "stream") args["x-queue-type"] = qtype;
   // Rust's names for the rest of its arguments.
   if (typeof argsIn.max_age_ms === "number" && args["x-max-age"] == null) args["x-max-age"] = `${Math.ceil(argsIn.max_age_ms / 1000)}s`;
   if (typeof argsIn.leader_locator === "string") args["x-queue-leader-locator"] = argsIn.leader_locator;
-  if (argsIn.single_active === true) args["x-single-active-consumer"] = "true";
+  if (argsIn.single_active === true || argsIn["x-single-active-consumer"] === true) args["x-single-active-consumer"] = "true";
   if (argsIn.dead_letter_strategy === "at-least-once") args["x-dead-letter-strategy"] = "at-least-once";
   for (const [key, value] of Object.entries(argsIn)) {
     if (key.startsWith("x-") && (typeof value === "string" || typeof value === "number") && args[key] == null) args[key] = value;
@@ -78,7 +79,9 @@ function queueFromWire(payload: Record<string, unknown>): QueueRow {
  * A replicated policy row. Rust sends its `Policy` struct (snake_case,
  * `apply_to`); Bun sends its own camelCase row. Both map to Bun's `Policy`.
  */
-export function policyFromWire(p: Record<string, unknown>): Policy {
+export function policyFromWire(p: Record<string, unknown>): Policy & { definition: Record<string, unknown> } {
+  const definition = (p.definition ?? {}) as Record<string, unknown>;
+  p = { ...Object.fromEntries(Object.entries(definition).map(([key, value]) => [({ "message-ttl": "message_ttl_ms", "expires": "expires_ms", "dead-letter-exchange": "dead_letter_exchange", "dead-letter-routing-key": "dead_letter_routing_key", "max-length": "max_length", "max-length-bytes": "max_length_bytes", "dead-letter-strategy": "dead_letter_strategy", "delivery-limit": "delivery_limit", "alternate-exchange": "alternate_exchange" } as Record<string, string>)[key] ?? key, value])), ...p };
   const num = (v: unknown) => (v == null ? null : Number(v));
   const str = (v: unknown) => (v == null ? null : String(v));
   const applyTo = String(p.applyTo ?? p.apply_to ?? "all");
@@ -98,6 +101,7 @@ export function policyFromWire(p: Record<string, unknown>): Policy {
     dlxStrategy: (str(p.dlxStrategy ?? p.dead_letter_strategy) as Policy["dlxStrategy"]) ?? null,
     deliveryLimit: num(p.deliveryLimit ?? p.delivery_limit),
     alternate: str(p.alternate ?? p.alternate_exchange),
+    definition,
   };
 }
 
@@ -105,7 +109,7 @@ export function policyFromWire(p: Record<string, unknown>): Policy {
  * The wire form of a policy: Rust's `Policy` field names, which Rust parses
  * and `policyFromWire` reads back.
  */
-export function policyToWire(p: Policy): Record<string, unknown> {
+export function policyToWire(p: Policy) {
   return {
     vhost: p.vhost,
     name: p.name,
@@ -122,6 +126,7 @@ export function policyToWire(p: Policy): Record<string, unknown> {
     dead_letter_strategy: p.dlxStrategy,
     delivery_limit: p.deliveryLimit,
     alternate_exchange: p.alternate,
+    definition: { ...policyItem(p).definition, ...((p as Policy & { definition?: Record<string, unknown> }).definition ?? {}) },
   };
 }
 
@@ -233,7 +238,7 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
  */
 export function snapshot(this: Broker) {
   return {
-    users: [...this.users.entries()].map(([name, u]) => ({ name, hash: u.hash, tags: u.tags })),
+    users: [...this.users.entries()].map(([name, u]) => ({ name, hash: u.hash, password_hash: u.hash, tags: u.tags })),
     vhosts: [...this.vhosts],
     permissions: this.perms,
     exchanges: [...this.exchanges.values()],
@@ -243,11 +248,13 @@ export function snapshot(this: Broker) {
       durable: q.durable,
       exclusive: q.exclusive,
       autoDelete: q.autoDelete,
-      args: q.args,
+      args: q.declaredArgs ?? q.args,
       home: q.home,
       raftGroup: q.raftGroup ?? null,
     })),
-    bindings: this.bindings,
+    bindings: this.bindings.map((b) => ({ ...b, routing_key: b.routingKey })),
+    exchangeBindings: this.e2e.map((b) => ({ ...b, routing_key: b.routingKey })),
+    policies: [...this.policies.map((p) => ({ ...policyToWire(p), operator: false })), ...this.operatorPolicies.map((p) => ({ ...policyToWire(p), operator: true }))],
     consumed: this.consumed,
     userLimits: this.listUserLimits(),
     vhostLimits: this.listVhostLimits(),
@@ -265,11 +272,17 @@ export function snapshot(this: Broker) {
  */
 export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]> | null | undefined) {
   if (!snap) return;
-  for (const u of snap.users ?? []) if (!this.users.has(u.name)) {
-    this.users.set(u.name, { hash: u.hash, tags: u.tags });
-    this.store.putUser(u);
+  const names = (snap.vhosts ?? []).map((row: string | { name: string }) => typeof row === "string" ? row : row.name);
+  if (names.some((name) => typeof name !== "string")) throw new Error("Invalid snapshot vhost");
+  for (const row of snap.users ?? []) if (!this.users.has(row.name)) {
+    const wire = row as typeof row & { password_hash?: string };
+    const hash = wire.hash ?? wire.password_hash;
+    if (typeof hash !== "string") throw new Error("Invalid snapshot user hash");
+    const user = { name: row.name, hash, tags: row.tags };
+    this.users.set(user.name, { hash: user.hash, tags: user.tags });
+    this.store.putUser(user);
   }
-  for (const name of snap.vhosts ?? []) this.ensureBuiltins(name);
+  for (const name of names) this.ensureBuiltins(name);
   for (const p of snap.permissions ?? []) {
     if (!this.perms.some((x) => x.user === p.user && x.vhost === p.vhost)) {
       this.perms.push(p);
@@ -322,14 +335,161 @@ export function applySnapshot(this: Broker, snap: ReturnType<Broker["snapshot"]>
   for (const p of snap.globalParameters ?? []) if (!globals.has(p.name)) this.putGlobalParam(p.name, p.value);
 }
 
+/** Install authoritative Raft metadata; legacy peer hello snapshots remain additive. */
+export function installMetaSnapshot(this: Broker, state: unknown): void {
+  const object = (value: unknown): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid metadata snapshot row");
+    return value as Record<string, unknown>;
+  };
+  const snap = object(state);
+  const list = (key: string, required = false): unknown[] => {
+    if (snap[key] === undefined && !required) return [];
+    if (!Array.isArray(snap[key])) throw new Error(`Invalid metadata snapshot ${key}`);
+    return snap[key] as unknown[];
+  };
+  const text = (value: unknown, empty = false): string => {
+    if (typeof value !== "string" || (!empty && value.length === 0) || value.includes("\0")) throw new Error("Invalid metadata snapshot string");
+    return value;
+  };
+  const bool = (value: unknown, fallback: boolean): boolean => {
+    if (value === undefined) return fallback;
+    if (typeof value !== "boolean") throw new Error("Invalid metadata snapshot boolean");
+    return value;
+  };
+  const regex = (value: unknown): string => { const pattern = text(value, true); new RegExp(pattern); return pattern; };
+  const hosts = new Set(list("vhosts", true).map((v) => text(typeof v === "string" ? v : object(v).name)));
+  const host = (value: unknown): string => { const vhost = text(value); if (!hosts.has(vhost)) throw new Error("Unknown metadata snapshot vhost"); return vhost; };
+  const users = list("users", true).map((value) => {
+    const row = object(value), name = text(row.name), hash = text(row.hash ?? row.password_hash);
+    if (!Array.isArray(row.tags) || row.tags.some((tag) => typeof tag !== "string")) throw new Error("Invalid metadata snapshot tags");
+    return { name, hash, tags: row.tags as string[] };
+  });
+  const userNames = new Set(users.map((u) => u.name));
+  const user = (value: unknown): string => { const name = text(value); if (!userNames.has(name)) throw new Error("Unknown metadata snapshot user"); return name; };
+  const permissions = list("permissions", true).map((value) => { const r = object(value); return { user: user(r.user), vhost: host(r.vhost), configure: regex(r.configure), write: regex(r.write), read: regex(r.read) }; });
+  const exchanges: ExRow[] = list("exchanges", true).map((value) => {
+    const r = object(value), kind = text(r.kind ?? r.type);
+    if (!["default", "direct", "fanout", "topic", "headers", "x-consistent-hash", "x-delayed-message", "x-local-random"].includes(kind)) throw new Error("Invalid snapshot exchange kind");
+    const delayedType = r.delayedType ?? r.delayed_type ?? null;
+    if (delayedType !== null && !["direct", "fanout", "topic", "headers"].includes(text(delayedType))) throw new Error("Invalid delayed exchange kind");
+    return { vhost: host(r.vhost), name: text(r.name, true), kind, durable: bool(r.durable, true), autoDelete: bool(r.autoDelete ?? r.auto_delete, false), internal: bool(r.internal, false), alternate: r.alternate == null ? null : text(r.alternate, true), delayedType: delayedType as string | null };
+  });
+  const queueRows = list("queues", true).map((value) => {
+    const r = object(value); host(r.vhost); text(r.name ?? r.queue); bool(r.durable, true); bool(r.exclusive, false); bool(r.autoDelete ?? r.auto_delete, false);
+    if (r.home != null) text(r.home, true); if (r.raftGroup != null) text(r.raftGroup);
+    if (r.args != null) {
+      const raw = object(r.args);
+      for (const key of ["x-message-ttl", "message_ttl_ms", "x-expires", "expires_ms", "x-max-length", "max_length", "x-max-length-bytes", "max_length_bytes", "x-max-priority", "max_priority", "x-delivery-limit", "delivery_limit", "max_age_ms"]) {
+        const value = raw[key];
+        if (value != null && (typeof value !== "number" || !Number.isSafeInteger(value) || value < (key === "x-delivery-limit" || key === "delivery_limit" ? -1 : 0))) throw new Error("Invalid snapshot queue number");
+      }
+      for (const [key, value] of Object.entries(raw)) if (key.startsWith("x-") && typeof value !== "string" && typeof value !== "number" && !(key === "x-single-active-consumer" && typeof value === "boolean")) throw new Error("Invalid snapshot queue argument");
+    }
+    const row = queueFromWire(r); const type = (r.args as Record<string, unknown> | undefined)?.["x-queue-type"] ?? (r.args as Record<string, unknown> | undefined)?.queue_type;
+    if (type != null && !["classic", "quorum", "stream"].includes(String(type))) throw new Error("Invalid snapshot queue type");
+    for (const key of ["x-message-ttl", "x-expires", "x-max-length", "x-max-length-bytes", "x-max-priority", "x-delivery-limit"]) {
+      const value = row.args[key];
+      if (value != null && (typeof value !== "number" || !Number.isSafeInteger(value) || value < (key === "x-delivery-limit" ? -1 : 0))) throw new Error("Invalid snapshot queue number");
+    }
+    if (row.args["x-overflow"] != null && !["drop-head", "reject-publish", "reject-publish-dlx"].includes(String(row.args["x-overflow"]))) throw new Error("Invalid snapshot queue overflow");
+    if (row.args["x-dead-letter-strategy"] != null && !["at-most-once", "at-least-once"].includes(String(row.args["x-dead-letter-strategy"]))) throw new Error("Invalid snapshot queue dead-letter strategy");
+    parseArgs(row.args); return row;
+  });
+  const queueKeys = new Set(queueRows.map((q) => this.key(q.vhost, q.name)));
+  const exchangeKeys = new Set(exchanges.map((e) => this.key(e.vhost, e.name)));
+  const bindings: BindRow[] = [], e2e: Broker["e2e"] = [];
+  for (const value of [...list("bindings", true), ...list("exchangeBindings"), ...list("exchange_bindings"), ...list("e2e")]) {
+    const r = object(value), vhost = host(r.vhost), source = text(r.exchange ?? r.source), routingKey = text(r.routingKey ?? r.routing_key ?? r.key ?? "", true);
+    if (!exchangeKeys.has(this.key(vhost, source))) throw new Error("Unknown snapshot binding exchange");
+    if ((r.destinationType ?? r.destination_type) === "exchange" || (r.source !== undefined && r.queue === undefined)) {
+      const destination = text(r.destination); if (!exchangeKeys.has(this.key(vhost, destination))) throw new Error("Unknown snapshot binding destination");
+      e2e.push({ vhost, source, destination, routingKey });
+    } else {
+      const queue = text(r.queue ?? r.destination); if (!queueKeys.has(this.key(vhost, queue))) throw new Error("Unknown snapshot binding queue");
+      const args = r.args ?? []; if (!Array.isArray(args) || args.some((pair) => !Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string")) throw new Error("Invalid snapshot binding arguments");
+      bindings.push({ vhost, exchange: source, queue, routingKey, args: args as BindRow["args"] });
+    }
+  }
+  const unique = <T>(rows: T[], key: (row: T) => string): T[] => { const seen = new Set<string>(); for (const row of rows) { const id = key(row); if (seen.has(id)) throw new Error("Duplicate metadata snapshot row"); seen.add(id); } return rows; };
+  unique(users, (u) => u.name); unique(permissions, (p) => `${p.user}\0${p.vhost}`); unique(exchanges, (e) => this.key(e.vhost, e.name)); unique(queueRows, (q) => this.key(q.vhost, q.name));
+  unique(bindings, (b) => JSON.stringify([b.vhost, b.exchange, b.queue, b.routingKey, b.args])); unique(e2e, (b) => JSON.stringify([b.vhost, b.source, b.destination, b.routingKey]));
+  const policies = [...list("policies"), ...list("operatorPolicies").map((value) => ({ ...object(value), operator: true }))].map((value) => {
+    const r = object(value); host(r.vhost); text(r.name); regex(r.pattern);
+    if (r.definition !== undefined) object(r.definition);
+    const apply = r.applyTo ?? r.apply_to ?? r["apply-to"] ?? "all"; if (!["all", "queues", "exchanges"].includes(String(apply))) throw new Error("Invalid snapshot policy target");
+    if (r.priority !== undefined && (typeof r.priority !== "number" || !Number.isFinite(r.priority))) throw new Error("Invalid snapshot policy priority");
+    const p = policyFromWire({ ...r, apply_to: apply });
+    for (const key of ["messageTtl", "expiresMs", "maxLength", "maxLengthBytes", "deliveryLimit"] as const) if (p[key] !== null && (!Number.isFinite(p[key]) || p[key]! < 0)) throw new Error("Invalid snapshot policy number");
+    if (p.overflow !== null && !["drop-head", "reject-publish", "reject-publish-dlx"].includes(p.overflow)) throw new Error("Invalid snapshot policy overflow");
+    if (p.dlxStrategy !== null && !["at-most-once", "at-least-once"].includes(p.dlxStrategy)) throw new Error("Invalid snapshot dead-letter strategy");
+    return { ...p, operator: bool(r.operator, false) };
+  });
+  unique(policies, (p) => `${p.operator}\0${p.vhost}\0${p.name}`);
+  const topics = list("topicPermissions").map((value) => { const r = object(value); return { user: user(r.user), vhost: host(r.vhost), exchange: text(r.exchange, true), write: regex(r.write), read: regex(r.read) }; });
+  const limitRows = (key: string, id: "user" | "vhost") => list(key).map((value) => {
+    const r = object(value); (id === "user" ? user : host)(r[id]);
+    for (const name of ["max-connections", id === "user" ? "max-channels" : "max-queues"]) if (r[name] != null && (typeof r[name] !== "number" || !Number.isInteger(r[name]) || (r[name] as number) < -1)) throw new Error("Invalid snapshot limit");
+    return r;
+  });
+  const userLimits = limitRows("userLimits", "user"), vhostLimits = limitRows("vhostLimits", "vhost");
+  const parameters = list("parameters").map((value) => { const r = object(value); const component = text(r.component); if (component === "shovel" || component === "vhost-limits") throw new Error("Node-local or duplicated snapshot parameter"); if (!("value" in r)) throw new Error("Missing snapshot parameter value"); return { component, vhost: host(r.vhost), name: text(r.name), value: r.value }; });
+  const globals = list("globalParameters").map((value) => { const r = object(value); if (!("value" in r)) throw new Error("Missing snapshot global value"); return { name: text(r.name), value: r.value }; });
+  // Check serialization before deleting a single store row (also catches cyclic values).
+  JSON.stringify({ users, exchanges, queueRows, bindings, e2e, policies, topics, userLimits, vhostLimits, parameters, globals });
+  const survivingExclusive = [...this.queues.values()].filter((q) => q.exclusive && hosts.has(q.vhost) && !queueKeys.has(this.key(q.vhost, q.name)));
+  const preservedKeys = new Set(survivingExclusive.map((q) => this.key(q.vhost, q.name)));
+  const localBindings = this.bindings.filter((b) => preservedKeys.has(this.key(b.vhost, b.queue)) && exchangeKeys.has(this.key(b.vhost, b.exchange)));
+  const removed = [...this.queues.values()].filter((q) => !queueKeys.has(this.key(q.vhost, q.name)) && !preservedKeys.has(this.key(q.vhost, q.name)));
+  const normalPolicies = policies.filter((p) => !p.operator), operatorPolicies = policies.filter((p) => p.operator);
+  const prepared = queueRows.map((row) => {
+    const effective = capOperatorArgs(fillPolicyArgs(row.args, matchOne(normalPolicies, row.vhost, row.name, "queues")), matchOne(operatorPolicies, row.vhost, row.name, "queues"));
+    const parsed = parseArgs(effective);
+    return { row, effective, parsed, existing: this.queues.get(this.key(row.vhost, row.name)), fresh: this.makeQueue(row, !this.isLocalHome(row.home)) };
+  });
+  this.store.db.transaction(() => {
+    // Stored exclusive queues can be absent from memory after restart too.
+    const removedStored = this.store.listQueues().filter((q) => !queueKeys.has(this.key(q.vhost, q.name)) && !preservedKeys.has(this.key(q.vhost, q.name)));
+    for (const q of [...removed, ...removedStored]) { this.store.deleteQueue(q.vhost, q.name); this.store.deleteStreamLog(q.vhost, q.name); }
+    this.store.db.exec("DELETE FROM users; DELETE FROM permissions; DELETE FROM vhosts; DELETE FROM exchanges; DELETE FROM bindings; DELETE FROM exchange_bindings; DELETE FROM policies;");
+    this.store.db.exec("DELETE FROM parameters WHERE component IN ('user-limits','vhost-limits','topic-permissions','global','operator-policies') OR component LIKE 'rt:%'");
+    for (const row of this.store.db.query("SELECT DISTINCT vhost FROM parameters WHERE vhost <> ''").all() as Array<{ vhost: string }>) if (!hosts.has(row.vhost)) this.store.db.query("DELETE FROM parameters WHERE vhost=?").run(row.vhost);
+    for (const vhost of hosts) this.store.ensureVhost(vhost);
+    for (const u of users) this.store.putUser(u);
+    for (const p of permissions) this.store.putPerm(p);
+    for (const e of exchanges) if (e.durable) this.store.putExchange(e);
+    for (const { row } of prepared) { if (row.durable) this.store.putQueue(row); else this.store.db.query("DELETE FROM queues WHERE vhost=? AND name=?").run(row.vhost, row.name); }
+    for (const b of [...bindings, ...localBindings]) this.store.putBinding(b);
+    for (const b of e2e) this.store.putExchangeBinding(b);
+    for (const p of normalPolicies) this.store.putPolicy(p);
+    for (const p of operatorPolicies) this.store.putParameter("operator-policies", p.vhost, p.name, JSON.stringify(p));
+    for (const r of userLimits) this.store.putParameter("user-limits", "", r.user as string, JSON.stringify(r));
+    for (const r of vhostLimits) this.store.putParameter("vhost-limits", r.vhost as string, "limits", JSON.stringify(r));
+    for (const p of topics) this.store.putParameter("topic-permissions", p.vhost, `${p.user}\0${p.exchange}`, JSON.stringify(p));
+    for (const p of parameters) this.store.putParameter("rt:" + p.component, p.vhost, p.name, JSON.stringify(p.value ?? null));
+    for (const p of globals) this.store.putParameter("global", "", p.name, JSON.stringify(p.value ?? null));
+  })();
+  // Commit succeeded. Update existing objects so delivery callbacks retain their queue/body references.
+  this.users = new Map(users.map((u) => [u.name, { hash: u.hash, tags: u.tags }])); this.vhosts = hosts; this.perms = permissions;
+  this.exchanges = new Map(exchanges.map((e) => [this.key(e.vhost, e.name), e]));
+  for (const q of removed) { this.queues.delete(this.key(q.vhost, q.name)); this.streams.delete(this.key(q.vhost, q.name)); if (q.raftGroup) this.cluster?.consensus?.node?.dropGroup(q.raftGroup); }
+  for (const { row, effective, parsed, existing, fresh } of prepared) { const q = existing ?? fresh; Object.assign(q, row, { declaredArgs: { ...row.args }, args: effective, argsParsed: parsed }); this.queues.set(this.key(row.vhost, row.name), q); if (row.raftGroup) this.startQueueGroup(row.raftGroup, false); }
+  this.bindings = [...bindings, ...localBindings]; this.e2e = e2e; this.policies = normalPolicies; this.operatorPolicies = operatorPolicies; this.topicPerms = topics;
+  this.userConnLimit.clear(); this.userChanLimit.clear(); this.vhostConnLimit.clear(); this.vhostQueueLimit.clear();
+  const setLimit = (map: Map<string, number>, key: string, value: unknown) => { if (typeof value === "number" && value >= 0) map.set(key, value); };
+  for (const r of userLimits) { setLimit(this.userConnLimit, r.user as string, r["max-connections"]); setLimit(this.userChanLimit, r.user as string, r["max-channels"]); }
+  for (const r of vhostLimits) { setLimit(this.vhostConnLimit, r.vhost as string, r["max-connections"]); setLimit(this.vhostQueueLimit, r.vhost as string, r["max-queues"]); }
+}
+
 Broker.prototype.applyRemote = applyRemote;
 Broker.prototype.snapshot = snapshot;
 Broker.prototype.applySnapshot = applySnapshot;
+Broker.prototype.installMetaSnapshot = installMetaSnapshot;
 
 declare module "./class.ts" {
   interface Broker {
     applyRemote: typeof applyRemote;
     snapshot: typeof snapshot;
     applySnapshot: typeof applySnapshot;
+    installMetaSnapshot: typeof installMetaSnapshot;
   }
 }

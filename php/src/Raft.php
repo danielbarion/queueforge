@@ -58,6 +58,40 @@ final class Raft
         $this->resetElection(0);
     }
 
+    /** Restore only checked durable state; uncommitted suffix remains unapplied. */
+    public function restore(int $term, ?string $vote, ?array $snapshot, array $entries, int $applied): void
+    {
+        $index = (int) ($snapshot['index'] ?? 0);
+        $snapshotTerm = (int) ($snapshot['term'] ?? 0);
+        if ($term < 0 || $index < 0 || $snapshotTerm < 0 || $snapshotTerm > $term || $applied < $index) {
+            throw new RuntimeException('Invalid durable Raft state');
+        }
+        $next = $index + 1;
+        foreach ($entries as $entry) {
+            if (!is_array($entry) || ($entry['i'] ?? null) !== $next || !is_int($entry['term'] ?? null) || $entry['term'] < 0 || $entry['term'] > $term || !is_string($entry['kind'] ?? null)) {
+                throw new RuntimeException('Invalid durable Raft log');
+            }
+            $next++;
+        }
+        if ($applied >= $next) throw new RuntimeException('Applied index exceeds durable Raft log');
+        $this->term = $term; $this->votedFor = $vote;
+        $this->role = 'follower'; $this->leader = null;
+        $this->snapIndex = $index; $this->snapTerm = $snapshotTerm;
+        $this->snapVoters = self::sorted(array_map('strval', (array) ($snapshot['voters'] ?? [])));
+        $this->log = array_values($entries); $this->commit = $applied; $this->applied = $applied;
+        $this->outbox = []; $this->installed = null;
+        $this->dirty = ['hardState' => false, 'truncatedFrom' => null, 'appended' => [], 'snapshot' => null];
+    }
+
+    /** @return list<array{i:int,term:int,kind:string,data:mixed}> */
+    public function logEntries(): array { return $this->log; }
+
+    public function startTimer(int $now): void
+    {
+        $this->heardLeaderAt = $now; $this->resetElection($now);
+        $this->heartbeatDue = $now + self::HEARTBEAT_MS;
+    }
+
     private function rand(): int
     {
         // xorshift64 on native 64-bit ints. `<<` drops the high bits; the

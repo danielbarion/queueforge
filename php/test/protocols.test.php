@@ -12,6 +12,8 @@ $root = dirname(__DIR__);
 require_once $root . '/src/Routing.php';
 require_once $root . '/src/Features.php';
 require_once $root . '/src/Policy.php';
+require_once __DIR__ . '/lib/Amqp.php';
+require_once $root . '/src/Amqp10.php';
 
 // MQTT topic filter matching.
 Harness::guard('mqtt filters', static function (): void {
@@ -39,6 +41,11 @@ $broker = Harness::broker([
     "stomp = \"127.0.0.1:$stompPort\"",
     "stream = \"127.0.0.1:$streamPort\"",
 ]);
+
+// STOMP /queue destinations use existing, explicitly configured queues.
+$setup = new Amqp('127.0.0.1', $broker['port']); $setup->channel();
+foreach (['st', 'su'] as $name) $setup->declareQueue($name);
+$setup->close();
 
 /** Decodes an MQTT remaining length, returning the value and header size. */
 function mqttLen(string $frame): array
@@ -71,7 +78,7 @@ Harness::guard('mqtt connect and publish', static function () use ($mqttPort): v
     stream_set_timeout($fp, 3);
 
     // CONNECT, then expect CONNACK.
-    $payload = mqttString('MQTT') . chr(4) . chr(2) . pack('n', 60) . mqttString('tester');
+    $payload = mqttString('MQTT') . chr(4) . chr(0xc2) . pack('n', 60) . mqttString('tester') . mqttString('admin') . mqttString('devpassword12');
     fwrite($fp, chr(0x10) . chr(strlen($payload)) . $payload);
     $connack = fread($fp, 4);
     Harness::eq('connack arrives', "\x20\x02\x00\x00", $connack);
@@ -101,7 +108,7 @@ Harness::guard('mqtt large payload', static function () use ($mqttPort): void {
             throw new RuntimeException("mqtt connect failed at $size: $errstr");
         }
         stream_set_timeout($fp, 3);
-        $payload = mqttString('MQTT') . chr(4) . chr(2) . pack('n', 60) . mqttString("c$size");
+        $payload = mqttString('MQTT') . chr(4) . chr(0xc2) . pack('n', 60) . mqttString("c$size") . mqttString('admin') . mqttString('devpassword12');
         fwrite($fp, chr(0x10) . chr(strlen($payload)) . $payload);
         fread($fp, 4);
 
@@ -157,7 +164,7 @@ Harness::guard('stomp round trip', static function () use ($stompPort): void {
         throw new RuntimeException("stomp connect failed: $errstr");
     }
     stream_set_timeout($fp, 3);
-    fwrite($fp, "CONNECT\naccept-version:1.2\nhost:/\n\n\x00");
+    fwrite($fp, "CONNECT\naccept-version:1.2\nhost:/\nlogin:admin\npasscode:devpassword12\n\n\x00");
     $connected = fread($fp, 1024);
     Harness::ok('stomp connects', str_contains((string) $connected, 'CONNECTED'), 'got: ' . trim((string) $connected));
 
@@ -187,8 +194,8 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     }
     stream_set_timeout($fp, 3);
 
-    $send = static function ($fp, int $key, int $corr, string $extra = ''): void {
-        $payload = pack('n', $key) . pack('n', 1) . pack('N', $corr) . $extra;
+    $send = static function ($fp, int $key, ?int $corr, string $extra = ''): void {
+        $payload = pack('n', $key) . pack('n', 1) . ($corr === null ? '' : pack('N', $corr)) . $extra;
         fwrite($fp, pack('N', strlen($payload)) . $payload);
     };
     $recv = static function ($fp): array {
@@ -204,20 +211,11 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
         ];
     };
 
-    $send($fp, 0x0015, 11); // Open
-    $reply = $recv($fp);
-    Harness::eq('open is answered', 0x8015, $reply['key']);
-    Harness::eq('the correlation id is echoed', 11, $reply['corr']);
-
-    $send($fp, 0x000d, 12, pack('n', 6) . 'stream'); // Create
-    $reply = $recv($fp);
-    Harness::eq('create is answered', 0x800d, $reply['key']);
-
     // PeerProperties now carries a real properties map.
     $send($fp, 0x0011, 13);
     $reply = $recv($fp);
     Harness::eq('peer properties is answered', 0x8011, $reply['key']);
-    Harness::ok('and names the product', str_contains($reply['body'], 'RabbitMQ'));
+    Harness::ok('and names the product', str_contains($reply['body'], 'QueueForge'));
 
     // SaslHandshake lists PLAIN so a client can choose it.
     $send($fp, 0x0012, 14);
@@ -226,11 +224,21 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     Harness::ok('PLAIN is offered', str_contains($reply['body'], 'PLAIN'));
 
     // SaslAuthenticate is followed by an unsolicited Tune.
-    $send($fp, 0x0013, 15);
+    $plain = "\0admin\0devpassword12";
+    $send($fp, 0x0013, 15, pack('n', 5) . 'PLAIN' . pack('N', strlen($plain)) . $plain);
     $reply = $recv($fp);
     Harness::eq('sasl authenticate is answered', 0x8013, $reply['key']);
     $tune = $recv($fp);
     Harness::eq('a tune frame follows', 0x0014, $tune['key']);
+
+    $send($fp, 0x0015, 11, pack('n', 1) . '/'); // Open
+    $reply = $recv($fp);
+    Harness::eq('open is answered', 0x8015, $reply['key']);
+    Harness::eq('the correlation id is echoed', 11, $reply['corr']);
+
+    $send($fp, 0x000d, 12, pack('n', 6) . 'stream' . pack('N', 0)); // Create
+    $reply = $recv($fp);
+    Harness::eq('create is answered', 0x800d, $reply['key']);
 
     // DeclarePublisher, then Publish, which must come back as a 0x0003
     // PublishConfirm rather than a generic echo.
@@ -238,8 +246,9 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     $reply = $recv($fp);
     Harness::eq('declare publisher is answered', 0x8001, $reply['key']);
 
-    $entry = pack('N', 0) . pack('N', 42) . pack('N', 5) . 'hello';
-    $send($fp, 0x0002, 17, chr(7) . pack('N', 1) . $entry);
+    $message = Amqp10Codec::encode(new Amqp10Described(0x75, Amqp10Codec::binary('hello')));
+    $entry = pack('J', 42) . pack('N', strlen($message)) . $message;
+    $send($fp, 0x0002, null, chr(7) . pack('N', 1) . $entry);
     $reply = $recv($fp);
     Harness::eq('publish is confirmed', 0x0003, $reply['key']);
     Harness::eq('the publisher id comes back', 7, ord($reply['body'][4]));
@@ -247,7 +256,7 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     Harness::eq('and it is the one sent', 42, unpack('N', substr($reply['body'], 13, 4))[1]);
 
     // Subscribe replays the stored chunk as a 0x0008 Deliver.
-    $send($fp, 0x0007, 18, chr(3) . pack('n', 6) . 'stream');
+    $send($fp, 0x0007, 18, chr(3) . pack('n', 6) . 'stream' . pack('nnN', 1, 10, 0));
     $reply = $recv($fp);
     Harness::eq('subscribe is answered', 0x8007, $reply['key']);
     $deliver = $recv($fp);
@@ -256,7 +265,7 @@ Harness::guard('stream commands', static function () use ($streamPort): void {
     Harness::ok('and carries the payload', str_contains($deliver['body'], 'hello'));
 
     // A client Tune response and a heartbeat get no reply at all.
-    $send($fp, 0x0014, 19, pack('N', 1048576) . pack('N', 60));
+    $send($fp, 0x0014, null, pack('N', 1048576) . pack('N', 60));
     $send($fp, 0x0016, 20); // Close, so there is something to read next.
     $reply = $recv($fp);
     Harness::eq('tune is not echoed and close is answered', 0x8016, $reply['key']);
@@ -269,7 +278,7 @@ Harness::guard('mqtt unsubscribe and disconnect', static function () use ($mqttP
         throw new RuntimeException("mqtt connect failed: $errstr");
     }
     stream_set_timeout($fp, 3);
-    $payload = mqttString('MQTT') . chr(4) . chr(2) . pack('n', 60) . mqttString('c1');
+    $payload = mqttString('MQTT') . chr(4) . chr(0xc2) . pack('n', 60) . mqttString('c1') . mqttString('admin') . mqttString('devpassword12');
     fwrite($fp, chr(0x10) . chr(strlen($payload)) . $payload);
     fread($fp, 4);
 
@@ -306,7 +315,7 @@ Harness::guard('stomp unsubscribe, content-length and disconnect', static functi
         throw new RuntimeException("stomp connect failed: $errstr");
     }
     stream_set_timeout($fp, 3);
-    fwrite($fp, "CONNECT\naccept-version:1.2\n\n\0");
+    fwrite($fp, "CONNECT\naccept-version:1.2\nhost:/\nlogin:admin\npasscode:devpassword12\n\n\0");
     $connected = (string) fread($fp, 64);
     Harness::ok('connected arrives', str_starts_with($connected, 'CONNECTED'));
 
@@ -331,7 +340,7 @@ Harness::guard('stomp unsubscribe, content-length and disconnect', static functi
     fclose($fp);
 });
 
-Harness::guard('amqp 1.0 shim', static function () use ($broker): void {
+Harness::guard('amqp 1.0 authenticated session', static function () use ($broker): void {
     $fp = stream_socket_client("tcp://127.0.0.1:{$broker['port']}", $errno, $errstr, 5.0);
     if ($fp === false) {
         throw new RuntimeException("amqp connect failed: $errstr");
@@ -347,7 +356,7 @@ Harness::guard('amqp 1.0 shim', static function () use ($broker): void {
     Harness::ok('mechanisms are offered', str_contains($frame, 'PLAIN'));
 
     // sasl-init draws a sasl-outcome.
-    $init = "\x00\x53\x41\xc0\x04\x01\xa3\x00";
+    $init = Amqp10Codec::encode(new Amqp10Described(0x41, [Amqp10Codec::symbol('PLAIN'), Amqp10Codec::binary("\0admin\0devpassword12")]));
     fwrite($fp, pack('N', strlen($init) + 8) . chr(2) . chr(1) . "\x00\x00" . $init);
     $outcome = (string) fread($fp, 64);
     Harness::ok('a sasl outcome comes back', str_contains($outcome, "\x00\x53\x44"));
@@ -357,7 +366,7 @@ Harness::guard('amqp 1.0 shim', static function () use ($broker): void {
     $head = (string) fread($fp, 8);
     Harness::eq('the plain header is echoed', "AMQP\x00\x01\x00\x00", $head);
 
-    $open = "\x00\x53\x10\x45";
+    $open = Amqp10Codec::encode(new Amqp10Described(0x10, ['protocol-test', 'vhost:/', Amqp10Codec::uint(131072)]));
     fwrite($fp, pack('N', strlen($open) + 8) . chr(2) . chr(0) . "\x00\x00" . $open);
     $reply = (string) fread($fp, 64);
     Harness::ok('open is answered', str_contains($reply, "\x00\x53\x10"));

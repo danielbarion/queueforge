@@ -1,7 +1,7 @@
 # QueueForge (PHP)
 
 One process, one thread, one `stream_select()` loop. No Composer, no autoloader,
-no build step: thirteen `require` lines in `bin/queueforge` and the only extension
+no build step: explicit `require` lines in `bin/queueforge` and the only extension
 beyond the bundled ones is `sockets`, used to set `TCP_NODELAY` when it is
 available and skipped when it is not.
 
@@ -52,18 +52,26 @@ Same as Rust and Bun:
   subscribe, purge, or delete arriving elsewhere is forwarded to the home
 - the consumed set, so a peer that replays its log does not hand out a quorum
   body a second time, and node-slotted session ids that cannot collide
-- cluster protocol version 1, so a PHP process can sit in a Rust or Bun member
-  list. Only the lower node id dials, so a pair gets one connection
+- versioned cluster protocol with persistent Raft elections, replicated metadata,
+  quorum commits, snapshots, and legacy protocol fallback. Only the lower node
+  id dials, so a pair gets one connection
 - the management HTTP API and the SPA with a history fallback, the full
   Prometheus series including the per-queue labelled gauges, and `/healthz`
   and `/readyz`
 - RabbitMQ's `password_hash` format, verified against the same fixture the Bun
   suite pins
 - TLS on the AMQP and management listeners when `[tls]` names a certificate
-- MQTT 3.1.1 including UNSUBSCRIBE and DISCONNECT, STOMP 1.2 including
-  UNSUBSCRIBE, `content-length`, receipts and ERROR frames, the RabbitMQ
-  stream command set including publish, publish-confirm and subscribe-deliver,
-  and an AMQP 1.0 shim
+- MQTT 3.1.1 authentication, QoS, retained messages and persistent sessions;
+  MQTT 5 properties and reason codes; STOMP 1.2 authentication, ACK/NACK,
+  transactions, binary bodies and receipts; MQTT/STOMP WebSocket transports
+- durable RabbitMQ streams with publisher deduplication, stored offsets, credit,
+  single active consumers and super streams; AMQP 1.0 framing, SASL, settlement
+  and binary message sections
+- direct reply-to, delayed and consistent-hash exchanges, durable topology,
+  definition imports/exports, live connections/channels and tracing/events
+- verified JWKS authentication, LDAP binds and administrator-group lookup;
+  TLS client-certificate authentication with a configured trusted CA
+- AMQP 0-9-1 shovels and federation with remote authentication and confirmations
 
 Not the same:
 
@@ -72,8 +80,7 @@ Not the same:
   of measuring it. See [`../BENCHMARK.md`](../BENCHMARK.md).
 - **Quorum confirm latency.** Bun runs its local fsync and its peer appends at
   the same time. One thread cannot, so the appends go out non-blocking and the
-  confirm gate is resolved on a later pass of the loop. Correctness is the same
-  and latency is worse.
+  confirm gate is resolved on a later pass of the loop. Confirm latency depends on the event-loop tick and cluster round trips.
 - **A forwarded `basic.get` answers from a callback.** One thread cannot block
   on a peer, so the reply is written when it arrives; a peer that does not
   answer within the request timeout yields `basic.get-empty`.
@@ -84,19 +91,18 @@ Not the same:
   preallocated fsync log. This is a single append-only log, rewritten when it is
   mostly dead records. Nothing crosses processes on disk, so only the wire
   formats have to agree.
-- **No transactions.** `tx.select` and `tx.commit` are accepted, but publishes
-  apply as they arrive rather than being buffered, so `tx.rollback` cannot undo
-  one and is refused with a 540 rather than acknowledged.
-- **The AMQP 1.0 shim is a byte scanner, not a parser.** It recognises
-  performatives by searching for their descriptor bytes, carries one message
-  per `flow`, and assumes single-byte lengths, so a payload over 255 bytes is
-  mis-framed. Bun's has the same shape and the same limits.
-- **Exchange-to-exchange bindings, policies, limits, and topic permissions are
-  in memory only** and do not survive a restart. Users, their tags, and their
-  permissions persist. Bun holds the volatile ones the same way.
-- **Auto-delete is stored and reported but not enforced**, which is also true
-  of Bun: neither deletes a queue or exchange when its last consumer or binding
-  goes away.
+- **TLS with a configured client CA requires a client certificate.** PHP's
+  standard verified handshake does not provide RabbitMQ's optional-certificate
+  behavior.
+- **Integration transports.** Shovels and federation currently bridge AMQP
+  0-9-1; AMQP 1.0 and native-stream bridge transports are unsupported.
+- **Remaining cluster work.** Mixed-stack rolling upgrades need additional
+  interoperability validation.
+- **Producer coordination.** Concurrent stream publishing with the same producer
+  reference through different ingress nodes still needs leader coordination.
+  Retries and concurrent publishes through one ingress are deduplicated.
+- **Exchange auto-delete is stored and reported but not enforced.** Queue
+  auto-delete runs when the last consumer leaves a queue that had a consumer.
 - **One thread means one connection at a time gets served.** There is no flow
   control beyond prefetch, and `channel.flow` only echoes the requested state.
 - **Every message is held in memory**, and log compaction transiently needs a
@@ -112,6 +118,12 @@ php bin/queueforge --config config.example.toml --dev-bootstrap
 
 AMQP listens on `127.0.0.1:5675` in the example config. `--dev-bootstrap`
 creates `admin` / `devpassword12` when the data directory has no users.
+
+DNS peers can be resolved at startup with `[cluster] discovery = "dns"`,
+`dns_name` and optional `dns_port` (defaults to the cluster listener port).
+Address IDs follow the Rust/Bun format, including bracketed IPv6. Set `node_id`
+to the advertised address when the listener binds a wildcard address.
+`QUEUEFORGE_MEMBERS` also accepts the shared JSON array of `{id, addr}` rows.
 
 ## Checks
 
@@ -134,11 +146,10 @@ docker compose -f ../docker-compose.bench.yml run --rm --no-deps \
   php test/run.php quorum
 ```
 
-Eleven files and 489 checks: `lint`, `methods`, `routing`, `parity`, `protocols`,
-`cluster`, `cluster-live`, `quorum`, `mgmt`, plus the two original scripts,
-`roundtrip.php` and `parity.php`. `roundtrip.php` is the strongest of them: it
-`SIGKILL`s the broker and asserts that a confirmed but unacked durable message
-comes back.
+The suite includes protocol, management, authentication, Raft, snapshot,
+retention and real three-node metadata checks. `roundtrip.php` also kills the
+broker and checks that a confirmed but unacked durable message comes back.
+Run locally with `php test/run.php` when PHP is available.
 
 Each file is its own process and reports through its exit code, so there is no
 framework to install. `test/lib/Amqp.php` is a small AMQP client written for the

@@ -46,7 +46,9 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
   const c = this.ch(channel);
   const parsed = readContentHeader(payload);
   c.bodySize = parsed.bodySize;
-  c.propRaw = parsed.props.raw;
+  // A copy: the parsed bytes are a view of the socket read buffer, and a stored
+  // message holding that view kept the whole buffer (64 KiB and more) alive.
+  c.propRaw = parsed.props.raw.slice();
   c.headers = parsed.props.headers;
   c.deliveryMode = parsed.props.deliveryMode;
   c.priority = parsed.props.priority;
@@ -180,7 +182,7 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
             }),
           ),
           contentHeaderFrame(channel, body.length, propRaw),
-          bodyFrame(channel, body),
+          bodyFrame(channel, body, this.frameMax),
         ]);
         if (!confirm) return returned;
         return returned.then(() => this.send(encodeSettle(channel, pubTag, false)));

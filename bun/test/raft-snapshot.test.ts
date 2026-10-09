@@ -6,7 +6,7 @@ import { Broker, type QueueLive } from "../src/broker/index.ts";
 import type { Cluster } from "../src/cluster.ts";
 import type { Config } from "../src/config.ts";
 import { Consensus } from "../src/raft/glue.ts";
-import { QUORUM, type RaftNode } from "../src/raft/node.ts";
+import { META, QUORUM, type RaftNode } from "../src/raft/node.ts";
 import { Store } from "../src/store.ts";
 import { encodeQuorumAppend } from "../src/wire.ts";
 
@@ -20,6 +20,7 @@ async function fixture() {
     members: [{ id: "a", addr: "127.0.0.1:1" }, { id: "c", addr: "127.0.0.1:2" }], defaultQueueType: "classic",
   };
   const broker = new Broker(cfg, store);
+  broker.load();
   const queues: QueueLive[] = [];
   for (const name of ["target", "absent", "other"]) {
     await broker.declareQueue({ vhost: "/", name, durable: true, exclusive: false, autoDelete: false, passive: false, args: { "x-queue-type": "quorum" } });
@@ -28,7 +29,7 @@ async function fixture() {
   queues[2]!.raftGroup = "q:other";
   const consensus = new Consensus(broker, () => {});
   let leader = "a";
-  consensus.node = { leader: () => leader } as unknown as RaftNode;
+  consensus.node = { leader: () => leader, dropGroup: () => {}, addGroup: () => {}, expedite: () => {} } as unknown as RaftNode;
   broker.cluster = { consensus, peers: new Map() } as unknown as Cluster;
   const append = (q: QueueLive, id: string) => {
     const src = { body: Buffer.from(id), exchange: "", routingKey: q.name, headers: [], propRaw: new Uint8Array(), persistent: true, priority: 0, expiration: "", id };
@@ -38,7 +39,8 @@ async function fixture() {
     return data;
   };
   const install = (state: unknown) => (consensus as unknown as { install(group: string, state: unknown): Promise<void> }).install(QUORUM, state);
-  return { broker, store, consensus, queues, append, install, promote: () => { leader = "c"; broker.promoteIfLeader(); }, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+  const installMeta = (state: unknown) => (consensus as unknown as { install(group: string, state: unknown): Promise<void> }).install(META, state);
+  return { broker, store, cfg, dir, consensus, queues, append, install, installMeta, promote: () => { leader = "c"; broker.promoteIfLeader(); }, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test("quorum snapshots replace ready, replicas and unacked in leader order", async () => {
@@ -84,4 +86,98 @@ test("an empty quorum snapshot removes bodies without changing other groups", as
     expect(f.queues[0]!.ready.length).toBe(0);
     expect(f.queues[2]!.ready.at(0)?.id).toBe("kept");
   } finally { f.close(); }
+});
+
+
+test("portable metadata accepts Rust named vhosts and password_hash users", async () => {
+  const f = await fixture();
+  try {
+    f.broker.applySnapshot({ users: [{ name: "portable", password_hash: "wire-hash", tags: ["management"] }], vhosts: [{ name: "tenant" }], permissions: [], queues: [], exchanges: [], bindings: [] } as unknown as ReturnType<Broker["snapshot"]>);
+    expect(f.broker.vhosts.has("tenant")).toBe(true);
+    expect([...f.broker.vhosts].every((name) => typeof name === "string")).toBe(true);
+    expect(f.broker.users.get("portable")).toEqual({ hash: "wire-hash", tags: ["management"] });
+    expect(f.store.listUsers().find((user) => user.name === "portable")?.hash).toBe("wire-hash");
+  } finally { f.close(); }
+});
+
+test("authoritative metadata replaces credentials and topology without losing surviving queue bodies", async () => {
+  const f = await fixture();
+  try {
+    const q = f.queues[0]!;
+    f.append(q, "ready");
+    const ready = q.replicas.get("ready")!;
+    q.replicas.delete("ready"); q.ready.push(ready);
+    f.append(q, "unacked");
+    const unacked = q.replicas.get("unacked")!;
+    q.replicas.delete("unacked"); q.unacked.set("unacked", unacked);
+    f.append(f.queues[1]!, "deleted-body");
+    const snapshot = f.broker.snapshot();
+    snapshot.queues = snapshot.queues.filter(row => row.name === "target");
+    snapshot.users = [{ name: "replacement", hash: "new-hash", password_hash: "new-hash", tags: ["administrator"] }];
+    snapshot.permissions = [{ user: "replacement", vhost: "/", configure: ".*", write: ".*", read: ".*" }];
+    snapshot.exchangeBindings = [{ vhost: "/", source: "amq.direct", destination: "amq.topic", routingKey: "route", routing_key: "route" }];
+    await f.installMeta(snapshot);
+    await f.installMeta(snapshot);
+    expect(f.broker.queues.get(f.broker.key("/", "target"))).toBe(q);
+    expect(q.ready.at(0)).toBe(ready);
+    expect(q.unacked.get("unacked")).toBe(unacked);
+    expect(f.broker.queues.has(f.broker.key("/", "absent"))).toBe(false);
+    expect(f.store.listQueues().map(row => row.name)).toEqual(["target"]);
+    expect(f.store.listMessages().map(row => Buffer.from(row.body).toString()).sort()).toEqual(["ready", "unacked"]);
+    expect([...f.broker.users.keys()]).toEqual(["replacement"]);
+    expect(f.store.listUsers().map(row => row.name)).toEqual(["replacement"]);
+    expect(f.broker.e2e).toHaveLength(1);
+    expect(f.store.listExchangeBindings()).toHaveLength(1);
+
+    // A bad late row must not leave earlier user changes in memory or SQLite.
+    const before = JSON.stringify(f.broker.snapshot());
+    const invalid = structuredClone(snapshot);
+    invalid.users[0]!.hash = "must-not-commit";
+    invalid.bindings.push({ vhost: "/", exchange: "amq.direct", queue: "missing", routingKey: "route", routing_key: "route", args: [] });
+    await expect(f.installMeta(invalid)).rejects.toThrow();
+    expect(JSON.stringify(f.broker.snapshot())).toBe(before);
+    expect(f.store.listUsers()[0]!.hash).toBe("new-hash");
+    const invalidArgs = structuredClone(snapshot);
+    invalidArgs.queues[0]!.args["x-message-ttl"] = -1;
+    await expect(f.installMeta(invalidArgs)).rejects.toThrow();
+    expect(JSON.stringify(f.broker.snapshot())).toBe(before);
+
+    await f.installMeta({ users: [], vhosts: ["/"], permissions: [], queues: [], exchanges: [], bindings: [] });
+    expect(f.store.listQueues()).toHaveLength(0);
+    expect(f.store.listMessages()).toHaveLength(0);
+    expect(f.store.listUsers()).toHaveLength(0);
+    expect(f.store.listExchangeBindings()).toHaveLength(0);
+    // Legacy peer hello remains additive; only the Raft installer replaces.
+    f.broker.applySnapshot(snapshot);
+    f.broker.applySnapshot({ ...snapshot, users: [], vhosts: ["/"], permissions: [], queues: [], exchanges: [], bindings: [], exchangeBindings: [], policies: [] });
+    expect(f.broker.queues.has(f.broker.key("/", "target"))).toBe(true);
+    expect(f.broker.users.has("replacement")).toBe(true);
+  } finally { f.close(); }
+});
+
+test("metadata policies retain declared arguments and separate operator policies after restart", async () => {
+  const f = await fixture();
+  let reopened: Store | undefined;
+  try {
+    const snapshot = f.broker.snapshot();
+    snapshot.queues = [{ ...snapshot.queues[0]!, args: { "x-message-ttl": 123 } }];
+    const state = { ...snapshot, policies: [
+      { vhost: "/", name: "caps", pattern: ".*", apply_to: "queues", priority: 1, operator: false, definition: { "message-ttl": 321 } },
+      { vhost: "/", name: "caps", pattern: ".*", apply_to: "queues", priority: 1, operator: true, definition: { "max-length": 50, "federation-upstream-set": "all" } },
+    ] };
+    await f.installMeta(state);
+    expect(f.broker.snapshot().queues[0]!.args["x-max-length"]).toBeUndefined();
+    expect(f.broker.snapshot().policies!.find(row => row.operator)?.definition).toMatchObject({ "federation-upstream-set": "all" });
+    expect(f.store.listPolicies()).toHaveLength(1);
+    expect(f.store.listParameters("operator-policies")).toHaveLength(1);
+    f.store.close();
+    reopened = new Store(join(f.dir, "bun.sqlite"), "always", 50);
+    const broker = new Broker(f.cfg, reopened);
+    broker.load();
+    const q = broker.queues.get(broker.key("/", "target"))!;
+    expect(q.declaredArgs).toEqual({ "x-message-ttl": 123 });
+    expect(q.argsParsed.maxLength).toBe(50);
+    expect(broker.policies).toHaveLength(1);
+    expect(broker.operatorPolicies).toHaveLength(1);
+  } finally { reopened?.close(); f.close(); }
 });

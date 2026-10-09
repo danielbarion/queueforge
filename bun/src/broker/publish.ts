@@ -26,6 +26,11 @@ import { BUILTIN, EMPTY_BODY, EMPTY_HEADERS, emptyProm, type Consumer, type Live
  */
 const SLOW = Symbol("slow");
 
+/** Ready depth past which a new durable classic message keeps only its row id. */
+const PAGE_AFTER_READY = 2048;
+/** The same, in body bytes: 1 MiB bodies page after 64, not after 2048. */
+const PAGE_AFTER_BYTES = 64 * 1024 * 1024;
+
 /**
  * Local classic publish with no fan-out. Returns the confirm outcome, or
  * `SLOW` when quorum, a remote home, or extra destinations need the full path.
@@ -170,36 +175,70 @@ async function publishSlow(this: Broker, input: {
     if (!q || q.argsParsed.queueType === "quorum" || !this.isLocalHome(q.home)) return;
     needsLocalDurable = true;
   };
+  // Start every destination before waiting on any. A local enqueue happens in
+  // the call and a forward is written in the call, so each queue still sees
+  // this channel's publishes in order. Awaiting one forward after another made
+  // a fanout to queues on 3 other processes cost 15 round trips per publish.
+  const waits: Array<Promise<boolean>> = [];
+  const src = {
+    body: input.body,
+    exchange: input.exchange,
+    routingKey: input.routingKey,
+    headers: input.headers,
+    propRaw: input.propRaw,
+    persistent: input.persistent,
+    priority: input.priority,
+    expiration: input.expiration,
+  };
+  // Classic queues homed on one other process share one forward when that
+  // process takes a `queues` list (enqueue_many).
+  const byHome = new Map<string, string[]>();
+  const many = this.cluster?.consensus?.manyPeers;
   for (const name of dests) {
     noteLocalDurable(input.vhost, name);
-    const ok = await this.enqueue(input.vhost, name, {
-      body: input.body,
-      exchange: input.exchange,
-      routingKey: input.routingKey,
-      headers: input.headers,
-      propRaw: input.propRaw,
-      persistent: input.persistent,
-      priority: input.priority,
-      expiration: input.expiration,
-    });
-    if (!ok) rejected = true;
+    const q = this.queues.get(this.key(input.vhost, name));
+    const classic = q && q.argsParsed.queueType !== "quorum" && !(q.argsParsed.queueType === "stream" && q.raftGroup);
+    if (classic && q.home && !this.isLocalHome(q.home) && many?.has(q.home)) {
+      const list = byHome.get(q.home);
+      if (list) list.push(name);
+      else byHome.set(q.home, [name]);
+      continue;
+    }
+    waits.push(this.enqueue(input.vhost, name, src));
+  }
+  for (const [home, names] of byHome) {
+    if (names.length === 1) {
+      waits.push(this.enqueue(input.vhost, names[0]!, src));
+      continue;
+    }
+    waits.push(
+      this.cluster!.call(home, "enqueue", {
+        vhost: input.vhost,
+        queue: names[0],
+        queues: names,
+        body: Buffer.from(src.body).toString("base64"),
+        exchange: src.exchange,
+        routingKey: src.routingKey,
+        headers: src.headers,
+        propRaw: Buffer.from(src.propRaw).toString("base64"),
+        persistent: src.persistent,
+        priority: src.priority,
+        expiration: src.expiration,
+      }).then(
+        () => true,
+        () => {
+          throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
+        },
+      ),
+    );
   }
   for (const link of copies) {
     for (const name of this.route(link.downstream, input.exchange, input.routingKey, input.headers)) {
       noteLocalDurable(link.downstream, name);
-      const ok = await this.enqueue(link.downstream, name, {
-        body: input.body,
-        exchange: input.exchange,
-        routingKey: input.routingKey,
-        headers: input.headers,
-        propRaw: input.propRaw,
-        persistent: input.persistent,
-        priority: input.priority,
-        expiration: input.expiration,
-      });
-      if (!ok) rejected = true;
+      waits.push(this.enqueue(link.downstream, name, src));
     }
   }
+  for (const ok of await Promise.all(waits)) if (!ok) rejected = true;
   // every_n_ms stages a local classic row and fsyncs on the interval. The confirm waits for that fsync.
   // Quorum and a forwarded home already waited on their own copy. Counting here
   // would blame this confirm for a newer row that is still staged.
@@ -433,8 +472,12 @@ export function enqueueLocal(this: Broker,
     confirmGate: src.confirmGate,
   };
   // The row owns the bytes and the property block. A backlog of full records
-  // made a later confirm pause under the memory cap.
-  if (rowId != null && q.argsParsed.queueType === "quorum") {
+  // made a later confirm pause under the memory cap. A classic durable message
+  // behind a deep backlog is paged the same way: delivery reloads it from the
+  // store, as RabbitMQ classic queues page bodies to disk. 300,000 queued 1 KiB
+  // bodies otherwise outgrew a 1 GiB container.
+  const deep = q.ready.length >= PAGE_AFTER_READY || q.ready.bytes >= PAGE_AFTER_BYTES;
+  if (rowId != null && (q.argsParsed.queueType === "quorum" || deep)) {
     msg.bodyBytes = src.body.length;
     msg.body = EMPTY_BODY;
     msg.propRaw = EMPTY_BODY;

@@ -49,6 +49,8 @@ export class Consensus {
   private autoPeers = new Set<string>();
   /** Peers that run one Raft group per quorum queue. */
   private qgroupPeers = new Set<string>();
+  /** Peers that take one `enqueue` for several queues (`queues`). */
+  manyPeers = new Set<string>();
   /** Quorum messages the quorum group holds, by `vhost\0queue\0id`, as their `enq` data. */
   live = new Map<string, Record<string, unknown>>();
 
@@ -73,8 +75,8 @@ export class Consensus {
 
   /** The `features` list for a hello payload. */
   features(): string[] {
-    if (!raftSupported()) return [];
-    const out = ["raft"];
+    if (!raftSupported()) return ["enqueue_many"];
+    const out = ["raft", "enqueue_many"];
     if (this.node || existsSync(join(this.dir(), "auto"))) out.push("raft_auto");
     if (this.node) out.push("raft_on");
     if (queueGroupsSupported()) out.push("raft_qgroups");
@@ -119,8 +121,11 @@ export class Consensus {
   }
 
   noteFeatures(peer: string, payload: Record<string, unknown> | undefined) {
-    if (!peer || !raftSupported()) return;
+    if (!peer) return;
     const list = Array.isArray(payload?.features) ? (payload!.features as unknown[]) : [];
+    if (list.includes("enqueue_many")) this.manyPeers.add(peer);
+    else this.manyPeers.delete(peer);
+    if (!raftSupported()) return;
     if (!list.includes("raft")) return;
     this.advertised.add(peer);
     if (list.includes("raft_auto")) this.autoPeers.add(peer);
@@ -265,11 +270,7 @@ export class Consensus {
 
   private async install(group: Group, state: unknown) {
     if (group === META) {
-      try {
-        this.broker.applySnapshot(state as ReturnType<Broker["snapshot"]>);
-      } catch {
-        /* a snapshot from the other implementation keeps what it cannot read */
-      }
+      this.broker.installMetaSnapshot(state);
       return;
     }
     const stream = this.queueOfGroup(group);

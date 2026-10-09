@@ -46,7 +46,7 @@ export function consumeReplies(this: Conn, channel: number, c: Ch, tag: string, 
         }),
       ),
       contentHeaderFrame(channel, msg.body.length, msg.propRaw.length ? msg.propRaw : emptyProps()),
-      bodyFrame(channel, msg.body),
+      bodyFrame(channel, msg.body, this.frameMax),
     ]);
     return true;
   };

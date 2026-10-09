@@ -14,11 +14,21 @@ import { metricsText } from "./metrics.ts";
 import { MqttSession } from "../protocols/mqtt.ts";
 import { StompSession } from "../protocols/stomp.ts";
 import { availableBytes } from "../disk.ts";
+import { readProps } from "../amqp10/map.ts";
+import type { Field } from "../codec.ts";
 import { cookieNameFromHost, requireUser as requireSession, sessions, tokenOf, verifyBasic, SESSION_LIFETIME_MS, type Session } from "./session.ts";
 
 /** Sessions behind each management WebSocket. */
 const wsSessions = new WeakMap<object, MqttSession | StompSession>();
 const textDecoder = new TextDecoder();
+function inspectionField(field: Field): unknown {
+  if (field.t === "V") return null;
+  if (field.t === "F") return Object.fromEntries(field.v.map(([key, value]) => [key, inspectionField(value)]));
+  if (field.t === "A") return field.v.map(inspectionField);
+  if (field.t === "x") return { encoding: "base64", value: Buffer.from(field.v).toString("base64") };
+  if (field.t === "other") return { type: "unknown", raw: field.raw };
+  return field.v;
+}
 /** STOMP frames go out as text WebSocket messages, as RabbitMQ sends them. */
 function textOf(frame: Uint8Array): string {
   return textDecoder.decode(frame);
@@ -562,26 +572,60 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const b = (body ?? {}) as { count?: number; ackmode?: string };
+      const b = (body ?? {}) as { count?: number; ackmode?: string; encoding?: string };
       const vhost = decodeURIComponent(params.vhost);
       const denied = access(request, set, vhost, [ ["read", params.name] ]);
       if (denied) return denied;
-      const count = Math.max(1, Math.min(b.count ?? 1, 20));
-      const noAck = b.ackmode === "ack_requeue_false" || b.ackmode === "reject_requeue_false";
+      const ackmode = b.ackmode ?? "ack_requeue_false";
+      const encoding = b.encoding ?? "auto";
+      if (!["ack_requeue_true", "ack_requeue_false", "reject_requeue_true", "reject_requeue_false"].includes(ackmode) || !["auto", "base64"].includes(encoding)) {
+        set.status = 400;
+        return { error: "bad_request", reason: "unsupported ackmode or encoding" };
+      }
+      if (b.count !== undefined && (!Number.isInteger(b.count) || b.count < 1)) {
+        set.status = 400;
+        return { error: "bad_request", reason: "count must be a positive integer" };
+      }
+      const count = Math.min(b.count ?? 1, 20);
+      const requeue = ackmode.endsWith("_true");
       const out = [];
-      for (let i = 0; i < count; i++) {
-        const msg = await broker.get(vhost, params.name, noAck || b.ackmode !== "ack_requeue_true");
-        if (!msg) break;
-        const payload = Buffer.from(msg.body).toString("utf8");
-        out.push({
-          payload,
-          payload_encoding: "string",
-          payload_bytes: msg.body.byteLength,
-          redelivered: msg.redelivered,
-          exchange: msg.exchange,
-          routing_key: msg.routingKey,
-          properties: {},
-        });
+      const held: string[] = [];
+      try {
+        for (let i = 0; i < count; i++) {
+          const msg = await broker.get(vhost, params.name, !requeue);
+          if (!msg) break;
+          if (requeue) held.push(msg.id);
+          const props = readProps(msg.propRaw);
+          const properties: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(props)) {
+            if (key !== "headers" && value !== undefined) properties[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)] = value;
+          }
+          const headers = props.headers.length ? props.headers : msg.headers;
+          if (headers.length || (msg.propRaw.length >= 2 && ((msg.propRaw[0]! << 8 | msg.propRaw[1]!) & 0x2000))) {
+            properties.headers = Object.fromEntries(headers.map(([key, value]) => [key, inspectionField(value)]));
+          }
+          const bytes = Buffer.from(msg.body);
+          const text = bytes.toString("utf8");
+          const binary = encoding === "base64" || !Buffer.from(text, "utf8").equals(bytes);
+          out.push({
+            payload: binary ? bytes.toString("base64") : text,
+            payload_encoding: binary ? "base64" : "string",
+            payload_bytes: msg.body.byteLength,
+            redelivered: msg.redelivered,
+            exchange: msg.exchange,
+            routing_key: msg.routingKey,
+            properties,
+          });
+        }
+      } finally {
+        // Hold the batch until all reads finish so a peek cannot fetch the
+        // same message repeatedly. Reverse requeue preserves local FIFO.
+        let failed: unknown;
+        for (const id of held.reverse()) {
+          try { await broker.nack(vhost, params.name, id, true); }
+          catch (error) { failed ??= error; }
+        }
+        if (failed) throw failed;
       }
       return out;
     })

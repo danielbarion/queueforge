@@ -43,6 +43,7 @@ export function load(this: Broker) {
   this.bindings = this.store.listBindings();
   this.e2e = this.store.listExchangeBindings();
   for (const p of this.store.listPolicies() as Policy[]) this.policies.push(p);
+  for (const row of this.store.listParameters("operator-policies")) this.operatorPolicies.push(JSON.parse(row.value) as Policy);
   this.applyPolicies();
   this.loadLimits();
   this.loadTopicPerms();

@@ -98,6 +98,43 @@ test("128 durable waits share one fsync without the interval", async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("two confirms started in one turn share one fsync without the interval", async () => {
+  // Two channels on one connection, one confirm each, parsed from one read.
+  const dir = mkdtempSync(join(tmpdir(), "qf-store-pair-"));
+  const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 400);
+  for (let round = 0; round < 3; round++) {
+    const started = performance.now();
+    store.insertMessage("/", "q", new Uint8Array([round, 1]), "{}");
+    const a = store.whenDurable();
+    store.insertMessage("/", "q", new Uint8Array([round, 2]), "{}");
+    const b = store.whenDurable();
+    await Promise.all([a, b]);
+    expect(performance.now() - started).toBeLessThan(10);
+    expect(store.fullFlushCount).toBe(round + 1);
+  }
+  expect(store.confirmsBeforeFsync).toBe(0);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a 50-confirm window shares one fsync without the interval", async () => {
+  // PerfTest's -c 50: more than the small group, fewer than the 128 window.
+  const dir = mkdtempSync(join(tmpdir(), "qf-store-mid-"));
+  const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 400);
+  const started = performance.now();
+  const waits: Promise<void>[] = [];
+  for (let i = 0; i < 50; i++) {
+    store.insertMessage("/", "q", new Uint8Array([i]), "{}");
+    waits.push(store.whenDurable());
+  }
+  await Promise.all(waits);
+  expect(performance.now() - started).toBeLessThan(50);
+  expect(store.fullFlushCount).toBe(1);
+  expect(store.confirmsBeforeFsync).toBe(0);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("a lone confirm is durable in the log before sqlite has the row", () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-shadow-"));
   const path = join(dir, "t.sqlite");

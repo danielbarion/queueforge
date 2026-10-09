@@ -5,7 +5,7 @@
  * management connection id created at open.
  */
 import { method, methodFrame, R, readTable } from "../codec.ts";
-import { heartbeatFrame } from "../codec.ts";
+import { FRAME_MAX, heartbeatFrame } from "../codec.ts";
 import { Conn } from "./listen.ts";
 
 /**
@@ -42,7 +42,7 @@ export async function handleStartOk(this: Conn, payload: Uint8Array) {
 export async function sendTune(this: Conn) {
   await this.send(methodFrame(0, method(10, 30, (w) => {
     w.u16(2047);
-    w.u32(131072);
+    w.u32(FRAME_MAX);
     w.u16(60);
   })));
 }
@@ -50,14 +50,16 @@ export async function sendTune(this: Conn) {
 /**
  * Record the heartbeat from connection.tune-ok and start the server timer.
  *
- * @param payload Method payload. Channel-max and frame-max are read and ignored.
+ * @param payload Method payload. Channel-max is ignored; frame-max sizes body frames.
  * A heartbeat of 0 disables the timer. Otherwise a heartbeat frame is sent
  * at half the negotiated interval, and never faster than once a second.
  */
 export function handleTuneOk(this: Conn, payload: Uint8Array) {
   const rr = new R(payload.subarray(4));
   rr.u16();
-  rr.u32();
+  // 0 means no limit; the broker still proposed FRAME_MAX, so stay under it.
+  const frameMax = rr.u32();
+  this.frameMax = frameMax > 0 ? Math.min(frameMax, FRAME_MAX) : FRAME_MAX;
   this.heartbeat = rr.u16();
   if (this.heartbeat > 0) {
     this.timer = setInterval(() => void this.send(heartbeatFrame()), Math.max(1000, (this.heartbeat * 1000) / 2));

@@ -23,7 +23,10 @@ import type { Consumer, LiveMsg, QueueLive } from "./model.ts";
 export type StreamEntry = {
   offset: number;
   ts: number;
-  body: Uint8Array;
+  /** Body bytes, also when the body is paged out. */
+  size: number;
+  /** Null once paged out: the row in `stream_messages` has it. */
+  body: Uint8Array | null;
   exchange: string;
   routingKey: string;
   headers: Array<[string, Field]>;
@@ -39,6 +42,10 @@ export type StreamState = {
   /** Offset the next append takes. */
   next: number;
   bytes: number;
+  /** Body bytes still held in `log`. Older bodies are read back from the store. */
+  resident: number;
+  /** Index in `log` of the oldest entry that may still hold its body. */
+  hot: number;
   readers: Array<{ consumer: Consumer; cursor: number }>;
   /** Highest Raft index applied, so a replay after a restart is skipped. */
   raftIndex: number;
@@ -54,17 +61,60 @@ export function parseMaxAge(text: string | null): number | null {
   return n * unit[m[2]!]!;
 }
 
-/** The stream state of `q`, loading stored entries on first use. */
+/**
+ * Body bytes one stream keeps in memory. Readers near the tail are served from
+ * memory; older entries are read back from sqlite, as RabbitMQ reads stream
+ * segments from disk. Without this a stream with no retention grew until the
+ * process was killed.
+ */
+const STREAM_RESIDENT_BYTES = 16 * 1024 * 1024;
+const NO_HEADERS: Array<[string, Field]> = [];
+const NO_BYTES = new Uint8Array(0);
+
+/** The stream state of `q`, loading the stored index on first use. Bodies stay in the store. */
 export function streamOf(this: Broker, q: QueueLive): StreamState {
   let s = this.streams.get(this.key(q.vhost, q.name));
   if (s) return s;
-  const log = this.store.listStreamEntries(q.vhost, q.name);
+  const index = this.store.listStreamIndex(q.vhost, q.name);
+  const log: StreamEntry[] = index.rows.map((r) => ({
+    offset: r.offset, ts: r.ts, size: r.size, body: null, exchange: "", routingKey: "", headers: NO_HEADERS, propRaw: NO_BYTES,
+  }));
   const first = log[0]?.offset ?? this.store.streamNextOffset(q.vhost, q.name);
   const next = log.length ? log[log.length - 1]!.offset + 1 : first;
   const applied = Number(this.store.listParameters("stream-raft").find((p) => p.vhost === q.vhost && p.name === q.name)?.value ?? 0);
-  s = { log, first, next, bytes: log.reduce((n, e) => n + e.body.length, 0), readers: [], raftIndex: Math.max(applied, log[log.length - 1]?.raftIndex ?? 0) };
+  s = {
+    log, first, next, bytes: log.reduce((n, e) => n + e.size, 0), resident: 0, hot: log.length,
+    readers: [], raftIndex: Math.max(applied, index.raftIndex),
+  };
   this.streams.set(this.key(q.vhost, q.name), s);
   return s;
+}
+
+/** Add an entry that holds its body, then page the oldest bodies past the budget. */
+function pushEntry(s: StreamState, entry: StreamEntry) {
+  s.log.push(entry);
+  s.bytes += entry.size;
+  if (entry.body) s.resident += entry.size;
+  while (s.resident > STREAM_RESIDENT_BYTES && s.hot < s.log.length - 1) {
+    const old = s.log[s.hot]!;
+    if (old.body) {
+      s.resident -= old.size;
+      old.body = null;
+      old.exchange = "";
+      old.routingKey = "";
+      old.headers = NO_HEADERS;
+      old.propRaw = NO_BYTES;
+    }
+    s.hot++;
+  }
+}
+
+/** The entry with its body, from memory or from the store. */
+function fullEntry(this: Broker, q: QueueLive, e: StreamEntry): StreamEntry | null {
+  if (e.body) return e;
+  const row = this.store.readStreamEntry(q.vhost, q.name, e.offset);
+  if (!row) return null;
+  return { ...row, size: row.body.length };
 }
 
 /** Append one message. Returns its offset. */
@@ -74,10 +124,9 @@ export function appendStream(
   src: { body: Uint8Array; exchange: string; routingKey: string; headers: Array<[string, Field]>; propRaw: Uint8Array },
 ): number {
   const s = this.streamOf(q);
-  const entry: StreamEntry = { offset: s.next++, ts: Date.now(), body: src.body, exchange: src.exchange, routingKey: src.routingKey, headers: src.headers, propRaw: src.propRaw };
-  s.log.push(entry);
-  s.bytes += entry.body.length;
-  this.store.appendStreamEntry(q.vhost, q.name, entry);
+  const entry: StreamEntry = { offset: s.next++, ts: Date.now(), size: src.body.length, body: src.body, exchange: src.exchange, routingKey: src.routingKey, headers: src.headers, propRaw: src.propRaw };
+  this.store.appendStreamEntry(q.vhost, q.name, { ...entry, body: src.body });
+  pushEntry(s, entry);
   this.trimStream(q);
   this.pumpStream(q);
   return entry.offset;
@@ -122,19 +171,20 @@ export function applyStreamAppend(this: Broker, q: QueueLive, index: number, dat
   const s = this.streamOf(q);
   if (index <= s.raftIndex) return;
   s.raftIndex = index;
+  const body = new Uint8Array(Buffer.from(String(data.body_b64 ?? ""), "base64"));
   const entry: StreamEntry = {
     offset: s.next++,
     ts: Number(data.ts ?? Date.now()),
-    body: new Uint8Array(Buffer.from(String(data.body_b64 ?? ""), "base64")),
+    size: body.length,
+    body,
     exchange: String(data.exchange ?? ""),
     routingKey: String(data.routing_key ?? ""),
     headers: (data.headers as StreamEntry["headers"]) ?? [],
     propRaw: new Uint8Array(Buffer.from(String(data.propRaw ?? ""), "base64")),
     raftIndex: index,
   };
-  s.log.push(entry);
-  s.bytes += entry.body.length;
-  this.store.appendStreamEntry(q.vhost, q.name, entry);
+  this.store.appendStreamEntry(q.vhost, q.name, { ...entry, body });
+  pushEntry(s, entry);
   this.trimStream(q);
   this.pumpStream(q);
 }
@@ -149,15 +199,19 @@ export function streamSnapshot(this: Broker, q: QueueLive) {
       first: s.first,
       next: s.next,
       raftIndex: s.raftIndex,
-      entries: s.log.map((e) => ({
-        offset: e.offset,
-        ts: e.ts,
-        body_b64: Buffer.from(e.body).toString("base64"),
-        exchange: e.exchange,
-        routing_key: e.routingKey,
-        headers: e.headers,
-        propRaw: Buffer.from(e.propRaw).toString("base64"),
-      })),
+      entries: s.log.flatMap((paged) => {
+        const e = fullEntry.call(this, q, paged);
+        if (!e) return [];
+        return [{
+          offset: e.offset,
+          ts: e.ts,
+          body_b64: Buffer.from(e.body!).toString("base64"),
+          exchange: e.exchange,
+          routing_key: e.routingKey,
+          headers: e.headers,
+          propRaw: Buffer.from(e.propRaw).toString("base64"),
+        }];
+      }),
     },
   };
 }
@@ -170,19 +224,22 @@ export function installStreamSnapshot(this: Broker, q: QueueLive, state: unknown
   this.store.deleteStreamLog(q.vhost, q.name);
   s.log = [];
   s.bytes = 0;
+  s.resident = 0;
+  s.hot = 0;
   for (const e of snap.entries ?? []) {
+    const body = new Uint8Array(Buffer.from(String(e.body_b64 ?? ""), "base64"));
     const entry: StreamEntry = {
       offset: Number(e.offset),
       ts: Number(e.ts),
-      body: new Uint8Array(Buffer.from(String(e.body_b64 ?? ""), "base64")),
+      size: body.length,
+      body,
       exchange: String(e.exchange ?? ""),
       routingKey: String(e.routing_key ?? ""),
       headers: (e.headers as StreamEntry["headers"]) ?? [],
       propRaw: new Uint8Array(Buffer.from(String(e.propRaw ?? ""), "base64")),
     };
-    s.log.push(entry);
-    s.bytes += entry.body.length;
-    this.store.appendStreamEntry(q.vhost, q.name, entry);
+    this.store.appendStreamEntry(q.vhost, q.name, { ...entry, body });
+    pushEntry(s, entry);
   }
   s.first = Number(snap.first ?? s.log[0]?.offset ?? 0);
   s.next = Number(snap.next ?? s.first);
@@ -205,12 +262,14 @@ export function trimStream(this: Broker, q: QueueLive): void {
     const tooBig = maxBytes != null && bytes > maxBytes;
     const tooOld = maxAge != null && now - e.ts > maxAge;
     if (!tooBig && !tooOld) break;
-    bytes -= e.body.length;
+    bytes -= e.size;
+    if (e.body) s.resident -= e.size;
     drop++;
   }
   if (!drop) return;
   const until = s.log[drop]!.offset;
   s.log.splice(0, drop);
+  s.hot = Math.max(0, s.hot - drop);
   s.bytes = bytes;
   s.first = until;
   this.store.deleteStreamEntriesBefore(q.vhost, q.name, until);
@@ -282,13 +341,15 @@ export function pumpStream(this: Broker, q: QueueLive): void {
   for (const reader of s.readers) {
     if (reader.cursor < s.first) reader.cursor = s.first;
     while (reader.cursor < s.next && reader.consumer.want()) {
-      const e = s.log[reader.cursor - s.first];
+      const at = s.log[reader.cursor - s.first];
+      if (!at) break;
+      const e = fullEntry.call(this, q, at);
       if (!e) break;
       reader.cursor++;
       const msg: LiveMsg = {
         id: `s-${e.offset}`,
         rowId: null,
-        body: e.body,
+        body: e.body!,
         exchange: e.exchange,
         routingKey: e.routingKey,
         headers: [...e.headers, ["x-stream-offset", { t: "l", v: e.offset }]],

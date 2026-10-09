@@ -2,6 +2,8 @@
 declare(strict_types=1);
 
 /** Management HTTP and Prometheus text. Routes match the Rust management API the SPA calls. */
+require_once __DIR__ . "/HttpMetadata.php";
+
 final class Http
 {
     /** @var array<string, string> */
@@ -21,12 +23,14 @@ final class Http
      * @var ?callable():void
      */
     public $onTopology = null;
+    public $onConnections = null;
+    public $onChannels = null;
 
     public function __construct(public Broker $broker, public string $uiRoot, public int $port, public bool $secure)
     {
     }
 
-    public function handle(string $raw): string
+    public function handle(string $raw, ?callable $onReply = null): string
     {
         $head = strstr($raw, "\r\n\r\n", true);
         if ($head === false) {
@@ -79,7 +83,40 @@ final class Http
         if (str_starts_with($path, '/api/')) {
             // A broker error answers this request; it must not end the process.
             try {
+                $this->authorize($method, $path, $user ?? '', $body);
+                if ($method === 'DELETE' && preg_match('#^/api/exchanges/[^/]+/(.*)$#', $path, $reserved) && (rawurldecode($reserved[1]) === '' || str_starts_with(rawurldecode($reserved[1]), 'amq.'))) return $this->json(400, ['error'=>'cannot_delete_builtin_exchange']);
+                if ($method === 'DELETE' && $path === '/api/users/' . rawurlencode($this->broker->identityName($user ?? ''))) return $this->json(400, ['error'=>'cannot_delete_current_user']);
+                if ($onReply !== null) {
+                    $json = $body === '' ? [] : json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+                    if (!is_array($json)) throw new RuntimeException('Invalid JSON request', 400);
+                    $stagePath = $path;
+                    if (preg_match('#^/api/(permissions|topic-permissions)/([^/]+)/([^/]+)(.*)$#', $path, $match)) {
+                        [$host, $name] = $this->permissionPath($match[2], $match[3]);
+                        $stagePath = '/api/' . $match[1] . '/' . rawurlencode($host) . '/' . rawurlencode($name) . $match[4];
+                    }
+                    $stage = HttpMetadata::stage($this->broker->root(), $method, $stagePath, $json);
+                    if ($stage !== null) {
+                        $commands = $stage['commands'];
+                        if (!($this->broker->cluster?->raftEnabled() ?? false)) {
+                            foreach ($commands as $row) $this->broker->root()->applyRaft('meta', $row['kind'], $row['data'], 0);
+                            $this->onTopologyChanged();
+                            return $stage['response'];
+                        }
+                        $submit = function (int $at) use (&$submit, $commands, $stage, $onReply): void {
+                            if ($at === count($commands)) { $onReply($stage['response']); return; }
+                            $row = $commands[$at];
+                            $this->broker->cluster->proposeMeta($row['kind'], $row['data'], function (bool $ok, ?string $error) use (&$submit, $at, $onReply): void {
+                                if ($ok) $submit($at + 1);
+                                else $onReply($this->json(503, ['error'=>'metadata_commit_failed', 'reason'=>$error]));
+                            });
+                        };
+                        $submit(0);
+                        return '';
+                    }
+                }
                 $response = $this->api($method, $path, $body, $user ?? '');
+            } catch (JsonException $err) {
+                return $this->json(400, ['error'=>'bad_request', 'reason'=>'Invalid JSON request']);
             } catch (RuntimeException $err) {
                 $code = $err->getCode();
                 $status = $code === 404 ? 404 : ($code === 403 ? 403 : 400);
@@ -90,6 +127,7 @@ final class Http
             // sends a whole snapshot, so doing it once here rather than per
             // route is equivalent and far harder to forget.
             if ($method !== 'GET' && str_starts_with($response, 'HTTP/1.1 2')) {
+                $this->broker->saveTopology();
                 $this->onTopologyChanged();
             }
             return $response;
@@ -128,7 +166,8 @@ final class Http
             return null;
         }
         [$name, $pass] = explode(':', $decoded, 2);
-        if (!$this->broker->verify($name, $pass) || !$this->broker->canManage($name)) {
+        $name = $this->broker->authenticate($name, $pass);
+        if ($name === null || !$this->broker->canManage($name)) {
             return null;
         }
         return $name;
@@ -139,7 +178,8 @@ final class Http
         $json = json_decode($body, true);
         $name = is_array($json) ? (string) ($json['username'] ?? '') : '';
         $pass = is_array($json) ? (string) ($json['password'] ?? '') : '';
-        if (!$this->broker->verify($name, $pass)) {
+        $name = $this->broker->authenticate($name, $pass);
+        if ($name === null) {
             return $this->json(401, ['error' => 'unauthorized']);
         }
         // A user with no management tag can publish over AMQP but has no
@@ -153,7 +193,7 @@ final class Http
         if ($this->secure) {
             $flags .= '; Secure';
         }
-        return $this->json(200, ['name' => $name, 'tags' => $this->broker->tags[$name] ?? ['administrator']], [
+        return $this->json(200, ['name' => $this->broker->identityName($name), 'tags' => $this->broker->userTags($name)], [
             'Set-Cookie: ' . $this->cookieName() . '=' . $token . '; ' . $flags,
         ]);
     }
@@ -166,7 +206,8 @@ final class Http
     private function userFromCookie(string $header): ?string
     {
         $token = $this->tokenFromCookie($header);
-        return $token === null ? null : ($this->sessions[$token] ?? null);
+        $user = $token === null ? null : ($this->sessions[$token] ?? null);
+        return $user !== null && $this->broker->canManage($user) ? $user : null;
     }
 
     /** The session token carried by a Cookie header, if any. */
@@ -182,41 +223,101 @@ final class Http
         return null;
     }
 
+    private function routeBroker(string $path): Broker
+    {
+        if (preg_match('#^/api/(queues|exchanges|bindings|consumers|policies|operator-policies)/([^/]+)#', $path, $m)) return $this->broker->forVhost(rawurldecode($m[2]));
+        return $this->broker;
+    }
+    private function permissionPath(string $a, string $b): array
+    {
+        $a = rawurldecode($a); $b = rawurldecode($b);
+        if (in_array($a, $this->broker->vhosts, true)) return [$a,$b];
+        if (isset($this->broker->users[$a]) && in_array($b, $this->broker->vhosts, true)) return [$b,$a];
+        return [$a,$b];
+    }
+    private function authorize(string $method, string $path, string $user, string $body): void
+    {
+        if (!$this->broker->canManage($user)) throw new RuntimeException('ACCESS_REFUSED - management tag required',403);
+        if (preg_match('#^/api/(definitions|users|permissions|topic-permissions|user-limits|vhost-limits)(/|$)#', $path) && !$this->broker->isAdmin($user)) throw new RuntimeException('ACCESS_REFUSED - administrator required', 403);
+        if (preg_match('#^/api/(queues|exchanges|bindings|consumers|policies|operator-policies)/([^/]+)#', $path, $scope) && !$this->broker->hasVhostAccess($user, rawurldecode($scope[2]))) throw new RuntimeException('ACCESS_REFUSED - vhost permission', 403);
+        if ($method !== 'GET' && preg_match('#^/api/(users|vhosts|permissions|topic-permissions|policies|operator-policies|user-limits|vhost-limits|nodes|parameters|definitions|feature-flags)(/|$)#',$path) && !$this->broker->isAdmin($user)) throw new RuntimeException('ACCESS_REFUSED - administrator required',403);
+        if ($method !== 'GET' && preg_match('#^/api/bindings/([^/]+)(.*)$#', $path, $match)) {
+            $vhost = rawurldecode($match[1]); $json = json_decode($body, true) ?? [];
+            if (preg_match('#^/e/([^/]+)/[qe]/([^/]+)(?:/(.*))?$#', $match[2], $names)) {
+                $source = rawurldecode($names[1]); $destination = rawurldecode($names[2]); $key = (string)($json['routing_key'] ?? rawurldecode($names[3] ?? ''));
+            } elseif ($match[2] === '') {
+                $source = (string)($json['source'] ?? ''); $destination = (string)($json['destination'] ?? ''); $key = (string)($json['routing_key'] ?? '');
+            } elseif (preg_match('#^/([^/]+)/([^/]+)/([^/]+)$#', $match[2], $names)) {
+                $source = rawurldecode($names[1]); $destination = rawurldecode($names[2]); $key = rawurldecode($names[3]);
+            } else throw new RuntimeException('Invalid binding path', 400);
+            $scope = $this->broker->forVhost($vhost);
+            if (!$this->broker->resourceAllowed($user, $vhost, 'read', $source) || !$this->broker->resourceAllowed($user, $vhost, 'write', $destination) || (($scope->exchanges[$source] ?? '') === 'topic' && !$scope->topicReadAllowed($user, $vhost, $source, $key))) throw new RuntimeException('ACCESS_REFUSED - binding permission', 403);
+        }
+        if (preg_match('#^/api/(queues|exchanges)/([^/]+)/([^/]+)(?:/(.*))?$#',$path,$m)) {
+            $vhost = rawurldecode($m[2]); $name = rawurldecode($m[3]); $suffix = $m[4] ?? '';
+            if ($suffix === 'publish' && ($this->broker->forVhost($vhost)->exchanges[$name] ?? '') === 'topic') {
+                $json = json_decode($body, true) ?? [];
+                if (!$this->broker->topicWriteAllowed($user, $vhost, $name, (string)($json['routing_key'] ?? ''))) throw new RuntimeException('ACCESS_REFUSED - topic permission', 403);
+            }
+            $op = $method === 'GET' || $suffix === 'get' || $suffix === 'contents' || $suffix === 'purge' ? 'read' : ($suffix === 'publish' ? 'write' : 'configure');
+            if (!$this->broker->hasVhostAccess($user,$vhost) || !$this->broker->resourceAllowed($user,$vhost,$op,$name)) throw new RuntimeException('ACCESS_REFUSED - resource permission',403);
+        }
+    }
+    private function definitions(): array
+    {
+        $root = $this->broker; $data = ['users'=>[], 'vhosts'=>array_map(static fn($name)=>['name'=>$name],$root->vhosts), 'queues'=>[], 'exchanges'=>[], 'bindings'=>[], 'permissions'=>[], 'policies'=>[], 'operator_policies'=>[], 'parameters'=>[]];
+        foreach ($root->users as $name=>$hash) $data['users'][] = ['name'=>$name,'password_hash'=>$hash,'hashing_algorithm'=>strlen(base64_decode($hash, true) ?: '') === 68 ? 'rabbit_password_hashing_sha512' : 'rabbit_password_hashing_sha256','tags'=>$root->tags[$name] ?? []];
+        foreach ($root->allBrokers() as $vhost=>$scope) {
+            foreach ($this->queueItems($scope) as $row) $data['queues'][]=$row;
+            foreach ($scope->exchanges as $name=>$type) $data['exchanges'][]=['name'=>$name,'vhost'=>$vhost,'type'=>$type,'durable'=>$scope->exchangeRows[$name]['durable'] ?? true,'auto_delete'=>$scope->exchangeRows[$name]['autoDelete'] ?? false,'internal'=>$scope->exchangeRows[$name]['internal'] ?? false];
+            foreach ($scope->bindings as $row) $data['bindings'][]=['source'=>$row['exchange'],'destination'=>$row['queue'],'destination_type'=>'queue','routing_key'=>$row['key'],'arguments'=>array_column($row['args'],1,0),'vhost'=>$vhost];
+            foreach ($scope->e2e as $row) $data['bindings'][]=['source'=>$row['source'],'destination'=>$row['destination'],'destination_type'=>'exchange','routing_key'=>$row['key'],'vhost'=>$vhost];
+        }
+        foreach ($root->permissions as $name=>$vhosts) foreach ($vhosts as $vhost=>$row) $data['permissions'][]=['user'=>$name,'vhost'=>$vhost]+$row;
+        foreach (['policies'=>'policies','operator_policies'=>'operatorPolicies'] as $key=>$field) foreach ($root->$field as $vhost=>$rows) foreach ($rows as $name=>$row) $data[$key][]=['name'=>$name,'vhost'=>$vhost]+$row;
+        foreach ($root->parameters as $component=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $name=>$value) $data['parameters'][]=compact('component','vhost','name','value');
+        return $data;
+    }
+
     private function api(string $method, string $path, string $body, string $user): string
     {
+        $broker = $this->routeBroker($path);
         if ($method === 'GET' && $path === '/api/whoami') {
-            return $this->json(200, ['name' => $user, 'tags' => $this->broker->tags[$user] ?? ['administrator']]);
+            return $this->json(200, ['name' => $broker->identityName($user), 'tags' => $broker->userTags($user)]);
         }
         if ($method === 'GET' && $path === '/api/overview') {
             return $this->json(200, $this->overview());
         }
         if ($method === 'GET' && $path === '/api/vhosts') {
             $items = [];
-            foreach ($this->broker->vhosts as $name) {
+            foreach ($broker->vhosts as $name) {
+                if (!$broker->hasVhostAccess($user, $name)) continue;
                 $items[] = ['name' => $name];
             }
             return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
         }
         if ($method === 'GET' && preg_match('#^/api/queues/([^/]+)$#', $path, $m) === 1) {
-            return $this->json(200, ['items' => $this->queueItems(), 'total_count' => count($this->broker->queues)]);
+            $items = array_values(array_filter($this->queueItems($broker), fn($row) => $broker->resourceAllowed($user, $broker->vhost, 'read', $row['name'])));
+            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
         }
         if ($method === 'PUT' && preg_match('#^/api/queues/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $json = json_decode($body, true);
             $args = is_array($json) && is_array($json['arguments'] ?? null) ? $json['arguments'] : [];
-            $this->broker->declareQueue(rawurldecode($m[2]), $args);
+            $broker->declareQueue(rawurldecode($m[2]), $args);
             return $this->json(201, ['name' => rawurldecode($m[2])]);
         }
         if ($method === 'GET' && preg_match('#^/api/exchanges/([^/]+)$#', $path, $m) === 1) {
             $items = [];
-            foreach ($this->broker->exchanges as $name => $type) {
-                $items[] = ['name' => $name, 'vhost' => '/', 'type' => $type, 'durable' => true, 'auto_delete' => false, 'internal' => false];
+            foreach ($broker->exchanges as $name => $type) {
+                if (!$broker->resourceAllowed($user, $broker->vhost, 'read', $name)) continue;
+                $items[] = ['name' => $name, 'vhost' => $broker->vhost, 'type' => $type, 'durable' => true, 'auto_delete' => false, 'internal' => false];
             }
             return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
         }
         if ($method === 'PUT' && preg_match('#^/api/exchanges/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $json = json_decode($body, true);
             $type = is_array($json) ? (string) ($json['type'] ?? 'direct') : 'direct';
-            $this->broker->declareExchange(rawurldecode($m[2]), $type);
+            $broker->declareExchange(rawurldecode($m[2]), $type);
             return $this->json(201, ['name' => rawurldecode($m[2])]);
         }
         // Parenthesised: mixing && and || without them meant a non-GET
@@ -224,13 +325,14 @@ final class Http
         // handled as a GET.
         if ($method === 'GET' && ($path === '/api/bindings/%2F' || preg_match('#^/api/bindings/([^/]+)$#', $path) === 1)) {
             $items = [];
-            foreach ($this->broker->bindings as $row) {
+            foreach ($broker->bindings as $row) {
+                if (!$broker->resourceAllowed($user, $broker->vhost, 'read', $row['exchange']) || !$broker->resourceAllowed($user, $broker->vhost, 'read', $row['queue'])) continue;
                 $items[] = [
                     'source' => $row['exchange'],
                     'destination' => $row['queue'],
                     'destination_type' => 'queue',
                     'routing_key' => $row['key'],
-                    'vhost' => '/',
+                    'vhost' => $broker->vhost,
                     'properties_key' => $row['key'],
                 ];
             }
@@ -247,35 +349,29 @@ final class Http
                     $args[] = [(string) $k, (string) $v];
                 }
             }
-            $this->broker->bind((string) $json['destination'], (string) $json['source'], (string) ($json['routing_key'] ?? ''), $args);
+            $broker->bind((string) $json['destination'], (string) $json['source'], (string) ($json['routing_key'] ?? ''), $args);
             return $this->json(201, ['routed' => true]);
         }
         if ($method === 'GET' && $path === '/api/users') {
             $items = [];
-            foreach (array_keys($this->broker->users) as $name) {
-                $items[] = ['name' => $name, 'tags' => $this->broker->tags[$name] ?? ['administrator']];
+            foreach (array_keys($broker->users) as $name) {
+                $items[] = ['name' => $name, 'tags' => $broker->tags[$name] ?? ['administrator']];
             }
             return $this->json(200, $items);
         }
         if ($method === 'GET' && $path === '/api/connections') {
-            return $this->json(200, ['items' => [], 'total_count' => $this->broker->prom['connections']]);
+            return $this->json(200, $this->onConnections ? ($this->onConnections)() : []);
         }
-        if ($method === 'GET' && $path === '/api/definitions') {
-            return $this->json(200, [
-                'vhosts' => [['name' => '/']],
-                'queues' => $this->queueItems(),
-                'exchanges' => $this->broker->exchanges,
-                'bindings' => $this->broker->bindings,
-            ]);
-        }
+        if ($method === 'GET' && $path === '/api/definitions') return $this->json(200, $this->definitions());
+
         // /api/channels has no backing state in this broker, so it stays an
         // empty list. permissions, policies and nodes are served by api2.
         if ($method === 'GET' && $path === '/api/channels') {
-            return $this->json(200, []);
+            return $this->json(200, $this->onChannels ? ($this->onChannels)() : []);
         }
         if ($method === 'GET' && $path === '/api/nodes') {
             $items = [];
-            foreach ($this->broker->members as $member) {
+            foreach ($broker->members as $member) {
                 $items[] = [
                     'name' => $member['id'],
                     'addr' => $member['addr'],
@@ -285,7 +381,7 @@ final class Http
             }
             if ($items === []) {
                 $items[] = [
-                    'name' => $this->broker->nodeId,
+                    'name' => $broker->nodeId,
                     'addr' => '',
                     'running' => true,
                     'type' => 'queueforge-php',
@@ -307,31 +403,32 @@ final class Http
      */
     private function api2(string $method, string $path, string $body, string $user): string
     {
+        $broker = $this->routeBroker($path);
         $json = json_decode($body, true);
         $json = is_array($json) ? $json : [];
 
         // Queues.
         if ($method === 'DELETE' && preg_match('#^/api/queues/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->queues[$name])) {
+            if (!isset($broker->queues[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
-            $this->broker->deleteQueue($name);
+            $broker->deleteQueue($name);
             return $this->status(204, '', 'application/json');
         }
-        if ($method === 'POST' && preg_match('#^/api/queues/([^/]+)/([^/]+)/purge$#', $path, $m) === 1) {
+        if (($method === 'POST' && preg_match('#^/api/queues/([^/]+)/([^/]+)/purge$#', $path, $m) === 1) || ($method === 'DELETE' && preg_match('#^/api/queues/([^/]+)/([^/]+)/contents$#', $path, $m) === 1)) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->queues[$name])) {
+            if (!isset($broker->queues[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
-            $n = $this->broker->purge($name);
+            $n = $broker->purge($name);
             // RabbitMQ answers 200 with the count, which management clients
             // display; a bare 204 leaves them with nothing to show.
             return $this->json(200, ['message_count' => $n]);
         }
         if ($method === 'POST' && preg_match('#^/api/queues/([^/]+)/([^/]+)/get$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->queues[$name])) {
+            if (!isset($broker->queues[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
             $count = max(1, (int) ($json['count'] ?? 1));
@@ -339,11 +436,11 @@ final class Http
             $items = [];
             $taken = [];
             while (count($items) < $count) {
-                $id = $this->broker->getReady($name);
+                $id = $broker->getReady($name);
                 if ($id === null) {
                     break;
                 }
-                $msg = $this->broker->msgs[$id];
+                $msg = $broker->msgs[$id];
                 $items[] = [
                     'payload' => $msg['body'],
                     'payload_bytes' => strlen($msg['body']),
@@ -351,22 +448,22 @@ final class Http
                     'routing_key' => $msg['key'] ?? $name,
                     'exchange' => $msg['exchange'] ?? '',
                     'redelivered' => (bool) ($msg['redelivered'] ?? false),
-                    'message_count' => $this->broker->readyCount($name),
+                    'message_count' => $broker->readyCount($name),
                 ];
                 $taken[] = $id;
             }
             foreach ($taken as $id) {
                 if ($requeue) {
-                    $this->broker->requeue($id);
+                    $broker->requeue($id);
                 } else {
-                    $this->broker->ack($id);
+                    $broker->ack($id);
                 }
             }
             return $this->json(200, $items);
         }
         if ($method === 'GET' && preg_match('#^/api/queues/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            foreach ($this->queueItems() as $item) {
+            foreach ($this->queueItems($broker) as $item) {
                 if ($item['name'] === $name) {
                     return $this->json(200, $item);
                 }
@@ -377,17 +474,17 @@ final class Http
         // Exchanges.
         if ($method === 'DELETE' && preg_match('#^/api/exchanges/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->exchanges[$name])) {
+            if (!isset($broker->exchanges[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
-            if (!$this->broker->deleteExchange($name)) {
+            if (!$broker->deleteExchange($name)) {
                 return $this->json(400, ['error' => 'a built-in exchange cannot be deleted']);
             }
             return $this->status(204, '', 'application/json');
         }
         if ($method === 'POST' && preg_match('#^/api/exchanges/([^/]+)/([^/]+)/publish$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->exchanges[$name])) {
+            if (!isset($broker->exchanges[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
             $payload = (string) ($json['payload'] ?? '');
@@ -397,7 +494,7 @@ final class Http
             }
             $props = is_array($json['properties'] ?? null) ? $json['properties'] : [];
             $mode = (int) ($props['delivery_mode'] ?? 1);
-            $result = $this->broker->publish(
+            $result = $broker->publish(
                 0,
                 0,
                 0,
@@ -410,13 +507,13 @@ final class Http
         }
         if ($method === 'GET' && preg_match('#^/api/exchanges/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $name = rawurldecode($m[2]);
-            if (!isset($this->broker->exchanges[$name])) {
+            if (!isset($broker->exchanges[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
             return $this->json(200, [
                 'name' => $name,
-                'vhost' => '/',
-                'type' => $this->broker->exchanges[$name],
+                'vhost' => $broker->vhost,
+                'type' => $broker->exchanges[$name],
                 'durable' => true,
                 'auto_delete' => false,
                 'internal' => false,
@@ -425,13 +522,13 @@ final class Http
 
         // Bindings.
         if ($method === 'DELETE' && preg_match('#^/api/bindings/([^/]+)/([^/]+)/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            $this->broker->unbind(rawurldecode($m[3]), rawurldecode($m[2]), rawurldecode($m[4]));
+            $broker->unbind(rawurldecode($m[3]), rawurldecode($m[2]), rawurldecode($m[4]));
             return $this->status(204, '', 'application/json');
         }
 
         // Users.
         if ($method === 'PUT' && preg_match('#^/api/users/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $tags = [];
@@ -443,7 +540,7 @@ final class Http
                 }
             }
             try {
-                $this->broker->putUser(
+                $broker->putUser(
                     rawurldecode($m[1]),
                     (string) ($json['password'] ?? ''),
                     $tags,
@@ -455,30 +552,30 @@ final class Http
             return $this->status(201, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/users/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $name = rawurldecode($m[1]);
             if ($name === $user) {
                 return $this->json(400, ['error' => 'a user cannot delete itself']);
             }
-            return $this->broker->deleteUser($name)
+            return $broker->deleteUser($name)
                 ? $this->status(204, '', 'application/json')
                 : $this->json(404, ['error' => 'not found']);
         }
 
         // Permissions.
         if ($method === 'PUT' && preg_match('#^/api/permissions/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
-            $name = rawurldecode($m[1]);
-            if (!isset($this->broker->users[$name])) {
+            [$vhost, $name] = $this->permissionPath($m[1], $m[2]);
+            if (!isset($broker->users[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
-            $this->broker->setPermissions(
+            $broker->setPermissions(
                 $name,
-                rawurldecode($m[2]),
+                $vhost,
                 (string) ($json['configure'] ?? ''),
                 (string) ($json['write'] ?? ''),
                 (string) ($json['read'] ?? ''),
@@ -486,16 +583,17 @@ final class Http
             return $this->status(201, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/permissions/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
-            return $this->broker->clearPermissions(rawurldecode($m[1]), rawurldecode($m[2]))
+            [$vhost, $name] = $this->permissionPath($m[1], $m[2]);
+            return $broker->clearPermissions($name, $vhost)
                 ? $this->status(204, '', 'application/json')
                 : $this->json(404, ['error' => 'not found']);
         }
         if ($method === 'GET' && $path === '/api/permissions') {
             $items = [];
-            foreach ($this->broker->permissions as $name => $byVhost) {
+            foreach ($broker->permissions as $name => $byVhost) {
                 foreach ($byVhost as $vhost => $row) {
                     $items[] = ['user' => $name, 'vhost' => $vhost] + $row;
                 }
@@ -505,34 +603,32 @@ final class Http
 
         // Vhosts.
         if ($method === 'PUT' && preg_match('#^/api/vhosts/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $name = rawurldecode($m[1]);
-            if (!in_array($name, $this->broker->vhosts, true)) {
-                $this->broker->vhosts[] = $name;
+            if (array_key_exists('tracing', $json) && in_array($name, $broker->vhosts, true)) $broker->forVhost($name)->tracing = $json['tracing'] === true;
+            if (!in_array($name, $broker->vhosts, true)) {
+                $broker->vhosts[] = $name;
             }
             return $this->status(201, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/vhosts/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $name = rawurldecode($m[1]);
             if ($name === '/') {
                 return $this->json(400, ['error' => 'the default vhost cannot be deleted']);
             }
-            $this->broker->vhosts = array_values(array_filter(
-                $this->broker->vhosts,
-                static fn (string $row): bool => $row !== $name,
-            ));
+            $broker->deleteVhost($name);
             return $this->status(204, '', 'application/json');
         }
 
         // Policies and operator policies.
         foreach ([['policies', 'policies'], ['operator-policies', 'operatorPolicies']] as [$segment, $field]) {
             if ($method === 'PUT' && preg_match('#^/api/' . $segment . '/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-                if (!$this->broker->isAdmin($user)) {
+                if (!$broker->isAdmin($user)) {
                     return $this->json(403, ['error' => 'forbidden']);
                 }
                 $error = Policy::validate($json);
@@ -540,39 +636,39 @@ final class Http
                     return $this->json(400, ['reason' => $error]);
                 }
                 $definition = is_array($json['definition'] ?? null) ? $json['definition'] : [];
-                $this->broker->{$field}[rawurldecode($m[1])][rawurldecode($m[2])] = [
+                $broker->{$field}[rawurldecode($m[1])][rawurldecode($m[2])] = [
                     'pattern' => (string) ($json['pattern'] ?? '.*'),
                     'definition' => $definition,
                     'priority' => (int) ($json['priority'] ?? 0),
                     'apply-to' => (string) ($json['apply-to'] ?? 'all'),
                 ];
                 // A policy edit reaches queues that already exist.
-                $this->broker->applyPolicies();
+                foreach ($broker->allBrokers() as $scope) $scope->applyPolicies();
                 return $this->status(201, '', 'application/json');
             }
             if ($method === 'DELETE' && preg_match('#^/api/' . $segment . '/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-                if (!$this->broker->isAdmin($user)) {
+                if (!$broker->isAdmin($user)) {
                     return $this->json(403, ['error' => 'forbidden']);
                 }
                 $vhost = rawurldecode($m[1]);
                 $name = rawurldecode($m[2]);
-                if (!isset($this->broker->{$field}[$vhost][$name])) {
+                if (!isset($broker->{$field}[$vhost][$name])) {
                     return $this->json(404, ['error' => 'not found']);
                 }
-                unset($this->broker->{$field}[$vhost][$name]);
+                unset($broker->{$field}[$vhost][$name]);
                 return $this->status(204, '', 'application/json');
             }
             if ($method === 'GET' && preg_match('#^/api/' . $segment . '/([^/]+)$#', $path, $m) === 1) {
                 $vhost = rawurldecode($m[1]);
                 $items = [];
-                foreach ($this->broker->{$field}[$vhost] ?? [] as $name => $row) {
+                foreach ($broker->{$field}[$vhost] ?? [] as $name => $row) {
                     $items[] = ['vhost' => $vhost, 'name' => $name] + $row;
                 }
                 return $this->json(200, $items);
             }
             if ($method === 'GET' && $path === '/api/' . $segment) {
                 $items = [];
-                foreach ($this->broker->{$field} as $vhost => $rows) {
+                foreach ($broker->{$field} as $vhost => $rows) {
                     foreach ($rows as $name => $row) {
                         $items[] = ['vhost' => $vhost, 'name' => $name] + $row;
                     }
@@ -583,7 +679,7 @@ final class Http
 
         // Limits.
         if ($method === 'PUT' && preg_match('#^/api/(user|vhost)-limits/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $allowed = $m[1] === 'user'
@@ -593,56 +689,62 @@ final class Http
                 return $this->json(400, ['reason' => 'unknown limit ' . $m[3]]);
             }
             $field = $m[1] === 'user' ? 'userLimits' : 'vhostLimits';
-            $this->broker->{$field}[rawurldecode($m[2])][$m[3]] = (int) ($json['value'] ?? 0);
+            $broker->{$field}[rawurldecode($m[2])][$m[3]] = (int) ($json['value'] ?? 0);
             return $this->status(204, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/(user|vhost)-limits/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $field = $m[1] === 'user' ? 'userLimits' : 'vhostLimits';
-            unset($this->broker->{$field}[rawurldecode($m[2])][$m[3]]);
+            unset($broker->{$field}[rawurldecode($m[2])][$m[3]]);
             return $this->status(204, '', 'application/json');
         }
         if ($method === 'GET' && $path === '/api/limits') {
             return $this->json(200, [
-                'user_limits' => $this->broker->userLimits,
-                'vhost_limits' => $this->broker->vhostLimits,
+                'user_limits' => $broker->userLimits,
+                'vhost_limits' => $broker->vhostLimits,
             ]);
+        }
+
+        if ($method === 'GET' && preg_match('#^/api/(user|vhost)-limits/([^/]+)$#', $path, $m)) {
+            $field = $m[1] === 'user' ? 'userLimits' : 'vhostLimits'; $name = rawurldecode($m[2]);
+            return $this->json(200, [[$m[1] => $name, 'value' => $broker->{$field}[$name] ?? new stdClass()]]);
         }
 
         // Topic permissions.
         if ($method === 'GET' && $path === '/api/topic-permissions') {
             $items = [];
-            foreach ($this->broker->topicPermissions as $name => $byExchange) {
-                foreach ($byExchange as $exchange => $row) {
-                    $items[] = ['user' => $name, 'vhost' => '/', 'exchange' => $exchange] + $row;
-                }
+            foreach ($broker->topicPermissions as $name => $hosts) foreach ($hosts as $vhost => $exchanges) foreach ($exchanges as $exchange => $row) {
+                if (is_array($row)) $items[] = ['user' => $name, 'vhost' => $vhost, 'exchange' => $exchange] + $row;
             }
             return $this->json(200, $items);
         }
         if ($method === 'PUT' && preg_match('#^/api/topic-permissions/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
-            $this->broker->topicPermissions[rawurldecode($m[1])][(string) ($json['exchange'] ?? '')] = [
+            [$vhost, $name] = $this->permissionPath($m[1], $m[2]);
+            $broker->topicPermissions[$name][$vhost][(string) ($json['exchange'] ?? '')] = [
                 'write' => (string) ($json['write'] ?? ''),
                 'read' => (string) ($json['read'] ?? ''),
             ];
             return $this->status(201, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/topic-permissions/([^/]+)/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
-            unset($this->broker->topicPermissions[rawurldecode($m[1])][rawurldecode($m[3])]);
+            [$vhost, $name] = $this->permissionPath($m[1], $m[2]);
+            unset($broker->topicPermissions[$name][$vhost][rawurldecode($m[3])]);
             return $this->status(204, '', 'application/json');
         }
 
         // Feature flags.
         if ($method === 'GET' && $path === '/api/feature-flags') {
             $items = [];
-            foreach ($this->broker->featureFlags as $name => $on) {
+            $flags = $broker->featureFlags + ['raft'=>$broker->cluster?->raftEnabled() ?? false, 'transient_nonexcl_queues'=>$broker->transientNonexcl];
+            foreach ($flags as $name => $on) {
                 $items[] = [
                     'name' => $name,
                     'state' => $on ? 'enabled' : 'disabled',
@@ -651,25 +753,33 @@ final class Http
             }
             return $this->json(200, $items);
         }
-        if ($method === 'POST' && preg_match('#^/api/feature-flags/([^/]+)/(enable|disable)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+        if (in_array($method, ['POST','PUT'], true) && preg_match('#^/api/feature-flags/([^/]+)/(enable|disable)$#', $path, $m) === 1) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $name = rawurldecode($m[1]);
-            if (!isset($this->broker->featureFlags[$name])) {
+            if ($name === 'raft') {
+                if ($m[2] === 'disable') return $this->json(400, ['reason'=>'Raft cannot be disabled once enabled']);
+                return ($broker->cluster?->enableRaft() ?? false) ? $this->status(204, '', 'application/json') : $this->json(400, ['reason'=>'every configured voter must support Raft']);
+            }
+            if ($name === 'transient_nonexcl_queues') {
+                $broker->transientNonexcl = $m[2] === 'enable';
+                return $this->status(204, '', 'application/json');
+            }
+            if (!isset($broker->featureFlags[$name])) {
                 return $this->json(404, ['error' => 'not found']);
             }
             // A required flag cannot be turned off once it is on.
             if ($m[2] === 'disable' && $name === 'quorum_queues') {
                 return $this->json(400, ['reason' => 'feature flag quorum_queues cannot be disabled']);
             }
-            $this->broker->featureFlags[$name] = $m[2] === 'enable';
+            $broker->featureFlags[$name] = $m[2] === 'enable';
             return $this->status(204, '', 'application/json');
         }
 
         // Nodes and membership.
         if ($method === 'GET' && $path === '/api/cluster-name') {
-            return $this->json(200, ['name' => $this->broker->nodeId]);
+            return $this->json(200, ['name' => $broker->nodeId]);
         }
         if ($method === 'POST' && $path === '/api/nodes') {
             $id = (string) ($json['id'] ?? '');
@@ -678,65 +788,65 @@ final class Http
                 return $this->json(400, ['error' => 'a node needs an id and an addr']);
             }
             $members = array_values(array_filter(
-                $this->broker->members,
+                $broker->members,
                 static fn (array $row): bool => $row['id'] !== $id,
             ));
             $members[] = ['id' => $id, 'addr' => $addr];
-            $this->broker->members = $members;
-            $this->broker->refreshRole();
+            $broker->members = $members;
+            $broker->refreshRole();
             $this->onMembersChanged();
             return $this->json(201, $members);
         }
         if ($method === 'DELETE' && preg_match('#^/api/nodes/([^/]+)$#', $path, $m) === 1) {
             $id = rawurldecode($m[1]);
-            if ($id === $this->broker->nodeId) {
+            if ($id === $broker->nodeId) {
                 return $this->json(400, ['error' => 'a node cannot remove itself']);
             }
             // A node that is the stored home of a classic queue stays.
-            foreach ($this->broker->queues as $name => $queue) {
-                if ($this->broker->home($name) === $id) {
+            foreach ($broker->queues as $name => $queue) {
+                if ($broker->home($name) === $id) {
                     return $this->json(400, ['error' => "node $id is the home of queue $name"]);
                 }
             }
             $members = array_values(array_filter(
-                $this->broker->members,
+                $broker->members,
                 static fn (array $row): bool => $row['id'] !== $id,
             ));
             if ($members === []) {
                 return $this->json(400, ['error' => 'the member list cannot become empty']);
             }
-            $this->broker->members = $members;
-            $this->broker->refreshRole();
+            $broker->members = $members;
+            $broker->refreshRole();
             $this->onMembersChanged();
             return $this->status(204, '', 'application/json');
         }
 
         // Definitions import.
         if ($method === 'POST' && $path === '/api/definitions') {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             foreach ((array) ($json['queues'] ?? []) as $row) {
                 if (is_array($row) && isset($row['name'])) {
                     $args = is_array($row['arguments'] ?? null) ? $row['arguments'] : [];
-                    $this->broker->declareQueue((string) $row['name'], $args);
+                    $broker->declareQueue((string) $row['name'], $args);
                 }
             }
             foreach ((array) ($json['exchanges'] ?? []) as $row) {
                 if (is_array($row) && isset($row['name'])) {
-                    $this->broker->declareExchange((string) $row['name'], (string) ($row['type'] ?? 'direct'));
+                    $broker->declareExchange((string) $row['name'], (string) ($row['type'] ?? 'direct'));
                 }
             }
             foreach ((array) ($json['bindings'] ?? []) as $row) {
                 if (is_array($row) && isset($row['source'], $row['destination'])) {
                     if (($row['destination_type'] ?? 'queue') === 'exchange') {
-                        $this->broker->bindExchange(
+                        $broker->bindExchange(
                             (string) $row['destination'],
                             (string) $row['source'],
                             (string) ($row['routing_key'] ?? ''),
                         );
                     } else {
-                        $this->broker->bind(
+                        $broker->bind(
                             (string) $row['destination'],
                             (string) $row['source'],
                             (string) ($row['routing_key'] ?? ''),
@@ -750,10 +860,10 @@ final class Http
         // Read-only views the SPA asks for.
         if ($method === 'GET' && preg_match('#^/api/consumers/([^/]+)$#', $path) === 1) {
             $items = [];
-            foreach ($this->broker->queues as $name => $queue) {
+            foreach ($broker->queues as $name => $queue) {
                 foreach ($queue['consumers'] as $consumer) {
                     $items[] = [
-                        'queue' => ['name' => $name, 'vhost' => '/'],
+                        'queue' => ['name' => $name, 'vhost' => $broker->vhost],
                         'consumer_tag' => $consumer['tag'],
                         'ack_required' => ($consumer['noAck'] ?? false) !== true,
                         'prefetch_count' => (int) ($consumer['credit'] ?? 0),
@@ -769,7 +879,7 @@ final class Http
             return $this->json(200, []);
         }
         if ($method === 'DELETE' && preg_match('#^/api/deprecated-features/([^/]+)$#', $path) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             // Nothing is gated on a deprecated feature, so acknowledging one
@@ -777,7 +887,7 @@ final class Http
             return $this->status(204, '', 'application/json');
         }
         if ($method === 'DELETE' && preg_match('#^/api/connections/([^/]+)$#', $path) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             // Connections are not tracked by name in the management view, so
@@ -785,15 +895,15 @@ final class Http
             return $this->json(404, ['error' => 'not found']);
         }
         if ($method === 'PUT' && preg_match('#^/api/parameters/(shovel|federation-upstream)/([^/]+)/([^/]+)$#', $path, $m) === 1) {
-            if (!$this->broker->isAdmin($user)) {
+            if (!$broker->isAdmin($user)) {
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $value = is_array($json['value'] ?? null) ? $json['value'] : [];
-            $this->broker->parameters[$m[1]][rawurldecode($m[2])][rawurldecode($m[3])] = $value;
+            $broker->parameters[$m[1]][rawurldecode($m[2])][rawurldecode($m[3])] = $value;
             if ($m[1] === 'federation-upstream') {
                 $uri = (string) ($value['uri'] ?? '');
                 if ($uri !== '') {
-                    $this->broker->fedUpstreams[rawurldecode($m[3])] = $uri;
+                    $broker->fedUpstreams[rawurldecode($m[3])] = $uri;
                 }
             }
             return $this->status(201, '', 'application/json');
@@ -818,23 +928,25 @@ final class Http
     }
 
     /** @return list<array<string, mixed>> */
-    private function queueItems(): array
+    private function queueItems(?Broker $scope = null): array
     {
+        $broker = $scope ?? $this->broker;
         $items = [];
-        foreach ($this->broker->queues as $name => $queue) {
+        foreach ($broker->queues as $name => $queue) {
             $ready = count($queue['ready']);
             $items[] = [
                 'name' => $name,
-                'vhost' => '/',
-                'durable' => true,
-                'exclusive' => false,
-                'auto_delete' => false,
+                'vhost' => $broker->vhost,
+                'durable' => $queue['durable'] ?? true,
+                'exclusive' => $queue['exclusive'] ?? false,
+                'auto_delete' => $queue['autoDelete'] ?? false,
                 'state' => 'running',
                 'messages' => $ready,
                 'messages_ready' => $ready,
                 'messages_unacknowledged' => 0,
                 'consumers' => count($queue['consumers']),
                 'type' => $queue['args']['queueType'] ?? 'classic',
+                'arguments' => (object) ($queue['declaredArgs'] ?? []),
             ];
         }
         return $items;

@@ -78,6 +78,8 @@ export class Conn {
   closed = false;
   channels = new Map<number, Ch>();
   heartbeat = 0;
+  /** Negotiated in connection.tune-ok. Body frames are split to fit. */
+  frameMax = 131072;
   timer: Timer | null = null;
   writeChain: Promise<unknown> = Promise.resolve();
   /** Slow-path writes still queued on `writeChain`. The idle path writes directly. */
@@ -282,6 +284,11 @@ export function startAmqp(host: string, port: number, broker: Broker, reusePort 
   return Bun.listen(options as unknown as Bun.TCPSocketListenOptions<Conn>);
 }
 
+/** The bytes of a node socket read, without copying them. Each read is a fresh Buffer. */
+function viewOf(buf: Buffer): Uint8Array {
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
+}
+
 /** Run one adopted TCP socket as an AMQP connection. The parent already accepted it. */
 export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = true): Conn {
   socket.setNoDelay(true);
@@ -315,7 +322,7 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = tr
     }
   };
   socket.on("data", (buf: Buffer) => {
-    void conn.push(new Uint8Array(buf)).catch(fail);
+    void conn.push(viewOf(buf)).catch(fail);
   });
   socket.on("close", () => {
     conn.closed = true;
@@ -393,7 +400,7 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
     }
   };
   socket.on("data", (buf: Buffer) => {
-    void conn.push(new Uint8Array(buf)).catch(fail);
+    void conn.push(viewOf(buf)).catch(fail);
   });
   socket.on("error", fail);
   socket.resume();

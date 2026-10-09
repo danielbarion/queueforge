@@ -521,19 +521,26 @@ export class Cluster {
     if (op === "quorum_append" || op === "enqueue") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
       const decoded = decodeQuorumAppend(p);
-      const q = this.broker.queues.get(this.broker.key(decoded.vhost, decoded.queue));
-      if (!q) throw new Error("NOT_FOUND");
-      const ok = this.broker.enqueueLocal(q, {
-        body: decoded.body,
-        exchange: decoded.exchange,
-        routingKey: decoded.routingKey,
-        headers: decoded.headers,
-        propRaw: decoded.propRaw,
-        persistent: decoded.persistent,
-        priority: decoded.priority,
-        expiration: decoded.expiration,
-        id: decoded.messageId,
-      }, 0);
+      // `queues` (advertised as enqueue_many): one copy of a fanout for every
+      // queue this process homes, so the body crosses the wire once.
+      const names = op === "enqueue" && Array.isArray(p.queues) ? (p.queues as unknown[]).map(String) : [decoded.queue];
+      let ok = true;
+      for (const name of names) {
+        const q = this.broker.queues.get(this.broker.key(decoded.vhost, name));
+        if (!q) throw new Error("NOT_FOUND");
+        const stored = this.broker.enqueueLocal(q, {
+          body: decoded.body,
+          exchange: decoded.exchange,
+          routingKey: decoded.routingKey,
+          headers: decoded.headers,
+          propRaw: decoded.propRaw,
+          persistent: decoded.persistent,
+          priority: decoded.priority,
+          expiration: decoded.expiration,
+          id: names.length > 1 ? undefined : decoded.messageId,
+        }, 0);
+        if (!stored) ok = false;
+      }
       // A resolved false is "not stored". The reply envelope must be ok:false,
       // or the caller counts the peer as a durable copy.
       if (op === "quorum_append" && !ok) throw new Error("NOT_STORED");

@@ -5,6 +5,9 @@ declare(strict_types=1);
  * Single-node and clustered queues. A classic confirm is not released until the
  * covering fsync. A quorum confirm also waits for a durable majority.
  */
+require_once __DIR__ . "/Streams.php";
+require_once __DIR__ . "/Security.php";
+
 final class Broker
 {
     /** @var array<string, array{ready: list<int>, consumers: list<array{conn:int,ch:int,tag:string,credit:int}>}> */
@@ -30,6 +33,7 @@ final class Broker
     public array $permissions = [];
     /** @var array<string, array<string, array<string, mixed>>> vhost to name to body */
     public array $policies = [];
+    public bool $raftApplying = false;
     /** @var array<string, array<string, array<string, mixed>>> */
     public array $operatorPolicies = [];
     /** @var array<string, array<string, array{write:string,read:string}>> user to exchange */
@@ -51,6 +55,10 @@ final class Broker
     /** @var array<int, string> Connection ID to authenticated username. */
     public array $userByConn = [];
     public array $currentUsers = [];
+    public array $authConfig = [];
+    /** Runtime identities keyed by credentials, never persisted as internal users. */
+    public array $externalPrincipals = [];
+    private ?string $externalIdentitySecret = null;
     /**
      * Feature flags. Named after Bun's set so the management UI sees the same
      * shape; this broker has no code paths keyed off them.
@@ -73,9 +81,11 @@ final class Broker
         'amq.headers' => 'headers',
         'amq.match' => 'headers',
         'amq.rabbitmq.event' => 'topic',
+        'amq.rabbitmq.trace' => 'topic',
     ];
     /** True while the broker itself publishes, which may use an internal exchange. */
     public bool $internalPublish = false;
+    public bool $tracing = false;
     /**
      * Exchange rows beyond the kind: durability, auto-delete, internal, and
      * the alternate exchange.
@@ -138,7 +148,7 @@ final class Broker
         'dlxDeliveryLimit' => 0,
     ];
 
-    public function __construct(public Store $store, public string $userFile)
+    public function __construct(public Store $store, public string $userFile, private ?Broker $registry = null, public string $vhost = "/")
     {
         if (is_file($userFile)) {
             $decoded = json_decode((string) file_get_contents($userFile), true);
@@ -162,7 +172,7 @@ final class Broker
                                 $tags[] = $tag;
                             }
                         }
-                        $this->tags[$name] = $tags === [] ? ['administrator'] : $tags;
+                        $this->tags[$name] = array_key_exists('tags', $row) ? $tags : ['administrator'];
                         if (is_array($row['permissions'] ?? null)) {
                             $this->permissions[$name] = $row['permissions'];
                         }
@@ -188,6 +198,7 @@ final class Broker
                 'exchange' => (string) ($meta['exchange'] ?? ''),
                 'key' => (string) ($meta['key'] ?? $msg['queue']),
                 'priority' => (int) ($meta['priority'] ?? 0),
+                'notBefore' => $meta['notBefore'] ?? null,
                 'expires' => isset($meta['expires']) && $meta['expires'] !== null ? (int) $meta['expires'] : null,
                 'headers' => $headers,
                 'deliveries' => (int) ($meta['deliveries'] ?? 0),
@@ -200,6 +211,13 @@ final class Broker
                 $this->nextId = $msg['id'] + 1;
             }
         }
+        if ($this->registry === null && is_file($this->dataDir() . '/topology.json')) {
+            $state = json_decode((string) file_get_contents($this->dataDir() . '/topology.json'), true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($state)) throw new RuntimeException('Invalid topology state');
+            $this->savedTopology = $state; $this->vhosts = $state['vhosts'] ?? ['/'];
+            foreach (['policies','operatorPolicies','topicPermissions','vhostLimits','userLimits','parameters','featureFlags'] as $field) if (isset($state[$field])) $this->$field = $state[$field];
+            $this->restoreTopology($state['states']['/'] ?? []);
+        }
     }
 
     /**
@@ -207,6 +225,393 @@ final class Broker
      * since a persisted queue already passed them and its declared arguments
      * are not in the log.
      */
+    public function dataDir(): string { return dirname($this->store->path); }
+    private array $vhostBrokers = [];
+    private array $streams = [];
+    private bool $loadingTopology = false;
+    private array $savedTopology = [];
+
+    public function root(): Broker { return $this->registry ?? $this; }
+    public function forVhost(string $vhost): Broker
+    {
+        $root = $this->root();
+        if (!in_array($vhost, $root->vhosts, true)) throw new RuntimeException("NOT_FOUND - vhost '$vhost'", 404);
+        if ($vhost === '/') return $root;
+        if (!isset($root->vhostBrokers[$vhost])) {
+            $dir = $root->dataDir() . '/vhosts/' . bin2hex($vhost);
+            $child = new Broker(new Store($dir . '/messages.log'), $root->userFile, $root, $vhost);
+            foreach (['users','tags','permissions','topicPermissions','userLimits','vhostLimits','vhosts','policies','operatorPolicies','parameters','featureFlags','nodeId','members','cluster','prom','userByConn','currentUsers','authConfig','externalPrincipals'] as $field) $child->$field =& $root->$field;
+            $root->vhostBrokers[$vhost] = $child;
+            $child->restoreTopology($root->savedTopology['states'][$vhost] ?? []);
+        }
+        return $root->vhostBrokers[$vhost];
+    }
+    public $onDeleteVhost = null;
+    public $onDeleteQueue = null;
+    public function deleteVhost(string $name): void
+    {
+        $root = $this->root();
+        if ($name === '/') throw new RuntimeException('The default vhost cannot be deleted', 406);
+        if (!in_array($name, $root->vhosts, true)) return;
+        if ($root->onDeleteVhost !== null) ($root->onDeleteVhost)($name);
+        $path = $root->dataDir() . '/vhosts/' . bin2hex($name);
+        self::removeTree($path);
+        unset($root->vhostBrokers[$name], $root->savedTopology['states'][$name]);
+        $root->vhosts = array_values(array_filter($root->vhosts, static fn($host) => $host !== $name));
+        foreach (['policies','operatorPolicies','vhostLimits'] as $field) unset($root->{$field}[$name]);
+        foreach ($root->permissions as $user => $hosts) unset($root->permissions[$user][$name], $root->topicPermissions[$user][$name]);
+        foreach ($root->parameters as $component => $hosts) unset($root->parameters[$component][$name]);
+        $root->saveUsers(); $root->saveTopology();
+    }
+    private static function removeTree(string $path): void
+    {
+        if (is_link($path) || is_file($path)) { if (!unlink($path)) throw new RuntimeException('Cannot remove broker resource'); return; }
+        if (!is_dir($path)) return;
+        foreach (new DirectoryIterator($path) as $entry) if (!$entry->isDot()) self::removeTree($entry->getPathname());
+        if (!rmdir($path)) throw new RuntimeException('Cannot remove broker resource directory');
+    }
+
+    public function allBrokers(): array
+    {
+        $root = $this->root(); $all = [];
+        foreach ($root->vhosts as $vhost) $all[$vhost] = $root->forVhost($vhost);
+        return $all;
+    }
+    public static function writeDurable(string $path, string $bytes): void
+    {
+        $temp = $path . '.tmp-' . bin2hex(random_bytes(6)); $fp = @fopen($temp, 'xb');
+        if ($fp === false) throw new RuntimeException('Cannot create durable state');
+        try {
+            $offset = 0; while ($offset < strlen($bytes)) { $n = fwrite($fp, substr($bytes, $offset)); if ($n === false || $n === 0) throw new RuntimeException('Cannot write durable state'); $offset += $n; }
+            if (!fflush($fp) || !fsync($fp)) throw new RuntimeException('Cannot sync durable state');
+            fclose($fp); $fp = null;
+            if (!rename($temp, $path)) throw new RuntimeException('Cannot install durable state');
+        } finally { if (is_resource($fp)) fclose($fp); if (is_file($temp)) unlink($temp); }
+    }
+    private function topologyState(): array
+    {
+        $queues = [];
+        foreach ($this->queues as $name => $queue) if (($queue['durable'] ?? true) && !($queue['exclusive'] ?? false)) $queues[$name] = array_intersect_key($queue, array_flip(['declaredArgs','durable','exclusive','autoDelete','home','raftGroup']));
+        $exchanges = []; $rows = [];
+        foreach ($this->exchanges as $name => $kind) if (($this->exchangeRows[$name]['durable'] ?? true)) { $exchanges[$name] = $kind; if (isset($this->exchangeRows[$name])) $rows[$name] = $this->exchangeRows[$name]; }
+        return ['tracing' => $this->tracing, 'queues' => $queues, 'exchanges' => $exchanges, 'exchangeRows' => $rows, 'bindings' => array_values(array_filter($this->bindings, static fn($b) => isset($queues[$b['queue']]) && isset($exchanges[$b['exchange']]))), 'e2e' => array_values(array_filter($this->e2e, static fn($b) => isset($exchanges[$b['source']], $exchanges[$b['destination']])) )];
+    }
+    private function restoreTopology(array $state): void
+    {
+        $this->loadingTopology = true;
+        try {
+            $this->tracing = ($state['tracing'] ?? false) === true;
+            foreach (($state['queues'] ?? []) as $name => $queue) {
+                if (!isset($this->queues[$name])) $this->declareRecovered($name);
+                $this->queues[$name] = [...$this->queues[$name], ...$queue, 'args' => Features::parseArgs($this->withPolicy($queue['declaredArgs'] ?? [], $name))];
+            }
+            foreach (['exchanges','exchangeRows'] as $field) $this->$field = [...$this->$field, ...($state[$field] ?? [])];
+            foreach (['bindings','e2e'] as $field) if (isset($state[$field])) $this->$field = $state[$field];
+        } finally { $this->loadingTopology = false; }
+    }
+    public function saveTopology(): void
+    {
+        $root = $this->root(); if ($this->loadingTopology || $root->loadingTopology) return;
+        $state = ['vhosts' => $root->vhosts, 'states' => []];
+        foreach ($root->allBrokers() as $vhost => $broker) $state['states'][$vhost] = $broker->topologyState();
+        foreach (['policies','operatorPolicies','topicPermissions','vhostLimits','userLimits','parameters','featureFlags'] as $field) $state[$field] = $root->$field;
+        self::writeDurable($root->dataDir() . '/topology.json', json_encode($state, JSON_THROW_ON_ERROR)); $root->savedTopology = $state;
+    }
+    /** A portable Raft snapshot, shared with Bun and Rust. */
+    public function raftState(string $group): mixed
+    {
+        if ($group === 'meta') {
+            $root = $this->root(); $state = ['users'=>[], 'vhosts'=>$root->vhosts, 'permissions'=>[], 'queues'=>[], 'exchanges'=>[], 'bindings'=>[], 'exchangeBindings'=>[], 'policies'=>[], 'userLimits'=>[], 'vhostLimits'=>[], 'topicPermissions'=>[], 'parameters'=>[], 'globalParameters'=>[]];
+            foreach ($root->users as $name=>$hash) $state['users'][] = ['name'=>$name, 'hash'=>$hash, 'password_hash'=>$hash, 'tags'=>$root->tags[$name] ?? []];
+            foreach ($root->permissions as $user=>$vhosts) foreach ($vhosts as $vhost=>$row) $state['permissions'][] = ['user'=>$user, 'vhost'=>$vhost, ...$row];
+            foreach ($root->allBrokers() as $scope) {
+                foreach ($scope->queues as $name=>$q) if (!($q['exclusive'] ?? false)) $state['queues'][] = ['vhost'=>$scope->vhost, 'name'=>$name, 'durable'=>$q['durable'] ?? true, 'exclusive'=>false, 'autoDelete'=>$q['autoDelete'] ?? false, 'args'=>$this->raftQueueArgs($q['declaredArgs'] ?? []), 'auto_delete'=>$q['autoDelete'] ?? false, 'home'=>$q['home'] ?? null, 'raftGroup'=>$q['raftGroup'] ?? null];
+                foreach ($scope->exchanges as $name=>$type) $state['exchanges'][] = ['vhost'=>$scope->vhost, 'name'=>$name, 'type'=>$type, 'kind'=>$name===''?'default':$type, 'auto_delete'=>$scope->exchangeRows[$name]['autoDelete'] ?? false, ...($scope->exchangeRows[$name] ?? ['durable'=>true, 'autoDelete'=>false, 'internal'=>false, 'alternate'=>null])];
+                foreach ($scope->bindings as $b) if (!($scope->queues[$b['queue']]['exclusive'] ?? false)) $state['bindings'][] = ['vhost'=>$scope->vhost, 'queue'=>$b['queue'], 'exchange'=>$b['exchange'], 'routingKey'=>$b['key'], 'routing_key'=>$b['key'], 'args'=>$b['args'] ?? []];
+                foreach ($scope->e2e as $b) $state['exchangeBindings'][] = ['vhost'=>$scope->vhost, 'source'=>$b['source'], 'destination'=>$b['destination'], 'routingKey'=>$b['key'], 'routing_key'=>$b['key'], 'key'=>$b['key']];
+            }
+            foreach (['policies','operatorPolicies'] as $field) foreach ($root->$field as $vhost=>$rows) foreach ($rows as $name=>$row) $state['policies'][] = $this->raftPolicyWire($vhost, (string)$name, $row, $field === 'operatorPolicies');
+            foreach (['userLimits'=>'user','vhostLimits'=>'vhost'] as $field=>$key) foreach ($root->$field as $name=>$value) $state[$field][] = [$key=>$name, ...$value];
+            foreach ($root->topicPermissions as $user=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $exchange=>$row) if (is_array($row)) $state['topicPermissions'][] = ['user'=>$user, 'vhost'=>$vhost, 'exchange'=>$exchange, ...$row];
+            foreach ($root->parameters as $component=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $name=>$value) {
+                if ($component === 'global') $state['globalParameters'][] = ['name'=>$name, 'value'=>$value];
+                elseif ($component !== 'shovel') $state['parameters'][] = compact('component','vhost','name','value');
+            }
+            return $state;
+        }
+        $rows = [];
+        foreach ($this->allBrokers() as $scope) foreach ($scope->queues as $name=>$queue) {
+            if (($queue['raftGroup'] ?? 'quorum') !== $group) continue;
+            if (($queue['args']['queueType'] ?? '') === 'stream') return $scope->stream($name)->snapshot($scope->vhost, (string)$name);
+            if (($queue['args']['queueType'] ?? '') !== 'quorum') continue;
+            $messages = [];
+            foreach ($scope->msgs as $msg) if ($msg['queue'] === $name) $messages[] = ['v'=>1, 'vhost'=>$scope->vhost, 'queue'=>$name, 'message_id'=>$msg['qid'], 'body_b64'=>base64_encode($msg['body']), 'persistent'=>($msg['mode'] ?? 1) === 2, 'exchange'=>$msg['exchange'], 'routing_key'=>$msg['key'], 'headers'=>$msg['headers'] ?? [], 'propRaw'=>$msg['propRaw'] === null ? null : base64_encode($msg['propRaw']), 'priority'=>$msg['priority'] ?? 0, 'expiration'=>isset($msg['expires']) ? (string)max(0,$msg['expires']-(int)(microtime(true)*1000)) : null];
+            $rows[] = ['vhost'=>$scope->vhost, 'queue'=>$name, 'messages'=>$messages];
+        }
+        return ['queues'=>$rows];
+    }
+    private function raftQueueArgs(array $args): array
+    {
+        foreach(['x-queue-type'=>'queue_type','x-message-ttl'=>'message_ttl_ms','x-expires'=>'expires_ms','x-max-length'=>'max_length','x-max-length-bytes'=>'max_length_bytes','x-overflow'=>'overflow','x-dead-letter-exchange'=>'dead_letter_exchange','x-dead-letter-routing-key'=>'dead_letter_routing_key','x-max-priority'=>'max_priority','x-delivery-limit'=>'delivery_limit','x-dead-letter-strategy'=>'dead_letter_strategy','x-queue-leader-locator'=>'leader_locator'] as $key=>$wire)if(isset($args[$key]))$args[$wire]=$args[$key];
+        if(isset($args['x-single-active-consumer']))$args['single_active']=in_array($args['x-single-active-consumer'],[true,1,'true'],true);
+        $maxAgeMs=self::streamMaxAgeMs($args['x-max-age']??null);
+        if($maxAgeMs!==null)$args['max_age_ms']=$maxAgeMs;
+        return $args;
+    }
+    private function raftPolicyWire(string $vhost, string $name, array $row, bool $operator): array
+    {
+        $out = ['vhost'=>$vhost, 'name'=>$name, 'pattern'=>$row['pattern'] ?? '', 'apply_to'=>$row['apply-to'] ?? 'all', 'priority'=>$row['priority'] ?? 0, 'operator'=>$operator, 'definition'=>$row['definition'] ?? []];
+        foreach (['message-ttl'=>'message_ttl_ms','expires'=>'expires_ms','max-length'=>'max_length','max-length-bytes'=>'max_length_bytes','overflow'=>'overflow','dead-letter-exchange'=>'dead_letter_exchange','dead-letter-routing-key'=>'dead_letter_routing_key','dead-letter-strategy'=>'dead_letter_strategy','delivery-limit'=>'delivery_limit','alternate-exchange'=>'alternate_exchange'] as $key=>$wire) if (array_key_exists($key,$row['definition'] ?? [])) $out[$wire]=$row['definition'][$key];
+        return $out;
+    }
+    public function installRaftState(string $group, mixed $state): void
+    {
+        if (!is_array($state)) throw new RuntimeException('Invalid Raft snapshot');
+        $root=$this->root(); $previous=$root->raftApplying; $root->raftApplying=true;
+        try {
+            if ($group === 'meta') {
+                foreach (['vhosts','users','permissions','exchanges','queues','bindings'] as $field) if (!isset($state[$field]) || !is_array($state[$field])) throw new RuntimeException('Unsupported metadata snapshot');
+                if (isset($state['exchangeBindings']) && !is_array($state['exchangeBindings'])) throw new RuntimeException('Invalid exchange bindings snapshot');
+                foreach (['users','permissions','exchanges','queues','bindings','exchangeBindings'] as $field) foreach ($state[$field] ?? [] as $row) if (!is_array($row)) throw new RuntimeException('Invalid metadata snapshot row');
+                $vhosts=[]; foreach ($state['vhosts'] as $row) { $name=is_string($row)?$row:($row['name']??null); if(!is_string($name))throw new RuntimeException('Invalid vhost snapshot');$vhosts[]=$name; }
+                $root->loadingTopology=true;
+                try {
+                    $root->vhosts=array_values(array_unique($vhosts));
+                    foreach ($root->allBrokers() as $scope) {
+                        $desired=[]; foreach ($state['queues'] as $q) if (($q['vhost']??'/')===$scope->vhost) $desired[(string)($q['name']??$q['queue']??'')]=true;
+                        foreach ($scope->queues as $name=>$q) if (!($q['exclusive']??false) && !isset($desired[$name])) $scope->deleteQueue((string)$name);
+                        $scope->bindings=array_values(array_filter($scope->bindings,static fn($b)=>$scope->queues[$b['queue']]['exclusive']??false)); $scope->e2e=[];
+                        $scope->exchanges=[]; $scope->exchangeRows=[];
+                    }
+                    $root->users=[];$root->tags=[];$root->permissions=[];$root->policies=[];$root->operatorPolicies=[];
+                    foreach (['userLimits','vhostLimits','topicPermissions'] as $field) if(array_key_exists($field,$state))$root->$field=[];
+                    if(array_key_exists('parameters',$state)) foreach(array_keys($root->parameters) as $component) if(!in_array($component,['shovel','global'],true))unset($root->parameters[$component]);
+                    if(array_key_exists('globalParameters',$state))unset($root->parameters['global']);
+                    foreach (['users'=>'user','exchanges'=>'exchange','queues'=>'queue','bindings'=>'binding','permissions'=>'permission','policies'=>'policy','userLimits'=>'user_limits','vhostLimits'=>'vhost_limits','topicPermissions'=>'topic_permission','parameters'=>'parameter','globalParameters'=>'global_parameter'] as $field=>$kind) foreach ($state[$field]??[] as $row) $root->applyRaft('meta',$kind,$row,0);
+                    foreach ($state['exchangeBindings'] ?? [] as $row) $root->applyRaft('meta', 'binding', ['destinationType'=>'exchange', ...$row], 0);
+                    foreach(array_keys($root->vhostBrokers) as $vhost)if(!in_array($vhost,$root->vhosts,true))unset($root->vhostBrokers[$vhost]);
+                } finally { $root->loadingTopology=false; }
+                $root->saveUsers();$root->saveTopology();return;
+            }
+            if (array_key_exists('stream',$state)) {
+                $snap=$state['stream'];if(!is_array($snap)||!is_string($snap['vhost']??null)||!is_string($snap['queue']??null))throw new RuntimeException('Invalid stream snapshot identity');
+                $scope=$root->forVhost($snap['vhost']);$name=$snap['queue'];if(($scope->queues[$name]['raftGroup']??'quorum')!==$group)throw new RuntimeException('Stream snapshot group mismatch');
+                $scope->stream($name)->install($state,$group);return;
+            }
+            if (!isset($state['queues']) || !is_array($state['queues'])) throw new RuntimeException('Unsupported quorum snapshot');
+            $messages=[];
+            foreach ($state['queues'] as $row) {
+                if(!is_array($row)||!is_string($row['vhost']??null)||!is_string($row['queue']??null)||!is_array($row['messages']??null))throw new RuntimeException('Invalid quorum snapshot row');
+                $scope=$root->forVhost($row['vhost']);$q=$scope->queues[$row['queue']]??null;
+                if(($q['args']['queueType']??'')!=='quorum'||($q['raftGroup']??'quorum')!==$group)throw new RuntimeException('Quorum snapshot group mismatch');
+                foreach($row['messages'] as $msg){if(!is_array($msg)||($msg['vhost']??null)!==$row['vhost']||($msg['queue']??null)!==$row['queue']||!is_string($msg['message_id']??null)||base64_decode((string)($msg['body_b64']??''),true)===false||(isset($msg['propRaw'])&&base64_decode((string)$msg['propRaw'],true)===false))throw new RuntimeException('Invalid quorum snapshot message');$messages[$row['vhost']."\0".$row['queue']."\0".$msg['message_id']]=$msg;}
+            }
+            foreach($root->allBrokers() as $scope)foreach($scope->queues as $name=>$q)if(($q['args']['queueType']??'')==='quorum'&&($q['raftGroup']??'quorum')===$group){
+                foreach($scope->msgs as $id=>$msg)if($msg['queue']===$name){$scope->drop($id);unset($scope->consumed[$name."\0".$msg['qid']]);}
+                $scope->queues[$name]['ready']=[];$scope->queues[$name]['replicas']=[];
+            }
+            foreach($messages as $msg)$root->applyRaft($group,'enq',$msg,0);
+            foreach($root->allBrokers() as $scope)$scope->flushDurable();
+        } finally { $root->raftApplying=$previous; }
+    }
+    public function applyRaft(string $group, string $kind, mixed $data, int $index): void
+    {
+        if(in_array($kind,['noop','config'],true))return;
+        if(!is_array($data))throw new RuntimeException('Invalid Raft entry');
+        $root=$this->root();$previous=$root->raftApplying;$root->raftApplying=true;
+        try {
+            if($kind==='members'){$root->members=$data;$root->saveTopology();return;}
+            $vhost=(string)($data['vhost']??'/');$name=(string)($data['name']??$data['queue']??'');
+            if($kind==='vhost'){$name=(string)($data['name']??$vhost);if(!in_array($name,$root->vhosts,true))$root->vhosts[]=$name;$root->forVhost($name);$root->saveTopology();return;}
+            if($kind==='delete_vhost') { $root->deleteVhost((string)($data['name'] ?? $vhost)); return; }
+            $scope=in_array($kind,['user','delete_user','permission','delete_permission','topic_permission','delete_topic_permission','user_limits','vhost_limits','global_parameter','delete_global_parameter'],true)?$root:$root->forVhost($vhost);
+            switch($kind){
+                case 'queue': case 'declare_queue':
+                    $args=(array)($data['arguments']??$data['args']??[]);
+                    foreach(['queue_type'=>'x-queue-type','message_ttl_ms'=>'x-message-ttl','expires_ms'=>'x-expires','max_length'=>'x-max-length','max_length_bytes'=>'x-max-length-bytes','overflow'=>'x-overflow','dead_letter_exchange'=>'x-dead-letter-exchange','dead_letter_routing_key'=>'x-dead-letter-routing-key','max_priority'=>'x-max-priority','delivery_limit'=>'x-delivery-limit','dead_letter_strategy'=>'x-dead-letter-strategy','leader_locator'=>'x-queue-leader-locator'] as $key=>$arg)if(isset($args[$key])){$args[$arg]=$args[$key];unset($args[$key]);}
+                    if(isset($args['max_age_ms'])){$args['x-max-age']=ceil($args['max_age_ms']/1000).'s';unset($args['max_age_ms']);}if($args['single_active']??false)$args['x-single-active-consumer']=true;unset($args['single_active']);
+                    if(isset($data['type']))$args['x-queue-type']=$data['type'];
+                    if (isset($scope->queues[$name])) {
+                        $scope->queues[$name]['declaredArgs']=$args; $scope->queues[$name]['args']=Features::parseArgs($scope->withPolicy($args,$name));
+                        foreach (['durable'=>true,'exclusive'=>false,'autoDelete'=>false] as $field=>$default) $scope->queues[$name][$field]=$data[$field]??($field==='autoDelete'?($data['auto_delete']??$default):$default);
+                    } else $scope->declareQueue($name,$args,$data['durable']??true,$data['exclusive']??false,false,$data['autoDelete']??$data['auto_delete']??false);
+                    if(isset($data['home']))$scope->queues[$name]['home']=$data['home'];
+                    if(isset($data['raftGroup'])){$scope->queues[$name]['raftGroup']=$data['raftGroup'];$root->cluster?->registerQueueGroup($data['raftGroup'], ($data['raftLeader'] ?? '') === $root->nodeId);}break;
+                case 'exchange':
+                    $type=(string)($data['type']??$data['kind']??'direct');if($type==='default')$type='direct';
+                    if($name===''||str_starts_with($name,'amq.')) { $scope->exchanges[$name]=$type;$scope->exchangeRows[$name]=['durable'=>$data['durable']??true,'autoDelete'=>$data['autoDelete']??$data['auto_delete']??false,'internal'=>$data['internal']??false,'alternate'=>$data['alternate']??$data['alternate_exchange']??null]; }
+                    else $scope->declareExchange($name,$type,$data['durable']??true,$data['autoDelete']??$data['auto_delete']??false,$data['internal']??false,$data['alternate']??$data['alternate_exchange']??null,false,$data['arguments']??[]);break;
+                case 'binding': case 'unbind':
+                    $source=(string)($data['source']??$data['exchange']??'');$dest=(string)($data['destination']??$data['queue']??'');$key=(string)($data['routingKey']??$data['routing_key']??$data['key']??'');$args=(array)($data['arguments']??$data['args']??[]);
+                    if(($data['destinationType']??$data['destination_type']??'queue')==='exchange'){if($kind==='binding')$scope->bindExchange($dest,$source,$key);else $scope->e2e=array_values(array_filter($scope->e2e,static fn($b)=>!($b['source']===$source&&$b['destination']===$dest&&$b['key']===$key)));}
+                    elseif($kind==='binding')$scope->bind($dest,$source,$key,$args);else $scope->unbind($dest,$source,$key,$args);break;
+                case 'delete_queue':if(isset($scope->queues[$name]))$scope->deleteQueue($name);break;
+                case 'delete_exchange':if(isset($scope->exchanges[$name]))$scope->deleteExchange($name);break;
+                case 'user':$hash=$data['hash']??$data['password_hash']??null;if(is_string($hash)){$root->users[$name]=$hash;$root->tags[$name]=$data['tags']??[];$root->saveUsers();}break;
+                case 'delete_user':$root->deleteUser($name);break;
+                case 'permission':$root->setPermissions((string)($data['user']??$name),$vhost,(string)($data['configure']??''),(string)($data['write']??''),(string)($data['read']??''));break;
+                case 'delete_permission':unset($root->permissions[(string)$data['user']][$vhost]);$root->saveUsers();break;
+                case 'topic_permission':$root->topicPermissions[(string)$data['user']][$vhost][(string)$data['exchange']]=['write'=>(string)$data['write'],'read'=>(string)$data['read']];break;
+                case 'delete_topic_permission':unset($root->topicPermissions[(string)$data['user']][$vhost][(string)$data['exchange']]);break;
+                case 'user_limits': case 'vhost_limits':
+                    $field=$kind==='user_limits'?'userLimits':'vhostLimits';$key=$kind==='user_limits'?'user':'vhost';$id=(string)($data[$key]??$name);$row=[];
+                    foreach($data['value']??$data as $k=>$value)if(str_starts_with((string)$k,'max-')&&$value!==null)$row[$k]=$value;
+                    if($row===[])unset($root->{$field}[$id]);else $root->{$field}[$id]=$row;break;
+                case 'policy': case 'delete_policy':
+                    $field=($data['operator']??false)?'operatorPolicies':'policies';if($kind==='delete_policy')unset($root->{$field}[$vhost][$name]);else{
+                        $definition=(array)($data['definition']??[]);
+                        foreach(['messageTtl'=>'message-ttl','message_ttl_ms'=>'message-ttl','expiresMs'=>'expires','expires_ms'=>'expires','dlx'=>'dead-letter-exchange','dead_letter_exchange'=>'dead-letter-exchange','dlxKey'=>'dead-letter-routing-key','dead_letter_routing_key'=>'dead-letter-routing-key','maxLength'=>'max-length','max_length'=>'max-length','maxLengthBytes'=>'max-length-bytes','max_length_bytes'=>'max-length-bytes','overflow'=>'overflow','dlxStrategy'=>'dead-letter-strategy','dead_letter_strategy'=>'dead-letter-strategy','deliveryLimit'=>'delivery-limit','delivery_limit'=>'delivery-limit','alternate'=>'alternate-exchange','alternate_exchange'=>'alternate-exchange'] as $wire=>$key)if(isset($data[$wire]))$definition[$key]=$data[$wire];
+                        $root->{$field}[$vhost][$name]=['pattern'=>$data['pattern']??'', 'priority'=>$data['priority']??0,'apply-to'=>$data['apply-to']??$data['applyTo']??$data['apply_to']??'all','definition'=>$definition];
+                    }$scope->applyPolicies();break;
+                case 'parameter':$root->parameters[(string)$data['component']][$vhost][$name]=$data['value']??[];break;
+                case 'delete_parameter':unset($root->parameters[(string)$data['component']][$vhost][$name]);break;
+                case 'global_parameter':$root->parameters['global']['/'][$name]=$data['value']??null;break;
+                case 'delete_global_parameter':unset($root->parameters['global']['/'][$name]);break;
+                case 'enq':
+                    $body=base64_decode((string)($data['body_b64']??''),true);$raw=isset($data['propRaw'])?base64_decode((string)$data['propRaw'],true):null;if($body===false||$raw===false)throw new RuntimeException('Invalid Raft body');
+                    if(!$scope->enqueueLocal((string)$data['queue'],(string)$data['message_id'],$body,(string)($data['exchange']??''),(string)($data['routing_key']??''),($data['persistent']??false)===true,$raw,(array)($data['headers']??[]),(int)($data['priority']??0),isset($data['expiration'])&&$data['expiration']!==''?(int)$data['expiration']:null))throw new RuntimeException('Raft queue missing');$scope->flushDurable();break;
+                case 'drop':foreach($data['ids']??[($data['id']??'')] as $qid){$queue=(string)$data['queue'];foreach($scope->msgs as $id=>$msg)if($msg['queue']===$queue&&$msg['qid']===(string)$qid)$scope->drop($id);$scope->dropByQid($queue,(string)$qid);$scope->noteConsumed($queue,(string)$qid);}$scope->flushDurable();break;
+                case 'purge':$queue=(string)$data['queue'];foreach($scope->msgs as $id=>$msg)if($msg['queue']===$queue){$scope->noteConsumed($queue,$msg['qid']);$scope->drop($id);}$scope->purge($queue);$scope->queues[$queue]['replicas']=[];$scope->flushDurable();break;
+                case 'sappend':$body=base64_decode((string)($data['body_b64']??''),true);$raw=isset($data['propRaw'])?base64_decode((string)$data['propRaw'],true):null;if($body===false||$raw===false)throw new RuntimeException('Invalid stream body');$scope->stream((string)$data['queue'])->append($body,(array)($data['headers']??[]),$raw,$data['reference']??null,$data['sequence']??null,$group,$index,isset($data['ts'])?(int)$data['ts']:null,(string)($data['exchange']??''),(string)($data['routing_key']??''));break;
+                default:throw new RuntimeException('Unsupported Raft entry '.$kind);
+            }
+            $root->saveTopology();
+        } finally { $root->raftApplying=$previous; }
+    }
+    public function raftLeaderChanged(string $group, ?string $leader): void { foreach($this->allBrokers() as $scope)$scope->refreshRole(); }
+    /** Per-reference reservations serialize accepted publisher sequences before proposal. */
+    private array $streamReservations = [];
+    public function streamAppendAsync(string $name,string $body,array $headers,?string $propRaw,?string $reference,?int $sequence,callable $done): void
+    {
+        $completed=false;
+        $finish=static function(bool $ok,?int $offset=null)use(&$completed,$done):void{if($completed)return;$completed=true;$done($ok,$offset);};
+        if ($this->cluster===null || !$this->cluster->raftEnabled() || count($this->members)<=1) {
+            try{$offset=$this->streamAppend($name,$body,$headers,$propRaw,$reference,$sequence);}catch(Throwable){$finish(false);return;}
+            $finish(true,$offset);return;
+        }
+        try {
+            $stored=$reference===null?null:$this->streamPublisherSequence($name,$reference);
+            if($sequence!==null&&$stored!==null&&self::streamSequenceAtMost($sequence,$stored)){$finish(true,$this->streamAppend($name,$body,$headers,$propRaw,$reference,$sequence));return;}
+        } catch(Throwable){$finish(false);return;}
+        $key=$reference!==null&&$sequence!==null?$name."\0".$reference:null;
+        if($key!==null&&isset($this->streamReservations[$key])){
+            $last=array_key_last($this->streamReservations[$key]);$job=$this->streamReservations[$key][$last];
+            if(self::streamSequenceAtMost($sequence,$job->sequence)){$job->callbacks[]=$finish;return;}
+        }
+        $job=(object)['sequence'=>$sequence,'callbacks'=>[$finish],'start'=>null,'started'=>false];
+        $job->start=function()use($job,$key,$name,$body,$headers,$propRaw,$reference,$sequence):void{
+            if($job->started)return;$job->started=true;
+            $settled=false;
+            $complete=function(bool $ok,?string $error=null)use(&$settled,$job,$key,$name,$body,$headers,$propRaw,$reference,$sequence):void{
+                if($settled)return;$settled=true;$offset=null;
+                if($ok){try{$offset=$reference!==null&&$sequence!==null?$this->streamAppend($name,$body,$headers,$propRaw,$reference,$sequence):$this->streamNext($name)-1;}catch(Throwable){$ok=false;}}
+                if($key!==null){array_shift($this->streamReservations[$key]);if($this->streamReservations[$key]===[])unset($this->streamReservations[$key]);}
+                foreach($job->callbacks as $callback){try{$callback($ok,$offset);}catch(Throwable){}}
+                if($key!==null&&isset($this->streamReservations[$key]))($this->streamReservations[$key][0]->start)();
+            };
+            try{
+                $stored=$reference===null?null:$this->streamPublisherSequence($name,$reference);
+                if($sequence!==null&&$stored!==null&&self::streamSequenceAtMost($sequence,$stored)){$complete(true);return;}
+                $group=$this->cluster->quorumGroup($this->vhost,$name);
+                // A rejected proposal invokes complete itself; never complete it twice.
+                $this->cluster->propose($group,'sappend',['vhost'=>$this->vhost,'queue'=>$name,'ts'=>(int)(microtime(true)*1000),'body_b64'=>base64_encode($body),'headers'=>$headers,'propRaw'=>$propRaw===null?null:base64_encode($propRaw),'exchange'=>'','routing_key'=>'','reference'=>$reference,'sequence'=>$sequence],$complete);
+            }catch(Throwable){$complete(false);}
+        };
+        if($key===null){($job->start)();return;}
+        $this->streamReservations[$key][]=$job;
+        if(count($this->streamReservations[$key])===1)($job->start)();
+    }
+    private static function streamSequenceAtMost(int $a,int $b):bool
+    {
+        return ($a<0)!==($b<0)?$a>=0:$a<=$b;
+    }
+    public function publishAsync(int $conn,int $ch,string $exchange,string $key,string $body,int $mode,int $priority,array $headers,?int $expiration,?string $propRaw,callable $done):void
+    {
+        try {
+            $result=$this->publish($conn,$ch,0,$exchange,$key,$body,$mode,$priority,$headers,$expiration,$propRaw);
+            if($result!=='wait'){$done($result==='return');return;}
+            $at=array_key_last($this->waiting);
+            if($at===null){$done(true);return;}
+            $this->waiting[$at]['callback']=$done;$this->flushDurable();
+        } catch(Throwable){$done(false);}
+    }
+    public function registerProtocolConsumer(string $queue,int $conn,string $tag,callable $readyFn,callable $deliverFn,bool $noAck=false,int $priority=0):void
+    {
+        $this->addConsumer($queue,$conn,-1,$tag,$noAck,false,$priority);
+        $at=array_key_last($this->queues[$queue]['consumers']);
+        $this->queues[$queue]['consumers'][$at]['readyFn']=$readyFn;$this->queues[$queue]['consumers'][$at]['deliverFn']=$deliverFn;
+    }
+    public function unregisterProtocolConsumer(string $queue,int $conn,string $tag):void
+    {
+        if(!isset($this->queues[$queue]))return;
+        $before=count($this->queues[$queue]['consumers']);
+        $this->queues[$queue]['consumers']=array_values(array_filter($this->queues[$queue]['consumers'],static fn($c)=>$c['conn']!==$conn||$c['tag']!==$tag));
+        $this->prom['consumers']-=$before-count($this->queues[$queue]['consumers']);
+    }
+    public function pumpConsumers():void
+    {
+        $remaining=128;
+        foreach($this->queues as $name=>$queue) {
+            if(($queue['args']['queueType']??'')==='stream')continue;
+            while($remaining>0 && ($this->queues[$name]['ready']??[])!==[]) {
+                $pick=$this->pickConsumer($name,static fn($c)=>isset($c['readyFn'])&&($c['readyFn'])());
+                if($pick===null)break;$consumer=$this->queues[$name]['consumers'][$pick];if(!isset($consumer['deliverFn']))break;
+                $id=$this->getReady($name);if($id===null)break;$message=$this->msgs[$id];$remaining--;
+                ($consumer['deliverFn'])($message,$id);
+                if(($consumer['noAck']??false)&&isset($this->msgs[$id]))$this->ack($id);
+            }
+        }
+    }
+
+    public function resourceAllowed(string $user, string $vhost, string $operation, string $name): bool
+    {
+        $principal = $this->externalPrincipal($user);
+        if ($principal !== null) return Security::allows($principal, $vhost, $operation, $name);
+        if ($this->isExternalIdentity($user) && !array_key_exists($user, $this->users)) return false;
+        if ($this->isAdmin($user)) return true;
+        $pattern = $this->permissions[$user][$vhost][$operation] ?? null;
+        return is_string($pattern) && @preg_match('~' . str_replace('~', '\\~', $pattern) . '~', $name) === 1;
+    }
+    private function stream(string $name): Streams
+    {
+        if (($this->queues[$name]['args']['queueType'] ?? null) !== 'stream') throw new RuntimeException('NOT_FOUND - stream queue', 404);
+        $stream = $this->streams[$name] ??= new Streams($this->dataDir() . '/streams/' . bin2hex($name));
+        $maxBytes = $this->queues[$name]['args']['maxLengthBytes'] ?? null;
+        $maxAgeMs = self::streamMaxAgeMs($this->queues[$name]['declaredArgs']['x-max-age'] ?? null);
+        $stream->retention(is_int($maxBytes) ? $maxBytes : null, $maxAgeMs);
+        return $stream;
+    }
+    private static function streamMaxAgeMs(mixed $age): ?int
+    {
+        if (is_string($age) && preg_match('/^(\d+)([YMDdhms])$/', $age, $match)) {
+            $unit = ['Y'=>31536000000, 'M'=>2592000000, 'D'=>86400000, 'd'=>86400000, 'h'=>3600000, 'm'=>60000, 's'=>1000][$match[2]];
+            $amount = (float)$match[1];
+            return $amount > intdiv(PHP_INT_MAX, $unit) ? PHP_INT_MAX : (int)$amount * $unit;
+        }
+        return null;
+    }
+    public function streamAppend(string $name, string $body, array $headers = [], ?string $propRaw = null, ?string $reference = null, ?int $sequence = null): int { return $this->stream($name)->append($body,$headers,$propRaw,$reference,$sequence); }
+    public function streamRead(string $name, int $offset, int $count): array { return $this->stream($name)->read($offset,$count); }
+    public function streamFirst(string $name): int { return $this->stream($name)->first(); }
+    public function streamNext(string $name): int { return $this->stream($name)->next(); }
+    public function streamPublisherSequence(string $name, string $reference): ?int { return $this->stream($name)->sequence($reference); }
+    public function streamStoredOffset(string $name, string $reference): ?int { return $this->stream($name)->stored($reference); }
+    public function streamStoreOffset(string $name, string $reference, int $offset): void { $this->stream($name)->storeOffset($reference,$offset); }
+    public function flushDurable(): void
+    {
+        $this->store->sync(); foreach ($this->streams as $stream) $stream->sync();
+        $still = [];
+        $batch = $this->waiting; $this->waiting = [];
+        foreach ($batch as $waiting) {
+            if ($waiting['tag'] === 0 && ($waiting['completion']->pending ?? 0) === 0 && !($waiting['completion']->failed ?? false) && $waiting['end'] <= $this->store->synced && ($waiting['quorumNeed'] ?? 0) <= 1) {
+                foreach ($waiting['ids'] as $id) if (isset($this->msgs[$id]) && !in_array($id, $this->queues[$this->msgs[$id]['queue']]['ready'], true)) $this->hold($this->msgs[$id]['queue'], $id);
+                $this->release($waiting['ids']);
+                if(isset($waiting['callback']))($waiting['callback'])(true);
+            } else $still[] = $waiting;
+        }
+        $this->waiting = [...$still, ...$this->waiting];
+    }
+
     private function declareRecovered(string $name): void
     {
         if (isset($this->queues[$name])) {
@@ -285,7 +690,7 @@ final class Broker
     /** True when the user carries a tag that may reach the management API. */
     public function canManage(string $name): bool
     {
-        $tags = $this->tags[$name] ?? [];
+        $tags = $this->userTags($name);
         foreach (['administrator', 'management', 'monitoring'] as $tag) {
             if (in_array($tag, $tags, true)) {
                 return true;
@@ -296,7 +701,7 @@ final class Broker
 
     public function isAdmin(string $name): bool
     {
-        return in_array('administrator', $this->tags[$name] ?? [], true);
+        return in_array('administrator', $this->userTags($name), true);
     }
 
     public function setPermissions(string $user, string $vhost, string $configure, string $write, string $read): void
@@ -319,9 +724,40 @@ final class Broker
         return true;
     }
 
-    public function verify(string $user, string $pass): bool
+    /** Returns a credential-specific identity; callers retain it for every permission check. */
+    public function authenticate(string $user, string $pass): ?string
     {
-        return isset($this->users[$user]) && Auth::matches($pass, $this->users[$user]);
+        if (array_key_exists($user, $this->users)) return Auth::matches($pass, $this->users[$user]) ? $user : null;
+        $principal = Security::verify($this->root(), $this->authConfig, $user, $pass);
+        return $principal === null ? null : $this->registerExternalPrincipal($user, $pass, $principal);
+    }
+    public function verify(string $user, string $pass): bool { return $this->authenticate($user, $pass) !== null; }
+    private function registerExternalPrincipal(string $user, string $pass, array $principal): string
+    {
+        $root = $this->root();
+        $root->externalIdentitySecret ??= random_bytes(32);
+        $identity = '@external:' . hash_hmac('sha256', pack('N', strlen($user)) . $user . $pass, $root->externalIdentitySecret);
+        $root->externalPrincipals[$identity] = $principal;
+        return $identity;
+    }
+    private function isExternalIdentity(string $identity): bool { return str_starts_with($identity, '@external:'); }
+    private function externalPrincipal(string $identity): ?array
+    {
+        $principal = $this->root()->externalPrincipals[$identity] ?? null;
+        if (!is_array($principal)) return null;
+        // Creating an internal account revokes an external identity with that visible name.
+        if (array_key_exists($identity, $this->users) || array_key_exists((string) ($principal['name'] ?? ''), $this->users)) $principal['expiresAt'] = 0;
+        return $principal;
+    }
+    public function identityName(string $identity): string
+    {
+        return (string) ($this->externalPrincipal($identity)['name'] ?? $identity);
+    }
+    public function userTags(string $identity): array
+    {
+        $principal = $this->externalPrincipal($identity);
+        if ($principal !== null) return Security::live($principal) ? ($principal['tags'] ?? []) : [];
+        return $this->isExternalIdentity($identity) && !array_key_exists($identity, $this->users) ? [] : ($this->tags[$identity] ?? []);
     }
 
     /**
@@ -377,7 +813,7 @@ final class Broker
         if (!Features::knownQueueType($type)) {
             throw new RuntimeException("PRECONDITION_FAILED - unsupported x-queue-type '$type'", 406);
         }
-        if ($type === 'quorum' && (!$durable || $exclusive)) {
+        if (in_array($type, ['quorum','stream'], true) && (!$durable || $exclusive)) {
             throw new RuntimeException('PRECONDITION_FAILED - quorum queue must be durable and non-exclusive', 406);
         }
         $this->queues[$name] = [
@@ -399,6 +835,8 @@ final class Broker
         ];
         $this->prom['queuesDeclared']++;
         $this->prom['queuesCreated']++;
+        $this->saveTopology();
+        $this->emitEvent('queue.created', [['name', $name], ['durable', $durable], ['exclusive', $exclusive]]);
         return ['messages' => 0, 'consumers' => 0];
     }
 
@@ -412,8 +850,8 @@ final class Broker
     {
         return Policy::resolve(
             $rawArgs,
-            Policy::match($this->policies['/'] ?? [], $name, 'queues'),
-            Policy::match($this->operatorPolicies['/'] ?? [], $name, 'queues'),
+            Policy::match($this->policies[$this->vhost] ?? [], $name, 'queues'),
+            Policy::match($this->operatorPolicies[$this->vhost] ?? [], $name, 'queues'),
         );
     }
 
@@ -436,7 +874,7 @@ final class Broker
      *
      * @throws RuntimeException with the reply code as the exception code
      */
-    public function declareExchange(string $name, string $kind, bool $durable = true, bool $autoDelete = false, bool $internal = false, ?string $alternate = null, bool $passive = false): void
+    public function declareExchange(string $name, string $kind, bool $durable = true, bool $autoDelete = false, bool $internal = false, ?string $alternate = null, bool $passive = false, array $arguments = []): void
     {
         if ($name === '') {
             return;
@@ -456,7 +894,9 @@ final class Broker
             'autoDelete' => $autoDelete,
             'internal' => $internal,
             'alternate' => $alternate,
+            'arguments' => $arguments,
         ];
+        $this->saveTopology();
     }
 
     /**
@@ -491,6 +931,7 @@ final class Broker
             }
         }
         $this->bindings[] = ['exchange' => $exchange, 'queue' => $queue, 'key' => $key, 'args' => $args];
+        $this->saveTopology();
     }
 
     /**
@@ -507,7 +948,7 @@ final class Broker
             if ($this->route('amq.rabbitmq.event', $key, []) === []) {
                 return;
             }
-            $headers[] = ['vhost', '/'];
+            $headers[] = ['vhost', $this->vhost];
             $headers[] = ['timestamp_in_ms', (int) (microtime(true) * 1000)];
             $this->publish(0, 0, 0, 'amq.rabbitmq.event', $key, '', 1, 0, $headers);
         } catch (RuntimeException) {
@@ -564,8 +1005,8 @@ final class Broker
         if ($out === [] && $exchange !== '') {
             $alternate = Policy::alternate(
                 $this->exchangeRows[$exchange]['alternate'] ?? null,
-                $this->policies['/'] ?? [],
-                $this->operatorPolicies['/'] ?? [],
+                $this->policies[$this->vhost] ?? [],
+                $this->operatorPolicies[$this->vhost] ?? [],
                 $exchange,
             );
             if ($alternate !== null && isset($this->exchanges[$alternate])) {
@@ -590,6 +1031,20 @@ final class Broker
             static fn (array $row): bool => $row['exchange'] === $exchange,
         ));
         $kind = $this->exchanges[$exchange];
+        if ($kind === 'x-delayed-message') $kind = $this->exchangeRows[$exchange]['arguments']['x-delayed-type'] ?? 'direct';
+        if ($kind === 'x-local-random') return $rows === [] ? [] : [$rows[random_int(0, count($rows)-1)]['queue']];
+        if ($kind === 'x-consistent-hash') {
+            $chosen = null; $best = null;
+            foreach ($rows as $row) {
+                $weight = filter_var($row['key'], FILTER_VALIDATE_INT);
+                if ($weight === false || $weight < 1 || $weight > 10000) continue;
+                for ($replica = 0; $replica < $weight; $replica++) {
+                    $score = hash('sha256', $key . "\0" . $row['queue'] . "\0" . $replica);
+                    if ($best === null || strcmp($score, $best) > 0) { $best = $score; $chosen = $row['queue']; }
+                }
+            }
+            return $chosen === null ? [] : [$chosen];
+        }
         if ($kind === 'fanout') {
             return array_values(array_unique(array_column($rows, 'queue')));
         }
@@ -646,8 +1101,8 @@ final class Broker
         
         // Enforce topic write permission for non-empty exchanges.
         if ($exchange !== '') {
-            $user = $this->currentUsers[$conn] ?? 'guest';
-            if (!$this->topicWriteAllowed($user, '/', $exchange, $key)) {
+            $user = $this->userByConn[$conn] ?? $this->currentUsers[$conn] ?? 'guest';
+            if (!$this->topicWriteAllowed($user, $this->vhost, $exchange, $key)) {
                 throw new RuntimeException(
                     "ACCESS_REFUSED - topic permission denied for '$exchange' key '$key'",
                     403
@@ -681,14 +1136,46 @@ final class Broker
         if ($dests === []) {
             return 'return';
         }
+        if ($this->tracing && !$this->internalPublish && $exchange !== 'amq.rabbitmq.trace') {
+            $this->internalPublish = true;
+            try { $this->publish(0, 0, 0, 'amq.rabbitmq.trace', 'publish.' . $exchange, $body, 1, 0, [['exchange_name', $exchange], ['routing_keys', [$key]]]); }
+            finally { $this->internalPublish = false; }
+        }
         $this->prom['routed']++;
         $ids = [];
         $qids = [];
         $end = 0;
         $rejected = 0;
         $forwarded = 0;
+        $streamWrites = 0;
+        $completion = (object) ['pending' => 0, 'failed' => false];
+        $settled = static function (bool $ok) use ($completion): void {
+            $completion->pending--;
+            if (!$ok) $completion->failed = true;
+        };
         foreach ($dests as $queue) {
             if (!isset($this->queues[$queue])) {
+                continue;
+            }
+            if (($this->queues[$queue]['args']['queueType'] ?? 'classic') === 'stream') {
+                $completion->pending++;
+                $this->streamAppendAsync($queue, $body, $headers, $propRaw, null, null, static function (bool $ok, ?int $offset) use ($settled): void { $settled($ok); });
+                $streamWrites++;
+                continue;
+            }
+            if (($this->queues[$queue]['args']['queueType'] ?? '') === 'quorum' && $this->cluster?->raftEnabled()) {
+                $completion->pending++;
+                $qid = 'q-' . $this->nodeId . '-' . bin2hex(random_bytes(12));
+                $group = $this->cluster->quorumGroup($this->vhost, $queue);
+                $this->cluster->registerQueueGroup($group);
+                $accepted = $this->cluster->propose($group, 'enq', [
+                    'v' => 1, 'vhost' => $this->vhost, 'queue' => $queue, 'message_id' => $qid,
+                    'body_b64' => base64_encode($body), 'persistent' => $mode === 2,
+                    'exchange' => $exchange, 'routing_key' => $key, 'headers' => $headers,
+                    'propRaw' => $propRaw === null ? null : base64_encode($propRaw),
+                ], static function (bool $ok, ?string $error) use ($settled): void { $settled($ok); });
+                // propose invokes the completion callback even when rejected.
+                $forwarded++;
                 continue;
             }
             // A classic queue lives on one node. A publish that arrives
@@ -696,15 +1183,18 @@ final class Broker
             // sits here and a consumer attached at the home never sees it.
             $home = $this->remoteHomeOf($queue);
             if ($home !== null && $this->cluster !== null) {
+                $completion->pending++;
                 $this->cluster->request($home, 'enqueue', [
-                    'vhost' => '/',
+                    'vhost' => $this->vhost,
                     'queue' => $queue,
                     'exchange' => $exchange,
                     'routing_key' => $key,
                     'body_b64' => base64_encode($body),
                     'persistent' => $mode === 2,
                     'durable' => $mode === 2,
-                ]);
+                    'headers' => $headers,
+                    'propRaw' => $propRaw === null ? null : base64_encode($propRaw),
+                ], '', static function (?array $reply) use ($settled): void { $settled($reply !== null); });
                 $forwarded++;
                 continue;
             }
@@ -759,6 +1249,7 @@ final class Broker
                 'key' => $key,
                 'priority' => $priority,
                 'expires' => $expires,
+                'notBefore' => ($this->exchanges[$exchange] ?? '') === 'x-delayed-message' ? $now + max(0, (int) (array_column($headers, 1, 0)['x-delay'] ?? 0)) : null,
                 'headers' => $headers,
                 'propRaw' => $propRaw,
                 'qid' => $qid,
@@ -774,17 +1265,17 @@ final class Broker
         // Any rejected destination nacks the publish, as Bun does
         // (bun/src/broker/publish.ts:166). Acking because one of three
         // queues accepted would tell the publisher the message is safe.
-        if ($rejected > 0 || ($ids === [] && $forwarded === 0)) {
+        if ($rejected > 0 || ($ids === [] && $forwarded === 0 && $streamWrites === 0)) {
             return 'nack';
         }
         $need = 0;
         $copies = ['durable'];
-        if ($this->quorumPublish($dests)) {
+        if ($this->quorumPublish($dests) && !($this->cluster?->raftEnabled() ?? false)) {
             $need = Features::majority(max(1, count($this->members)));
             if ($this->cluster !== null) {
                 foreach ($qids as $i => $qid) {
                     $queue = $this->msgs[$ids[$i]]['queue'];
-                    $this->cluster->replicate(Features::encodeQuorumAppend('/', $queue, $qid, $body, $exchange, $key, $mode === 2));
+                    $this->cluster->replicate(Features::encodeQuorumAppend($this->vhost, $queue, $qid, $body, $exchange, $key, $mode === 2));
                 }
             }
         }        $this->waiting[] = [
@@ -796,6 +1287,7 @@ final class Broker
             'qids' => $qids,
             'quorumNeed' => $need,
             'quorumHave' => 1,
+            'completion' => $completion,
             // One entry per durable copy. The local append is already fsynced
             // by the time the confirm is considered, so it counts as durable.
             'copies' => $copies,
@@ -815,6 +1307,7 @@ final class Broker
      */
     private static function meta(array $msg): array
     {
+        if (($msg['notBefore'] ?? null) !== null) return array_intersect_key($msg, array_flip(['exchange','key','priority','expires','notBefore','headers','qid','deliveries']));
         $exchange = (string) ($msg['exchange'] ?? '');
         $key = (string) ($msg['key'] ?? '');
         $priority = (int) ($msg['priority'] ?? 0);
@@ -878,9 +1371,11 @@ final class Broker
      */
     public function hasVhostAccess(string $user, string $vhost): bool
     {
-        if ($this->isAdmin($user)) {
-            return true;
-        }
+        if (!in_array($vhost, $this->vhosts, true)) return false;
+        $principal = $this->externalPrincipal($user);
+        if ($principal !== null) return Security::hasVhost($principal, $vhost);
+        if ($this->isExternalIdentity($user) && !array_key_exists($user, $this->users)) return false;
+        if ($this->isAdmin($user)) return true;
         return isset($this->permissions[$user][$vhost]);
     }
 
@@ -917,7 +1412,10 @@ final class Broker
      */
     public function topicWriteAllowed(string $user, string $vhost, string $exchange, string $key): bool
     {
-        $row = $this->topicPermissions[$user][$exchange] ?? null;
+        $principal = $this->externalPrincipal($user);
+        if ($principal !== null) return Security::allows($principal, $vhost, 'write', $exchange, $key);
+        if ($this->isExternalIdentity($user) && !array_key_exists($user, $this->users)) return false;
+        $row = $this->topicPermissions[$user][$vhost][$exchange] ?? ($vhost === '/' ? $this->topicPermissions[$user][$exchange] ?? null : null);
         if ($row === null) {
             return true;
         }
@@ -931,7 +1429,10 @@ final class Broker
     /** Binding a topic routing key requires its read permission. */
     public function topicReadAllowed(string $user, string $vhost, string $exchange, string $key): bool
     {
-        $row = $this->topicPermissions[$user][$exchange] ?? null;
+        $principal = $this->externalPrincipal($user);
+        if ($principal !== null) return Security::allows($principal, $vhost, 'read', $exchange, $key);
+        if ($this->isExternalIdentity($user) && !array_key_exists($user, $this->users)) return false;
+        $row = $this->topicPermissions[$user][$vhost][$exchange] ?? ($vhost === '/' ? $this->topicPermissions[$user][$exchange] ?? null : null);
         if ($row === null) {
             return true;
         }
@@ -956,7 +1457,7 @@ final class Broker
     /** Records a quorum id as consumed. */
     public function noteConsumed(string $queue, string $qid): void
     {
-        if ($qid === '') {
+        if ($qid === '' || ($this->cluster?->raftEnabled() ?? false)) {
             return;
         }
         // Classic ids are local and already acked out of the log. Keeping one
@@ -1111,7 +1612,7 @@ final class Broker
     private function hold(string $queue, int $id, bool $gate = false): void
     {
         $type = $this->queues[$queue]['args']['queueType'] ?? 'classic';
-        if ($type === 'quorum' && !$this->isLeader()) {
+        if ($type === 'quorum' && !$this->queueIsLeader($queue)) {
             $this->queues[$queue]['replicas'][] = $id;
             return;
         }
@@ -1202,13 +1703,21 @@ final class Broker
         return Features::leader($ids) === $this->nodeId;
     }
 
+    public function queueIsLeader(string $queue): bool
+    {
+        if ($this->cluster?->raftEnabled() && ($this->queues[$queue]['args']['queueType'] ?? '') === 'quorum') {
+            return $this->cluster->queueLeader($this->vhost, $queue) === $this->nodeId;
+        }
+        return $this->isLeader();
+    }
+
     public function refreshRole(): void
     {
         foreach ($this->queues as $name => $queue) {
             if (($queue['args']['queueType'] ?? 'classic') !== 'quorum') {
                 continue;
             }
-            if ($this->isLeader()) {
+            if ($this->queueIsLeader($name)) {
                 foreach ($queue['replicas'] as $id) {
                     $this->pushReady($name, $id);
                 }
@@ -1249,7 +1758,7 @@ final class Broker
                     $qid = $w['qids'][$slot] ?? '';
                     foreach ($this->cluster->peerIds() as $peer) {
                         $this->cluster->request($peer, 'quorum_drop', [
-                            'vhost' => '/',
+                            'vhost' => $this->vhost,
                             'queue' => $queue,
                             'id' => $qid,
                         ]);
@@ -1304,26 +1813,28 @@ final class Broker
     }
 
     /** Store a peer's quorum append. The body is durable before the reply. */
-    public function enqueueLocal(string $queue, string $messageId, string $body, string $exchange, string $key, bool $persistent): bool
+    public function enqueueLocal(string $queue, string $messageId, string $body, string $exchange, string $key, bool $persistent, ?string $propRaw = null, array $headers = [], int $priority = 0, ?int $expiration = null): bool
     {
         if (!isset($this->queues[$queue])) {
             return false;
         }
+        if ($this->wasConsumed($queue, $messageId)) return true;
+        foreach ($this->msgs as $msg) if ($msg['queue'] === $queue && ($msg['qid'] ?? '') === $messageId) return true;
         $id = $this->nextId++;
         $this->msgs[$id] = [
             'queue' => $queue,
             'body' => $body,
             'mode' => $persistent ? 2 : 1,
+            'propRaw' => $propRaw, 'headers' => $headers,
             'redelivered' => false,
             'exchange' => $exchange,
             'key' => $key,
-            'priority' => 0,
-            'expires' => null,
-            'headers' => [],
+            'priority' => $priority,
+            'expires' => $expiration === null ? null : (int)(microtime(true)*1000) + $expiration,
             'qid' => $messageId,
         ];
         if ($persistent) {
-            $this->store->appendPublish($id, $queue, $body, 2);
+            $this->store->appendPublish($id, $queue, $body, 2, $propRaw, self::meta($this->msgs[$id]));
             $this->store->sync();
         }
         $this->hold($queue, $id);
@@ -1350,14 +1861,15 @@ final class Broker
         $this->store->sync();
         $ready = [];
         $still = [];
-        foreach ($this->waiting as $w) {
+        $batch = $this->waiting; $this->waiting = [];
+        foreach ($batch as $w) {
             // A quorum publish that could not reach a majority is nacked, so
             // the publisher learns the message was not accepted.
-            if (($w['failed'] ?? false) === true) {
-                $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => true];
+            if (($w['failed'] ?? false) === true || ($w['completion']->failed ?? false)) {
+                if(isset($w['callback']))($w['callback'])(false); else $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => true];
                 continue;
             }
-            if ($w['end'] > $this->store->synced) {
+            if (($w['completion']->pending ?? 0) > 0 || $w['end'] > $this->store->synced) {
                 $still[] = $w;
                 continue;
             }
@@ -1377,9 +1889,9 @@ final class Broker
             // The majority is in, so any gated transient quorum body in this
             // batch can now be delivered.
             $this->release($w['ids']);
-            $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => false];
+            if(isset($w['callback']))($w['callback'])(true); else $ready[] = ['conn' => $w['conn'], 'ch' => $w['ch'], 'tag' => $w['tag'], 'nack' => false];
         }
-        $this->waiting = $still;
+        $this->waiting = [...$still, ...$this->waiting];
         return $ready;
     }
 
@@ -1431,6 +1943,17 @@ final class Broker
         $consumers = $this->queues[$queue]['consumers'] ?? [];
         if ($consumers === []) {
             return null;
+        }
+        if (($this->queues[$queue]['args']['singleActive'] ?? false) === true) {
+            $active = $this->queues[$queue]['activeConsumer'] ?? null;
+            $found = null;
+            foreach ($consumers as $i => $consumer) if (($consumer['tag'] ?? '') . ':' . ($consumer['conn'] ?? $consumer['session'] ?? '') === $active) $found = $i;
+            if ($found === null) {
+                $found = array_key_first($consumers);
+                $consumer = $consumers[$found];
+                $this->queues[$queue]['activeConsumer'] = ($consumer['tag'] ?? '') . ':' . ($consumer['conn'] ?? $consumer['session'] ?? '');
+            }
+            return $ready($consumers[$found]) ? $found : null;
         }
         $best = null;
         foreach ($consumers as $consumer) {
@@ -1504,6 +2027,16 @@ final class Broker
         if (!isset($this->msgs[$id])) {
             return;
         }
+        $message = $this->msgs[$id];
+        $queue = $message['queue'];
+        if ($this->cluster?->raftEnabled() && !$this->root()->raftApplying && ($this->queues[$queue]['args']['queueType'] ?? '') === 'quorum') {
+            $group = $this->cluster->quorumGroup($this->vhost, $queue);
+            $accepted = $this->cluster->propose($group, 'drop', ['vhost' => $this->vhost, 'queue' => $queue, 'ids' => [(string) $message['qid']]], function (bool $ok, ?string $error) use ($id): void {
+                if (!$ok && isset($this->msgs[$id])) $this->requeue($id);
+            });
+            // Rejection also invokes the callback; avoid requeueing twice.
+            return;
+        }
         $this->drop($id);
         $this->prom['acknowledged']++;
     }
@@ -1535,56 +2068,40 @@ final class Broker
      */
     public function deadLetter(int $id, string $reason = 'rejected'): bool
     {
-        if (!isset($this->msgs[$id])) {
-            return false;
-        }
-        $msg = $this->msgs[$id];
-        $queue = $msg['queue'];
-        $args = $this->queues[$queue]['args'] ?? Features::parseArgs([]);
-        $exchange = $args['dlx'] ?? null;
-        $atLeastOnce = ($args['dlxStrategy'] ?? 'at-most-once') === 'at-least-once';
-        if (!is_string($exchange) || $exchange === '' || $this->dlxDepth >= self::DLX_DEPTH) {
-            // Nowhere to send it. at-least-once keeps the message so it is
-            // not silently lost; at-most-once drops it.
-            if ($atLeastOnce) {
-                return false;
-            }
-            $this->drop($id);
-            return false;
-        }
-        $headers = Features::deathHeaders(
-            is_array($msg['headers'] ?? null) ? $msg['headers'] : [],
-            $queue,
-            $reason,
-            (string) ($msg['exchange'] ?? ''),
-            (string) ($msg['key'] ?? $queue),
-        );
+        if (!isset($this->msgs[$id])) return false;
+        if($this->msgs[$id]['dlxPending']??false)return true;
+        $msg=$this->msgs[$id];$queue=$msg['queue'];$args=$this->queues[$queue]['args']??Features::parseArgs([]);
+        $exchange=$args['dlx']??null;$atLeastOnce=($args['dlxStrategy']??'at-most-once')==='at-least-once';
+        if(!is_string($exchange)||$this->dlxDepth>=self::DLX_DEPTH){if(!$atLeastOnce)$this->settleDeadLetter($id);return false;}
+        $headers=Features::deathHeaders(is_array($msg['headers']??null)?$msg['headers']:[],$queue,$reason,(string)($msg['exchange']??''),(string)($msg['key']??$queue));
+        $this->msgs[$id]['dlxPending']=true;
+        $confirmed=null;
+        $complete=function(bool $ok)use($id,$queue,$atLeastOnce,&$confirmed):void{
+            $confirmed=$ok;if(!isset($this->msgs[$id]))return;unset($this->msgs[$id]['dlxPending']);
+            if($ok||!$atLeastOnce){$this->settleDeadLetter($id);return;}
+            // A failed destination commit leaves the durable source available for retry.
+            if(isset($this->queues[$queue])&&!in_array($id,$this->queues[$queue]['ready'],true))$this->pushReady($queue,$id);
+        };
         $this->dlxDepth++;
-        try {
-            $result = $this->publish(
-                0,
-                0,
-                0,
-                $exchange,
-                $args['dlxKey'] ?? $msg['key'],
-                $msg['body'],
-                $msg['mode'] ?? 1,
-                0,
-                $headers,
-            );
-        } catch (RuntimeException $err) {
-            $result = 'return';
-        } finally {
-            $this->dlxDepth--;
-        }
-        $accepted = $result === 'wait';
-        if (!$accepted && $atLeastOnce) {
-            return false;
-        }
-        $this->drop($id);
-        return $accepted;
+        try{$result=$this->publish(0,0,0,$exchange,$args['dlxKey']??$msg['key'],$msg['body'],$msg['mode']??1,0,$headers);}
+        catch(Throwable){$result='return';}
+        finally{$this->dlxDepth--;}
+        if($result!=='wait'){$complete(false);return false;}
+        $at=array_key_last($this->waiting);
+        if($at===null){$complete(false);return false;}
+        $this->waiting[$at]['callback']=$complete;
+        // Keep the body in the source log but prevent another consumer taking it during transfer.
+        if(isset($this->queues[$queue]))$this->queues[$queue]['ready']=array_values(array_filter($this->queues[$queue]['ready'],static fn($ready)=>$ready!==$id));
+        $this->flushDurable();
+        return $confirmed!==false;
     }
-
+    /** Quorum source removal must commit too, including rejects and expiry. */
+    private function settleDeadLetter(int $id): void
+    {
+        if(!isset($this->msgs[$id]))return;$queue=$this->msgs[$id]['queue'];
+        if($this->cluster?->raftEnabled()&&!$this->root()->raftApplying&&($this->queues[$queue]['args']['queueType']??'')==='quorum')$this->ack($id);
+        else $this->drop($id);
+    }
     /** Nesting cap for dead-letter republishing, matching Bun's 8. */
     private const DLX_DEPTH = 8;
     private int $dlxDepth = 0;
@@ -1739,15 +2256,17 @@ final class Broker
         if (!isset($this->queues[$queue])) {
             return null;
         }
+        if (($this->queues[$queue]['args']['queueType'] ?? '') === 'quorum' && !$this->queueIsLeader($queue)) return null;
         $this->expire($queue);
-        while ($this->queues[$queue]['ready'] !== []) {
-            $id = $this->queues[$queue]['ready'][0];
+        $now = (int) (microtime(true) * 1000);
+        foreach ($this->queues[$queue]['ready'] as $position => $id) {
+            if (($this->msgs[$id]['notBefore'] ?? 0) > $now) continue;
             // A gated quorum body is not available yet, and the queue is
             // ordered, so nothing behind it is either.
             if (is_int($id) && $this->isGated($id)) {
                 return null;
             }
-            array_shift($this->queues[$queue]['ready']);
+            array_splice($this->queues[$queue]['ready'], $position, 1);
             if (!is_int($id) || !isset($this->msgs[$id])) {
                 continue;
             }
@@ -1798,7 +2317,12 @@ final class Broker
         if (!isset($this->queues[$name])) {
             return 0;
         }
+        if ($this->root()->raftApplying && $this->root()->onDeleteQueue !== null) ($this->root()->onDeleteQueue)($this->vhost, $name, $this->queues[$name]['consumers']);
         $n = $this->purge($name);
+        if (($this->queues[$name]['args']['queueType'] ?? '') === 'stream') {
+            unset($this->streams[$name]);
+            self::removeTree($this->dataDir() . '/streams/' . bin2hex($name));
+        }
         $this->prom['consumers'] -= count($this->queues[$name]['consumers']);
         $this->prom['queuesDeleted']++;
         unset($this->queues[$name]);
@@ -1806,6 +2330,7 @@ final class Broker
             $this->bindings,
             static fn (array $row): bool => $row['queue'] !== $name,
         ));
+        $this->saveTopology();
         return $n;
     }
 
@@ -1821,6 +2346,7 @@ final class Broker
                 && ($args === [] || $row['args'] === $args)
             ),
         ));
+        $this->saveTopology();
     }
 
     /**
@@ -1841,6 +2367,7 @@ final class Broker
             $this->e2e,
             static fn (array $row): bool => $row['source'] !== $name && $row['destination'] !== $name,
         ));
+        $this->saveTopology();
         return true;
     }
 
@@ -1853,6 +2380,7 @@ final class Broker
             }
         }
         $this->e2e[] = ['source' => $source, 'destination' => $destination, 'key' => $key];
+        $this->saveTopology();
     }
 
     public function unbindExchange(string $destination, string $source, string $key): void
@@ -1865,6 +2393,7 @@ final class Broker
                 && $row['key'] === $key
             ),
         ));
+        $this->saveTopology();
     }
 
     /**
@@ -1881,7 +2410,7 @@ final class Broker
         if (count($this->members) < 2) {
             return $this->nodeId;
         }
-        return Features::home($this->members, '/', $queue);
+        return Features::home($this->members, $this->vhost, $queue);
     }
 
     /** True when this node owns the queue, so no forwarding is needed. */
@@ -1902,41 +2431,21 @@ final class Broker
      */
     public function applySnapshot(array $snapshot): void
     {
-        foreach ((array) ($snapshot['users'] ?? []) as $name => $hash) {
-            // Accepts both a name list and a name to hash map.
-            if (is_int($name) && is_string($hash)) {
-                continue;
-            }
-            if (is_string($name) && is_string($hash) && !isset($this->users[$name])) {
-                $this->users[$name] = $hash;
-            }
+        foreach ($snapshot['vhosts'] ?? [] as $host) {
+            $name = is_array($host) ? ($host['name'] ?? '') : $host;
+            if (is_string($name) && !in_array($name, $this->vhosts, true)) $this->vhosts[] = $name;
         }
-        foreach ((array) ($snapshot['exchanges'] ?? []) as $name => $kind) {
-            if (is_string($name) && is_string($kind) && !isset($this->exchanges[$name])) {
-                $this->exchanges[$name] = $kind;
+        foreach (['users'=>'user','exchanges'=>'exchange','queues'=>'queue','bindings'=>'binding','permissions'=>'permission'] as $field=>$kind) {
+            foreach ($snapshot[$field] ?? [] as $key=>$row) {
+                if (is_string($row) && is_string($key)) $row = $field === 'users' ? ['name'=>$key,'hash'=>$row] : ['name'=>$key,'type'=>$row];
+                if (!is_array($row)) continue;
+                $scope = $this->forVhost((string)($row['vhost'] ?? '/'));
+                $name = (string)($row['name'] ?? '');
+                if ($kind === 'user' && isset($this->users[$name])) continue;
+                if ($kind === 'exchange' && isset($scope->exchanges[$name])) continue;
+                if ($kind === 'queue' && isset($scope->queues[$name])) continue;
+                $this->applyRaft('meta', $kind, $row, 0);
             }
-        }
-        foreach ((array) ($snapshot['queues'] ?? []) as $row) {
-            if (!is_array($row)) {
-                continue;
-            }
-            $name = (string) ($row['name'] ?? '');
-            if ($name === '' || isset($this->queues[$name])) {
-                continue;
-            }
-            $type = (string) ($row['type'] ?? $row['queue_type'] ?? 'classic');
-            $this->declareQueue($name, $type === 'quorum' ? ['x-queue-type' => 'quorum'] : []);
-        }
-        foreach ((array) ($snapshot['bindings'] ?? []) as $row) {
-            if (!is_array($row)) {
-                continue;
-            }
-            $queue = (string) ($row['queue'] ?? '');
-            $exchange = (string) ($row['exchange'] ?? '');
-            if ($queue === '') {
-                continue;
-            }
-            $this->bind($queue, $exchange, (string) ($row['key'] ?? $row['routing_key'] ?? ''), []);
         }
     }
 

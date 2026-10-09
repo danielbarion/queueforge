@@ -9,6 +9,15 @@ import { method, methodFrame, R, writeTable } from "../codec.ts";
 import { ChanError } from "../broker/index.ts";
 import { Conn } from "./listen.ts";
 
+/**
+ * The `version` server property: the RabbitMQ release whose behavior this
+ * broker follows. Clients pick features from it. PerfTest declares transient
+ * queues for anything below 4.3, which 4.3 itself refuses. Rust and PHP send
+ * the same value; `queueforge_version` is this build.
+ */
+const SERVER_VERSION = "4.3.0";
+const QUEUEFORGE_VERSION = "0.1.0";
+
 /** Every AMQP frame ends with this octet. A mismatch closes the connection. */
 const FRAME_END = 0xce;
 
@@ -33,6 +42,29 @@ const COALESCE_LIMIT = 64 * 1024;
 let gather = new Uint8Array(4 * COALESCE_LIMIT);
 const GATHER_MAX = 1024 * 1024;
 
+/** Connections with frames staged for the coalesce microtask. */
+const staging = new Set<Conn>();
+
+/**
+ * Write every staged frame now, ahead of a blocking fsync.
+ *
+ * A lone durable publish fsyncs in the publisher's turn, before the coalesce
+ * microtask runs, so the delivery it produced waited for the disk too. A
+ * delivery may leave before the publisher's confirm; the confirm still waits.
+ */
+export function flushStagedWrites() {
+  if (staging.size === 0) return;
+  for (const conn of staging) {
+    if (conn.closed || !conn.staged.length) continue;
+    try {
+      flushCoalesced.call(conn);
+    } catch {
+      /* the coalesce microtask closes the connection */
+    }
+  }
+  staging.clear();
+}
+
 /**
  * Queue one microtask that writes every frame staged on this turn.
  *
@@ -43,8 +75,10 @@ const GATHER_MAX = 1024 * 1024;
 function armCoalesce(this: Conn) {
   if (this.coalesceScheduled) return;
   this.coalesceScheduled = true;
+  staging.add(this);
   queueMicrotask(() => {
     this.coalesceScheduled = false;
+    staging.delete(this);
     if (this.closed) {
       this.staged = [];
       this.stagedBytes = 0;
@@ -373,6 +407,32 @@ function absorbFresh(this: Conn) {
 }
 
 /**
+ * The one home of every queue an exchange publish routes to, or null.
+ *
+ * Null for a headers exchange, an exchange this process does not know, a key
+ * that routes nowhere yet, or queues on more than one home.
+ */
+function exchangeHome(this: Conn, exchange: string, routingKey: string): string | null {
+  const vhost = this.vhost || "/";
+  const ex = this.broker.exchanges.get(this.broker.key(vhost, exchange));
+  if (!ex || ex.kind === "headers") return null;
+  let queues: string[];
+  try {
+    queues = this.broker.route(vhost, exchange, routingKey, []);
+  } catch {
+    return null;
+  }
+  let home: string | null = null;
+  for (const name of queues) {
+    const q = this.broker.queues.get(this.broker.key(vhost, name));
+    if (!q?.home) return null;
+    if (home === null) home = q.home;
+    else if (home !== q.home) return null;
+  }
+  return home;
+}
+
+/**
  * Move this connection to the queue's home before the naming frame is handled.
  *
  * One move per connection. The frame stays in `buf` so the home parses it.
@@ -386,20 +446,30 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   const meth = (buf[at + 9]! << 8) | buf[at + 10]!;
   const args = new R(buf.subarray(at + 11, at + 7 + size));
   let queue = "";
+  let home: string | null = null;
   if (cls === 60 && meth === 40) {
     args.u16();
     const exchange = args.shortstr();
-    if (exchange !== "") return false;
     queue = args.shortstr();
+    // Most applications publish through a named exchange. When every queue it
+    // routes to has one home, move there too, so the publish is not forwarded
+    // between processes. Mixed homes, no route yet, and headers exchanges
+    // (the headers are in the next frame) stay here and forward.
+    if (exchange !== "") {
+      home = exchangeHome.call(this, exchange, queue);
+      if (!home) return false;
+    }
   } else if (cls === 60 && meth === 20) {
     args.u16();
     queue = args.shortstr();
   } else {
     return false;
   }
-  // A known queue keeps the home it was placed on; a locator may have moved it off the hash.
-  const known = this.broker.queues.get(this.broker.key(this.vhost || "/", queue));
-  const home = known ? known.home : this.broker.homeOf(this.vhost || "/", queue, false);
+  if (home === null) {
+    // A known queue keeps the home it was placed on; a locator may have moved it off the hash.
+    const known = this.broker.queues.get(this.broker.key(this.vhost || "/", queue));
+    home = known ? known.home : this.broker.homeOf(this.vhost || "/", queue, false);
+  }
   if (!home || this.broker.isLocalHome(home)) return false;
   // The home parses from the naming frame on.
   if (at > 0) this.buf = buf.subarray(at);
@@ -483,7 +553,13 @@ async function parseAvailable(this: Conn): Promise<void> {
               ["direct_reply_to", { t: "t", v: true }],
             ] }],
             ["product", { t: "S", v: "QueueForge" }],
+            // RabbitMQ's own clients read these. PerfTest stops on a missing version.
+            ["version", { t: "S", v: SERVER_VERSION }],
+            ["queueforge_version", { t: "S", v: QUEUEFORGE_VERSION }],
             ["platform", { t: "S", v: `Bun ${Bun.version}` }],
+            ["copyright", { t: "S", v: "Copyright (c) QueueForge" }],
+            ["information", { t: "S", v: "https://github.com/danielbarion/queueforge" }],
+            ["cluster_name", { t: "S", v: this.broker.clusterName() }],
           ]);
           w.longstr(this.peerCN ? "PLAIN EXTERNAL" : "PLAIN");
           w.longstr("en_US");

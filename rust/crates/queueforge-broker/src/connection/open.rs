@@ -9,6 +9,9 @@ use queueforge_amqp::{FieldTable, FieldValue, Method};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tracing::{info, warn};
 
+/// The `version` server property. See `send_connection_start`.
+const RABBITMQ_COMPAT_VERSION: &str = "4.3.0";
+
 impl<'a, S> Connection<'a, S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -132,7 +135,11 @@ where
     pub(in crate::connection) async fn send_connection_start(&mut self) -> Result<(), ConnError> {
         let mut props = FieldTable::new();
         props.insert("product", FieldValue::long_str("QueueForge"));
-        props.insert("version", FieldValue::long_str(env!("CARGO_PKG_VERSION")));
+        // The RabbitMQ release whose behavior this broker follows. Clients pick
+        // features from it: PerfTest declares transient queues below 4.3, which
+        // 4.3 refuses. Bun and PHP send the same value.
+        props.insert("version", FieldValue::long_str(RABBITMQ_COMPAT_VERSION));
+        props.insert("queueforge_version", FieldValue::long_str(env!("CARGO_PKG_VERSION")));
         props.insert(
             "copyright",
             FieldValue::long_str("Copyright (c) QueueForge"),

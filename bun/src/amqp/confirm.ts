@@ -52,7 +52,12 @@ export async function handleConfirmTx(this: Conn, channel: number, c: Ch, payloa
 export async function txCommit(this: Conn, channel: number, c: Ch) {
   const batch = c.txBatch;
   c.txBatch = [];
-  for (const op of batch) await op();
+  // Each op enqueues before its first await, so starting them in turn keeps
+  // their order. Awaiting each one before the next made a 10-message commit
+  // wait for 10 fsyncs; together they share one group commit.
+  const pending: Array<unknown> = [];
+  for (const op of batch) pending.push(op());
+  await Promise.all(pending);
   await this.send(methodFrame(channel, method(90, 21, () => {})));
 }
 

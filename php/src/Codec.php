@@ -44,7 +44,7 @@ final class Codec
      * using publisher confirms, consumer cancel notification or basic.nack
      * sees them offered.
      */
-    public static function connectionStart(): string
+    public static function connectionStart(string $mechanisms = 'PLAIN'): string
     {
         $caps = self::boolField('publisher_confirms')
             . self::boolField('consumer_cancel_notify')
@@ -54,10 +54,12 @@ final class Codec
             . self::boolField('authentication_failure_close');
         $props = self::shortstr('capabilities') . 'F' . pack('N', strlen($caps)) . $caps
             . self::shortstr('product') . 'S' . self::longstr('QueueForge')
-            . self::shortstr('version') . 'S' . self::longstr('0.1.0')
+            // The RabbitMQ release this broker follows; clients pick features from it.
+            . self::shortstr('version') . 'S' . self::longstr('4.3.0')
+            . self::shortstr('queueforge_version') . 'S' . self::longstr('0.1.0')
             . self::shortstr('platform') . 'S' . self::longstr('PHP');
         $args = chr(0) . chr(9) . pack('N', strlen($props)) . $props
-            . self::longstr('PLAIN') . self::longstr('en_US');
+            . self::longstr($mechanisms) . self::longstr('en_US');
         return self::method(0, 10, 10, $args);
     }
 
@@ -198,7 +200,7 @@ final class Codec
         $method = self::shortstr($tag) . self::u64($deliveryTag) . chr($redelivered ? 1 : 0) . self::shortstr($exchange) . self::shortstr($routingKey);
         return self::method($channel, 60, 60, $method)
             . self::frame(2, $channel, self::contentHeader(strlen($body), $deliveryMode, $propRaw, $headers))
-            . self::frame(3, $channel, $body);
+            . ($body === '' ? '' : self::frame(3, $channel, $body));
     }
 
     /** Heartbeat frame: type 8 on channel 0 with an empty payload. */
@@ -263,7 +265,9 @@ final class Codec
             return self::readLongstr($buf, $o);
         }
         if ($type === 's') {
-            return self::readShortstr($buf, $o);
+            if ($o + 2 > $end) { $o = $end; return null; }
+            $value = unpack('n', substr($buf, $o, 2))[1]; $o += 2;
+            return $value >= 0x8000 ? $value - 0x10000 : $value;
         }
         if ($type === 't') {
             // Kept as 1/0, not a bool, so the (string) cast the broker applies
@@ -379,7 +383,7 @@ final class Codec
             . pack('N', $messageCount);
         return self::method($channel, 60, 71, $args)
             . self::frame(2, $channel, self::contentHeader(strlen($body), $deliveryMode, $propRaw, $headers))
-            . self::frame(3, $channel, $body);
+            . ($body === '' ? '' : self::frame(3, $channel, $body));
     }
 
     public static function getEmpty(int $channel): string
