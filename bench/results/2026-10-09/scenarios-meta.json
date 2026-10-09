@@ -1,0 +1,128 @@
+{
+ "perf_test": "pivotalrabbitmq/perf-test:2.25.0",
+ "images": {
+  "rabbit": "sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89",
+  "rust": "sha256:38137db59067dd0cb8ca1c369068c6051c7f5d5aa6f432f001d51de5d4a5aa9e",
+  "bun": "sha256:3fbdcbbaf7ff0cd87b78966085cda98bd2c65459edf7a7d0c14273cf1b1c4b82",
+  "php": "sha256:ef6e84c66cba7abb25b614b05d61d6fbe21afaa396e6af9c390ed2fa7bc90acd"
+ },
+ "vm_ncpu": 8,
+ "vm_mem": 25159827456,
+ "started": "2026-10-09T15:38:55Z",
+ "scenarios": [
+  {
+   "id": "work-queue",
+   "title": "Work queue",
+   "real": "Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one.",
+   "args": "-x 4 -y 4 -u jobs -f persistent -s 1024 -c 100 -q 100"
+  },
+  {
+   "id": "telemetry",
+   "title": "Fire-and-forget telemetry",
+   "real": "Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers.",
+   "args": "-x 4 -y 4 -u telemetry -s 256 -a"
+  },
+  {
+   "id": "fanout-20",
+   "title": "Broadcast to 20 services",
+   "real": "Domain events on a fanout exchange, each copied to 20 durable subscriber queues.",
+   "args": "-t fanout -e events -qp events-%d -qpf 1 -qpt 20 -x 1 -y 20 -f persistent -s 512 -c 100 -q 100"
+  },
+  {
+   "id": "routing-64",
+   "title": "64 queues, own publisher each",
+   "real": "Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B.",
+   "args": "-qp tenant-%d -qpf 1 -qpt 64 -x 64 -y 64 -f persistent -s 512 -c 20 -q 50"
+  },
+  {
+   "id": "large-64k",
+   "title": "64 KiB messages",
+   "real": "Documents and images: 2 producers of durable 64 KiB bodies, scored in MB/s.",
+   "args": "-x 2 -y 2 -u blobs -f persistent -s 65536 -c 20 -q 20",
+   "bytes": 65536
+  },
+  {
+   "id": "large-1m",
+   "title": "1 MiB messages",
+   "real": "Large payloads: 1 producer of durable 1 MiB bodies, 4 confirms in flight, scored in MB/s.",
+   "args": "-x 1 -y 1 -u big -f persistent -s 1048576 -c 4 -q 4",
+   "bytes": 1048576
+  },
+  {
+   "id": "latency-1k",
+   "title": "Latency at 1,000 msg/s",
+   "real": "A steady API workload: 1,000 durable 1 KiB msg/s with confirms. Scored on end-to-end latency.",
+   "args": "-x 1 -y 1 -u steady -f persistent -s 1024 -c 100 -q 100 -r 1000",
+   "rate": 1000
+  },
+  {
+   "id": "latency-10k",
+   "title": "Latency at 10,000 msg/s",
+   "real": "A busy API workload: 2 producers at 5,000 durable 1 KiB msg/s each.",
+   "args": "-x 2 -y 2 -u busy -f persistent -s 1024 -c 100 -q 100 -r 5000",
+   "rate": 10000
+  },
+  {
+   "id": "many-queues",
+   "title": "500 queues, 1,000 connections",
+   "real": "Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer.",
+   "args": "-qp svc-%d -qpf 1 -qpt 500 -x 500 -y 500 -f persistent -s 512 -c 10 -q 10 -r 10",
+   "rate": 5000,
+   "seconds": 50,
+   "warm": 20
+  },
+  {
+   "id": "slow-consumers",
+   "title": "Slow workers, prefetch 1",
+   "real": "20 workers that each spend 2 ms per job with prefetch 1, fed 5,000 msg/s.",
+   "args": "-x 1 -y 20 -u tasks -f persistent -s 512 -c 100 -q 1 -L 2000 -r 5000",
+   "rate": 5000
+  },
+  {
+   "id": "quorum",
+   "title": "Quorum queue",
+   "real": "The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB.",
+   "args": "-x 4 -y 4 -u orders-qq -qq -f persistent -s 1024 -c 100 -q 100"
+  },
+  {
+   "id": "stream",
+   "title": "Stream queue",
+   "real": "An append-only log read by 2 consumers from the start, over AMQP 0-9-1.",
+   "args": "-x 2 -y 2 -u audit-log -sq -f persistent -s 1024 -c 100 -q 100"
+  },
+  {
+   "id": "priority",
+   "title": "Priority queue",
+   "real": "x-max-priority=10, every message at priority 5, 2 producers and 2 consumers.",
+   "args": "-x 2 -y 2 -u prio -qa x-max-priority=10 -mp priority=5 -f persistent -s 1024 -c 100 -q 100"
+  },
+  {
+   "id": "transactions",
+   "title": "Transactions",
+   "real": "tx.select publishers committing every 10 messages, transactional consumers acking every 10.",
+   "args": "-x 2 -y 2 -u txq -f persistent -s 1024 -m 10 -n 10 -q 100"
+  },
+  {
+   "id": "heavy",
+   "title": "Heavy mixed load",
+   "real": "64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each.",
+   "args": "-qp heavy-%d -qpf 1 -qpt 16 -x 64 -y 64 -f persistent -s 1024 -c 200 -q 200"
+  },
+  {
+   "id": "backlog",
+   "title": "Backlog fill and drain",
+   "real": "A consumer outage: 300,000 durable 1 KiB messages pile up, then 4 consumers drain them.",
+   "phases": [
+    [
+     "-x 4 -y 0 -u backlog -f persistent -s 1024 -c 200 -C 75000",
+     null
+    ],
+    [
+     "-x 0 -y 4 -u backlog -q 200",
+     90
+    ]
+   ],
+   "seconds": 240
+  }
+ ]
+}

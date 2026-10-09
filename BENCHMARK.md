@@ -8,9 +8,201 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [2026-10-08 session](#session-2026-10-08) is the current result for all four brokers: paced, the load sweep, and a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
+The [2026-10-09 session](#session-2026-10-09) is the current result for all four brokers: paced, the load sweep, 16 application scenarios driven by RabbitMQ PerfTest at two container sizes, and the connection hold, all in Docker with the harness in `bench/`. The [2026-10-08 session](#session-2026-10-08) is the previous one, with a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
 
 The PHP rows are the parity build, the one with client-visible parity with Bun and Rust. The earlier PHP image is kept in [PHP paced](#php-paced-2026-10-06t161324z) for comparison.
+
+## Session (2026-10-09)
+
+Everything in this section was measured on 2026-10-09 with the harness in [`bench/`](bench/), from images built from the tree of that day. `bench/run-all.py` runs it all: Docker Desktop goes to 8 CPUs and 25159827456 bytes for the load sweep, the scenarios and the connection hold, then back to 2 CPUs and 8320565248 bytes for the paced ladder. `bench/report.py` turns `bench/results/2026-10-09/` into the tables below and into `site/app/bench-data.ts`. Rust and RabbitMQ are the first pass (11:45Z–14:26Z). PHP's load and scenario cells are the second pass (14:37Z–15:16Z), because the PHP image of the first pass caught another session's half-written `Protocols.php` and did not boot. Bun's load, scenario and paced cells are the third pass (15:35Z on), on the final Bun image. Bun's connection hold is from the first pass on image `sha256:2a9ea15e5eabb3dac277ec1189b120dd23b28042bbab5a6980a8d845595493af`; it has not been remeasured on the final image. The text uses UTC; `bench.log` records local UTC−03:00 times. These measurements describe the recorded images, not every later change in the source tree.
+
+Load/scenario images (`bench/results/2026-10-09/run-meta.json` records earlier passes too):
+
+- `rabbitmq:4.3-management` `sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89`
+- `queueforge-rust:bench` `sha256:38137db59067dd0cb8ca1c369068c6051c7f5d5aa6f432f001d51de5d4a5aa9e`
+- `queueforge-php:bench` `sha256:ef6e84c66cba7abb25b614b05d61d6fbe21afaa396e6af9c390ed2fa7bc90acd`
+- `queueforge-bun:bench` `sha256:3fbdcbbaf7ff0cd87b78966085cda98bd2c65459edf7a7d0c14273cf1b1c4b82`
+
+### What is new
+
+**Application scenarios.** `bench/scenarios.py` runs RabbitMQ's own load tool, PerfTest 2.25.0 (`pivotalrabbitmq/perf-test:2.25.0`), against each broker: a fresh broker container per cell, pinned to CPU 0 (1 CPU / 1 GiB) or CPUs 0–3 (4 CPU / 4 GiB), and the client on CPUs 4–6 with 3 CPUs and 4 GiB. Every cell runs 25 s and drops the first 5 s and the last partial second; rates are the mean of PerfTest's per-second samples, and a p50 or p99 is the median of the per-second percentiles. `many-queues` runs 50 s and drops 20. The backlog cell fills 300,000 messages with no consumer, then drains them with four. Memory is the cgroup peak, sampled once a second: `anon` is the process heap, `cgroup` adds page cache. The 1 CPU size runs all 16 scenarios; the 4 CPU size runs the seven that are about load. A cell fails when the broker is OOM-killed or exits, when PerfTest exits non-zero, or when it logs an error that is not its own teardown.
+
+**Fixes the scenarios forced.** Before these runs PerfTest could not drive Bun at all, and several scenarios broke or stalled QueueForge:
+
+- No engine sent the RabbitMQ `version` its clients key on. Bun sent none, and PerfTest stopped with a NullPointerException; Rust and PHP sent `0.1.0`, so PerfTest took them for a pre-4.3 broker and declared transient non-exclusive queues, which 4.3 refuses (`transient_nonexcl_queues`, 541). All three now send `version` 4.3.0 and their own build as `queueforge_version`.
+- Bun: a confirm window of 17 to 127 (PerfTest uses 50) waited for the 10 ms fsync timer before its flush. It now flushes once the reads that are ready are handled.
+- Bun: a publish through a named exchange on more than one core was forwarded between processes for every message. A connection now moves to the process that homes every queue its exchange routes to.
+- Bun: a message body over 131,072 bytes went out as one frame larger than the negotiated `frame_max`; Java and other clients close the connection. 1 MiB messages were undeliverable. Body frames are now split at the negotiated size.
+- Bun: three ways to exit or exhaust memory under a backlog. A log batch larger than one 4 MiB chunk reused the preallocated chunk and threw; a relocated row hit `UNIQUE constraint failed` in the SQLite catch-up; both threw from a timer and killed the process. Every queued body and every stream entry stayed in memory, and each stored message pinned its whole socket read buffer through a 20-byte property view. A 300,000-message backlog was OOM-killed in 1 GiB, and a stream with no retention grew until it was. Classic messages behind 2,048 ready (or 64 MiB) and stream bodies past 16 MiB per stream are now read back from the store, as RabbitMQ pages to disk.
+- Bun: `tx.commit` awaited each publish's fsync in turn; the publishes of one commit now share one (12,921 msg/s at p50 1.12 ms before, 46,479 at p50 0.35 ms after, in a two-image check on the 2 CPU host). A fanout publish awaited each remote queue in turn, and now sends one forward per process: the 4 CPU fanout cell went from 6,917 deliveries/s in the first pass to 28,641–30,128.
+
+### Paced
+
+The ladder of the earlier sessions: `queueforge-compare`, Mac client through the published port, one broker at a time at 1 CPU / 512 MiB.
+
+#### 128 confirms in flight
+
+| Broker | durable-256 msg/s | first miss | confirm p50 ms | fan-2x2 msg/s | first miss |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RabbitMQ | 11,545.89 | 32000 | 3.84 | 11,855.48 | 32000 |
+| Rust | 21,032.90 | 64000 | 1.75 | 23,993.55 | 96000 |
+| Bun | 20,357.20 | 64000 | 0.61 | 24,306.63 | 96000 |
+| PHP | 7,004.91 | 16000 | 9.84 | 11,124.00 | 32000 |
+
+#### One confirm in flight
+
+| Broker | durable-256 msg/s | first miss | confirm p50 ms | fan-2x2 msg/s | first miss |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RabbitMQ | 1,827.86 | 4000 | 0.37 | 2,273.10 | 6400 |
+| Rust | 2,086.78 | 8000 | 0.28 | 197.87 | 800 |
+| Bun | 2,779.87 | 8000 | 0.19 | 3,678.05 | 12800 |
+| PHP | 1,146.85 | 4000 | 0.42 | 2,188.24 | 6400 |
+
+### Load sweep
+
+The shapes and client of [Load (2026-10-05T21:29:06Z)](#load-2026-10-05t212906z): `qf-loadgen:linux` (`bench/loadgen`), 2 s warmup, 8 s measure. A failed cell shows its error.
+
+| Container | Broker | single confirm/s | single consume/s | shared confirm/s | shared consume/s | spread confirm/s | spread consume/s | spread MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 53,568.0 | 53,567.4 | 41,984.0 | 41,984.0 | 45,760.2 | 45,789.2 | 190 |
+| 1 CPU / 512 MiB | Rust | 175,360.1 | 175,360.1 | 59,836.4 | 34,719.8 | 157,075.1 | 157,219.5 | 368 |
+| 1 CPU / 512 MiB | Bun | 205,140.0 | 205,140.0 | 162,848.0 | 162,824.0 | 146,304.0 | 146,304.0 | 159 |
+| 1 CPU / 512 MiB | PHP | 11,232.0 | 11,232.0 | 51,401.9 | 51,278.2 | 81,285.0 | 81,383.0 | 207 |
+| 1 CPU / 1 GiB | RabbitMQ | 58,114.6 | 58,129.6 | 45,056.0 | 45,198.1 | 44,635.6 | 44,616.4 | 196 |
+| 1 CPU / 1 GiB | Rust | 174,773.5 | 174,779.1 | 116,388.6 | 68,803.4 | 153,490.6 | 153,455.0 | 367 |
+| 1 CPU / 1 GiB | Bun | 180,636.0 | 180,644.0 | 161,520.0 | 161,504.0 | 205,584.0 | 205,600.0 | 157 |
+| 1 CPU / 1 GiB | PHP | 11,152.0 | 11,152.0 | 49,688.0 | 49,835.0 | 77,007.4 | 76,805.5 | 181 |
+| 2 CPU / 2 GiB | RabbitMQ | 78,934.0 | 78,943.9 | 74,752.0 | 75,338.5 | 89,170.8 | 89,523.0 | 245 |
+| 2 CPU / 2 GiB | Rust | 189,818.4 | 189,817.9 | 189,525.0 | 93,801.8 | 250,179.1 | 250,176.8 | 502 |
+| 2 CPU / 2 GiB | Bun | 170,456.0 | 170,452.0 | 144,472.1 | 144,464.1 | 277,712.0 | 277,688.0 | 248 |
+| 2 CPU / 2 GiB | PHP | 32,048.0 | 32,048.0 | c17_404_NOT_FOUND_-_no_queue__q0_ |  | 170,484.2 | 170,507.5 | 417 |
+| 4 CPU / 4 GiB | RabbitMQ | 83,586.1 | 83,592.2 | 80,154.2 | 80,820.8 | 172,532.1 | 172,583.6 | 274 |
+| 4 CPU / 4 GiB | Rust | 177,606.4 | 177,595.8 | 244,256.8 | 120,327.6 | 381,878.9 | 381,938.6 | 700 |
+| 4 CPU / 4 GiB | Bun | 189,068.0 | 189,068.0 | 155,968.0 | 155,992.0 | 411,904.0 | 411,888.0 | 398 |
+| 4 CPU / 4 GiB | PHP | 31,296.0 | 31,296.0 | 47,546.0 | 47,576.4 | 288,669.0 | 288,512.6 | 332 |
+| 4 CPU / 8 GiB | RabbitMQ | 83,574.6 | 83,571.1 | 82,234.2 | 82,252.1 | 173,112.8 | 173,110.0 | 241 |
+| 4 CPU / 8 GiB | Rust | 195,854.9 | 195,861.5 | 239,698.4 | 123,188.1 | 399,582.0 | 399,594.9 | 792 |
+| 4 CPU / 8 GiB | Bun | 165,220.0 | 165,216.0 | 149,984.0 | 149,974.0 | 461,888.0 | 461,936.0 | 384 |
+| 4 CPU / 8 GiB | PHP | c2_404_NOT_FOUND_-_no_queue__q0_ |  | 50,116.0 | 50,116.0 | 292,520.1 | 292,480.2 | 334 |
+
+### Scenarios, 1 CPU / 1 GiB
+
+| Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Work queue | Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one. | delivered msg/s | 41,976 | 124,898 | 92,563 | 35,518 |
+| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 94,088 | 88,042 | 69,776 | 88,917 |
+| Broadcast to 20 services | Domain events on a fanout exchange, each copied to 20 durable subscriber queues. | deliveries/s (20 per publish) | 42,192 | 117,624 | 214,913 | 75,801 |
+| 64 queues, own publisher each | Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B. | delivered msg/s | 34,480 | 73,944 | 92,925 | 51,665 |
+| 64 KiB messages | Documents and images: 2 producers of durable 64 KiB bodies, scored in MB/s. | delivered MB/s | 634.3 MB/s | 255.0 MB/s | 312.5 MB/s | 245.9 MB/s |
+| 1 MiB messages | Large payloads: 1 producer of durable 1 MiB bodies, 4 confirms in flight, scored in MB/s. | delivered MB/s | 1,240.5 MB/s | 390.3 MB/s | 362.8 MB/s | failed (oom) |
+| Latency at 1,000 msg/s | A steady API workload: 1,000 durable 1 KiB msg/s with confirms. Scored on end-to-end latency. | p99 latency at the offered rate | 4.23 ms | 1.46 ms | 6.50 ms | 13.45 ms |
+| Latency at 10,000 msg/s | A busy API workload: 2 producers at 5,000 durable 1 KiB msg/s each. | p99 latency at the offered rate | 14.91 ms | 1.64 ms | 14.69 ms | 28.87 ms |
+| 500 queues, 1,000 connections | Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer. | p99 latency at the offered rate | 13.35 ms | 7.43 ms | 38.42 ms | 33.97 ms |
+| Slow workers, prefetch 1 | 20 workers that each spend 2 ms per job with prefetch 1, fed 5,000 msg/s. | p99 latency at the offered rate | 12.53 ms | 0.67 ms | 22.82 ms | 37.66 ms |
+| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 26,692 | 76,544 | 88,158 | 589 |
+| Stream queue | An append-only log read by 2 consumers from the start, over AMQP 0-9-1. | delivered msg/s | 26,688 | 10,442 | 27,171 | 791 |
+| Priority queue | x-max-priority=10, every message at priority 5, 2 producers and 2 consumers. | delivered msg/s | 31,130 | 113,478 | 79,705 | 16,991 |
+| Transactions | tx.select publishers committing every 10 messages, transactional consumers acking every 10. | delivered msg/s | 19,233 | 199 | 17,704 | 21,550 |
+| Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 29,258 | 90,035 | 96,051 | 61,762 |
+| Backlog fill and drain | A consumer outage: 300,000 durable 1 KiB messages pile up, then 4 consumers drain them. | fill / drain msg/s | 71,864 / 50,009 | 145,338 / 149,850 | 29,988 / 74,814 | 60,000 / 811 (incomplete: sent 300000 got 76200) |
+
+Peak memory, anonymous / cgroup MiB:
+
+| Scenario | RabbitMQ | Rust | Bun | PHP |
+| --- | ---: | ---: | ---: | ---: |
+| Work queue | 125 / 161 | 15 / 83 | 798 / 840 | 20 / 88 |
+| Fire-and-forget telemetry | 195 / 256 | 66 / 189 | 790 / 909 | 20 / 31 |
+| Broadcast to 20 services | 151 / 193 | 18 / 1024 | 88 / 145 | 26 / 367 |
+| 64 queues, own publisher each | 200 / 236 | 34 / 1024 | 96 / 126 | 28 / 255 |
+| 64 KiB messages | 268 / 366 | 16 / 88 | 960 / 1024 | 18 / 61 |
+| 1 MiB messages | 241 / 324 | 20 / 97 | 204 / 438 | 993 / 1022 |
+| Latency at 1,000 msg/s | 127 / 159 | 14 / 48 | 54 / 84 | 18 / 35 |
+| Latency at 10,000 msg/s | 127 / 159 | 12 / 83 | 68 / 91 | 16 / 35 |
+| 500 queues, 1,000 connections | 392 / 441 | 111 / 1024 | 91 / 127 | 50 / 73 |
+| Slow workers, prefetch 1 | 128 / 161 | 18 / 85 | 70 / 95 | 22 / 38 |
+| Quorum queue | 573 / 954 | 794 / 1024 | 569 / 595 | 38 / 84 |
+| Stream queue | 126 / 1024 | 366 / 634 | 241 / 1024 | 42 / 70 |
+| Priority queue | 127 / 158 | 15 / 83 | 90 / 110 | 20 / 58 |
+| Transactions | 126 / 157 | 14 / 23 | 295 / 1024 | 18 / 38 |
+| Heavy mixed load | 214 / 248 | 68 / 1024 | 314 / 1024 | 53 / 1024 |
+| Backlog fill and drain | 169 / 545 | 473 / 820 | 556 / 1024 | 763 / 1024 |
+
+### Scenarios, 4 CPU / 4 GiB
+
+| Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Work queue | Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one. | delivered msg/s | 68,452 | 181,079 | 101,532 | 10,050 |
+| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 274,151 | 143,620 | 97,339 | 50,305 |
+| Broadcast to 20 services | Domain events on a fanout exchange, each copied to 20 durable subscriber queues. | deliveries/s (20 per publish) | 144,495 | 189,063 | 28,641 | 7,269 |
+| 64 queues, own publisher each | Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B. | delivered msg/s | 132,621 | 125,354 | 208,309 | 36,746 |
+| 500 queues, 1,000 connections | Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer. | p99 latency at the offered rate | 2.17 ms | 0.80 ms | 258.10 ms | failed (client-exit-124) |
+| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 89,750 | 73,562 | 12,034 | failed (no-delivery) |
+| Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 123,802 | 240,587 | 234,593 | 2,802 |
+
+Peak memory, anonymous / cgroup MiB:
+
+| Scenario | RabbitMQ | Rust | Bun | PHP |
+| --- | ---: | ---: | ---: | ---: |
+| Work queue | 146 / 180 | 18 / 85 | 2147 / 2286 | 57 / 106 |
+| Fire-and-forget telemetry | 203 / 268 | 100 / 223 | 1015 / 1158 | 378 / 446 |
+| Broadcast to 20 services | 176 / 216 | 21 / 1343 | 1002 / 2949 | 61 / 169 |
+| 64 queues, own publisher each | 247 / 307 | 39 / 2149 | 345 / 404 | 65 / 279 |
+| 500 queues, 1,000 connections | 413 / 461 | 144 / 2231 | 344 / 498 | 67 / 107 |
+| Quorum queue | 337 / 810 | 3082 / 4096 | 2209 / 2281 | 2340 / 2405 |
+| Heavy mixed load | 323 / 506 | 143 / 1139 | 2098 / 3951 | 105 / 237 |
+
+### Connections
+
+The hold sweep of [Load compare](#load-compare) (`bench/connections.py`, `bench/connscale`): the largest number of simultaneous AMQP connections that stayed up and then passed 40 confirms. Memory is the container's use at that hold.
+
+| Broker | Size | Held | Memory at hold |
+| --- | --- | ---: | ---: |
+| RabbitMQ | 1 CPU / 512m | 3,500 | 440.5MiB |
+| RabbitMQ | 2 CPU / 2g | 20,000 | 1.862GiB |
+| RabbitMQ | 4 CPU / 4g | 41,083 | 3.801GiB |
+| RabbitMQ | 4 CPU / 8g | 64,370 | 5.676GiB |
+| Rust | 1 CPU / 512m | 8,980 | 502.2MiB |
+| Rust | 2 CPU / 2g | 34,600 | 1.873GiB |
+| Rust | 4 CPU / 4g | 67,208 | 3.639GiB |
+| Rust | 4 CPU / 8g | 95,000 | 5.121GiB |
+| Bun | 1 CPU / 512m | 42,965 | 426.7MiB |
+| Bun | 2 CPU / 2g | 117,420 | 1.506GiB |
+| Bun | 4 CPU / 4g | 247,316 | 3.03GiB |
+| Bun | 4 CPU / 8g | 260,000 | 3.121GiB |
+| PHP | 1 CPU / 512m | 1,000 | 20.99MiB |
+| PHP | 2 CPU / 2g | 1,250 | 52.99MiB |
+| PHP | 4 CPU / 4g | 2,500 | 89.01MiB |
+| PHP | 4 CPU / 8g | 2,500 | 88.89MiB |
+
+### Reading the scenarios
+
+These are the reported cells; Bun's three passes are in `bench/results/2026-10-09/bench.log`. Where they disagree by more than a tenth, both ends are given.
+
+**Where QueueForge is ahead.** Bun leads fanout at 1 CPU (197,637 to 235,556 deliveries/s across passes, against Rust 117,624 and RabbitMQ 42,192), the 64-queue routing cell at both sizes (1 CPU 86,468–107,347; 4 CPU 208,309–236,174, against RabbitMQ 132,621 and Rust 125,354), quorum queues at 1 CPU (80,987–88,158, against Rust 76,544 and RabbitMQ 26,692), the heavy mixed cell at 1 CPU (91,083–96,051, against Rust 90,035 and RabbitMQ 29,258; at 4 CPU Bun's 202,133–249,098 brackets Rust's 240,587), and the connection hold (260,000 at 4 CPU / 8 GiB, against Rust 95,000 and RabbitMQ 64,370). Rust leads the work queue, priority, the backlog, and every latency row: at 1 CPU its p99 is 0.67 to 7.43 ms where RabbitMQ's is 4.23 to 14.91 ms. Both QueueForge engines pass 300,000 messages through the backlog, and Rust fills it at 145,338 msg/s, twice RabbitMQ.
+
+**Where RabbitMQ is ahead.** Large messages: RabbitMQ delivers 634.3 MB/s of 64 KiB bodies and 1,240.5 MB/s of 1 MiB bodies, against 255.0–406.6 MB/s for Rust and Bun. RabbitMQ confirms before its flush and QueueForge after the fsync, and a 1 MiB body makes that wait the largest share of each confirm. Fire-and-forget telemetry at 4 CPU: RabbitMQ 274,151, Rust 143,620, Bun 96,887. Bun's work queue does not scale with cores (one queue lives on one process: 92,563–111,883 at 1 CPU, 95,350–101,532 at 4 CPU), nor do its fanout (28,641–30,128 at 4 CPU, every copy crosses processes) or its quorum queues (12,034–12,517 at 4 CPU: each queue's Raft group spans the four sibling processes on one disk, where RabbitMQ on one node runs a group of one).
+
+**Open problems this run found.**
+
+- Bun has no publisher flow control. Without confirms (telemetry) or inside transactions, publishers outrun consumers and the queue grows: telemetry p50 54 to 472 ms and 790+ MiB, transactions 10,786 to 37,052 msg/s with p50 0.67 to 2.6 s. RabbitMQ's credit flow holds the publisher back. In a two-image check on the 2 CPU host, the transactions cell went from 12,921 msg/s (p50 1.12 ms) before the `tx.commit` change to 46,479 (p50 0.35 ms) after; in the full passes the queue grew instead.
+- Bun's peak memory varies across recorded builds and passes: work queue at 1 CPU 77 to 798 MiB anonymous, 64 KiB messages 90 to 960, 10,000 msg/s 61 to 883 (two reruns of that cell after the run: 54 and 60). The second and third passes use different image hashes, so these ranges do not isolate collector timing. The cause needs profiling and repeated runs on one frozen image.
+- Bun's low-rate latency is noisy: at 1,000 msg/s the p50 was 0.15, 0.67 and 1.05 ms in three passes, the p99 3.42 to 6.50 ms.
+- Rust: transactions run at 199 msg/s with a 45 ms p50; the cause is not traced yet. With one confirm in flight, paced fan-2x2 keeps 197.87 msg/s. The stream cell delivers 10,442 msg/s, under RabbitMQ's 26,688.
+- PHP: 1 MiB messages are OOM-killed in 1 GiB, and the backlog drains at 811 msg/s, with only 76,200 of 300,000 messages received during the 90 s drain window; the incomplete cell is excluded from website score comparisons. Above 1 CPU, a connection can reach a process that has not seen its queue's declare, so the load sweep shows `404 NOT_FOUND - no queue 'q0'` and several 4 CPU scenarios deliver nothing or exit. Quorum queues at 1 CPU deliver 589 msg/s.
+- Memory is not comparable from the cgroup column alone: SQLite and the log files fill page cache, so Rust and Bun show 1,024 MiB on cells where their heap is 18 to 314 MiB. The anonymous column is the process.
+
+### Run it
+
+```
+docker compose -f docker-compose.bench.yml build
+docker build -t qf-loadgen:linux bench/loadgen
+docker build -t qf-connscale:linux bench/connscale
+(cd rust && cargo build --release -p queueforge-compare)
+QF_BENCH_SIDECARS=<containers to keep up> python3 bench/run-all.py
+python3 bench/report.py
+```
+
+`bench/run-all.py --kinds bun --skip connections` reruns one broker and replaces its rows. `bench/scenarios.py one <scenario> [broker]` runs one cell at 1 CPU / 1 GiB.
 
 ## Session (2026-10-08)
 

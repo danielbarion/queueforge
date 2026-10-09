@@ -1,0 +1,145 @@
+inflight=1
+queue_type=classic
+confirm_cap_ms=500
+disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+scenario=durable-256
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=200,1000,2000,4000,8000,16000
+wall_secs=12.10
+messages_per_sec=1827.86
+pace_messages_per_sec=1827.86
+throughput=paced
+saturation_messages_per_sec=2765.52
+confirm_latency_ms=0.37 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.37
+confirm_p99_ms=0.99
+saturation_load=4000 kept_up=false
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=size-64
+inflight=1
+queue_type=classic
+body_size=64
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.05
+messages_per_sec=600.00
+pace_messages_per_sec=600.00
+throughput=paced
+saturation_messages_per_sec=999.34
+confirm_latency_ms=0.51 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.51
+confirm_p99_ms=0.87
+saturation_load=1000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=size-4096
+inflight=1
+queue_type=classic
+body_size=4096
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=100,400
+wall_secs=4.04
+messages_per_sec=250.00
+pace_messages_per_sec=250.00
+throughput=paced
+saturation_messages_per_sec=400.00
+confirm_latency_ms=0.52 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.52
+confirm_p99_ms=3.14
+saturation_load=400 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=transient-256
+inflight=1
+queue_type=classic
+body_size=256
+durable=false
+step_duration_secs=1.5
+prefetch=32
+producers=1
+consumers=1
+rates=500,2000
+wall_secs=3.05
+messages_per_sec=1250.00
+pace_messages_per_sec=1250.00
+throughput=paced
+saturation_messages_per_sec=1996.78
+confirm_latency_ms=0.29 disk_flush=not-durable
+confirm_p50_ms=0.29
+confirm_p99_ms=1.32
+saturation_load=2000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=prefetch-1
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=1
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.05
+messages_per_sec=600.00
+pace_messages_per_sec=600.00
+throughput=paced
+saturation_messages_per_sec=1000.00
+confirm_latency_ms=0.58 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.58
+confirm_p99_ms=2.95
+saturation_load=1000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=prefetch-128
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=128
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.05
+messages_per_sec=600.00
+pace_messages_per_sec=600.00
+throughput=paced
+saturation_messages_per_sec=999.47
+confirm_latency_ms=0.59 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.59
+confirm_p99_ms=2.79
+saturation_load=1000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=fan-2x2
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=2
+consumers=2
+rates=200,800,1600,3200,6400,12800
+wall_secs=12.17
+messages_per_sec=2273.10
+pace_messages_per_sec=2273.10
+throughput=paced
+saturation_messages_per_sec=3916.28
+confirm_latency_ms=0.50 disk_flush=classic_queue.default_version=2; write-buffer flush at least every 200ms; publisher confirms before fsync
+confirm_p50_ms=0.50
+confirm_p99_ms=2.40
+saturation_load=6400 kept_up=false
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+

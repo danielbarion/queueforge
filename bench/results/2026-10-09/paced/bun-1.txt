@@ -1,0 +1,145 @@
+inflight=1
+queue_type=classic
+confirm_cap_ms=500
+disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+scenario=durable-256
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=200,1000,2000,4000,8000,16000
+wall_secs=12.10
+messages_per_sec=2779.87
+pace_messages_per_sec=2779.87
+throughput=paced
+saturation_messages_per_sec=5008.39
+confirm_latency_ms=0.19 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.19
+confirm_p99_ms=0.76
+saturation_load=8000 kept_up=false
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=size-64
+inflight=1
+queue_type=classic
+body_size=64
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.05
+messages_per_sec=600.00
+pace_messages_per_sec=600.00
+throughput=paced
+saturation_messages_per_sec=1000.00
+confirm_latency_ms=0.25 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.25
+confirm_p99_ms=0.88
+saturation_load=1000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=size-4096
+inflight=1
+queue_type=classic
+body_size=4096
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=1
+consumers=1
+rates=100,400
+wall_secs=4.05
+messages_per_sec=250.00
+pace_messages_per_sec=250.00
+throughput=paced
+saturation_messages_per_sec=400.00
+confirm_latency_ms=0.57 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.57
+confirm_p99_ms=3.23
+saturation_load=400 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=transient-256
+inflight=1
+queue_type=classic
+body_size=256
+durable=false
+step_duration_secs=1.5
+prefetch=32
+producers=1
+consumers=1
+rates=500,2000
+wall_secs=3.05
+messages_per_sec=1250.00
+pace_messages_per_sec=1250.00
+throughput=paced
+saturation_messages_per_sec=1997.74
+confirm_latency_ms=0.26 disk_flush=not-durable
+confirm_p50_ms=0.26
+confirm_p99_ms=0.95
+saturation_load=2000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=prefetch-1
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=1
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.14
+messages_per_sec=597.50
+pace_messages_per_sec=597.50
+throughput=paced
+saturation_messages_per_sec=946.64
+confirm_latency_ms=0.48 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.48
+confirm_p99_ms=5.58
+saturation_load=1000 kept_up=false
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=prefetch-128
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=128
+producers=1
+consumers=1
+rates=200,1000
+wall_secs=4.05
+messages_per_sec=600.00
+pace_messages_per_sec=600.00
+throughput=paced
+saturation_messages_per_sec=999.57
+confirm_latency_ms=0.50 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.50
+confirm_p99_ms=5.76
+saturation_load=1000 kept_up=true
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+scenario=fan-2x2
+inflight=1
+queue_type=classic
+body_size=256
+durable=true
+step_duration_secs=2
+prefetch=32
+producers=2
+consumers=2
+rates=200,800,1600,3200,6400,12800
+wall_secs=12.06
+messages_per_sec=3678.05
+pace_messages_per_sec=3678.05
+throughput=paced
+saturation_messages_per_sec=9821.96
+confirm_latency_ms=0.21 disk_flush=fsync_policy=every_n_ms fsync_interval_ms=10; group-commit timer, publisher confirm after that fsync
+confirm_p50_ms=0.21
+confirm_p99_ms=1.62
+saturation_load=12800 kept_up=false
+declare=ok publish=ok consume=ok ack=ok confirms=ok
+

@@ -1,0 +1,18 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-150038-889, starting producer #0
+id: test-150038-889, starting producer #0, channel #0
+id: test-150038-889, starting producer #1
+id: test-150038-889, starting producer #1, channel #0
+id: test-150038-889, starting producer #2
+id: test-150038-889, starting producer #2, channel #0
+id: test-150038-889, starting producer #3
+id: test-150038-889, starting producer #3, channel #0
+id: test-150038-889, time 1.000 s, sent: 65545 msg/s, confirmed: 65266 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 3200/10497/11369/12788/15427/20628 µs
+id: test-150038-889, time 2.001 s, sent: 64224 msg/s, confirmed: 63703 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 702/10792/11471/14209/29123/40316 µs
+id: test-150038-889, time 3.003 s, sent: 62770 msg/s, confirmed: 63450 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 341/10675/11363/19543/49351/55983 µs
+id: test-150038-889, time 4.000 s, sent: 58553 msg/s, confirmed: 57870 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 286/10541/11214/12162/62757/74274 µs
+id: test-150038-889, time 5.002 s, sent: 48908 msg/s, confirmed: 49707 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 4128/10751/11308/35340/101405/109164 µs
+test stopped (Producer reached message limit [4])
+id: test-150038-889, sending rate avg: 58195 msg/s
+id: test-150038-889, receiving rate avg: 0 msg/s
+id: test-150038-889, confirm latency min/median/75th/95th/99th/max 540/10630/11336/17276/42445/105301 µs

@@ -1,0 +1,23 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-154702-708, starting producer #0
+id: test-154702-708, starting producer #0, channel #0
+id: test-154702-708, starting producer #1
+id: test-154702-708, starting producer #1, channel #0
+id: test-154702-708, starting producer #2
+id: test-154702-708, starting producer #2, channel #0
+id: test-154702-708, starting producer #3
+id: test-154702-708, starting producer #3, channel #0
+id: test-154702-708, time 1.001 s, sent: 68137 msg/s, confirmed: 67482 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 662/4574/9109/28479/83139/190768 µs
+id: test-154702-708, time 2.001 s, sent: 28680 msg/s, confirmed: 28557 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1108/16819/26134/124747/167594/186827 µs
+id: test-154702-708, time 3.003 s, sent: 26638 msg/s, confirmed: 26656 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1580/16524/27723/122570/172130/186065 µs
+id: test-154702-708, time 4.004 s, sent: 26227 msg/s, confirmed: 26187 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1678/16851/26532/108153/189232/224742 µs
+id: test-154702-708, time 5.001 s, sent: 30240 msg/s, confirmed: 30294 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 591/16327/20606/128459/142437/143443 µs
+id: test-154702-708, time 6.010 s, sent: 29557 msg/s, confirmed: 29505 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 779/15514/22771/76293/115436/127554 µs
+id: test-154702-708, time 7.001 s, sent: 25971 msg/s, confirmed: 25971 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 2213/16916/24698/138173/191652/221107 µs
+id: test-154702-708, time 8.000 s, sent: 24248 msg/s, confirmed: 24301 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1022/18513/29578/130195/180021/209194 µs
+id: test-154702-708, time 9.001 s, sent: 24029 msg/s, confirmed: 24178 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1200/18666/29738/121799/178264/204749 µs
+id: test-154702-708, time 10.010 s, sent: 16156 msg/s, confirmed: 16749 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1585/18523/23215/83291/180521/187879 µs
+test stopped (Producer reached message limit [4])
+id: test-154702-708, sending rate avg: 29898 msg/s
+id: test-154702-708, receiving rate avg: 0 msg/s
+id: test-154702-708, confirm latency min/median/75th/95th/99th/max 796/15413/22574/78171/151707/224715 µs

@@ -1,0 +1,200 @@
+08:45:54 RABBIT_QUEUES Timeout: 60.0 seconds ... | Listing queues for vhost / ... | name	durable	type	arguments | q0	true	classic	[{"x-queue-type","classic"}] | 
+08:45:54 PROGRESS kind=rabbit cpus=1 mem=512 shape=single ok=1 confirm_s=53568.0 consume_s=53567.4 p50_us=2300 p99_us=3700 broker_cpu=92 client_cpu=97 broker_mib=221 oom=false early= boot_s=1.6 err=none
+08:46:06 PROGRESS kind=rabbit cpus=1 mem=512 shape=shared ok=1 confirm_s=41984.0 consume_s=41984.0 p50_us=194100 p99_us=200000 broker_cpu=97 client_cpu=97 broker_mib=243 oom=false early= boot_s=1.6 err=none
+08:46:18 PROGRESS kind=rabbit cpus=1 mem=512 shape=spread ok=1 confirm_s=45760.2 consume_s=45789.2 p50_us=175400 p99_us=200000 broker_cpu=97 client_cpu=97 broker_mib=190 oom=false early= boot_s=1.6 err=none
+08:46:30 PROGRESS kind=rabbit cpus=1 mem=1024 shape=single ok=1 confirm_s=58114.6 consume_s=58129.6 p50_us=2200 p99_us=3000 broker_cpu=97 client_cpu=97 broker_mib=150 oom=false early= boot_s=1.6 err=none
+08:46:42 PROGRESS kind=rabbit cpus=1 mem=1024 shape=shared ok=1 confirm_s=45056.0 consume_s=45198.1 p50_us=175200 p99_us=200000 broker_cpu=97 client_cpu=97 broker_mib=234 oom=false early= boot_s=1.6 err=none
+08:46:54 PROGRESS kind=rabbit cpus=1 mem=1024 shape=spread ok=1 confirm_s=44635.6 consume_s=44616.4 p50_us=184000 p99_us=200000 broker_cpu=97 client_cpu=97 broker_mib=196 oom=false early= boot_s=1.6 err=none
+08:47:06 PROGRESS kind=rabbit cpus=2 mem=2048 shape=single ok=1 confirm_s=78934.0 consume_s=78943.9 p50_us=1500 p99_us=5100 broker_cpu=154 client_cpu=97 broker_mib=161 oom=false early= boot_s=1.6 err=none
+08:47:18 PROGRESS kind=rabbit cpus=2 mem=2048 shape=shared ok=1 confirm_s=74752.0 consume_s=75338.5 p50_us=110200 p99_us=154500 broker_cpu=166 client_cpu=97 broker_mib=235 oom=false early= boot_s=1.5 err=none
+08:47:30 PROGRESS kind=rabbit cpus=2 mem=2048 shape=spread ok=1 confirm_s=89170.8 consume_s=89523.0 p50_us=89900 p99_us=177100 broker_cpu=193 client_cpu=97 broker_mib=245 oom=false early= boot_s=2.0 err=none
+08:47:42 PROGRESS kind=rabbit cpus=4 mem=4096 shape=single ok=1 confirm_s=83586.1 consume_s=83592.2 p50_us=1500 p99_us=2500 broker_cpu=200 client_cpu=97 broker_mib=171 oom=false early= boot_s=1.5 err=none
+08:47:54 PROGRESS kind=rabbit cpus=4 mem=4096 shape=shared ok=1 confirm_s=80154.2 consume_s=80820.8 p50_us=99900 p99_us=165200 broker_cpu=239 client_cpu=97 broker_mib=243 oom=false early= boot_s=1.5 err=none
+08:48:06 PROGRESS kind=rabbit cpus=4 mem=4096 shape=spread ok=1 confirm_s=172532.1 consume_s=172583.6 p50_us=46800 p99_us=95600 broker_cpu=379 client_cpu=97 broker_mib=274 oom=false early= boot_s=1.6 err=none
+08:48:18 PROGRESS kind=rabbit cpus=4 mem=8192 shape=single ok=1 confirm_s=83574.6 consume_s=83571.1 p50_us=1500 p99_us=2500 broker_cpu=198 client_cpu=97 broker_mib=174 oom=false early= boot_s=1.6 err=none
+08:48:30 PROGRESS kind=rabbit cpus=4 mem=8192 shape=shared ok=1 confirm_s=82234.2 consume_s=82252.1 p50_us=93200 p99_us=166600 broker_cpu=237 client_cpu=97 broker_mib=240 oom=false early= boot_s=1.5 err=none
+08:48:41 PROGRESS kind=rabbit cpus=4 mem=8192 shape=spread ok=1 confirm_s=173112.8 consume_s=173110.0 p50_us=46600 p99_us=99000 broker_cpu=383 client_cpu=97 broker_mib=241 oom=false early= boot_s=1.6 err=none
+08:48:52 PROGRESS kind=rust cpus=1 mem=512 shape=single ok=1 confirm_s=175360.1 consume_s=175360.1 p50_us=700 p99_us=1600 broker_cpu=88 client_cpu=97 broker_mib=77 oom=false early=0 boot_s=0.2 err=none
+08:49:10 metrics curl failed timeout
+08:49:10 PROGRESS kind=rust cpus=1 mem=512 shape=shared ok=1 confirm_s=59836.4 consume_s=34719.8 p50_us=60200 p99_us=200000 broker_cpu=96 client_cpu=97 broker_mib=373 oom=false early= boot_s=0.2 err=none
+08:49:21 PROGRESS kind=rust cpus=1 mem=512 shape=spread ok=1 confirm_s=157075.1 consume_s=157219.5 p50_us=48600 p99_us=94500 broker_cpu=94 client_cpu=97 broker_mib=368 oom=false early=0 boot_s=0.2 err=none
+08:49:32 PROGRESS kind=rust cpus=1 mem=1024 shape=single ok=1 confirm_s=174773.5 consume_s=174779.1 p50_us=700 p99_us=1600 broker_cpu=89 client_cpu=97 broker_mib=52 oom=false early=0 boot_s=0.2 err=none
+08:49:50 PROGRESS kind=rust cpus=1 mem=1024 shape=shared ok=1 confirm_s=116388.6 consume_s=68803.4 p50_us=61000 p99_us=200000 broker_cpu=96 client_cpu=97 broker_mib=374 oom=false early= boot_s=0.2 err=none
+08:50:00 PROGRESS kind=rust cpus=1 mem=1024 shape=spread ok=1 confirm_s=153490.6 consume_s=153455.0 p50_us=49700 p99_us=93600 broker_cpu=96 client_cpu=97 broker_mib=367 oom=false early=0 boot_s=0.2 err=none
+08:50:11 PROGRESS kind=rust cpus=2 mem=2048 shape=single ok=1 confirm_s=189818.4 consume_s=189817.9 p50_us=600 p99_us=1800 broker_cpu=129 client_cpu=98 broker_mib=63 oom=false early=0 boot_s=0.2 err=none
+08:50:22 PROGRESS kind=rust cpus=2 mem=2048 shape=shared ok=1 confirm_s=189525.0 consume_s=93801.8 p50_us=40700 p99_us=111400 broker_cpu=182 client_cpu=97 broker_mib=611 oom=false early=0 boot_s=0.2 err=none
+08:50:32 PROGRESS kind=rust cpus=2 mem=2048 shape=spread ok=1 confirm_s=250179.1 consume_s=250176.8 p50_us=30500 p99_us=85000 broker_cpu=169 client_cpu=98 broker_mib=502 oom=false early=0 boot_s=0.2 err=none
+08:50:43 PROGRESS kind=rust cpus=4 mem=4096 shape=single ok=1 confirm_s=177606.4 consume_s=177595.8 p50_us=600 p99_us=4500 broker_cpu=112 client_cpu=97 broker_mib=76 oom=false early=0 boot_s=0.2 err=none
+08:50:53 PROGRESS kind=rust cpus=4 mem=4096 shape=shared ok=1 confirm_s=244256.8 consume_s=120327.6 p50_us=32600 p99_us=74700 broker_cpu=335 client_cpu=97 broker_mib=768 oom=false early=0 boot_s=0.2 err=none
+08:51:04 PROGRESS kind=rust cpus=4 mem=4096 shape=spread ok=1 confirm_s=381878.9 consume_s=381938.6 p50_us=18700 p99_us=118300 broker_cpu=303 client_cpu=97 broker_mib=700 oom=false early=0 boot_s=0.2 err=none
+08:51:15 PROGRESS kind=rust cpus=4 mem=8192 shape=single ok=1 confirm_s=195854.9 consume_s=195861.5 p50_us=600 p99_us=1100 broker_cpu=120 client_cpu=98 broker_mib=84 oom=false early=0 boot_s=0.2 err=none
+08:51:25 PROGRESS kind=rust cpus=4 mem=8192 shape=shared ok=1 confirm_s=239698.4 consume_s=123188.1 p50_us=32700 p99_us=94600 broker_cpu=333 client_cpu=97 broker_mib=748 oom=false early=0 boot_s=0.2 err=none
+08:51:36 PROGRESS kind=rust cpus=4 mem=8192 shape=spread ok=1 confirm_s=399582.0 consume_s=399594.9 p50_us=18500 p99_us=49600 broker_cpu=327 client_cpu=97 broker_mib=792 oom=false early=0 boot_s=0.2 err=none
+08:51:47 PROGRESS kind=bun cpus=1 mem=512 shape=single ok=1 confirm_s=216552.0 consume_s=216544.0 p50_us=400 p99_us=2400 broker_cpu=75 client_cpu=97 broker_mib=167 oom=false early=0 boot_s=0.7 err=none
+08:51:58 PROGRESS kind=bun cpus=1 mem=512 shape=shared ok=1 confirm_s=177264.0 consume_s=177258.5 p50_us=43900 p99_us=95100 broker_cpu=83 client_cpu=97 broker_mib=147 oom=false early=0 boot_s=0.7 err=none
+08:52:09 PROGRESS kind=bun cpus=1 mem=512 shape=spread ok=1 confirm_s=217088.0 consume_s=217088.0 p50_us=36500 p99_us=81100 broker_cpu=78 client_cpu=97 broker_mib=166 oom=false early=0 boot_s=0.7 err=none
+08:52:20 PROGRESS kind=bun cpus=1 mem=1024 shape=single ok=1 confirm_s=210648.0 consume_s=210648.0 p50_us=400 p99_us=2700 broker_cpu=68 client_cpu=97 broker_mib=89 oom=false early=0 boot_s=0.7 err=none
+08:52:31 PROGRESS kind=bun cpus=1 mem=1024 shape=shared ok=1 confirm_s=187200.0 consume_s=187224.0 p50_us=42600 p99_us=98700 broker_cpu=83 client_cpu=97 broker_mib=163 oom=false early=0 boot_s=0.7 err=none
+08:52:42 PROGRESS kind=bun cpus=1 mem=1024 shape=spread ok=1 confirm_s=225584.0 consume_s=225568.0 p50_us=35100 p99_us=92800 broker_cpu=76 client_cpu=97 broker_mib=166 oom=false early=0 boot_s=0.7 err=none
+08:52:54 PROGRESS kind=bun cpus=2 mem=2048 shape=single ok=1 confirm_s=223260.0 consume_s=223260.0 p50_us=400 p99_us=2500 broker_cpu=92 client_cpu=97 broker_mib=165 oom=false early=0 boot_s=0.7 err=none
+08:53:06 PROGRESS kind=bun cpus=2 mem=2048 shape=shared ok=1 confirm_s=186944.0 consume_s=186944.0 p50_us=42100 p99_us=93500 broker_cpu=96 client_cpu=98 broker_mib=226 oom=false early=0 boot_s=0.7 err=none
+08:53:18 PROGRESS kind=bun cpus=2 mem=2048 shape=spread ok=1 confirm_s=366064.0 consume_s=366096.0 p50_us=21500 p99_us=67600 broker_cpu=159 client_cpu=97 broker_mib=262 oom=false early=0 boot_s=0.7 err=none
+08:53:30 PROGRESS kind=bun cpus=4 mem=4096 shape=single ok=1 confirm_s=211164.0 consume_s=211156.0 p50_us=500 p99_us=2200 broker_cpu=88 client_cpu=97 broker_mib=299 oom=false early=0 boot_s=0.7 err=none
+08:53:42 PROGRESS kind=bun cpus=4 mem=4096 shape=shared ok=1 confirm_s=192640.0 consume_s=192640.0 p50_us=41000 p99_us=93200 broker_cpu=108 client_cpu=97 broker_mib=345 oom=false early=0 boot_s=0.7 err=none
+08:53:54 PROGRESS kind=bun cpus=4 mem=4096 shape=spread ok=1 confirm_s=603472.0 consume_s=603496.0 p50_us=13000 p99_us=23100 broker_cpu=304 client_cpu=97 broker_mib=392 oom=false early=0 boot_s=0.7 err=none
+08:54:06 PROGRESS kind=bun cpus=4 mem=8192 shape=single ok=1 confirm_s=227364.0 consume_s=227372.0 p50_us=400 p99_us=2100 broker_cpu=105 client_cpu=97 broker_mib=299 oom=false early=0 boot_s=0.7 err=none
+08:54:18 PROGRESS kind=bun cpus=4 mem=8192 shape=shared ok=1 confirm_s=184464.0 consume_s=184488.0 p50_us=42300 p99_us=101100 broker_cpu=107 client_cpu=97 broker_mib=360 oom=false early=0 boot_s=1.2 err=none
+08:54:30 PROGRESS kind=bun cpus=4 mem=8192 shape=spread ok=1 confirm_s=309875.5 consume_s=309867.5 p50_us=13300 p99_us=200000 broker_cpu=222 client_cpu=97 broker_mib=396 oom=false early=0 boot_s=0.7 err=none
+08:54:31 broker down during boot oom=false status=exited
+08:54:31 FAILED kind=php cpus=1 mem=512 shape=single err=boot-failed-exited oom=false
+08:54:31 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:31 broker down during boot oom=false status=exited
+08:54:31 FAILED kind=php cpus=1 mem=512 shape=shared err=boot-failed-exited oom=false
+08:54:31 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:32 broker down during boot oom=false status=exited
+08:54:32 FAILED kind=php cpus=1 mem=512 shape=spread err=boot-failed-exited oom=false
+08:54:32 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:32 broker down during boot oom=false status=exited
+08:54:32 FAILED kind=php cpus=1 mem=1024 shape=single err=boot-failed-exited oom=false
+08:54:32 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:32 broker down during boot oom=false status=exited
+08:54:32 FAILED kind=php cpus=1 mem=1024 shape=shared err=boot-failed-exited oom=false
+08:54:32 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:32 broker down during boot oom=false status=exited
+08:54:32 FAILED kind=php cpus=1 mem=1024 shape=spread err=boot-failed-exited oom=false
+08:54:32 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:33 broker down during boot oom=false status=exited
+08:54:33 FAILED kind=php cpus=2 mem=2048 shape=single err=boot-failed-exited oom=false
+08:54:33 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:33 broker down during boot oom=false status=exited
+08:54:33 FAILED kind=php cpus=2 mem=2048 shape=shared err=boot-failed-exited oom=false
+08:54:33 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:33 broker down during boot oom=false status=exited
+08:54:33 FAILED kind=php cpus=2 mem=2048 shape=spread err=boot-failed-exited oom=false
+08:54:33 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:34 broker down during boot oom=false status=exited
+08:54:34 FAILED kind=php cpus=4 mem=4096 shape=single err=boot-failed-exited oom=false
+08:54:34 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:34 broker down during boot oom=false status=exited
+08:54:34 FAILED kind=php cpus=4 mem=4096 shape=shared err=boot-failed-exited oom=false
+08:54:34 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:34 broker down during boot oom=false status=exited
+08:54:34 FAILED kind=php cpus=4 mem=4096 shape=spread err=boot-failed-exited oom=false
+08:54:34 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:35 broker down during boot oom=false status=exited
+08:54:35 FAILED kind=php cpus=4 mem=8192 shape=single err=boot-failed-exited oom=false
+08:54:35 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:35 broker down during boot oom=false status=exited
+08:54:35 FAILED kind=php cpus=4 mem=8192 shape=shared err=boot-failed-exited oom=false
+08:54:35 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:35 broker down during boot oom=false status=exited
+08:54:35 FAILED kind=php cpus=4 mem=8192 shape=spread err=boot-failed-exited oom=false
+08:54:35 broker-log  | Parse error: Unclosed '{' on line 6 in /opt/queueforge/src/Protocols.php on line 465 | 
+08:54:35 TABLE single confirm/s p50ms
+08:54:35 size	rabbit	rust	bun	php
+08:54:35 1cpu/512m	53568 (2.30)	175360 (0.70)	216552 (0.40)	boot-failed-exited
+08:54:35 1cpu/1024m	58115 (2.20)	174774 (0.70)	210648 (0.40)	boot-failed-exited
+08:54:35 2cpu/2048m	78934 (1.50)	189818 (0.60)	223260 (0.40)	boot-failed-exited
+08:54:35 4cpu/4096m	83586 (1.50)	177606 (0.60)	211164 (0.50)	boot-failed-exited
+08:54:35 4cpu/8192m	83575 (1.50)	195855 (0.60)	227364 (0.40)	boot-failed-exited
+08:54:35 TABLE shared confirm/s p50ms
+08:54:35 size	rabbit	rust	bun	php
+08:54:35 1cpu/512m	41984 (194.10)	59836 (60.20)	177264 (43.90)	boot-failed-exited
+08:54:35 1cpu/1024m	45056 (175.20)	116389 (61.00)	187200 (42.60)	boot-failed-exited
+08:54:35 2cpu/2048m	74752 (110.20)	189525 (40.70)	186944 (42.10)	boot-failed-exited
+08:54:35 4cpu/4096m	80154 (99.90)	244257 (32.60)	192640 (41.00)	boot-failed-exited
+08:54:35 4cpu/8192m	82234 (93.20)	239698 (32.70)	184464 (42.30)	boot-failed-exited
+08:54:35 TABLE spread confirm/s p50ms
+08:54:35 size	rabbit	rust	bun	php
+08:54:35 1cpu/512m	45760 (175.40)	157075 (48.60)	217088 (36.50)	boot-failed-exited
+08:54:35 1cpu/1024m	44636 (184.00)	153491 (49.70)	225584 (35.10)	boot-failed-exited
+08:54:35 2cpu/2048m	89171 (89.90)	250179 (30.50)	366064 (21.50)	boot-failed-exited
+08:54:35 4cpu/4096m	172532 (46.80)	381879 (18.70)	603472 (13.00)	boot-failed-exited
+08:54:35 4cpu/8192m	173113 (46.60)	399582 (18.50)	309876 (13.30)	boot-failed-exited
+11:37:42 PROGRESS kind=bun cpus=1 mem=512 shape=single ok=1 confirm_s=214604.0 consume_s=214620.0 p50_us=400 p99_us=2600 broker_cpu=78 client_cpu=97 broker_mib=157 oom=false early=0 boot_s=0.7 err=none
+11:37:53 PROGRESS kind=bun cpus=1 mem=512 shape=shared ok=1 confirm_s=166704.0 consume_s=166720.0 p50_us=46300 p99_us=116800 broker_cpu=83 client_cpu=97 broker_mib=164 oom=false early=0 boot_s=0.7 err=none
+11:38:04 PROGRESS kind=bun cpus=1 mem=512 shape=spread ok=1 confirm_s=189584.0 consume_s=189608.0 p50_us=39100 p99_us=119000 broker_cpu=69 client_cpu=97 broker_mib=163 oom=false early=0 boot_s=0.7 err=none
+11:38:15 PROGRESS kind=bun cpus=1 mem=1024 shape=single ok=1 confirm_s=226972.0 consume_s=226956.0 p50_us=400 p99_us=2200 broker_cpu=78 client_cpu=97 broker_mib=80 oom=false early=0 boot_s=0.6 err=none
+11:38:26 PROGRESS kind=bun cpus=1 mem=1024 shape=shared ok=1 confirm_s=176288.0 consume_s=176304.0 p50_us=45600 p99_us=91200 broker_cpu=84 client_cpu=97 broker_mib=170 oom=false early=0 boot_s=0.6 err=none
+11:38:37 PROGRESS kind=bun cpus=1 mem=1024 shape=spread ok=1 confirm_s=224320.0 consume_s=224304.0 p50_us=34700 p99_us=88400 broker_cpu=80 client_cpu=97 broker_mib=158 oom=false early=0 boot_s=0.6 err=none
+11:38:49 PROGRESS kind=bun cpus=2 mem=2048 shape=single ok=1 confirm_s=207312.0 consume_s=207312.0 p50_us=500 p99_us=2800 broker_cpu=80 client_cpu=97 broker_mib=161 oom=false early=0 boot_s=0.7 err=none
+11:39:01 PROGRESS kind=bun cpus=2 mem=2048 shape=shared ok=1 confirm_s=173760.0 consume_s=173752.0 p50_us=43000 p99_us=142200 broker_cpu=96 client_cpu=97 broker_mib=223 oom=false early=0 boot_s=0.6 err=none
+11:39:13 PROGRESS kind=bun cpus=2 mem=2048 shape=spread ok=1 confirm_s=353376.0 consume_s=353352.0 p50_us=21000 p99_us=83600 broker_cpu=135 client_cpu=97 broker_mib=256 oom=false early=0 boot_s=0.7 err=none
+11:39:25 PROGRESS kind=bun cpus=4 mem=4096 shape=single ok=1 confirm_s=221060.0 consume_s=221056.0 p50_us=400 p99_us=2200 broker_cpu=100 client_cpu=97 broker_mib=290 oom=false early=0 boot_s=0.7 err=none
+11:39:37 PROGRESS kind=bun cpus=4 mem=4096 shape=shared ok=1 confirm_s=187040.0 consume_s=187040.0 p50_us=42400 p99_us=93300 broker_cpu=108 client_cpu=97 broker_mib=350 oom=false early=0 boot_s=0.7 err=none
+11:39:49 PROGRESS kind=bun cpus=4 mem=4096 shape=spread ok=1 confirm_s=584576.0 consume_s=584568.0 p50_us=12400 p99_us=54200 broker_cpu=303 client_cpu=97 broker_mib=398 oom=false early=0 boot_s=0.7 err=none
+11:40:01 PROGRESS kind=bun cpus=4 mem=8192 shape=single ok=1 confirm_s=225440.0 consume_s=225440.0 p50_us=400 p99_us=2000 broker_cpu=100 client_cpu=98 broker_mib=303 oom=false early=0 boot_s=0.7 err=none
+11:40:13 PROGRESS kind=bun cpus=4 mem=8192 shape=shared ok=1 confirm_s=186016.0 consume_s=185992.0 p50_us=41500 p99_us=95300 broker_cpu=106 client_cpu=98 broker_mib=345 oom=false early=0 boot_s=0.7 err=none
+11:40:25 PROGRESS kind=bun cpus=4 mem=8192 shape=spread ok=1 confirm_s=574528.0 consume_s=574504.0 p50_us=12800 p99_us=57000 broker_cpu=285 client_cpu=97 broker_mib=390 oom=false early=0 boot_s=0.7 err=none
+11:40:35 PROGRESS kind=php cpus=1 mem=512 shape=single ok=1 confirm_s=11232.0 consume_s=11232.0 p50_us=11600 p99_us=13700 broker_cpu=12 client_cpu=98 broker_mib=88 oom=false early= boot_s=0.2 err=none
+11:40:46 PROGRESS kind=php cpus=1 mem=512 shape=shared ok=1 confirm_s=51401.9 consume_s=51278.2 p50_us=134600 p99_us=200000 broker_cpu=93 client_cpu=97 broker_mib=141 oom=false early= boot_s=0.2 err=none
+11:40:56 PROGRESS kind=php cpus=1 mem=512 shape=spread ok=1 confirm_s=81285.0 consume_s=81383.0 p50_us=87300 p99_us=174200 broker_cpu=93 client_cpu=95 broker_mib=207 oom=false early= boot_s=0.2 err=none
+11:41:07 PROGRESS kind=php cpus=1 mem=1024 shape=single ok=1 confirm_s=11152.0 consume_s=11152.0 p50_us=11600 p99_us=12400 broker_cpu=12 client_cpu=98 broker_mib=34 oom=false early= boot_s=0.2 err=none
+11:41:17 PROGRESS kind=php cpus=1 mem=1024 shape=shared ok=1 confirm_s=49688.0 consume_s=49835.0 p50_us=145800 p99_us=200000 broker_cpu=95 client_cpu=97 broker_mib=136 oom=false early= boot_s=0.2 err=none
+11:41:28 PROGRESS kind=php cpus=1 mem=1024 shape=spread ok=1 confirm_s=77007.4 consume_s=76805.5 p50_us=91900 p99_us=198400 broker_cpu=94 client_cpu=97 broker_mib=181 oom=false early= boot_s=0.2 err=none
+11:41:40 PROGRESS kind=php cpus=2 mem=2048 shape=single ok=1 confirm_s=32048.0 consume_s=32048.0 p50_us=3900 p99_us=6000 broker_cpu=38 client_cpu=98 broker_mib=69 oom=false early= boot_s=0.7 err=none
+11:41:41 FAILED kind=php cpus=2 mem=2048 shape=shared ok=0 confirm_s=0.0 consume_s=0.0 p50_us=-1 p99_us=-1 broker_cpu= client_cpu= broker_mib= oom=false early= boot_s=0.7 err=c17_404_NOT_FOUND_-_no_queue__q0_
+11:41:53 PROGRESS kind=php cpus=2 mem=2048 shape=spread ok=1 confirm_s=170484.2 consume_s=170507.5 p50_us=40400 p99_us=86200 broker_cpu=186 client_cpu=97 broker_mib=417 oom=false early= boot_s=0.7 err=none
+11:42:05 PROGRESS kind=php cpus=4 mem=4096 shape=single ok=1 confirm_s=31296.0 consume_s=31296.0 p50_us=4000 p99_us=6300 broker_cpu=40 client_cpu=98 broker_mib=98 oom=false early= boot_s=0.7 err=none
+11:42:17 PROGRESS kind=php cpus=4 mem=4096 shape=shared ok=1 confirm_s=47546.0 consume_s=47576.4 p50_us=146000 p99_us=200000 broker_cpu=104 client_cpu=97 broker_mib=202 oom=false early= boot_s=0.6 err=none
+11:42:29 PROGRESS kind=php cpus=4 mem=4096 shape=spread ok=1 confirm_s=288669.0 consume_s=288512.6 p50_us=31300 p99_us=71200 broker_cpu=354 client_cpu=97 broker_mib=332 oom=false early= boot_s=0.7 err=none
+11:42:30 FAILED kind=php cpus=4 mem=8192 shape=single ok=0 confirm_s=0.0 consume_s=0.0 p50_us=-1 p99_us=-1 broker_cpu= client_cpu= broker_mib= oom=false early= boot_s=0.7 err=c2_404_NOT_FOUND_-_no_queue__q0_
+11:42:42 PROGRESS kind=php cpus=4 mem=8192 shape=shared ok=1 confirm_s=50116.0 consume_s=50116.0 p50_us=143000 p99_us=200000 broker_cpu=100 client_cpu=97 broker_mib=204 oom=false early= boot_s=0.7 err=none
+11:42:56 PROGRESS kind=php cpus=4 mem=8192 shape=spread ok=1 confirm_s=292520.1 consume_s=292480.2 p50_us=30500 p99_us=65400 broker_cpu=343 client_cpu=97 broker_mib=334 oom=false early= boot_s=0.6 err=none
+11:42:56 TABLE single confirm/s p50ms
+11:42:56 size	bun	php
+11:42:56 1cpu/512m	214604 (0.40)	11232 (11.60)
+11:42:56 1cpu/1024m	226972 (0.40)	11152 (11.60)
+11:42:56 2cpu/2048m	207312 (0.50)	32048 (3.90)
+11:42:56 4cpu/4096m	221060 (0.40)	31296 (4.00)
+11:42:56 4cpu/8192m	225440 (0.40)	0 (-0.00)
+11:42:56 TABLE shared confirm/s p50ms
+11:42:56 size	bun	php
+11:42:56 1cpu/512m	166704 (46.30)	51402 (134.60)
+11:42:56 1cpu/1024m	176288 (45.60)	49688 (145.80)
+11:42:56 2cpu/2048m	173760 (43.00)	0 (-0.00)
+11:42:56 4cpu/4096m	187040 (42.40)	47546 (146.00)
+11:42:56 4cpu/8192m	186016 (41.50)	50116 (143.00)
+11:42:56 TABLE spread confirm/s p50ms
+11:42:56 size	bun	php
+11:42:56 1cpu/512m	189584 (39.10)	81285 (87.30)
+11:42:56 1cpu/1024m	224320 (34.70)	77007 (91.90)
+11:42:56 2cpu/2048m	353376 (21.00)	170484 (40.40)
+11:42:56 4cpu/4096m	584576 (12.40)	288669 (31.30)
+11:42:56 4cpu/8192m	574528 (12.80)	292520 (30.50)
+12:36:08 PROGRESS kind=bun cpus=1 mem=512 shape=single ok=1 confirm_s=205140.0 consume_s=205140.0 p50_us=400 p99_us=2700 broker_cpu=75 client_cpu=97 broker_mib=157 oom=false early=0 boot_s=0.7 err=none
+12:36:19 PROGRESS kind=bun cpus=1 mem=512 shape=shared ok=1 confirm_s=162848.0 consume_s=162824.0 p50_us=47500 p99_us=127200 broker_cpu=82 client_cpu=97 broker_mib=174 oom=false early=0 boot_s=0.6 err=none
+12:36:30 PROGRESS kind=bun cpus=1 mem=512 shape=spread ok=1 confirm_s=146304.0 consume_s=146304.0 p50_us=38800 p99_us=200000 broker_cpu=53 client_cpu=97 broker_mib=159 oom=false early=0 boot_s=0.7 err=none
+12:36:41 PROGRESS kind=bun cpus=1 mem=1024 shape=single ok=1 confirm_s=180636.0 consume_s=180644.0 p50_us=400 p99_us=6500 broker_cpu=67 client_cpu=97 broker_mib=90 oom=false early=0 boot_s=0.7 err=none
+12:36:52 PROGRESS kind=bun cpus=1 mem=1024 shape=shared ok=1 confirm_s=161520.0 consume_s=161504.0 p50_us=43000 p99_us=191300 broker_cpu=70 client_cpu=97 broker_mib=143 oom=false early=0 boot_s=0.7 err=none
+12:37:03 PROGRESS kind=bun cpus=1 mem=1024 shape=spread ok=1 confirm_s=205584.0 consume_s=205600.0 p50_us=34900 p99_us=167400 broker_cpu=60 client_cpu=97 broker_mib=157 oom=false early=0 boot_s=0.7 err=none
+12:37:15 PROGRESS kind=bun cpus=2 mem=2048 shape=single ok=1 confirm_s=170456.0 consume_s=170452.0 p50_us=400 p99_us=6200 broker_cpu=84 client_cpu=97 broker_mib=154 oom=false early=0 boot_s=0.8 err=none
+12:37:28 PROGRESS kind=bun cpus=2 mem=2048 shape=shared ok=1 confirm_s=144472.1 consume_s=144464.1 p50_us=41500 p99_us=200000 broker_cpu=86 client_cpu=97 broker_mib=229 oom=false early=0 boot_s=0.6 err=none
+12:37:40 PROGRESS kind=bun cpus=2 mem=2048 shape=spread ok=1 confirm_s=277712.0 consume_s=277688.0 p50_us=21700 p99_us=131200 broker_cpu=114 client_cpu=97 broker_mib=248 oom=false early=0 boot_s=0.8 err=none
+12:37:52 PROGRESS kind=bun cpus=4 mem=4096 shape=single ok=1 confirm_s=189068.0 consume_s=189068.0 p50_us=400 p99_us=4600 broker_cpu=93 client_cpu=97 broker_mib=288 oom=false early=0 boot_s=0.7 err=none
+12:38:04 PROGRESS kind=bun cpus=4 mem=4096 shape=shared ok=1 confirm_s=155968.0 consume_s=155992.0 p50_us=41200 p99_us=188900 broker_cpu=107 client_cpu=97 broker_mib=358 oom=false early=0 boot_s=0.7 err=none
+12:38:16 PROGRESS kind=bun cpus=4 mem=4096 shape=spread ok=1 confirm_s=411904.0 consume_s=411888.0 p50_us=12800 p99_us=134200 broker_cpu=165 client_cpu=97 broker_mib=398 oom=false early=0 boot_s=0.7 err=none
+12:38:28 PROGRESS kind=bun cpus=4 mem=8192 shape=single ok=1 confirm_s=165220.0 consume_s=165216.0 p50_us=400 p99_us=5600 broker_cpu=71 client_cpu=97 broker_mib=285 oom=false early=0 boot_s=0.7 err=none
+12:38:40 PROGRESS kind=bun cpus=4 mem=8192 shape=shared ok=1 confirm_s=149984.0 consume_s=149974.0 p50_us=43000 p99_us=200000 broker_cpu=77 client_cpu=97 broker_mib=348 oom=false early=0 boot_s=0.7 err=none
+12:38:52 PROGRESS kind=bun cpus=4 mem=8192 shape=spread ok=1 confirm_s=461888.0 consume_s=461936.0 p50_us=13300 p99_us=110800 broker_cpu=225 client_cpu=97 broker_mib=384 oom=false early=0 boot_s=0.7 err=none
+12:38:52 TABLE single confirm/s p50ms
+12:38:52 size	bun
+12:38:52 1cpu/512m	205140 (0.40)
+12:38:52 1cpu/1024m	180636 (0.40)
+12:38:52 2cpu/2048m	170456 (0.40)
+12:38:52 4cpu/4096m	189068 (0.40)
+12:38:52 4cpu/8192m	165220 (0.40)
+12:38:52 TABLE shared confirm/s p50ms
+12:38:52 size	bun
+12:38:52 1cpu/512m	162848 (47.50)
+12:38:52 1cpu/1024m	161520 (43.00)
+12:38:52 2cpu/2048m	144472 (41.50)
+12:38:52 4cpu/4096m	155968 (41.20)
+12:38:52 4cpu/8192m	149984 (43.00)
+12:38:52 TABLE spread confirm/s p50ms
+12:38:52 size	bun
+12:38:52 1cpu/512m	146304 (38.80)
+12:38:52 1cpu/1024m	205584 (34.90)
+12:38:52 2cpu/2048m	277712 (21.70)
+12:38:52 4cpu/4096m	411904 (12.80)
+12:38:52 4cpu/8192m	461888 (13.30)

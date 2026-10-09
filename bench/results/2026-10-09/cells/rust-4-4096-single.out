@@ -1,0 +1,6 @@
+CONFIG ping=0 pubs=1 cons=1 queues=1 window=128 prefetch=256 body=256 warmup_us=2000000 measure_us=8000000
+DECLARED 1
+ARMED queues=1
+RUNNING
+MARK
+RESULT ok=1 confirm_s=177606.4 consume_s=177595.8 sent_s=177606.4 p50_us=600 p99_us=4500 confirmed=1420851 consumed=1420766 sent=1420851 samples=1420723 inflight=128 blocked=0 nacks=0 missed=0 returns=0 elapsed_s=8.000 pubs=1 cons=1 queues=1 window=128 prefetch=256 body=256 err=none

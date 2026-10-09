@@ -1,0 +1,19 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-122552-908, starting consumer #0
+id: test-122552-908, starting consumer #0, channel #0
+id: test-122552-908, starting consumer #1
+id: test-122552-908, starting consumer #1, channel #0
+id: test-122552-908, starting consumer #2
+id: test-122552-908, starting consumer #2, channel #0
+id: test-122552-908, starting consumer #3
+id: test-122552-908, starting consumer #3, channel #0
+id: test-122552-908, time 1.001 s, received: 48011 msg/s, min/median/75th/95th/99th/max consumer latency: 4997869/5115437/5187927/5267474/5281222/5286746 µs
+id: test-122552-908, time 2.000 s, received: 51488 msg/s, min/median/75th/95th/99th/max consumer latency: 5267510/5359747/5440763/5515905/5535993/5540520 µs
+id: test-122552-908, time 3.000 s, received: 49113 msg/s, min/median/75th/95th/99th/max consumer latency: 5532237/5691898/5768344/5836479/5853733/5858966 µs
+id: test-122552-908, time 4.000 s, received: 52065 msg/s, min/median/75th/95th/99th/max consumer latency: 5856914/6020965/6109918/6176034/6187603/6194690 µs
+id: test-122552-908, time 5.000 s, received: 49844 msg/s, min/median/75th/95th/99th/max consumer latency: 6187692/6337769/6420937/6489179/6506460/6513503 µs
+id: test-122552-908, time 6.002 s, received: 49532 msg/s, min/median/75th/95th/99th/max consumer latency: 6506256/6628156/6683661/6705054/6709193/6712271 µs
+test stopped (Reached time limit)
+id: test-122552-908, sending rate avg: 0 msg/s
+id: test-122552-908, receiving rate avg: 3328 msg/s
+id: test-122552-908, consumer latency min/median/75th/95th/99th/max 5012060/5903113/6331998/6656720/6701963/6711818 µs

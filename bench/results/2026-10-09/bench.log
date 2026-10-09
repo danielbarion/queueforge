@@ -1,0 +1,247 @@
+08:45:31 RUN images {"rabbit": "sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89", "rust": "sha256:38137db59067dd0cb8ca1c369068c6051c7f5d5aa6f432f001d51de5d4a5aa9e", "bun": "sha256:2a9ea15e5eabb3dac277ec1189b120dd23b28042bbab5a6980a8d845595493af", "php": "sha256:466c9b6bfbdd21c8a330e39b7580b5e3cba716e21a07088b0a214cabb65932ad"}
+08:45:31 PROGRESS vm before ncpu=2 mem=8320565248
+08:45:31 PROGRESS docker quit
+08:45:38 PROGRESS docker start
+08:45:41 PROGRESS vm large ncpu=8 mem=25159827456
+08:45:42 sidecar trievo-postgres cpuset=7
+08:45:42 STEP load start
+08:54:35 STEP load done in 534s
+08:54:36 STEP scenarios start
+08:55:07 CELL rabbit 1 CPU / 1 GiB work-queue ok=1 err= sent=41966.8 recv=41976.1 mb= p50=5.22 p99=13.19 mib=161 anon=125 cpu=99 client= kept=yes
+08:55:36 CELL rust 1 CPU / 1 GiB work-queue ok=1 err= sent=124894.1 recv=124897.6 mb= p50=2.13 p99=4.78 mib=83 anon=15 cpu=96 client= kept=yes
+08:56:05 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=100969.8 recv=100966.1 mb= p50=2.19 p99=7.81 mib=100 anon=79 cpu=79 client= kept=yes
+08:56:06 FAILED php 1 CPU / 1 GiB work-queue boot-exited
+08:56:36 CELL rabbit 1 CPU / 1 GiB telemetry ok=1 err= sent=94123.2 recv=94087.7 mb= p50=66.06 p99=119.89 mib=256 anon=195 cpu=99 client= kept=yes
+08:57:08 CELL rust 1 CPU / 1 GiB telemetry ok=1 err= sent=83967.5 recv=88041.6 mb= p50=3738.41 p99=3821.97 mib=189 anon=66 cpu=99 client= kept=yes
+08:57:40 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=75019.7 recv=71350.1 mb= p50=388.83 p99=1066.67 mib=852 anon=817 cpu=100 client= kept=yes
+08:58:09 CELL php 1 CPU / 1 GiB telemetry ok=1 err= sent=97227.5 recv=97227.4 mb= p50=4.83 p99=39.91 mib=29 anon=20 cpu=99 client= kept=yes
+08:58:39 CELL rabbit 1 CPU / 1 GiB fanout-20 ok=1 err= sent=2108.6 recv=42192.4 mb= p50=20.10 p99=52.77 mib=193 anon=151 cpu=99 client= kept=yes
+08:59:08 CELL rust 1 CPU / 1 GiB fanout-20 ok=1 err= sent=5880.6 recv=117624.1 mb= p50=0.76 p99=6.82 mib=1024 anon=18 cpu=91 client= kept=yes
+08:59:38 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=9883.4 recv=197636.9 mb= p50=4.68 p99=17.26 mib=141 anon=87 cpu=86 client= kept=yes
+09:00:07 CELL php 1 CPU / 1 GiB fanout-20 ok=1 err= sent=3796.3 recv=75935.7 mb= p50=36.11 p99=64.40 mib=350 anon=22 cpu=93 client= kept=yes
+09:00:38 CELL rabbit 1 CPU / 1 GiB routing-64 ok=1 err= sent=34480.1 recv=34480.3 mb= p50=23.15 p99=43.98 mib=236 anon=200 cpu=99 client= kept=yes
+09:01:07 CELL rust 1 CPU / 1 GiB routing-64 ok=1 err= sent=73918.7 recv=73944.1 mb= p50=9.32 p99=16.27 mib=1024 anon=34 cpu=94 client= kept=yes
+09:01:37 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=86475.5 recv=86468.1 mb= p50=13.28 p99=36.23 mib=125 anon=98 cpu=87 client= kept=yes
+09:02:07 CELL php 1 CPU / 1 GiB routing-64 ok=1 err= sent=51313.0 recv=51330.1 mb= p50=26.27 p99=40.57 mib=246 anon=26 cpu=95 client= kept=yes
+09:02:38 CELL rabbit 1 CPU / 1 GiB large-64k ok=1 err= sent=9678.5 recv=9679.2 mb=634.3 p50=2.01 p99=7.39 mib=366 anon=268 cpu=99 client= kept=yes
+09:03:06 CELL rust 1 CPU / 1 GiB large-64k ok=1 err= sent=3889.9 recv=3890.5 mb=255.0 p50=0.92 p99=5.11 mib=88 anon=16 cpu=33 client= kept=yes
+09:03:36 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=4772.4 recv=4772.4 mb=312.8 p50=1.64 p99=6.91 mib=248 anon=159 cpu=74 client= kept=yes
+09:04:06 CELL php 1 CPU / 1 GiB large-64k ok=1 err= sent=3150.2 recv=3150.1 mb=206.4 p50=7.71 p99=21.76 mib=58 anon=20 cpu=38 client= kept=yes
+09:04:36 CELL rabbit 1 CPU / 1 GiB large-1m ok=1 err= sent=1182.9 recv=1183.0 mb=1240.5 p50=1.87 p99=6.72 mib=324 anon=241 cpu=97 client= kept=yes
+09:05:05 CELL rust 1 CPU / 1 GiB large-1m ok=1 err= sent=372.1 recv=372.3 mb=390.3 p50=3.78 p99=7.42 mib=97 anon=20 cpu=43 client= kept=yes
+09:05:35 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=354.6 recv=354.6 mb=371.9 p50=3.72 p99=11.89 mib=296 anon=97 cpu=79 client= kept=yes
+09:06:04 EXCEPTION php large-1m: 12:05:38.919 [AMQP Connection 172.26.0.2:5672] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+09:06:04 broker-log queueforge-php amqp=0.0.0.0:5672 node=queueforge fsync_ms=10 | 
+09:06:04 CELL php 1 CPU / 1 GiB large-1m ok=0 err=oom sent=None recv=None mb= p50=None p99=None mib=1024 anon=922 cpu= client= kept=None
+09:06:34 CELL rabbit 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.6 recv=1000.6 mb= p50=0.17 p99=4.23 mib=159 anon=127 cpu=42 client= kept=yes
+09:07:03 CELL rust 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.6 recv=1000.6 mb= p50=0.15 p99=1.46 mib=48 anon=14 cpu=13 client= kept=yes
+09:07:32 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.5 mb= p50=0.67 p99=3.42 mib=81 anon=51 cpu=15 client= kept=yes
+09:08:02 CELL php 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.2 recv=1000.1 mb= p50=0.31 p99=23.10 mib=32 anon=18 cpu=11 client= kept=yes
+09:08:32 CELL rabbit 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.8 recv=10004.7 mb= p50=0.40 p99=14.91 mib=159 anon=127 cpu=98 client= kept=yes
+09:09:01 CELL rust 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10005.3 mb= p50=0.04 p99=1.64 mib=83 anon=12 cpu=28 client= kept=yes
+09:09:30 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.3 recv=10005.2 mb= p50=0.21 p99=5.25 mib=79 anon=61 cpu=36 client= kept=yes
+09:10:00 CELL php 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.1 recv=10003.9 mb= p50=6.76 p99=28.21 mib=58 anon=18 cpu=23 client= kept=yes
+09:10:58 CELL rabbit 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.5 mb= p50=0.47 p99=13.35 mib=441 anon=392 cpu=91 client= kept=yes
+09:11:56 CELL rust 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.36 p99=7.43 mib=1024 anon=111 cpu=68 client= kept=yes
+09:12:52 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5167.7 recv=5350.0 mb= p50=0.73 p99=18.79 mib=167 anon=131 cpu=56 client= kept=yes
+09:13:49 CELL php 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.2 recv=5003.0 mb= p50=6.59 p99=21.34 mib=105 anon=68 cpu=72 client= kept=yes
+09:14:20 CELL rabbit 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.4 recv=5004.6 mb= p50=0.10 p99=12.53 mib=161 anon=128 cpu=90 client= kept=yes
+09:14:49 CELL rust 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5001.9 recv=5001.9 mb= p50=0.04 p99=0.67 mib=85 anon=18 cpu=17 client= kept=yes
+09:15:19 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.1 recv=5002.2 mb= p50=0.27 p99=14.63 mib=93 anon=66 cpu=24 client= kept=yes
+09:15:48 CELL php 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.4 recv=5005.0 mb= p50=0.41 p99=22.40 mib=33 anon=18 cpu=29 client= kept=yes
+09:16:19 CELL rabbit 1 CPU / 1 GiB quorum ok=1 err= sent=33840.9 recv=26691.5 mb= p50=3361.61 p99=3527.25 mib=954 anon=573 cpu=93 client= kept=no
+09:16:47 EXCEPTION rust quorum: 12:16:47.661 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+09:16:47 broker-log [2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:58484 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:16:47.659591Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:58500 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:16:47.660034Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:58506 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | 
+09:16:48 CELL rust 1 CPU / 1 GiB quorum ok=0 err=exception sent=77569.2 recv=76544.1 mb= p50=5665.85 p99=5896.44 mib=1024 anon=794 cpu=98 client= kept=yes
+09:17:17 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=80984.0 recv=80986.6 mb= p50=3.65 p99=12.72 mib=527 anon=493 cpu=84 client= kept=yes
+09:17:47 CELL php 1 CPU / 1 GiB quorum ok=1 err= sent=32842.3 recv=32842.3 mb= p50=12.20 p99=18.34 mib=235 anon=114 cpu=47 client= kept=yes
+09:18:17 CELL rabbit 1 CPU / 1 GiB stream ok=1 err= sent=53191.4 recv=26687.5 mb= p50=10840.84 p99=11220.13 mib=1024 anon=126 cpu=98 client= kept=no
+09:18:46 EXCEPTION rust stream: 12:18:46.325 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+09:18:46 broker-log [2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:41512 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:18:46.322611Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:41498 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:18:46.324261Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:41504 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | 
+09:18:46 CELL rust 1 CPU / 1 GiB stream ok=0 err=exception sent=9489.3 recv=10442.2 mb= p50=6523.07 p99=6710.88 mib=634 anon=366 cpu=19 client= kept=yes
+09:19:16 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=18045.2 recv=21795.1 mb= p50=5942.23 p99=6010.93 mib=1024 anon=208 cpu=55 client= kept=yes
+09:19:45 CELL php 1 CPU / 1 GiB stream ok=1 err= sent=4063.9 recv=6912.7 mb= p50=1807.28 p99=1893.57 mib=298 anon=178 cpu=21 client= kept=yes
+09:20:16 CELL rabbit 1 CPU / 1 GiB priority ok=1 err= sent=31131.8 recv=31129.7 mb= p50=3.34 p99=9.41 mib=158 anon=127 cpu=99 client= kept=yes
+09:20:45 CELL rust 1 CPU / 1 GiB priority ok=1 err= sent=113478.0 recv=113478.4 mb= p50=0.68 p99=1.85 mib=83 anon=15 cpu=93 client= kept=yes
+09:21:14 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=88993.2 recv=88995.2 mb= p50=1.23 p99=7.34 mib=96 anon=82 cpu=86 client= kept=yes
+09:21:44 CELL php 1 CPU / 1 GiB priority ok=1 err= sent=16661.1 recv=16661.1 mb= p50=11.97 p99=15.08 mib=82 anon=16 cpu=26 client= kept=yes
+09:22:14 CELL rabbit 1 CPU / 1 GiB transactions ok=1 err= sent=19233.1 recv=19232.9 mb= p50=0.42 p99=7.75 mib=157 anon=126 cpu=98 client= kept=yes
+09:22:43 CELL rust 1 CPU / 1 GiB transactions ok=1 err= sent=198.9 recv=198.8 mb= p50=45.16 p99=91.69 mib=23 anon=14 cpu=7 client= kept=yes
+09:23:13 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=10785.9 recv=10786.3 mb= p50=820.82 p99=1209.30 mib=285 anon=174 cpu=39 client= kept=yes
+09:23:41 EXCEPTION php transactions: 12:23:41.721 [perf-test-consumer-0-worker-0] ERROR c.r.perf.RelaxedExceptionHandler - Consumer com.rabbitmq.perf.Consumer$ConsumerImpl@685db459 (amq.ctag-bcdb57
+09:23:41 broker-log queueforge-php amqp=0.0.0.0:5672 node=queueforge fsync_ms=10 | 
+09:23:42 CELL php 1 CPU / 1 GiB transactions ok=0 err=exception sent=51736.4 recv=51758.6 mb= p50=11.73 p99=25.09 mib=196 anon=24 cpu=92 client= kept=yes
+09:24:13 CELL rabbit 1 CPU / 1 GiB heavy ok=1 err= sent=29238.9 recv=29257.9 mb= p50=309.72 p99=437.42 mib=248 anon=214 cpu=99 client= kept=yes
+09:24:42 CELL rust 1 CPU / 1 GiB heavy ok=1 err= sent=89958.8 recv=90035.2 mb= p50=98.81 p99=248.60 mib=1024 anon=68 cpu=98 client= kept=yes
+09:25:12 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=91724.5 recv=91731.1 mb= p50=236.06 p99=488.89 mib=1024 anon=259 cpu=86 client= kept=yes
+09:25:42 CELL php 1 CPU / 1 GiB heavy ok=1 err= sent=64915.3 recv=64878.8 mb= p50=191.82 p99=269.41 mib=1004 anon=48 cpu=95 client= kept=yes
+09:27:23 CELL rabbit 1 CPU / 1 GiB backlog ok=1 err= sent=71863.5 recv=50008.8 mb= p50= p99= mib=545 anon=169 cpu=8 client= kept=yes
+09:29:00 CELL rust 1 CPU / 1 GiB backlog ok=1 err= sent=145337.5 recv=149850.5 mb= p50= p99= mib=820 anon=473 cpu=2 client= kept=yes
+09:30:46 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=26912.4 recv=74977.2 mb= p50= p99= mib=1024 anon=540 cpu=11 client= kept=yes
+09:32:28 CELL php 1 CPU / 1 GiB backlog ok=1 err= sent=57393.2 recv=3616.0 mb= p50= p99= mib=1024 anon=749 cpu=89 client= kept=yes
+09:32:58 CELL rabbit 4 CPU / 4 GiB work-queue ok=1 err= sent=68452.3 recv=68452.3 mb= p50=2.40 p99=5.69 mib=180 anon=146 cpu=270 client= kept=yes
+09:33:27 CELL rust 4 CPU / 4 GiB work-queue ok=1 err= sent=181080.9 recv=181079.3 mb= p50=1.33 p99=3.32 mib=85 anon=18 cpu=314 client= kept=yes
+09:33:57 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=95348.5 recv=95349.7 mb= p50=2.70 p99=7.59 mib=314 anon=193 cpu=121 client= kept=yes
+09:34:28 CELL php 4 CPU / 4 GiB work-queue ok=1 err= sent=38625.4 recv=4538.1 mb= p50=19.16 p99=4169.92 mib=182 anon=134 cpu=231 client= kept=no
+09:34:59 CELL rabbit 4 CPU / 4 GiB telemetry ok=1 err= sent=274104.8 recv=274150.7 mb= p50=11.22 p99=27.41 mib=268 anon=203 cpu=364 client= kept=yes
+09:35:30 CELL rust 4 CPU / 4 GiB telemetry ok=1 err= sent=138963.1 recv=143620.1 mb= p50=2167.87 p99=2365.87 mib=223 anon=100 cpu=317 client= kept=yes
+09:36:00 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=88120.4 recv=88115.2 mb= p50=17.04 p99=38.01 mib=1061 anon=916 cpu=128 client= kept=yes
+09:36:29 CELL php 4 CPU / 4 GiB telemetry ok=1 err= sent=143002.8 recv=77283.4 mb= p50=2.94 p99=1946.54 mib=305 anon=252 cpu=400 client= kept=no
+09:37:00 CELL rabbit 4 CPU / 4 GiB fanout-20 ok=1 err= sent=7226.8 recv=144494.9 mb= p50=5.12 p99=15.27 mib=216 anon=176 cpu=391 client= kept=yes
+09:37:29 CELL rust 4 CPU / 4 GiB fanout-20 ok=1 err= sent=9452.9 recv=189063.4 mb= p50=0.54 p99=4.00 mib=1343 anon=21 cpu=196 client= kept=yes
+09:37:59 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=346.1 recv=6916.8 mb= p50=119.56 p99=404.60 mib=2090 anon=858 cpu=161 client= kept=yes
+09:38:03 EXCEPTION php fanout-20: Main thread caught exception: java.lang.RuntimeException: java.io.IOException
+09:38:03 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+09:38:04 CELL php 4 CPU / 4 GiB fanout-20 ok=0 err=client-exit-1 sent=None recv=None mb= p50=None p99=None mib=87 anon=55 cpu= client= kept=None
+09:38:35 CELL rabbit 4 CPU / 4 GiB routing-64 ok=1 err= sent=132617.7 recv=132620.7 mb= p50=6.15 p99=16.75 mib=307 anon=247 cpu=385 client= kept=yes
+09:39:04 CELL rust 4 CPU / 4 GiB routing-64 ok=1 err= sent=125353.8 recv=125353.7 mb= p50=0.55 p99=2.91 mib=2149 anon=39 cpu=183 client= kept=yes
+09:39:34 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=213486.1 recv=213943.0 mb= p50=3.74 p99=15.41 mib=472 anon=412 cpu=315 client= kept=yes
+09:39:39 EXCEPTION php routing-64: Main thread caught exception: java.lang.RuntimeException: java.io.IOException
+09:39:39 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+09:39:39 CELL php 4 CPU / 4 GiB routing-64 ok=0 err=client-exit-1 sent=None recv=None mb= p50=None p99=None mib=88 anon=55 cpu= client= kept=None
+09:40:38 CELL rabbit 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.23 p99=2.17 mib=461 anon=413 cpu=192 client= kept=yes
+09:41:36 CELL rust 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.2 recv=5002.2 mb= p50=0.12 p99=0.80 mib=2231 anon=144 cpu=86 client= kept=yes
+09:42:33 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5001.8 recv=5001.7 mb= p50=0.14 p99=15.89 mib=481 anon=334 cpu=76 client= kept=yes
+09:42:44 EXCEPTION php many-queues: Main thread caught exception: java.lang.RuntimeException: java.io.IOException
+09:42:44 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+09:42:44 CELL php 4 CPU / 4 GiB many-queues ok=0 err=client-exit-1 sent=None recv=None mb= p50=None p99=None mib=96 anon=57 cpu= client= kept=None
+09:43:15 CELL rabbit 4 CPU / 4 GiB quorum ok=1 err= sent=89656.2 recv=89749.8 mb= p50=7.82 p99=40.03 mib=810 anon=337 cpu=279 client= kept=yes
+09:43:44 EXCEPTION rust quorum: 12:43:44.037 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+09:43:44 broker-log [2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:39110 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:43:44.033619Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:39114 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | [2m2026-10-09T12:43:44.035691Z[0m [32m INFO[0m [2mqueueforge_broker::connection::queue[0m[2m:[0m client connection.close [3mpeer[0m[2m=[0m172.26.0.3:39120 [3mcode[0m[2m=[0m200 [3mtext[0m[2m=[0mClosed by PerfTest | 
+09:43:44 CELL rust 4 CPU / 4 GiB quorum ok=0 err=exception sent=145115.7 recv=73561.6 mb= p50=10221.85 p99=10532.38 mib=4096 anon=3082 cpu=262 client= kept=no
+09:44:14 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=12344.8 recv=12344.8 mb= p50=31.20 p99=51.58 mib=854 anon=758 cpu=144 client= kept=yes
+09:44:43 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+09:44:43 CELL php 4 CPU / 4 GiB quorum ok=0 err=no-delivery sent=None recv=None mb= p50=None p99=None mib=91 anon=57 cpu=27 client= kept=None
+09:45:14 CELL rabbit 4 CPU / 4 GiB heavy ok=1 err= sent=123815.6 recv=123801.6 mb= p50=31.83 p99=90.58 mib=506 anon=323 cpu=378 client= kept=yes
+09:45:44 CELL rust 4 CPU / 4 GiB heavy ok=1 err= sent=240313.0 recv=240587.1 mb= p50=37.71 p99=88.62 mib=1139 anon=143 cpu=348 client= kept=yes
+09:46:19 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=205205.4 recv=202133.3 mb= p50=237.01 p99=815.23 mib=3597 anon=2084 cpu=264 client= kept=yes
+09:46:24 EXCEPTION php heavy: Main thread caught exception: java.lang.RuntimeException: java.io.IOException
+09:46:24 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+09:46:24 CELL php 4 CPU / 4 GiB heavy ok=0 err=client-exit-1 sent=None recv=None mb= p50=None p99=None mib=87 anon=57 cpu= client= kept=None
+09:46:24 DONE scenarios
+09:46:24 STEP scenarios done in 3109s
+09:46:24 STEP connections start
+11:19:23 STEP connections done in 5579s
+11:19:23 PROGRESS restore docker to 2 cpu 8192 MiB
+11:19:24 PROGRESS docker quit
+11:19:31 PROGRESS docker start
+11:19:34 sidecar trievo-postgres cpuset=0-1
+11:19:34 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+11:19:34 STEP paced start
+11:26:45 STEP paced done in 430s
+11:26:45 RUN done
+11:33:53 RESCORE rust 1 CPU / 1 GiB quorum ok
+11:33:53 RESCORE rust 1 CPU / 1 GiB stream ok
+11:33:53 RESCORE php 1 CPU / 1 GiB transactions ok
+11:33:53 RESCORE rust 4 CPU / 4 GiB quorum ok
+11:37:21 RUN kinds=bun,php images {"rabbit": "sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89", "rust": "sha256:38137db59067dd0cb8ca1c369068c6051c7f5d5aa6f432f001d51de5d4a5aa9e", "bun": "sha256:663b7c06ca4772bf77da43901ef90c45f187dcfdd74bc7bc7573180f6c2fa140", "php": "sha256:ef6e84c66cba7abb25b614b05d61d6fbe21afaa396e6af9c390ed2fa7bc90acd"}
+11:37:21 PROGRESS vm before ncpu=2 mem=8320565248
+11:37:21 PROGRESS docker quit
+11:37:28 PROGRESS docker start
+11:37:30 PROGRESS vm large ncpu=8 mem=25159827456
+11:37:30 sidecar trievo-postgres cpuset=7
+11:37:31 STEP load start
+11:42:56 STEP load done in 326s
+11:42:57 STEP scenarios start
+11:43:28 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=111879.7 recv=111883.4 mb= p50=2.52 p99=8.10 mib=109 anon=77 cpu=86 client= kept=yes
+11:43:57 CELL php 1 CPU / 1 GiB work-queue ok=1 err= sent=35521.5 recv=35518.0 mb= p50=11.44 p99=16.40 mib=88 anon=20 cpu=55 client= kept=yes
+11:44:28 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=68283.8 recv=68725.6 mb= p50=54.10 p99=466.50 mib=841 anon=796 cpu=100 client= kept=yes
+11:44:58 CELL php 1 CPU / 1 GiB telemetry ok=1 err= sent=88962.1 recv=88917.2 mb= p50=5.15 p99=40.91 mib=31 anon=20 cpu=99 client= kept=yes
+11:45:27 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=11777.6 recv=235555.5 mb= p50=4.63 p99=11.17 mib=146 anon=93 cpu=89 client= kept=yes
+11:45:57 CELL php 1 CPU / 1 GiB fanout-20 ok=1 err= sent=3786.7 recv=75800.9 mb= p50=35.44 p99=64.37 mib=367 anon=26 cpu=94 client= kept=yes
+11:46:26 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=107346.3 recv=107347.3 mb= p50=10.60 p99=31.29 mib=122 anon=90 cpu=88 client= kept=yes
+11:46:56 CELL php 1 CPU / 1 GiB routing-64 ok=1 err= sent=51664.8 recv=51664.8 mb= p50=25.68 p99=44.89 mib=255 anon=28 cpu=95 client= kept=yes
+11:47:26 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=5743.6 recv=5743.7 mb=376.4 p50=1.45 p99=5.40 mib=182 anon=90 cpu=74 client= kept=yes
+11:47:55 CELL php 1 CPU / 1 GiB large-64k ok=1 err= sent=3752.6 recv=3752.4 mb=245.9 p50=6.98 p99=17.92 mib=61 anon=18 cpu=39 client= kept=yes
+11:48:25 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=387.7 recv=387.7 mb=406.6 p50=4.41 p99=13.09 mib=294 anon=139 cpu=80 client= kept=yes
+11:48:54 EXCEPTION php large-1m: 14:48:29.309 [AMQP Connection 172.26.0.2:5672] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+11:48:54 broker-log queueforge-php amqp=0.0.0.0:5672 node=queueforge fsync_ms=10 | 
+11:48:54 CELL php 1 CPU / 1 GiB large-1m ok=0 err=oom sent=None recv=None mb= p50=None p99=None mib=1022 anon=993 cpu= client= kept=None
+11:49:24 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=0.15 p99=5.05 mib=90 anon=61 cpu=18 client= kept=yes
+11:49:53 CELL php 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=0.33 p99=13.45 mib=35 anon=18 cpu=11 client= kept=yes
+11:50:28 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.5 recv=10004.6 mb= p50=0.22 p99=5.27 mib=894 anon=883 cpu=50 client= kept=yes
+11:50:58 CELL php 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.8 recv=10007.5 mb= p50=6.20 p99=28.87 mib=35 anon=16 cpu=29 client= kept=yes
+11:51:54 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.9 recv=5003.2 mb= p50=0.36 p99=39.49 mib=131 anon=96 cpu=40 client= kept=yes
+11:52:51 CELL php 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.5 recv=5002.9 mb= p50=7.53 p99=33.97 mib=73 anon=50 cpu=73 client= kept=yes
+11:53:21 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5001.9 recv=5001.9 mb= p50=0.27 p99=24.64 mib=94 anon=65 cpu=25 client= kept=yes
+11:53:50 CELL php 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5012.6 recv=5045.2 mb= p50=0.45 p99=37.66 mib=38 anon=22 cpu=28 client= kept=yes
+11:54:20 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=82388.3 recv=82389.6 mb= p50=3.54 p99=12.25 mib=568 anon=535 cpu=83 client= kept=yes
+11:54:50 CELL php 1 CPU / 1 GiB quorum ok=1 err= sent=589.4 recv=589.4 mb= p50=688.23 p99=745.81 mib=84 anon=38 cpu=28 client= kept=yes
+11:55:20 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=20028.7 recv=25744.2 mb= p50=5732.80 p99=6105.89 mib=1024 anon=240 cpu=59 client= kept=yes
+11:55:50 CELL php 1 CPU / 1 GiB stream ok=1 err= sent=464.3 recv=791.4 mb= p50=3862.46 p99=4126.44 mib=70 anon=42 cpu=89 client= kept=yes
+11:56:20 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=79417.2 recv=79410.2 mb= p50=1.44 p99=19.66 mib=103 anon=85 cpu=89 client= kept=yes
+11:56:49 CELL php 1 CPU / 1 GiB priority ok=1 err= sent=16991.0 recv=16990.8 mb= p50=11.44 p99=21.48 mib=58 anon=20 cpu=33 client= kept=yes
+11:57:19 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=39489.9 recv=37051.5 mb= p50=669.41 p99=784.62 mib=1024 anon=326 cpu=68 client= kept=no
+11:57:48 CELL php 1 CPU / 1 GiB transactions ok=1 err= sent=21554.9 recv=21550.2 mb= p50=4.04 p99=40.55 mib=38 anon=18 cpu=46 client= kept=yes
+11:58:18 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=91373.1 recv=91083.4 mb= p50=266.18 p99=635.00 mib=1024 anon=299 cpu=85 client= kept=yes
+11:58:48 CELL php 1 CPU / 1 GiB heavy ok=1 err= sent=61840.4 recv=61762.5 mb= p50=200.57 p99=286.12 mib=1024 anon=53 cpu=96 client= kept=yes
+12:00:34 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=29607.6 recv=74861.8 mb= p50= p99= mib=1024 anon=526 cpu=10 client= kept=yes
+12:02:19 CELL php 1 CPU / 1 GiB backlog ok=1 err= sent=60000.0 recv=810.6 mb= p50= p99= mib=1024 anon=763 cpu=99 client= kept=sent 300000 got 76200
+12:02:49 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=96389.4 recv=96385.3 mb= p50=2.48 p99=14.38 mib=322 anon=196 cpu=114 client= kept=yes
+12:03:19 CELL php 4 CPU / 4 GiB work-queue ok=1 err= sent=42609.3 recv=10049.9 mb= p50=10.33 p99=24.64 mib=106 anon=57 cpu=98 client= kept=no
+12:03:49 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=96909.8 recv=96886.6 mb= p50=25.00 p99=54.82 mib=1180 anon=1035 cpu=128 client= kept=yes
+12:04:19 CELL php 4 CPU / 4 GiB telemetry ok=1 err= sent=70383.7 recv=50304.8 mb= p50=2.84 p99=13.36 mib=446 anon=378 cpu=400 client= kept=no
+12:04:49 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=1504.9 recv=30128.0 mb= p50=19.29 p99=139.83 mib=3096 anon=1058 cpu=219 client= kept=yes
+12:05:27 CELL php 4 CPU / 4 GiB fanout-20 ok=1 err= sent=813.9 recv=7268.9 mb= p50=88.73 p99=270.60 mib=169 anon=61 cpu=43 client= kept=no
+12:05:57 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=236160.8 recv=236173.9 mb= p50=3.39 p99=13.24 mib=476 anon=416 cpu=320 client= kept=yes
+12:06:53 CELL php 4 CPU / 4 GiB routing-64 ok=1 err= sent=62130.6 recv=36746.2 mb= p50=11.38 p99=32.72 mib=279 anon=65 cpu=93 client= kept=no
+12:07:50 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.12 p99=31.64 mib=489 anon=333 cpu=71 client= kept=yes
+12:10:44 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+12:10:44 CELL php 4 CPU / 4 GiB many-queues ok=0 err=client-exit-124 sent=None recv=None mb= p50=None p99=None mib=107 anon=67 cpu=30 client= kept=None
+12:11:13 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=12516.6 recv=12516.7 mb= p50=31.21 p99=54.36 mib=892 anon=839 cpu=149 client= kept=yes
+12:11:47 broker-log queueforge-php amqp=adopted node=n0 fsync_ms=10 | queueforge-php amqp=adopted node=n1 fsync_ms=10 | queueforge-php amqp=adopted node=n2 fsync_ms=10 | queueforge-php amqp=adopted node=n3 fsync_ms=10 | queueforge-php parent cores=4 | 
+12:11:47 CELL php 4 CPU / 4 GiB quorum ok=0 err=no-delivery sent=101.6 recv=0.0 mb= p50=0.00 p99=0.00 mib=2405 anon=2340 cpu=202 client= kept=no
+12:12:17 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=249624.3 recv=249098.0 mb= p50=228.79 p99=736.19 mib=2798 anon=751 cpu=323 client= kept=yes
+12:12:53 CELL php 4 CPU / 4 GiB heavy ok=1 err= sent=24457.8 recv=2802.3 mb= p50=289.65 p99=727.39 mib=237 anon=105 cpu=144 client= kept=no
+12:12:53 DONE scenarios
+12:12:53 STEP scenarios done in 1797s
+12:12:53 PROGRESS restore docker to 2 cpu 8192 MiB
+12:12:54 PROGRESS docker quit
+12:12:59 PROGRESS docker start
+12:13:02 sidecar trievo-postgres cpuset=0-1
+12:13:02 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+12:13:02 STEP paced start
+12:16:40 STEP paced done in 218s
+12:16:40 RUN done
+12:35:47 RUN kinds=bun images {"rabbit": "sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89", "rust": "sha256:38137db59067dd0cb8ca1c369068c6051c7f5d5aa6f432f001d51de5d4a5aa9e", "bun": "sha256:3fbdcbbaf7ff0cd87b78966085cda98bd2c65459edf7a7d0c14273cf1b1c4b82", "php": "sha256:ef6e84c66cba7abb25b614b05d61d6fbe21afaa396e6af9c390ed2fa7bc90acd"}
+12:35:47 PROGRESS vm before ncpu=2 mem=8320565248
+12:35:47 PROGRESS docker quit
+12:35:53 PROGRESS docker start
+12:35:56 PROGRESS vm large ncpu=8 mem=25159827456
+12:35:56 sidecar trievo-postgres cpuset=7
+12:35:56 STEP load start
+12:38:52 STEP load done in 176s
+12:38:53 STEP scenarios start
+12:39:30 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=92567.0 recv=92562.9 mb= p50=3.90 p99=19.62 mib=840 anon=798 cpu=81 client= kept=yes
+12:40:01 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=73497.4 recv=69776.1 mb= p50=472.21 p99=1039.96 mib=909 anon=790 cpu=100 client= kept=no
+12:40:31 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=10746.2 recv=214913.2 mb= p50=4.79 p99=14.46 mib=145 anon=88 cpu=87 client= kept=yes
+12:41:01 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=92919.1 recv=92924.7 mb= p50=11.62 p99=50.00 mib=126 anon=96 cpu=82 client= kept=yes
+12:41:35 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=4769.1 recv=4769.1 mb=312.5 p50=1.54 p99=9.82 mib=1024 anon=960 cpu=74 client= kept=yes
+12:42:05 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=346.0 recv=346.0 mb=362.8 p50=3.70 p99=13.12 mib=438 anon=204 cpu=79 client= kept=yes
+12:42:34 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=1.05 p99=6.50 mib=84 anon=54 cpu=15 client= kept=yes
+12:43:04 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.3 recv=10004.3 mb= p50=0.21 p99=14.69 mib=91 anon=68 cpu=33 client= kept=yes
+12:44:00 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.4 recv=5001.8 mb= p50=0.32 p99=38.42 mib=127 anon=91 cpu=39 client= kept=yes
+12:44:29 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.9 recv=4997.9 mb= p50=0.24 p99=22.82 mib=95 anon=70 cpu=22 client= kept=yes
+12:44:59 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=88162.7 recv=88158.2 mb= p50=3.27 p99=11.40 mib=595 anon=569 cpu=84 client= kept=yes
+12:45:29 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=19069.3 recv=27171.3 mb= p50=5806.11 p99=5973.35 mib=1024 anon=241 cpu=61 client= kept=yes
+12:45:59 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=79732.6 recv=79704.6 mb= p50=1.18 p99=17.96 mib=110 anon=90 cpu=86 client= kept=yes
+12:46:28 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=20314.0 recv=17704.2 mb= p50=2632.22 p99=3254.45 mib=1024 anon=295 cpu=76 client= kept=no
+12:46:58 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=96105.7 recv=96051.2 mb= p50=290.99 p99=597.30 mib=1024 anon=314 cpu=88 client= kept=yes
+12:48:43 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=29988.3 recv=74813.5 mb= p50= p99= mib=1024 anon=556 cpu=11 client= kept=yes
+12:49:19 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=101533.3 recv=101531.6 mb= p50=2.23 p99=5.47 mib=2286 anon=2147 cpu=117 client= kept=yes
+12:49:48 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=97335.5 recv=97339.0 mb= p50=21.84 p99=53.30 mib=1158 anon=1015 cpu=128 client= kept=yes
+12:50:19 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=1430.5 recv=28640.8 mb= p50=25.83 p99=174.86 mib=2949 anon=1002 cpu=201 client= kept=yes
+12:50:49 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=208301.1 recv=208308.6 mb= p50=3.45 p99=20.96 mib=404 anon=345 cpu=273 client= kept=yes
+12:51:46 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.4 recv=5012.8 mb= p50=0.27 p99=258.10 mib=498 anon=344 cpu=63 client= kept=yes
+12:52:21 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=12034.5 recv=12034.4 mb= p50=29.69 p99=77.93 mib=2281 anon=2209 cpu=130 client= kept=yes
+12:52:57 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=236305.0 recv=234593.3 mb= p50=206.14 p99=804.42 mib=3951 anon=2098 cpu=258 client= kept=yes
+12:52:57 DONE scenarios
+12:52:57 STEP scenarios done in 844s
+12:52:57 PROGRESS restore docker to 2 cpu 8192 MiB
+12:52:57 PROGRESS docker quit
+12:53:04 PROGRESS docker start
+12:53:07 sidecar trievo-postgres cpuset=0-1
+12:53:07 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+12:53:07 STEP paced start
+12:54:56 STEP paced done in 109s
+12:54:56 RUN done

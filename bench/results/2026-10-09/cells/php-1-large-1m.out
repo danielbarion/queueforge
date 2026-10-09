@@ -1,0 +1,18 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-144829-230, starting consumer #0
+id: test-144829-230, starting consumer #0, channel #0
+id: test-144829-230, starting producer #0
+id: test-144829-230, starting producer #0, channel #0
+14:48:29.309 [AMQP Connection 172.26.0.2:5672] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+com.rabbitmq.client.MalformedFrameException: Frame size is invalid (1048584), maximum configured size is 131072. See ConnectionFactory#setMaxInboundMessageBodySize if you need to increase the limit.
+	at com.rabbitmq.client.impl.Utils.enforceFrameMax(Utils.java:90)
+	at com.rabbitmq.client.impl.Frame.readFrom(Frame.java:136)
+	at com.rabbitmq.client.impl.SocketFrameHandler.readFrame(SocketFrameHandler.java:212)
+	at com.rabbitmq.client.impl.AMQConnection$MainLoop.run(AMQConnection.java:702)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+id: test-144829-230, time 1.007 s, sent: 525 msg/s, confirmed: 521 msg/s, nacked: 0 msg/s, received: 0 msg/s, min/median/75th/95th/99th/max consumer latency: 0/0/0/0/0/0 µs, confirm latency: 1749/3844/4887/6137/8945/10646 µs
+test stopped (Reached time limit)
+id: test-144829-230, sending rate avg: 21 msg/s
+id: test-144829-230, receiving rate avg: 0 msg/s
+id: test-144829-230, consumer latency min/median/75th/95th/99th/max 0/0/0/0/0/0 µs
+id: test-144829-230, confirm latency min/median/75th/95th/99th/max 1749/3844/4887/6137/8945/10646 µs

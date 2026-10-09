@@ -1,0 +1,6 @@
+CONFIG ping=0 pubs=1 cons=1 queues=1 window=128 prefetch=256 body=256 warmup_us=2000000 measure_us=8000000
+DECLARED 1
+ARMED queues=1
+AMQP_CLOSE c2 404_NOT_FOUND - no queue 'q0'
+FAIL c2 404_NOT_FOUND - no queue 'q0'
+RESULT ok=0 confirm_s=0.0 consume_s=0.0 sent_s=0.0 p50_us=-1 p99_us=-1 confirmed=0 consumed=0 sent=0 samples=0 inflight=0 blocked=0 nacks=0 missed=0 returns=0 elapsed_s=0.000 pubs=1 cons=1 queues=1 window=128 prefetch=256 body=256 err=c2_404_NOT_FOUND_-_no_queue__q0_
