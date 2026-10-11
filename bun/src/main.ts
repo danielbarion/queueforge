@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createSecureContext } from "node:tls";
 import { markFreshRaft } from "./raft/glue.ts";
 import { hashRabbitPassword } from "./broker/auth.ts";
+import { startProfile } from "./profile.ts";
 
 const args = process.argv.slice(2);
 let configPath = "";
@@ -57,6 +58,7 @@ if (dev && store.listUsers().length === 0) {
   store.putPerm({ user: "admin", vhost: "/", configure: ".*", write: ".*", read: ".*" });
 }
 broker.load();
+startProfile(broker);
 const cluster = new Cluster(broker);
 broker.cluster = cluster;
 if (cfg.members.length) {

@@ -1,0 +1,16 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: cargo-audit
+    image: rust:bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+    commands:
+      - cargo install cargo-audit --locked
+      - cd rust && cargo audit

@@ -235,6 +235,8 @@ pub async fn handle_connection<S>(
         publish_counters: HashMap::new(),
         exchange_write_ok: HashMap::new(),
         tx_applying: false,
+        tx_durable: Vec::new(),
+        tx_flush: Vec::new(),
         sessions: HashMap::new(),
         declared_queues: Vec::new(),
         cleaned_up: false,
@@ -423,6 +425,13 @@ struct Connection<'a, S> {
     exchange_write_ok: HashMap<String, bool>,
     /// True while applying a `tx.commit` batch so those ops are not re-buffered.
     tx_applying: bool,
+    /// Fsync waits of the publishes in the `tx.commit` being applied. They are
+    /// awaited together before commit-ok, so a commit of N publishes shares
+    /// one group commit instead of waiting for N in turn.
+    tx_durable: Vec<oneshot::Receiver<queueforge_core::Result<()>>>,
+    /// The highest offset this `tx.commit` appended to each queue. Commit asks
+    /// each one to fsync through it, instead of waiting for the interval.
+    tx_flush: Vec<(QueueKey, mpsc::Sender<QueueCmd>, queueforge_core::queue::QueueOffset)>,
     sessions: HashMap<ConsumerSessionId, SessionInfo>,
     /// Queues declared on this connection (for exclusive/auto-delete cleanup).
     declared_queues: Vec<QueueKey>,

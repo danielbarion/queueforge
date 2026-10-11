@@ -1,0 +1,37 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: bun-toolchain
+    image: oven/bun:1.4.2
+    commands:
+      - mkdir -p .ci-tools
+      - cp /usr/local/bin/bun .ci-tools/bun
+
+  - name: cross-stack-conformance
+    image: rust:bookworm
+    privileged: true
+    environment:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+      QF_FIXTURE_BIND_HOST: 0.0.0.0
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends docker.io php-cli php-common openssl
+      - export PATH="$PWD/.ci-tools:$PATH"
+      - cd rust && cargo build -p queueforge-broker && cd ..
+      - cd bun && bun install --frozen-lockfile && cd ..
+      - cd conformance && bun install --frozen-lockfile && cd ..
+      - sh .ci/with-docker.sh bun conformance/run.ts
+
+  - name: conformance-results
+    image: alpine:3.22
+    commands:
+      - 'if [ -f conformance/results/summary.json ]; then cat conformance/results/summary.json; fi'
+      - 'if [ -d conformance/results ]; then tar -czf conformance-results.tar.gz conformance/results; fi'
+    when:
+      - event: [push, pull_request]
+        status: [success, failure]

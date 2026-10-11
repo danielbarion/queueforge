@@ -33,6 +33,15 @@ final class Cluster
     private function raftDir(): string { return $this->broker->dataDir() . '/raft'; }
     private function supported(): bool { return getenv('QUEUEFORGE_RAFT') !== '0'; }
     public function raftEnabled(): bool { return $this->raft !== null; }
+    private int $seenCompleted = 0;
+    /** True when Raft completed a proposal since the last call. */
+    public function takeSettled(): bool
+    {
+        $n = $this->raft?->completed ?? 0;
+        if ($n === $this->seenCompleted) return false;
+        $this->seenCompleted = $n;
+        return true;
+    }
     public function raftFeatures(): array
     {
         if (!$this->supported()) return [];
@@ -85,7 +94,8 @@ final class Cluster
                 function (string $group): bool {
                     foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $q) if (($q['raftGroup'] ?? $q['args']['raftGroup'] ?? null) === $group) return true;
                     return false;
-                });
+                },
+                fn () => $this->broker->finishRaftApply());
             foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $q) {
                 $group = $q['raftGroup'] ?? $q['args']['raftGroup'] ?? null;
                 if (is_string($group) && str_starts_with($group, 'q:')) $this->raft->addGroup($group);

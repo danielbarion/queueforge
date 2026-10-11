@@ -1,0 +1,19 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-043356-043, starting consumer #0
+id: test-043356-043, starting consumer #0, channel #0
+id: test-043356-043, starting consumer #1
+id: test-043356-043, starting consumer #1, channel #0
+id: test-043356-043, starting consumer #2
+id: test-043356-043, starting consumer #2, channel #0
+id: test-043356-043, starting consumer #3
+id: test-043356-043, starting consumer #3, channel #0
+id: test-043356-043, time 1.000 s, received: 53599 msg/s, min/median/75th/95th/99th/max consumer latency: 4889777/4968737/5032322/5137156/5150407/5153973 µs
+id: test-043356-043, time 2.000 s, received: 59155 msg/s, min/median/75th/95th/99th/max consumer latency: 5152294/5292858/5348208/5414997/5425535/5429178 µs
+id: test-043356-043, time 3.000 s, received: 54917 msg/s, min/median/75th/95th/99th/max consumer latency: 5419358/5553734/5623195/5716526/5730835/5734060 µs
+id: test-043356-043, time 4.000 s, received: 59347 msg/s, min/median/75th/95th/99th/max consumer latency: 5730056/5872308/5919564/5977982/5988809/5990571 µs
+id: test-043356-043, time 5.001 s, received: 58384 msg/s, min/median/75th/95th/99th/max consumer latency: 5987152/6115083/6182782/6262907/6279588/6282446 µs
+id: test-043356-043, time 6.001 s, received: 14671 msg/s, min/median/75th/95th/99th/max consumer latency: 6027315/6055931/6074314/6086137/6090606/6091690 µs
+test stopped (Reached time limit)
+id: test-043356-043, sending rate avg: 0 msg/s
+id: test-043356-043, receiving rate avg: 3330 msg/s
+id: test-043356-043, consumer latency min/median/75th/95th/99th/max 4892700/5703349/6004507/6183489/6267622/6281348 µs

@@ -56,11 +56,23 @@ final class Cores
         return 1;
     }
 
+    /**
+     * Broker processes to run: `QUEUEFORGE_CORES`, else one.
+     *
+     * The cgroup is not followed by default. Measured at 4 CPU / 4 GiB, one
+     * process delivered more in every cell than one per core: work-queue
+     * 36.9k vs 10.4k msg/s, telemetry 82k vs 25.5k, heavy 58.6k vs 2.6k,
+     * because forwarding between processes costs more than the extra cores
+     * return. `QUEUEFORGE_CORES=cgroup` keeps the cgroup count.
+     */
     public static function granted(): int
     {
         $forced = getenv('QUEUEFORGE_CORES');
         if (is_string($forced) && preg_match('/^[1-9]\\d*$/', $forced) === 1) {
             return (int) $forced;
+        }
+        if ($forced !== 'cgroup') {
+            return 1;
         }
         $max = @file_get_contents('/sys/fs/cgroup/cpu.max');
         $set = @file_get_contents('/sys/fs/cgroup/cpuset.cpus.effective');

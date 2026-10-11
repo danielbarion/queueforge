@@ -58,6 +58,8 @@ final class Chan
 
 final class Sock
 {
+    /** frame_max from connection.tune-ok; body frames are split to fit it. */
+    public int $frameMax = Codec::FRAME_MAX;
     /** @param resource $fp */
     public function __construct(public $fp)
     {
@@ -186,6 +188,8 @@ final class Server
 
     public function run(): void
     {
+        // This loop syncs streams on every pass, so appends may wait for it.
+        $this->broker->root()->deferStreamSync = true;
         while (true) {
             $this->pullHandoff();
             $read = [];
@@ -262,7 +266,12 @@ final class Server
             }
             // Nothing readable means the publishers are blocked rather than
             // streaming.
+            // Appends read in this pass share one stream fsync; then their
+            // confirms go out, and consumers see the new records.
+            $streamed = false;
+            foreach ($this->broker->allBrokers() as $scope) $streamed = $scope->syncStreams() || $streamed;
             $this->commit($selected === 0);
+            if ($streamed) $this->pump();
             $this->pullHandoff();
             $this->announce();
             $this->beat();
@@ -270,6 +279,9 @@ final class Server
             foreach ($this->conns as $sock) if ($sock->stage === 'amqp10' && !$sock->gone) { $sock->send($this->amqp10->tick($sock->amqp10)); $sock->flush(); }
             if ($this->extras !== null) {
                 $this->extras->tick();
+                // A Raft apply settles quorum publishes inside the tick. Their
+                // confirms go out now, not after the next select timeout.
+                if ($this->extras->cluster->takeSettled()) $this->commit(true);
             }
             foreach(array_keys($this->conns)as$id){
                 $sock=$this->conns[$id]??null;if($sock===null||$sock->gone)continue;
@@ -334,13 +346,39 @@ final class Server
         if (($ssl['queueforge_tls'] ?? false) !== true || isset(stream_get_meta_data($fp)['crypto'])) return true;
         stream_set_blocking($fp, false);
         $deadline = microtime(true) + 5;
-        do {
-            $result = @stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_SERVER);
-            if ($result !== 0) return $result === true && isset(stream_get_meta_data($fp)['crypto']);
-            $read = [$fp]; $write = []; $except = [];
-            if (@stream_select($read, $write, $except, 0, 10000) === false) return false;
-        } while (microtime(true) < $deadline);
-        return false;
+        // Accepted sockets share the listener's context, so these options are
+        // shared too. The accept is synchronous and `take` reads the peer
+        // certificate before the next one starts.
+        $verify = ($ssl['verify_peer'] ?? false) === true || ($ssl['queueforge_peer_verified'] ?? false) === true;
+        if ($verify) {
+            // A client that sends no certificate must not see the previous one.
+            stream_context_set_option($fp, 'ssl', 'peer_certificate', null);
+            stream_context_set_option($fp, 'ssl', 'peer_certificate_chain', null);
+            stream_context_set_option($fp, 'ssl', 'verify_peer', true);
+            stream_context_set_option($fp, 'ssl', 'queueforge_peer_verified', true);
+        }
+        try {
+            $first = true;
+            do {
+                $result = @stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_SERVER);
+                if ($result !== 0) return $result === true && isset(stream_get_meta_data($fp)['crypto']);
+                // The first call built this connection's TLS state: it asks for
+                // a client certificate and OpenSSL rejects one that does not
+                // chain to the CA. The handshake cannot finish in that call,
+                // since the certificate only comes after the request. PHP's
+                // later check also refuses a client that sent none, which
+                // RabbitMQ (fail_if_no_peer_cert = false) accepts for PLAIN.
+                // Drop only that check; `verifiedPeerCN` still needs a
+                // certificate OpenSSL verified.
+                if ($first && $verify) stream_context_set_option($fp, 'ssl', 'verify_peer', false);
+                $first = false;
+                $read = [$fp]; $write = []; $except = [];
+                if (@stream_select($read, $write, $except, 0, 10000) === false) return false;
+            } while (microtime(true) < $deadline);
+            return false;
+        } finally {
+            if ($verify) stream_context_set_option($fp, 'ssl', 'verify_peer', true);
+        }
     }
 
     /** Context verification happened during accept; a captured certificate alone proves nothing. */
@@ -348,7 +386,8 @@ final class Server
     {
         $meta = stream_get_meta_data($fp);
         $ssl = stream_context_get_options($fp)['ssl'] ?? [];
-        if ((!isset($meta['crypto']) && !str_contains($meta['stream_type'] ?? '', 'ssl')) || ($ssl['verify_peer'] ?? false) !== true || ($ssl['allow_self_signed'] ?? false) === true
+        $verified = ($ssl['verify_peer'] ?? false) === true || ($ssl['queueforge_peer_verified'] ?? false) === true;
+        if ((!isset($meta['crypto']) && !str_contains($meta['stream_type'] ?? '', 'ssl')) || !$verified || ($ssl['allow_self_signed'] ?? false) === true
             || !is_string($ssl['cafile'] ?? null) || $ssl['cafile'] === '' || !isset($ssl['peer_certificate'])) return null;
         $cert = openssl_x509_parse($ssl['peer_certificate']);
         $cn = $cert['subject']['CN'] ?? null;
@@ -897,6 +936,11 @@ final class Server
         if ($class === 10 && $method === 11) {
             $this->startOk($id, $payload, $o);
         } elseif ($class === 10 && $method === 31) {
+            // tune-ok: the client may lower frame_max, never raise it.
+            if (strlen($payload) >= $o + 8) {
+                $frame = unpack('N', substr($payload, $o + 2, 4))[1];
+                if ($frame > 0) $sock->frameMax = min(Codec::FRAME_MAX, max(4096, $frame));
+            }
             return;
         } elseif ($class === 10 && $method === 40) {
             // connection.open names the vhost. Access is checked here, so a
@@ -1095,6 +1139,7 @@ final class Server
                         ($msg['durable'] ?? false) ? 2 : 1,
                         $body === false ? '' : $body,
                         null,
+                        frameMax: $sock->frameMax,
                     ));
                     $sock->flush();
                     $broker->prom['delivered']++;
@@ -1129,6 +1174,7 @@ final class Server
             $msg['body'],
             $msg['propRaw'] ?? null,
             is_array($msg['headers'] ?? null) ? $msg['headers'] : [],
+            $sock->frameMax,
         ));
         $broker->prom['delivered']++;
         $broker->prom[$noAck ? 'deliveredGetAuto' : 'deliveredGetManual']++;
@@ -1638,7 +1684,7 @@ final class Server
         if ($pub['exchange'] === '' && str_starts_with($pub['key'], 'amq.rabbitmq.reply-to.')) {
             foreach ($this->conns as $recipient) if (!$recipient->gone && $recipient->vhost === $sock->vhost) foreach ($recipient->channels as $target => $reply) {
                 if ($reply->replyAddress !== $pub['key']) continue;
-                $recipient->send(Codec::deliver($target, $reply->replyTag, $reply->nextDel++, $pub['key'], $pub['mode'], $pub['got'], false, '', $pub['propRaw']));
+                $recipient->send(Codec::deliver($target, $reply->replyTag, $reply->nextDel++, $pub['key'], $pub['mode'], $pub['got'], false, '', $pub['propRaw'], frameMax: $recipient->frameMax));
                 $recipient->flush();
             }
             if ($tag > 0) $sock->send(Codec::basicAck($channel, $tag));
@@ -1669,7 +1715,7 @@ final class Server
                 $broker->prom['unroutableReturned']++;
                 $ret = Codec::method($channel, 60, 50, pack('n', 312) . Codec::shortstr('NO_ROUTE') . Codec::shortstr($pub['exchange']) . Codec::shortstr($pub['key']));
                 $header = Codec::contentHeader(strlen($pub['got']), $pub['mode'], $pub['propRaw'] ?? null);
-                $this->conns[$id]->send($ret . Codec::frame(2, $channel, $header) . Codec::frame(3, $channel, $pub['got']));
+                $this->conns[$id]->send($ret . Codec::frame(2, $channel, $header) . Codec::body($channel, $pub['got'], $this->conns[$id]->frameMax));
             } else {
                 $broker->prom['unroutableDropped']++;
             }
@@ -1698,7 +1744,12 @@ final class Server
             $ch->txAcks[] = [$payload, $o, $negative];
             return;
         }
-        foreach (array_keys($ch->unacked) as $have) {
+        // A single ack names one tag; scanning every unacked tag made each ack
+        // cost the prefetch window. Tags are added in ascending order, so a
+        // multiple ack stops at the first tag past the one it names.
+        $tags = $multiple ? array_keys($ch->unacked) : (isset($ch->unacked[$tag]) ? [$tag] : []);
+        foreach ($tags as $have) {
+            if ($multiple && $have > $tag) break;
             if ($multiple ? $have <= $tag : $have === $tag) {
                 $msg = $ch->settle($have);
                 if ($msg === null) {
@@ -1849,7 +1900,7 @@ final class Server
     {
         $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId>=0)$broker->requeue($msgId);return;}
         $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;}
-        $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[]));$sock->flush();
+        $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[],$sock->frameMax));$sock->flush();
         $broker->prom['delivered']++;$broker->prom[$noAck?'deliveredConsumeAuto':'deliveredConsumeManual']++;if($msg['redelivered']??false)$broker->prom['redelivered']++;
     }
     private function pumpStream(Broker $broker,string $name):void
@@ -1892,7 +1943,7 @@ final class Server
                 if ($pick === null) {
                     break;
                 }
-                $head = $broker->queues[$name]['ready'][0] ?? null;
+                $head = $broker->readyHead($name);
                 // A gated quorum body is not deliverable yet, and the queue
                 // is ordered, so nothing behind it is either.
                 if (is_int($head) && $broker->isGated($head)) {
@@ -1948,6 +1999,7 @@ final class Server
                     $msg['exchange'] ?? '',
                     $msg['propRaw'] ?? null,
                     is_array($msg['headers'] ?? null) ? $msg['headers'] : [],
+                    $sock->frameMax,
                 ));
                 $sock->flush();
                 $broker->prom['delivered']++;

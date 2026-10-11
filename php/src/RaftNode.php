@@ -24,6 +24,7 @@ final class RaftNode
         private $state,
         private $leaderChanged = null,
         private $wantGroup = null,
+        private $applied = null,
     ) {
         $this->wanted = $this->sorted($voters === [] ? [$id] : $voters);
         $this->addGroup('meta');
@@ -207,20 +208,28 @@ final class RaftNode
                 $g['install'] = null;
             }
             if ($g['apply'] === []) $g['apply'] = $core->takeCommitted();
-            while ($g['apply'] !== []) {
-                $entry = $g['apply'][0];
-                if (!in_array($entry['kind'], ['noop', 'config'], true)) ($this->apply)($name, $entry);
-                array_shift($g['apply']);
-                $g['applied'] = $entry['i'];
-                foreach ($this->pending as $rid => $p) {
-                    if ($p['group'] !== $name || $p['kind'] !== $entry['kind'] || $p['data'] != $entry['data']) continue;
-                    $this->pending[$rid]['localApplied'] = true;
-                    if ($p['leaderCommitted']) { unset($this->pending[$rid]); $this->complete($p['done'], true, null); }
+            $finished = [];
+            try {
+                while ($g['apply'] !== []) {
+                    $entry = $g['apply'][0];
+                    if (!in_array($entry['kind'], ['noop', 'config'], true)) ($this->apply)($name, $entry);
+                    array_shift($g['apply']);
+                    $g['applied'] = $entry['i'];
+                    foreach ($this->pending as $rid => $p) {
+                        if ($p['group'] !== $name || $p['kind'] !== $entry['kind'] || $p['data'] != $entry['data']) continue;
+                        $this->pending[$rid]['localApplied'] = true;
+                        if ($p['leaderCommitted']) { unset($this->pending[$rid]); $finished[] = [$p['done'], true, null]; }
+                    }
+                    $waiter = $g['waiters'][$entry['i']] ?? null;
+                    unset($g['waiters'][$entry['i']]);
+                    if ($waiter !== null) $finished[] = [$waiter['done'], $waiter['term'] === $entry['term'], $waiter['term'] === $entry['term'] ? null : 'entry replaced'];
+                    $g['sinceSnapshot']++;
                 }
-                $waiter = $g['waiters'][$entry['i']] ?? null;
-                unset($g['waiters'][$entry['i']]);
-                if ($waiter !== null) $this->complete($waiter['done'], $waiter['term'] === $entry['term'], $waiter['term'] === $entry['term'] ? null : 'entry replaced');
-                $g['sinceSnapshot']++;
+            } finally {
+                // Completions only mark a publish settled. `applied` then syncs
+                // the store once and releases the confirms that sync covers.
+                foreach ($finished as [$done, $ok, $error]) $this->complete($done, $ok, $error);
+                if ($this->applied !== null) ($this->applied)();
             }
             // A reply is never emitted before its hard state/log and apply succeed.
             foreach ($g['outbox'] as [$peer, $message]) ($this->send)($peer, $message);
@@ -316,8 +325,11 @@ final class RaftNode
         }
         return $entries;
     }
+    /** Proposals completed so far, so the server knows confirms may be ready. */
+    public int $completed = 0;
     private function complete(callable $done, bool $ok, ?string $error): void
     {
+        $this->completed++;
         try { $done($ok, $error); } catch (Throwable $failure) { error_log('queueforge-php raft callback: ' . $failure->getMessage()); }
     }
     private static function directory(string $dir): void

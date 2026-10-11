@@ -7,6 +7,7 @@ export type Bar = {
   name: string;
   rate: number;
   tone: Tone;
+  note?: string;
 };
 
 export { paced, scale, loadRows, scenarioRows } from "./bench-data";
@@ -56,4 +57,48 @@ export type ScenarioRow = {
   kind: "rate" | "bytes" | "latency";
   values: Record<Tone, number | null>;
   text: Record<Tone, string>;
+  /** Sampled memory peaks in MiB; cgroup includes file cache as well as process memory. */
+  memory: Record<Tone, { anonymous: number | null; cgroup: number | null }>;
 };
+
+const AVERAGE_BROKERS: { tone: Tone; name: string }[] = [
+  { tone: "mq", name: "RabbitMQ" },
+  { tone: "rust", name: "Rust" },
+  { tone: "bun", name: "Bun" },
+  { tone: "php", name: "PHP" },
+];
+
+export type ScenarioAverage = {
+  tone: Tone;
+  name: string;
+  /** Geometric mean of this broker ÷ RabbitMQ. Latency is inverted. RabbitMQ is 1. */
+  mean: number;
+  /** Scenarios that contributed. A missing cell is not a zero. */
+  used: number;
+  /** Scenarios where RabbitMQ has a number, so a ratio was possible. */
+  possible: number;
+  /** Container sizes that contributed, in table order. */
+  sizes: string[];
+};
+
+/**
+ * Average relative performance across PerfTest scenarios.
+ * Rate and MB/s use broker ÷ RabbitMQ. Latency uses RabbitMQ ÷ broker.
+ * A cell is included only when both sides have a number.
+ */
+export function scenarioAverages(rows: ScenarioRow[]): ScenarioAverage[] {
+  const baseline = rows.filter((row) => row.values.mq != null);
+  return AVERAGE_BROKERS.map(({ tone, name }) => {
+    if (tone === "mq") {
+      return { tone, name, mean: 1, used: baseline.length, possible: baseline.length, sizes: [...new Set(baseline.map((row) => row.size))] };
+    }
+    const hits = baseline.flatMap((row) => {
+      const base = row.values.mq;
+      const value = row.values[tone];
+      if (base == null || value == null || base <= 0 || value <= 0) return [];
+      return [{ size: row.size, ratio: row.kind === "latency" ? base / value : value / base }];
+    });
+    const mean = hits.length === 0 ? 0 : Math.exp(hits.reduce((sum, hit) => sum + Math.log(hit.ratio), 0) / hits.length);
+    return { tone, name, mean, used: hits.length, possible: baseline.length, sizes: [...new Set(hits.map((hit) => hit.size))] };
+  });
+}

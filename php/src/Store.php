@@ -49,6 +49,7 @@ final class Store
             if ($payload === false || strlen($payload) < $len) {
                 break;
             }
+            $at = $pos;
             $pos += 5 + $len;
             if ($type === 1 && strlen($payload) >= 8) {
                 $id = Codec::readU64($payload, 0);
@@ -95,6 +96,7 @@ final class Store
                     'mode' => $mode,
                     'propRaw' => $propRaw,
                     'meta' => $meta,
+                    'pos' => $at,
                 ];
             } elseif ($type === 2 && strlen($payload) >= 8) {
                 $id = Codec::readU64($payload, 0);
@@ -242,8 +244,64 @@ final class Store
         return $liveBytes * 2 < $this->end;
     }
 
+    /** Where the last appended record starts, for `readAt`. */
+    public int $lastStart = 0;
+
+    /**
+     * Read back the publish record that starts at `$pos`. Only for records a
+     * sync already covered: writes are not buffered, so the bytes are on file.
+     *
+     * @return ?array{id:int,queue:string,body:string,mode:int,propRaw:?string,meta:array<string, mixed>}
+     */
+    public function readAt(int $pos): ?array
+    {
+        if ($pos < 0 || $pos + 5 > $this->end) return null;
+        try {
+            if (fseek($this->fp, $pos) !== 0) return null;
+            $head = fread($this->fp, 5);
+            if ($head === false || strlen($head) < 5 || ord($head[0]) !== 1) return null;
+            $len = unpack('N', substr($head, 1, 4))[1];
+            $payload = $len > 0 ? fread($this->fp, $len) : '';
+            if ($payload === false || strlen($payload) < $len) return null;
+        } finally {
+            // Appends write at the current position.
+            fseek($this->fp, $this->end);
+        }
+        $id = Codec::readU64($payload, 0);
+        $o = 8;
+        $queue = Codec::readShortstr($payload, $o);
+        $bodyLen = unpack('N', substr($payload, $o, 4))[1];
+        $o += 4;
+        $body = substr($payload, $o, $bodyLen);
+        $o += $bodyLen;
+        $mode = $o < strlen($payload) ? ord($payload[$o]) : 2;
+        $o += 1;
+        $propRaw = null;
+        if ($o + 4 <= strlen($payload)) {
+            $propLen = unpack('N', substr($payload, $o, 4))[1];
+            $o += 4;
+            if ($propLen > 0) $propRaw = substr($payload, $o, $propLen);
+            $o += $propLen;
+        }
+        $meta = [];
+        if ($o + 4 <= strlen($payload)) {
+            $metaLen = unpack('N', substr($payload, $o, 4))[1];
+            $o += 4;
+            if ($metaLen > 0) {
+                $decoded = json_decode(substr($payload, $o, $metaLen), true);
+                if (is_array($decoded) && ($decoded['qf_encoding'] ?? '') === 'php-serialized-v1') {
+                    $raw = base64_decode((string) ($decoded['data'] ?? ''), true);
+                    $decoded = $raw === false ? null : unserialize($raw, ['allowed_classes' => false]);
+                }
+                $meta = is_array($decoded) ? $decoded : [];
+            }
+        }
+        return ['id' => $id, 'queue' => $queue, 'body' => $body, 'mode' => $mode, 'propRaw' => $propRaw, 'meta' => $meta];
+    }
+
     private function append(int $type, string $payload): int
     {
+        $this->lastStart = $this->end;
         $rec = chr($type) . pack('N', strlen($payload)) . $payload;
         $n = fwrite($this->fp, $rec);
         if ($n !== strlen($rec)) {

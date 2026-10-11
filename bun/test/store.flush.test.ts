@@ -140,6 +140,8 @@ test("a lone confirm is durable in the log before sqlite has the row", () => {
   const path = join(dir, "t.sqlite");
   const store = new Store(path, "every_n_ms", 80);
   store.immediateLone = true;
+  // The inline lone fsync. The sync worker path is covered in store.sync-aside.test.ts.
+  store.syncAside = false;
   const body = new Uint8Array([8, 8, 8]);
   const id = store.insertMessage("/", "q", body, "{\"k\":1}");
   expect(store.flushIfLone()).toBe(true);
@@ -165,6 +167,8 @@ test("a learned lone flush finishes in the caller's turn", () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-lone-"));
   const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 80);
   store.immediateLone = true;
+  // The inline lone fsync. The sync worker path is covered in store.sync-aside.test.ts.
+  store.syncAside = false;
   store.insertMessage("/", "q", new Uint8Array([1, 2, 3]), "{}");
   expect(store.fullFlushCount).toBe(0);
   expect(store.flushIfLone()).toBe(true);
@@ -180,6 +184,8 @@ test("immediateLone does not split a synchronous whenDurable burst", async () =>
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-lone-burst-"));
   const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 400);
   store.immediateLone = true;
+  // The inline lone fsync. The sync worker path is covered in store.sync-aside.test.ts.
+  store.syncAside = false;
   const waits: Promise<void>[] = [];
   for (let i = 0; i < 128; i++) {
     store.insertMessage("/", "q", new Uint8Array([i]), "{}");
@@ -275,6 +281,8 @@ test("a pre-flush delete stays out of the confirm fsync and lands on the next on
   const path = join(dir, "t.sqlite");
   const store = new Store(path, "every_n_ms", 400);
   store.immediateLone = true;
+  // The inline lone fsync. The sync worker path is covered in store.sync-aside.test.ts.
+  store.syncAside = false;
   const body = new Uint8Array([9, 4, 2, 7]);
   const id = store.insertMessage("/", "q", body, "{\"k\":1}");
   store.deleteMessage(id);

@@ -121,6 +121,7 @@ Harness::guard('store property round trip', static function (): void {
 // Management HTTP over a real socket.
 $port = Harness::freePort();
 $broker = Harness::broker(["management = \"127.0.0.1:$port\""]);
+Harness::waitListening($port, $broker['dir']);
 
 /** Issues one HTTP request and returns the status, headers and body. */
 function http(int $port, string $method, string $path, ?array $json = null, string $cookie = ''): array

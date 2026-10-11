@@ -1,0 +1,17 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-043531-069, starting producer #0
+id: test-043531-069, starting producer #0, channel #0
+id: test-043531-069, starting producer #1
+id: test-043531-069, starting producer #1, channel #0
+id: test-043531-069, starting producer #2
+id: test-043531-069, starting producer #2, channel #0
+id: test-043531-069, starting producer #3
+id: test-043531-069, starting producer #3, channel #0
+id: test-043531-069, time 1.000 s, sent: 74478 msg/s, confirmed: 73678 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 826/8531/9939/13067/33772/48790 µs
+id: test-043531-069, time 2.000 s, sent: 81401 msg/s, confirmed: 81535 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 1414/8553/10094/12156/13325/13822 µs
+id: test-043531-069, time 3.000 s, sent: 77123 msg/s, confirmed: 76989 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 3444/8814/10501/13125/13966/26055 µs
+id: test-043531-069, time 4.010 s, sent: 66480 msg/s, confirmed: 67273 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 2009/8624/10951/13452/14782/15252 µs
+test stopped (Producer reached message limit [4])
+id: test-043531-069, sending rate avg: 73850 msg/s
+id: test-043531-069, receiving rate avg: 0 msg/s
+id: test-043531-069, confirm latency min/median/75th/95th/99th/max 2506/8584/10054/12624/14574/41879 µs

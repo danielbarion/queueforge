@@ -1,0 +1,72 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-042326-273, starting consumer #0
+id: test-042326-273, starting consumer #0, channel #0
+id: test-042326-273, starting consumer #1
+id: test-042326-273, starting consumer #1, channel #0
+id: test-042326-273, starting producer #0
+id: test-042326-273, starting producer #0, channel #0
+id: test-042326-273, starting producer #1
+id: test-042326-273, starting producer #1, channel #0
+id: test-042326-273, time 1.000 s, sent: 108931 msg/s, confirmed: 108731 msg/s, nacked: 0 msg/s, received: 108841 msg/s, min/median/75th/95th/99th/max consumer latency: 28/678/1071/13612/20069/24697 µs, confirm latency: 254/1376/1681/2591/3504/6679 µs
+id: test-042326-273, time 2.000 s, sent: 117883 msg/s, confirmed: 117883 msg/s, nacked: 0 msg/s, received: 117857 msg/s, min/median/75th/95th/99th/max consumer latency: 81/620/734/1043/1931/8674 µs, confirm latency: 304/1494/1750/2597/4946/31874 µs
+id: test-042326-273, time 3.001 s, sent: 125555 msg/s, confirmed: 125555 msg/s, nacked: 0 msg/s, received: 125671 msg/s, min/median/75th/95th/99th/max consumer latency: 68/612/737/994/1840/3912 µs, confirm latency: 326/1531/1791/2334/3966/7645 µs
+id: test-042326-273, time 4.000 s, sent: 122892 msg/s, confirmed: 122892 msg/s, nacked: 0 msg/s, received: 122794 msg/s, min/median/75th/95th/99th/max consumer latency: 76/632/738/1028/1763/14710 µs, confirm latency: 393/1477/1725/2489/4883/30108 µs
+id: test-042326-273, time 5.000 s, sent: 131374 msg/s, confirmed: 131417 msg/s, nacked: 0 msg/s, received: 131351 msg/s, min/median/75th/95th/99th/max consumer latency: 63/630/741/984/1737/3882 µs, confirm latency: 455/1476/1709/2260/2905/8958 µs
+id: test-042326-273, time 6.000 s, sent: 120711 msg/s, confirmed: 120677 msg/s, nacked: 0 msg/s, received: 120801 msg/s, min/median/75th/95th/99th/max consumer latency: 69/622/741/1022/1648/17473 µs, confirm latency: 487/1522/1774/2488/3587/19138 µs
+id: test-042326-273, time 7.000 s, sent: 129901 msg/s, confirmed: 129892 msg/s, nacked: 0 msg/s, received: 129932 msg/s, min/median/75th/95th/99th/max consumer latency: 56/647/771/1080/1798/3690 µs, confirm latency: 342/1444/1688/2217/2961/4870 µs
+id: test-042326-273, time 8.000 s, sent: 120072 msg/s, confirmed: 120072 msg/s, nacked: 0 msg/s, received: 119987 msg/s, min/median/75th/95th/99th/max consumer latency: 37/620/750/1045/1806/11070 µs, confirm latency: 431/1488/1758/2611/5420/45737 µs
+id: test-042326-273, time 9.000 s, sent: 131300 msg/s, confirmed: 131300 msg/s, nacked: 0 msg/s, received: 131256 msg/s, min/median/75th/95th/99th/max consumer latency: 39/635/745/1002/1603/3838 µs, confirm latency: 444/1466/1678/2177/2840/5567 µs
+id: test-042326-273, time 10.000 s, sent: 121800 msg/s, confirmed: 121800 msg/s, nacked: 0 msg/s, received: 121807 msg/s, min/median/75th/95th/99th/max consumer latency: 44/617/727/1022/1851/3956 µs, confirm latency: 343/1468/1746/2569/5343/44905 µs
+id: test-042326-273, time 11.000 s, sent: 127601 msg/s, confirmed: 127601 msg/s, nacked: 0 msg/s, received: 127636 msg/s, min/median/75th/95th/99th/max consumer latency: 87/622/740/983/1615/3658 µs, confirm latency: 458/1496/1766/2392/2996/7509 µs
+id: test-042326-273, time 12.000 s, sent: 122712 msg/s, confirmed: 122712 msg/s, nacked: 0 msg/s, received: 122627 msg/s, min/median/75th/95th/99th/max consumer latency: 52/613/723/968/1865/6657 µs, confirm latency: 386/1455/1756/2203/3986/13271 µs
+id: test-042326-273, time 13.000 s, sent: 130448 msg/s, confirmed: 130448 msg/s, nacked: 0 msg/s, received: 130512 msg/s, min/median/75th/95th/99th/max consumer latency: 57/623/737/964/1733/3595 µs, confirm latency: 316/1462/1703/2085/2785/4945 µs
+id: test-042326-273, time 14.000 s, sent: 121416 msg/s, confirmed: 121416 msg/s, nacked: 0 msg/s, received: 121396 msg/s, min/median/75th/95th/99th/max consumer latency: 36/650/774/1062/2022/21612 µs, confirm latency: 487/1517/1766/2578/4432/30023 µs
+id: test-042326-273, time 15.000 s, sent: 130434 msg/s, confirmed: 130434 msg/s, nacked: 0 msg/s, received: 130472 msg/s, min/median/75th/95th/99th/max consumer latency: 38/622/736/1010/1672/3805 µs, confirm latency: 360/1470/1705/2354/3034/5449 µs
+id: test-042326-273, time 16.000 s, sent: 123950 msg/s, confirmed: 123958 msg/s, nacked: 0 msg/s, received: 123932 msg/s, min/median/75th/95th/99th/max consumer latency: 48/624/745/1001/1608/16520 µs, confirm latency: 340/1493/1724/2333/3960/33745 µs
+id: test-042326-273, time 17.000 s, sent: 126342 msg/s, confirmed: 126334 msg/s, nacked: 0 msg/s, received: 126414 msg/s, min/median/75th/95th/99th/max consumer latency: 66/622/735/1055/1788/4008 µs, confirm latency: 474/1476/1747/2300/3875/5610 µs
+id: test-042326-273, time 18.000 s, sent: 121388 msg/s, confirmed: 121424 msg/s, nacked: 0 msg/s, received: 121344 msg/s, min/median/75th/95th/99th/max consumer latency: 34/611/734/1029/1796/8087 µs, confirm latency: 497/1503/1765/2309/3160/23992 µs
+id: test-042326-273, time 19.000 s, sent: 129885 msg/s, confirmed: 129849 msg/s, nacked: 0 msg/s, received: 129850 msg/s, min/median/75th/95th/99th/max consumer latency: 84/630/743/974/1689/3900 µs, confirm latency: 392/1464/1696/2201/2944/8205 µs
+id: test-042326-273, time 20.000 s, sent: 97993 msg/s, confirmed: 97993 msg/s, nacked: 0 msg/s, received: 98036 msg/s, min/median/75th/95th/99th/max consumer latency: 48/648/768/1073/3704/14396 µs, confirm latency: 395/1573/1864/5886/14241/28223 µs
+id: test-042326-273, time 21.000 s, sent: 130432 msg/s, confirmed: 130432 msg/s, nacked: 0 msg/s, received: 130404 msg/s, min/median/75th/95th/99th/max consumer latency: 46/619/738/998/1647/3781 µs, confirm latency: 341/1448/1707/2139/2787/5188 µs
+id: test-042326-273, time 22.000 s, sent: 118150 msg/s, confirmed: 118150 msg/s, nacked: 0 msg/s, received: 118176 msg/s, min/median/75th/95th/99th/max consumer latency: 77/624/722/979/1696/11103 µs, confirm latency: 473/1485/1801/2600/4751/30144 µs
+id: test-042326-273, time 23.000 s, sent: 131328 msg/s, confirmed: 131328 msg/s, nacked: 0 msg/s, received: 131274 msg/s, min/median/75th/95th/99th/max consumer latency: 68/619/738/1034/1699/3627 µs, confirm latency: 426/1456/1722/2332/2886/7532 µs
+id: test-042326-273, time 24.000 s, sent: 121921 msg/s, confirmed: 121921 msg/s, nacked: 0 msg/s, received: 121957 msg/s, min/median/75th/95th/99th/max consumer latency: 44/624/733/997/1798/14151 µs, confirm latency: 315/1455/1699/2273/6558/29866 µs
+id: test-042326-273, time 25.000 s, sent: 130946 msg/s, confirmed: 130946 msg/s, nacked: 0 msg/s, received: 130962 msg/s, min/median/75th/95th/99th/max consumer latency: 64/635/756/1103/2037/4036 µs, confirm latency: 393/1474/1711/2345/3126/9134 µs
+04:23:51.365 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+java.net.SocketException: Broken pipe
+	at java.base/sun.nio.ch.SocketDispatcher.write0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.write(SocketDispatcher.java:65)
+	at java.base/sun.nio.ch.NioSocketImpl.tryWrite(NioSocketImpl.java:403)
+	at java.base/sun.nio.ch.NioSocketImpl.implWrite(NioSocketImpl.java:419)
+	at java.base/sun.nio.ch.NioSocketImpl.write(NioSocketImpl.java:449)
+	at java.base/sun.nio.ch.NioSocketImpl$2.write(NioSocketImpl.java:856)
+	at java.base/java.net.Socket$SocketOutputStream.write(Socket.java:1207)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:125)
+	at java.base/java.io.BufferedOutputStream.implFlush(BufferedOutputStream.java:252)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:240)
+	at java.base/java.io.DataOutputStream.flush(DataOutputStream.java:131)
+	at com.rabbitmq.client.impl.SocketFrameHandler.flush(SocketFrameHandler.java:231)
+	at com.rabbitmq.client.impl.AMQConnection.flush(AMQConnection.java:673)
+	at com.rabbitmq.client.impl.AMQCommand.transmit(AMQCommand.java:163)
+	at com.rabbitmq.client.impl.AMQChannel.quiescingTransmit(AMQChannel.java:503)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:470)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:460)
+	at com.rabbitmq.client.impl.recovery.RecoveryAwareChannelN.basicAck(RecoveryAwareChannelN.java:97)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.basicAck(AutorecoveringChannel.java:445)
+	at com.rabbitmq.perf.Consumer.lambda$static$0(Consumer.java:57)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$ackIfNecessary$0(Consumer.java:353)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.ackIfNecessary(Consumer.java:350)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:320)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+test stopped (Reached time limit)
+id: test-042326-273, sending rate avg: 123747 msg/s
+id: test-042326-273, receiving rate avg: 123750 msg/s
+id: test-042326-273, consumer latency min/median/75th/95th/99th/max 47/618/729/1028/1756/22479 µs
+id: test-042326-273, confirm latency min/median/75th/95th/99th/max 391/1492/1743/2404/3180/12525 µs

@@ -263,6 +263,7 @@ async function startRabbit(): Promise<Running> {
     "docker",
     [
       "run", "-d", "--name", name,
+      ...(process.platform === "linux" ? ["--add-host", "host.docker.internal:host-gateway"] : []),
       "-e", `RABBITMQ_DEFAULT_USER=${USER}`,
       "-e", `RABBITMQ_DEFAULT_PASS=${PASS}`,
       // Stream clients reconnect to the advertised address; advertise the mapped port.

@@ -258,8 +258,77 @@ export function route(this: Broker, vhost: string, exchange: string, routingKey:
   if (exchange === "" && this.e2e.length === 0 && this.queues.has(this.key(vhost, routingKey))) {
     return [routingKey];
   }
+  const cache = routeCache(this);
+  const key = vhost + "\0" + exchange + "\0" + routingKey;
+  const hit = cache.routes.get(key);
+  if (hit) return hit.slice();
+  const out = routeUncached.call(this, vhost, exchange, routingKey, headers);
+  if (out.length && cacheable(this, vhost, exchange)) {
+    if (cache.routes.size >= 10_000) cache.routes.clear();
+    cache.routes.set(key, out.slice());
+  }
+  return out;
+}
+
+type RouteCache = {
+  routes: Map<string, string[]>;
+  bindings: unknown;
+  bindingCount: number;
+  e2e: unknown;
+  e2eCount: number;
+  exchanges: number;
+  queues: number;
+};
+const routeCaches = new WeakMap<Broker, RouteCache>();
+
+/**
+ * Routes by vhost, exchange and key, for the bindings as they are now.
+ *
+ * Every binding change replaces `bindings` or appends to it, and every
+ * exchange-link change does the same to `e2e`, so the array identity and
+ * length say when to start over. A routing pass per publish was a fifth of
+ * the work-queue cell. An empty result is not kept: it falls back to an
+ * alternate exchange from a policy.
+ */
+function routeCache(broker: Broker): RouteCache {
+  let c = routeCaches.get(broker);
+  if (
+    !c ||
+    c.bindings !== broker.bindings || c.bindingCount !== broker.bindings.length ||
+    c.e2e !== broker.e2e || c.e2eCount !== broker.e2e.length ||
+    c.exchanges !== broker.exchanges.size || c.queues !== broker.queues.size
+  ) {
+    c = {
+      routes: new Map(),
+      bindings: broker.bindings,
+      bindingCount: broker.bindings.length,
+      e2e: broker.e2e,
+      e2eCount: broker.e2e.length,
+      exchanges: broker.exchanges.size,
+      queues: broker.queues.size,
+    };
+    routeCaches.set(broker, c);
+  }
+  return c;
+}
+
+/**
+ * Kinds whose result depends only on the key. Headers, random and delayed
+ * routing are not kept, nor any route while exchange-to-exchange links exist:
+ * a link can lead through one of those kinds.
+ */
+function cacheable(broker: Broker, vhost: string, exchange: string): boolean {
+  if (exchange === "") return true;
+  if (broker.e2e.length) return false;
+  const kind = broker.exchanges.get(broker.key(vhost, exchange))?.kind;
+  return kind === "direct" || kind === "topic" || kind === "fanout";
+}
+
+function routeUncached(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
   const first = this.exchanges.get(this.key(vhost, exchange));
-  if (first?.internal) throw new ChanError(403, `ACCESS_REFUSED - cannot publish to internal exchange '${exchange}' in vhost '${vhost}'`);
+  // The default exchange is implicit and marked internal in the topology,
+  // but clients may publish to it even when exchange-to-exchange edges exist.
+  if (exchange !== "" && first?.internal) throw new ChanError(403, `ACCESS_REFUSED - cannot publish to internal exchange '${exchange}' in vhost '${vhost}'`);
   const seen = new Set<string>();
   const pending = [exchange];
   const out: string[] = [];

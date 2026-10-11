@@ -37,11 +37,13 @@ foreach(['primary','secondary'] as $mode){
  try{
  $until=microtime(true)+5;$ready=false;while(microtime(true)<$until){$ready=@stream_socket_client("tcp://127.0.0.1:$plain",$e,$s,.1);if($ready){fclose($ready);break;}usleep(10000);}check((bool)$ready,"$mode listener starts");
  $good=login($tls,'client','EXTERNAL');check($good['open']&&$good['mechanisms']==='PLAIN EXTERNAL',"$mode trusted CN authenticates EXTERNAL");
- $no=login($tls,null,'EXTERNAL');check(!$no['open'],"$mode absent certificate denied and unadvertised");
+ $no=login($tls,null,'EXTERNAL');check(!$no['open']&&$no['mechanisms']==='PLAIN',"$mode absent certificate denied and unadvertised");
+ // RabbitMQ's fail_if_no_peer_cert = false: the TLS port still takes PLAIN without a certificate.
+ check(login($tls,null,'PLAIN')['open'],"$mode TLS PLAIN without a client certificate supported");
  check(!login($tls,'stranger','EXTERNAL')['open'],"$mode untrusted certificate denied");
  check(!login($tls,'nobody','EXTERNAL')['open'],"$mode trusted unknown CN denied");
  check(login($tls,'client','PLAIN')['open'],"$mode TLS PLAIN with trusted client certificate supported");
  if($mode==='secondary')check(!login($plain,null,'EXTERNAL',false)['open'],"plain socket EXTERNAL denied");
  }finally{proc_terminate($proc);proc_close($proc);}
 }
-echo "13 strict TLS checks passed\n";
+echo "15 strict TLS checks passed\n";

@@ -177,7 +177,7 @@ const EMPTY = new Uint8Array(0);
  * One buffer for a whole group commit, sized first, then written in one pass.
  * Deletes come first: a replay applies them before this group's inserts.
  */
-function encodeRows(deletes: number[], inserts: LogInsert[]): Buffer {
+function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[]): Buffer {
   let total = deletes.length * RECORD_FIXED;
   const lens = new Array<number>(inserts.length * 3);
   for (let i = 0; i < inserts.length; i++) {
@@ -195,8 +195,10 @@ function encodeRows(deletes: number[], inserts: LogInsert[]): Buffer {
   for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY);
   for (let i = 0; i < inserts.length; i++) {
     const row = inserts[i]!;
+    starts?.push(o);
     o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body);
   }
+  starts?.push(o);
   return buf;
 }
 
@@ -243,7 +245,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number): { next: number; o
   return { next: o, op };
 }
 
-function scanFile(fd: number, logical: number, apply: (op: LogOp) => void): number {
+function scanFile(fd: number, logical: number, apply: (op: LogOp, at: number, end: number) => void): number {
   if (logical <= HEADER) return HEADER;
   const buf = Buffer.alloc(logical);
   let got = 0;
@@ -257,7 +259,7 @@ function scanFile(fd: number, logical: number, apply: (op: LogOp) => void): numb
   while (pos + 4 <= limit) {
     const rec = parseRecord(buf, pos, limit);
     if (!rec) return pos;
-    apply(rec.op);
+    apply(rec.op, pos, rec.next);
     if (rec.next <= pos) return pos;
     pos = rec.next;
   }
@@ -285,11 +287,20 @@ export class FastLog {
   private readonly liveChunk = new Map<number, number>();
   /** Chunk id to the number of rows in `liveChunk` that point at it. */
   private readonly liveCount = new Map<number, number>();
+  /** Row id to its latest insert record: offset in its chunk and length. */
+  private readonly livePos = new Map<number, number>();
+  private readonly liveLen = new Map<number, number>();
+  /** Inserts ever written to each chunk, live or not. Relocation compares against it. */
+  private readonly chunkInserts = new Map<number, number>();
+  /** Read descriptors of rotated chunks, for rows paged out of memory. */
+  private readonly readFds = new Map<number, number>();
   private retireQueued = false;
   /** The oldest chunk whose rows were last handed out to be written forward, and when. */
   private relocating = { chunk: 0, at: 0 };
   /** Chunks removed since open. */
   retiredChunks = 0;
+  /** Rotations that left the old chunk's fsync to the sync worker. */
+  handOffs = 0;
   private worker: Worker | null = null;
   private preparingId = 0;
   private closed = false;
@@ -297,6 +308,19 @@ export class FastLog {
   private nextReady = false;
   private readonly state = new SharedArrayBuffer(8);
   private readonly view = new BigInt64Array(this.state);
+  /**
+   * Batches written but not yet covered by an fdatasync, oldest first. Their
+   * rows are tracked only once synced, so a chunk is never removed while the
+   * relocated copy of one of its rows could still be lost.
+   */
+  private unsynced: Array<{ seq: bigint; chunk: number; at: number; inserts: number[]; starts: number[]; deletes: number[] }> = [];
+  private writtenSeq = 0n;
+  private syncedSeq = 0n;
+  private syncWorker: Worker | null = null;
+  /** requested, done, fd, failed, previous chunk fd. See `sync-worker.ts`. */
+  private readonly syncState = new BigInt64Array(new SharedArrayBuffer(40));
+  /** Called once per completed sync with the highest batch it covered. */
+  onSynced: ((seq: bigint, ok: boolean) => void) | null = null;
 
   private constructor(private readonly dir: string, active: ActiveChunk, oldest: number) {
     this.active = active;
@@ -364,8 +388,8 @@ export class FastLog {
       const fd = owned ? openSync(path, "r") : this.active.fd;
       try {
         const size = fstatSync(fd).size;
-        const good = scanFile(fd, size, (op) => {
-          if (op.kind === "insert") this.track(op.id, id);
+        const good = scanFile(fd, size, (op, at, end) => {
+          if (op.kind === "insert") this.track(op.id, id, at, end - at);
           else this.untrack(op.id);
           apply(op);
         });
@@ -380,29 +404,155 @@ export class FastLog {
     }
   }
 
+  /** Recovery index: sqlite is a cache once this log is authoritative. */
+  hasLiveMessage(id: number): boolean {
+    return this.liveChunk.has(id);
+  }
+
+  /**
+   * Read a synced row back from its insert record, for a row whose body was
+   * dropped from memory. Null when the row is not live in a synced batch.
+   */
+  readRow(id: number): LogInsert | null {
+    const chunk = this.liveChunk.get(id);
+    const at = this.livePos.get(id);
+    const len = this.liveLen.get(id);
+    if (chunk === undefined || at === undefined || len === undefined) return null;
+    let fd = chunk === this.active.id ? this.active.fd : this.readFds.get(chunk);
+    if (fd === undefined) {
+      fd = openSync(chunkPath(this.dir, chunk), "r");
+      this.readFds.set(chunk, fd);
+    }
+    const buf = Buffer.allocUnsafe(len);
+    let got = 0;
+    while (got < len) {
+      const n = readSync(fd, buf, got, len - got, at + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    const rec = got === len ? parseRecord(buf, 0, len) : null;
+    if (!rec || rec.op.kind !== "insert" || rec.op.id !== id) return null;
+    // `body` is a view of this one-record buffer, so it pins nothing else.
+    return { id, vhost: rec.op.vhost, queue: rec.op.queue, meta: rec.op.meta, body: rec.op.body };
+  }
+
+  /** Used when migrating the current sqlite state back into this log. */
+  liveMessageIds(): IterableIterator<number> {
+    return this.liveChunk.keys();
+  }
+
   /**
    * Append these rows and fsync them. The length moves only after the sync,
    * so a failed sync retries the same region.
    */
   syncRows(inserts: LogInsert[], deletes: number[]) {
     if (inserts.length === 0 && deletes.length === 0) return;
-    const buf = encodeRows(deletes, inserts);
-    if (this.active.len + buf.length > this.active.size) {
-      this.rotate(Math.max(CHUNK, HEADER + buf.length));
-    }
-    if (this.active.len + buf.length > this.active.size) {
-      throw new Error("durable log chunk is too small");
-    }
-    const newLen = this.active.len + buf.length;
+    const starts: number[] = [];
+    const buf = encodeRows(deletes, inserts, starts);
+    this.makeRoom(buf.length);
+    const at = this.active.len;
     // One sequential overwrite. Rewriting the header would dirty byte 0 and
     // make this fdatasync flush a second region.
-    writeAllAt(this.active.fd, buf, this.active.len);
+    writeAllAt(this.active.fd, buf, at);
     fdatasyncSync(this.active.fd);
-    this.active.len = newLen;
-    for (const id of deletes) this.untrack(id);
-    for (const row of inserts) this.track(row.id, this.active.id);
+    this.active.len = at + buf.length;
+    // This sync also covers every batch written before it.
+    this.unsynced.push({ seq: ++this.writtenSeq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, deletes: [...deletes] });
     this.kick();
-    this.scheduleRetire();
+    this.completeThrough(this.writtenSeq, true);
+  }
+
+  /** False once a background sync failed. The caller then syncs inline. */
+  get canAppend(): boolean {
+    return !this.closed && Atomics.load(this.syncState, 3) === 0n;
+  }
+
+  /** Every batch is covered by a completed sync. */
+  get settled(): boolean {
+    return this.syncedSeq === this.writtenSeq;
+  }
+
+  /**
+   * Append these rows and sync them on the sync worker.
+   *
+   * The event loop keeps reading and delivering during the fsync. Batches
+   * written while one sync runs share the next. `onSynced` reports each
+   * completion; nothing here is durable before it.
+   *
+   * @returns The batch sequence number that `onSynced` will cover.
+   */
+  appendRows(inserts: LogInsert[], deletes: number[]): bigint {
+    if (inserts.length === 0 && deletes.length === 0) return this.writtenSeq;
+    const starts: number[] = [];
+    const buf = encodeRows(deletes, inserts, starts);
+    this.makeRoom(buf.length, true);
+    const at = this.active.len;
+    writeAllAt(this.active.fd, buf, at);
+    this.active.len += buf.length;
+    const seq = ++this.writtenSeq;
+    this.unsynced.push({ seq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, deletes: [...deletes] });
+    this.kick();
+    if (!this.syncWorker) {
+      this.syncWorker = new Worker(new URL("./sync-worker.ts", import.meta.url));
+      (this.syncWorker as unknown as { unref?: () => void }).unref?.();
+      this.syncWorker.onmessage = (event: MessageEvent<bigint>) => {
+        this.completeThrough(event.data, Atomics.load(this.syncState, 3) === 0n);
+      };
+      this.syncWorker.postMessage(this.syncState.buffer);
+    }
+    // The fd before the sequence: the worker reads them in the other order.
+    Atomics.store(this.syncState, 2, BigInt(this.active.fd));
+    Atomics.store(this.syncState, 0, seq);
+    Atomics.notify(this.syncState, 0);
+    return seq;
+  }
+
+  /**
+   * Rotate before a batch that does not fit.
+   *
+   * The inline path first lets the sync worker finish with the old fd. A
+   * worker batch hands the old chunk over instead: the next request syncs it
+   * before the new chunk, so its batches are covered in order without this
+   * thread waiting on that fsync. Only one chunk is handed over at a time.
+   */
+  private makeRoom(bytes: number, aside = false) {
+    if (this.active.len + bytes > this.active.size) {
+      const handOff = aside && !!this.syncWorker && !this.settled && Atomics.load(this.syncState, 4) === 0n;
+      if (!handOff) this.drainWorker();
+      this.rotate(Math.max(CHUNK, HEADER + bytes), handOff);
+    }
+    if (this.active.len + bytes > this.active.size) {
+      throw new Error("durable log chunk is too small");
+    }
+  }
+
+  /** Block until the sync worker covered every request, then report it. */
+  private drainWorker() {
+    if (!this.syncWorker) return;
+    const want = Atomics.load(this.syncState, 0);
+    const deadline = Date.now() + 5000;
+    while (Atomics.load(this.syncState, 1) < want && Date.now() < deadline) {
+      Atomics.wait(this.syncState, 1, Atomics.load(this.syncState, 1), 1000);
+    }
+    const done = Atomics.load(this.syncState, 1);
+    this.completeThrough(done, done >= want && Atomics.load(this.syncState, 3) === 0n);
+  }
+
+  /** Track the rows of every batch through `seq`, in order, then report it once. */
+  private completeThrough(seq: bigint, ok: boolean) {
+    if (seq <= this.syncedSeq) return;
+    this.syncedSeq = seq;
+    while (this.unsynced.length && this.unsynced[0]!.seq <= seq) {
+      const batch = this.unsynced.shift()!;
+      // A failed sync still keeps its chunk: those rows remain live in memory.
+      for (const id of batch.deletes) this.untrack(id);
+      for (let i = 0; i < batch.inserts.length; i++) {
+        const start = batch.starts[i]!;
+        this.track(batch.inserts[i]!, batch.chunk, batch.at + start, batch.starts[i + 1]! - start);
+      }
+    }
+    if (ok) this.scheduleRetire();
+    this.onSynced?.(seq, ok);
   }
 
   /**
@@ -415,6 +565,9 @@ export class FastLog {
     if (this.active.id - this.oldest <= COMPACT_AFTER) return [];
     const live = this.liveCount.get(this.oldest) ?? 0;
     if (live === 0) return [];
+    // A mostly live chunk is a backlog, not a few stragglers. Writing it
+    // forward frees nothing and rewrote the whole backlog every 16 chunks.
+    if (live * 4 > (this.chunkInserts.get(this.oldest) ?? live)) return [];
     const { chunk, at } = this.relocating;
     if (chunk === this.oldest && this.active.id - at < COMPACT_AFTER) return [];
     this.relocating = { chunk: this.oldest, at: this.active.id };
@@ -436,6 +589,16 @@ export class FastLog {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
       }
       this.liveCount.delete(this.oldest);
+      this.chunkInserts.delete(this.oldest);
+      const fd = this.readFds.get(this.oldest);
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+        this.readFds.delete(this.oldest);
+      }
       this.oldest++;
       removed++;
     }
@@ -449,16 +612,21 @@ export class FastLog {
     return this.active.id - this.oldest + 1;
   }
 
-  private track(id: number, chunk: number) {
+  private track(id: number, chunk: number, at: number, len: number) {
     this.untrack(id);
     this.liveChunk.set(id, chunk);
+    this.livePos.set(id, at);
+    this.liveLen.set(id, len);
     this.liveCount.set(chunk, (this.liveCount.get(chunk) ?? 0) + 1);
+    this.chunkInserts.set(chunk, (this.chunkInserts.get(chunk) ?? 0) + 1);
   }
 
   private untrack(id: number) {
     const chunk = this.liveChunk.get(id);
     if (chunk === undefined) return;
     this.liveChunk.delete(id);
+    this.livePos.delete(id);
+    this.liveLen.delete(id);
     const left = (this.liveCount.get(chunk) ?? 1) - 1;
     if (left > 0) this.liveCount.set(chunk, left);
     else this.liveCount.delete(chunk);
@@ -476,7 +644,22 @@ export class FastLog {
   }
 
   close() {
+    this.drainWorker();
     this.closed = true;
+    for (const fd of this.readFds.values()) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+    this.readFds.clear();
+    if (this.syncWorker) {
+      Atomics.store(this.syncState, 0, -1n);
+      Atomics.notify(this.syncState, 0);
+      this.syncWorker.terminate();
+      this.syncWorker = null;
+    }
     try {
       writeAllAt(this.active.fd, headerBuf(this.active.len), 0);
       fdatasyncSync(this.active.fd);
@@ -496,7 +679,7 @@ export class FastLog {
     }
   }
 
-  private rotate(size: number) {
+  private rotate(size: number, handOff = false) {
     const nextId = this.active.id + 1;
     const path = chunkPath(this.dir, nextId);
     if (this.preparingId === nextId) {
@@ -511,7 +694,12 @@ export class FastLog {
     const ready = !!info && info.logical === HEADER && info.size >= size;
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
-    closeSync(this.active.fd);
+    // The sync worker still owes this chunk an fsync. It syncs and closes it.
+    if (handOff) {
+      Atomics.store(this.syncState, 4, BigInt(this.active.fd));
+      this.handOffs++;
+    }
+    else closeSync(this.active.fd);
     this.active = { id: nextId, fd, len: HEADER, size: fileSize };
     this.preparingId = 0;
     this.nextReady = false;

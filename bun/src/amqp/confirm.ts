@@ -6,6 +6,17 @@
  */
 import { method, methodFrame, R } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
+import { ChanError } from "../broker/index.ts";
+
+/** Bound both payload bytes and operation objects across transactional channels. */
+export function stageTransaction(this: Conn, c: Ch, run: () => Promise<unknown> | void, bytes = 0) {
+  let retained = bytes;
+  for (const ch of this.channels.values()) retained += ch.txBytes;
+  if (this.txOperations >= 65536 || retained > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - transaction staging limit");
+  c.txBytes += bytes;
+  c.txBatch.push(run);
+  this.txOperations++;
+}
 
 /**
  * Handle confirm.select, tx.select, tx.commit, and tx.rollback.
@@ -35,7 +46,9 @@ export async function handleConfirmTx(this: Conn, channel: number, c: Ch, payloa
     return true;
   }
   if (cls === 90 && mid === 30) {
+    this.txOperations = Math.max(0, this.txOperations - c.txBatch.length);
     c.txBatch = [];
+    c.txBytes = 0;
     await this.send(methodFrame(channel, method(90, 31, () => {})));
     return true;
   }
@@ -51,7 +64,9 @@ export async function handleConfirmTx(this: Conn, channel: number, c: Ch, payloa
  */
 export async function txCommit(this: Conn, channel: number, c: Ch) {
   const batch = c.txBatch;
+  this.txOperations = Math.max(0, this.txOperations - batch.length);
   c.txBatch = [];
+  c.txBytes = 0;
   // Each op enqueues before its first await, so starting them in turn keeps
   // their order. Awaiting each one before the next made a 10-message commit
   // wait for 10 fsyncs; together they share one group commit.
@@ -63,3 +78,4 @@ export async function txCommit(this: Conn, channel: number, c: Ch) {
 
 Conn.prototype.handleConfirmTx = handleConfirmTx;
 Conn.prototype.txCommit = txCommit;
+Conn.prototype.stageTransaction = stageTransaction;

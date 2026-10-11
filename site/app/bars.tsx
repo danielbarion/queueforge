@@ -14,9 +14,12 @@ export function Bars({ rows, unit, base }: { rows: Bar[]; unit: string; base?: n
             <span className="bar-fill" style={{ width: `${(row.rate / max) * 100}%` }} />
           </span>
           <span className="bar-value">
-            {formatRate(row.rate)}
-            <span className="bar-unit"> {unit}</span>
-            {base ? <span className="bar-times">{formatTimes(row.rate, base)}×</span> : null}
+            <span>
+              {formatRate(row.rate)}
+              <span className="bar-unit"> {unit}</span>
+              {base ? <span className="bar-times">{formatTimes(row.rate, base)}×</span> : null}
+            </span>
+            {row.note ? <span className="bar-note">{row.note}</span> : null}
           </span>
         </li>
       ))}

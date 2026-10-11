@@ -4,6 +4,8 @@
  *
  * They start once per run. RabbitMQ in Docker reaches the JWKS server and
  * LDAP through host.docker.internal; QueueForge brokers through 127.0.0.1.
+ * QF_FIXTURE_BIND_HOST=0.0.0.0 makes the fixtures reachable from a Linux
+ * Docker bridge; local runs bind them to loopback by default.
  */
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
@@ -106,7 +108,7 @@ async function startLdap(dir: string): Promise<{ port: number; stop: () => void 
       "-e", "LDAP_DOMAIN=qf.test",
       "-e", `LDAP_ADMIN_PASSWORD=${LDAP_BIND_PASSWORD}`,
       "-e", "LDAP_TLS=false",
-      "-p", `127.0.0.1:${port}:389`,
+      "-p", `${process.env.QF_FIXTURE_BIND_HOST ?? "127.0.0.1"}:${port}:389`,
       "-v", `${dir}/seed.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-seed.ldif`,
       "osixia/openldap:1.5.0", "--copy-service",
     ],
@@ -142,7 +144,7 @@ export async function fixtures(): Promise<Fixtures> {
   const jwksPort = await freePort();
   // JWKS must be served over HTTPS (RabbitMQ refuses http); the test CA signs it.
   const jwks = Bun.serve({
-    hostname: "127.0.0.1",
+    hostname: process.env.QF_FIXTURE_BIND_HOST ?? "127.0.0.1",
     port: jwksPort,
     tls: { cert: Bun.file(join(pki, "server.pem")), key: Bun.file(join(pki, "server.key")) },
     fetch: () => Response.json({ keys: [jwk] }),

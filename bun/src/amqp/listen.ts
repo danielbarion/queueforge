@@ -13,17 +13,19 @@ import { emptyProps, R } from "../codec.ts";
 
 /** One basic.publish waiting for its header and body. */
 export type Pub = { exchange: string; routingKey: string; mandatory: boolean; immediate: boolean };
+export type PendingPublish = { channel: number; bytes: number; batchConfirm?: boolean; pressured: () => boolean; run: () => Promise<unknown> | void };
 
 /** State for one AMQP channel on this connection. */
 export type Ch = {
   confirm: boolean;
   tx: boolean;
   txBatch: Array<() => Promise<unknown> | void>;
+  txBytes: number;
   nextPub: number;
   nextDel: number;
   deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string }>;
   /** Deliveries held until this channel has prefetch credit again. */
-  parked: Array<{ channel: number; tag: string; queue: string; msg: LiveMsg; release?: () => void }>;
+  parked: Array<{ channel: number; tag: string; queue: string; msg: LiveMsg; noAck?: boolean; release?: () => void }>;
   byConsumer: Map<string, number>;
   prefetch: number;
   globalPrefetch: number | null;
@@ -53,6 +55,9 @@ export type AmqpSocket = {
   write: (b: Uint8Array) => number;
   end: () => void;
   flush?: () => void;
+  pendingBytes?: () => number;
+  pause?: () => unknown;
+  resume?: () => unknown;
   remoteAddress?: string;
   remotePort?: number;
 };
@@ -99,6 +104,12 @@ export class Conn {
   mgmtName = "";
   /** Frames waiting for the socket to accept more bytes. */
   outbound: Uint8Array[] = [];
+  outboundBytes = 0;
+  writeQueuedBytes = 0;
+  outputBlocked = false;
+  outputWakers = new Map<string, () => void>();
+  parkedBytes = 0;
+  parkedOperations = 0;
   /**
    * The socket copies what it accepts before `write` returns, so a gathered
    * burst may use the shared buffer. Only Bun's own listener promises that;
@@ -120,7 +131,12 @@ export class Conn {
    * Persistent confirms staged by the frame parser. They run after ack frames
    * already in the buffer, and in groups when the ready queue is ahead of consumers.
    */
-  deferredPublish: Array<() => Promise<unknown>> = [];
+  deferredPublish: PendingPublish[] = [];
+  publishBytes = 0;
+  inFlightBytes = 0;
+  inFlightPublishes = new Set<Promise<unknown>>();
+  txOperations = 0;
+  readsPaused = false;
   inboundRunning = false;
   inboundDone: Promise<void> = Promise.resolve();
   /**
@@ -159,6 +175,7 @@ export interface Conn {
   beginPublish(c: Ch, payload: Uint8Array): void;
   finishPublish(channel: number, c: Ch): Promise<unknown> | void;
   txCommit(channel: number, c: Ch): Promise<void>;
+  stageTransaction(c: Ch, run: () => Promise<unknown> | void, bytes?: number): void;
   exDeclare(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   exDelete(channel: number, payload: Uint8Array): Promise<void>;
   exBind(channel: number, payload: Uint8Array): Promise<void>;
@@ -171,7 +188,7 @@ export interface Conn {
   qos(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   creditOk(c: Ch, tag: string): boolean;
   consume(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
-  handOff(channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg): void;
+  handOff(channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg, noAck?: boolean): void;
   flushParked(c: Ch): void;
   deliver(channel: number, tag: string, dtag: number, msg: LiveMsg): void;
   cancel(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
@@ -182,6 +199,7 @@ export interface Conn {
   get(channel: number, c: Ch, payload: Uint8Array): Promise<void>;
   recover(channel: number, c: Ch, payload: Uint8Array, methodId: number): Promise<void>;
   requeueChannel(c: Ch): Promise<void>;
+  requeueParked(c: Ch, tag?: string): Promise<void>;
   dropConsumers(): Promise<void>;
   requeueAll(): Promise<void>;
   chanClose(channel: number, code: number, text: string, classId?: number, methodId?: number): Promise<void>;
@@ -305,6 +323,9 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = tr
     end() {
       socket.end();
     },
+    pause: () => socket.pause(),
+    resume: () => socket.resume(),
+    pendingBytes: () => socket.writableLength,
     remoteAddress: socket.remoteAddress,
     remotePort: socket.remotePort,
   };
@@ -331,6 +352,7 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = tr
     void conn.dropConsumers().then(() => conn.requeueAll()).then(() => conn.dropExclusive()).finally(() => conn.unwatchAlarms()).catch(() => {});
   });
   socket.on("error", fail);
+  socket.on("drain", () => conn.flush());
   return conn;
 }
 
@@ -377,6 +399,9 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
     end() {
       socket.end();
     },
+    pause: () => socket.pause(),
+    resume: () => socket.resume(),
+    pendingBytes: () => socket.writableLength,
     remoteAddress: socket.remoteAddress,
     remotePort: socket.remotePort,
   };
@@ -403,6 +428,7 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
     void conn.push(viewOf(buf)).catch(fail);
   });
   socket.on("error", fail);
+  socket.on("drain", () => conn.flush());
   socket.resume();
   void conn.push(bytes).catch(fail);
 }
@@ -420,6 +446,7 @@ export function ch(this: Conn, id: number): Ch {
       confirm: false,
       tx: false,
       txBatch: [],
+      txBytes: 0,
       nextPub: 1,
       nextDel: 1,
       deliveries: new Map(),

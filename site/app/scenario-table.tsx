@@ -13,6 +13,11 @@ const UNIT: Record<ScenarioRow["kind"], string> = {
   latency: "p99 ms",
 };
 
+function memoryText(memory: ScenarioRow["memory"][Tone]) {
+  const format = (value: number | null) => value == null ? "–" : value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  return `${format(memory.anonymous)} / ${format(memory.cgroup)} MiB`;
+}
+
 /** The best value in a row: highest rate, or lowest p99 latency. */
 function best(row: ScenarioRow): number | null {
   const vals = COLUMNS.map((c) => row.values[c.tone]).filter((v): v is number => v != null);
@@ -23,9 +28,14 @@ function best(row: ScenarioRow): number | null {
 /** One table of PerfTest scenarios for one container size. */
 export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
   return (
-    <div className="panel table-panel bench-table">
+    <div className="panel table-panel bench-table scenario-table">
       <div className="scroll">
         <table>
+          <colgroup>
+            <col className="scenario-column" />
+            <col className="score-column" />
+            {COLUMNS.map((c) => <col className="broker-column" key={c.tone} />)}
+          </colgroup>
           <thead>
             <tr>
               <th scope="col">Scenario</th>
@@ -53,16 +63,12 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
                     const text = row.text[c.tone];
-                    if (v == null) {
-                      return (
-                        <td key={c.tone} className="na">
-                          {text}
-                        </td>
-                      );
-                    }
                     return (
-                      <td key={c.tone} className={v === top ? "best" : undefined}>
-                        {text}
+                      <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
+                        <span>{text}</span>
+                        <span className="scenario-memory" title="Anonymous / total cgroup memory peaks; total includes file cache. Sampled once per second.">
+                          {memoryText(row.memory[c.tone])}
+                        </span>
                       </td>
                     );
                   })}

@@ -48,7 +48,7 @@
 | Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Work queue | Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one. | delivered msg/s | 41,976 | 124,898 | 92,563 | 35,518 |
-| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 94,088 | 88,042 | 69,776 | 88,917 |
+| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 94,088 | 88,042 | 69,776 (missed delivery rate) | 88,917 |
 | Broadcast to 20 services | Domain events on a fanout exchange, each copied to 20 durable subscriber queues. | deliveries/s (20 per publish) | 42,192 | 117,624 | 214,913 | 75,801 |
 | 64 queues, own publisher each | Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B. | delivered msg/s | 34,480 | 73,944 | 92,925 | 51,665 |
 | 64 KiB messages | Documents and images: 2 producers of durable 64 KiB bodies, scored in MB/s. | delivered MB/s | 634.3 MB/s | 255.0 MB/s | 312.5 MB/s | 245.9 MB/s |
@@ -57,10 +57,10 @@
 | Latency at 10,000 msg/s | A busy API workload: 2 producers at 5,000 durable 1 KiB msg/s each. | p99 latency at the offered rate | 14.91 ms | 1.64 ms | 14.69 ms | 28.87 ms |
 | 500 queues, 1,000 connections | Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer. | p99 latency at the offered rate | 13.35 ms | 7.43 ms | 38.42 ms | 33.97 ms |
 | Slow workers, prefetch 1 | 20 workers that each spend 2 ms per job with prefetch 1, fed 5,000 msg/s. | p99 latency at the offered rate | 12.53 ms | 0.67 ms | 22.82 ms | 37.66 ms |
-| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 26,692 | 76,544 | 88,158 | 589 |
-| Stream queue | An append-only log read by 2 consumers from the start, over AMQP 0-9-1. | delivered msg/s | 26,688 | 10,442 | 27,171 | 791 |
+| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 26,692 (missed delivery rate) | 76,544 | 88,158 | 589 |
+| Stream queue | An append-only log read by 2 consumers from the start, over AMQP 0-9-1. | delivered msg/s | 26,688 (missed delivery rate) | 10,442 | 27,171 | 791 |
 | Priority queue | x-max-priority=10, every message at priority 5, 2 producers and 2 consumers. | delivered msg/s | 31,130 | 113,478 | 79,705 | 16,991 |
-| Transactions | tx.select publishers committing every 10 messages, transactional consumers acking every 10. | delivered msg/s | 19,233 | 199 | 17,704 | 21,550 |
+| Transactions | tx.select publishers committing every 10 messages, transactional consumers acking every 10. | delivered msg/s | 19,233 | 199 | 17,704 (missed delivery rate) | 21,550 |
 | Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 29,258 | 90,035 | 96,051 | 61,762 |
 | Backlog fill and drain | A consumer outage: 300,000 durable 1 KiB messages pile up, then 4 consumers drain them. | fill / drain msg/s | 71,864 / 50,009 | 145,338 / 149,850 | 29,988 / 74,814 | 60,000 / 811 (incomplete: sent 300000 got 76200) |
 
@@ -70,44 +70,44 @@ Peak memory, 1 CPU / 1 GiB (anonymous / cgroup total MiB):
 | --- | ---: | ---: | ---: | ---: |
 | Work queue | 125 / 161 | 15 / 83 | 798 / 840 | 20 / 88 |
 | Fire-and-forget telemetry | 195 / 256 | 66 / 189 | 790 / 909 | 20 / 31 |
-| Broadcast to 20 services | 151 / 193 | 18 / 1024 | 88 / 145 | 26 / 367 |
-| 64 queues, own publisher each | 200 / 236 | 34 / 1024 | 96 / 126 | 28 / 255 |
-| 64 KiB messages | 268 / 366 | 16 / 88 | 960 / 1024 | 18 / 61 |
-| 1 MiB messages | 241 / 324 | 20 / 97 | 204 / 438 | 993 / 1022 |
+| Broadcast to 20 services | 151 / 193 | 18 / 1,024 | 88 / 145 | 26 / 367 |
+| 64 queues, own publisher each | 200 / 236 | 34 / 1,024 | 96 / 126 | 28 / 255 |
+| 64 KiB messages | 268 / 366 | 16 / 88 | 960 / 1,024 | 18 / 61 |
+| 1 MiB messages | 241 / 324 | 20 / 97 | 204 / 438 | 993 / 1,022 |
 | Latency at 1,000 msg/s | 127 / 159 | 14 / 48 | 54 / 84 | 18 / 35 |
 | Latency at 10,000 msg/s | 127 / 159 | 12 / 83 | 68 / 91 | 16 / 35 |
-| 500 queues, 1,000 connections | 392 / 441 | 111 / 1024 | 91 / 127 | 50 / 73 |
+| 500 queues, 1,000 connections | 392 / 441 | 111 / 1,024 | 91 / 127 | 50 / 73 |
 | Slow workers, prefetch 1 | 128 / 161 | 18 / 85 | 70 / 95 | 22 / 38 |
-| Quorum queue | 573 / 954 | 794 / 1024 | 569 / 595 | 38 / 84 |
-| Stream queue | 126 / 1024 | 366 / 634 | 241 / 1024 | 42 / 70 |
+| Quorum queue | 573 / 954 | 794 / 1,024 | 569 / 595 | 38 / 84 |
+| Stream queue | 126 / 1,024 | 366 / 634 | 241 / 1,024 | 42 / 70 |
 | Priority queue | 127 / 158 | 15 / 83 | 90 / 110 | 20 / 58 |
-| Transactions | 126 / 157 | 14 / 23 | 295 / 1024 | 18 / 38 |
-| Heavy mixed load | 214 / 248 | 68 / 1024 | 314 / 1024 | 53 / 1024 |
-| Backlog fill and drain | 169 / 545 | 473 / 820 | 556 / 1024 | 763 / 1024 |
+| Transactions | 126 / 157 | 14 / 23 | 295 / 1,024 | 18 / 38 |
+| Heavy mixed load | 214 / 248 | 68 / 1,024 | 314 / 1,024 | 53 / 1,024 |
+| Backlog fill and drain | 169 / 545 | 473 / 820 | 556 / 1,024 | 763 / 1,024 |
 
 ### Scenarios, 4 CPU / 4 GiB
 
 | Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Work queue | Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one. | delivered msg/s | 68,452 | 181,079 | 101,532 | 10,050 |
-| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 274,151 | 143,620 | 97,339 | 50,305 |
-| Broadcast to 20 services | Domain events on a fanout exchange, each copied to 20 durable subscriber queues. | deliveries/s (20 per publish) | 144,495 | 189,063 | 28,641 | 7,269 |
-| 64 queues, own publisher each | Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B. | delivered msg/s | 132,621 | 125,354 | 208,309 | 36,746 |
+| Work queue | Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one. | delivered msg/s | 68,452 | 181,079 | 101,532 | 10,050 (missed delivery rate) |
+| Fire-and-forget telemetry | Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers. | delivered msg/s | 274,151 | 143,620 | 97,339 | 50,305 (missed delivery rate) |
+| Broadcast to 20 services | Domain events on a fanout exchange, each copied to 20 durable subscriber queues. | deliveries/s (20 per publish) | 144,495 | 189,063 | 28,641 | 7,269 (missed delivery rate) |
+| 64 queues, own publisher each | Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B. | delivered msg/s | 132,621 | 125,354 | 208,309 | 36,746 (missed delivery rate) |
 | 500 queues, 1,000 connections | Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer. | p99 latency at the offered rate | 2.17 ms | 0.80 ms | 258.10 ms | failed (client-exit-124) |
-| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 89,750 | 73,562 | 12,034 | failed (no-delivery) |
-| Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 123,802 | 240,587 | 234,593 | 2,802 |
+| Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 89,750 | 73,562 (missed delivery rate) | 12,034 | failed (no-delivery) |
+| Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 123,802 | 240,587 | 234,593 | 2,802 (missed delivery rate) |
 
 Peak memory, 4 CPU / 4 GiB (anonymous / cgroup total MiB):
 
 | Scenario | RabbitMQ | Rust | Bun | PHP |
 | --- | ---: | ---: | ---: | ---: |
-| Work queue | 146 / 180 | 18 / 85 | 2147 / 2286 | 57 / 106 |
-| Fire-and-forget telemetry | 203 / 268 | 100 / 223 | 1015 / 1158 | 378 / 446 |
-| Broadcast to 20 services | 176 / 216 | 21 / 1343 | 1002 / 2949 | 61 / 169 |
-| 64 queues, own publisher each | 247 / 307 | 39 / 2149 | 345 / 404 | 65 / 279 |
-| 500 queues, 1,000 connections | 413 / 461 | 144 / 2231 | 344 / 498 | 67 / 107 |
-| Quorum queue | 337 / 810 | 3082 / 4096 | 2209 / 2281 | 2340 / 2405 |
-| Heavy mixed load | 323 / 506 | 143 / 1139 | 2098 / 3951 | 105 / 237 |
+| Work queue | 146 / 180 | 18 / 85 | 2,147 / 2,286 | 57 / 106 |
+| Fire-and-forget telemetry | 203 / 268 | 100 / 223 | 1,015 / 1,158 | 378 / 446 |
+| Broadcast to 20 services | 176 / 216 | 21 / 1,343 | 1,002 / 2,949 | 61 / 169 |
+| 64 queues, own publisher each | 247 / 307 | 39 / 2,149 | 345 / 404 | 65 / 279 |
+| 500 queues, 1,000 connections | 413 / 461 | 144 / 2,231 | 344 / 498 | 67 / 107 |
+| Quorum queue | 337 / 810 | 3,082 / 4,096 | 2,209 / 2,281 | 2,340 / 2,405 |
+| Heavy mixed load | 323 / 506 | 143 / 1,139 | 2,098 / 3,951 | 105 / 237 |
 
 ### Connections
 

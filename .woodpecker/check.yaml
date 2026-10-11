@@ -1,0 +1,27 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: bun-toolchain
+    image: oven/bun:1.4.2
+    commands:
+      - mkdir -p .ci-tools
+      - cp /usr/local/bin/bun .ci-tools/bun
+
+  - name: fmt-clippy-test
+    image: rust:slim-bookworm
+    privileged: true
+    environment:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends ca-certificates docker.io build-essential pkg-config libssl-dev curl
+      - export PATH="$PWD/.ci-tools:$PATH"
+      - rustup component add rustfmt clippy
+      - cd bun && bun install --frozen-lockfile && cd ..
+      - cd rust && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cd ..
+      - sh .ci/with-docker.sh sh .ci/rust-test.sh

@@ -71,7 +71,7 @@ final class Codec
 
     public static function connectionTune(): string
     {
-        return self::method(0, 10, 30, pack('nNn', 2047, 131072, 60));
+        return self::method(0, 10, 30, pack('nNn', 2047, self::FRAME_MAX, 60));
     }
 
     public static function connectionOpenOk(): string
@@ -195,12 +195,31 @@ final class Codec
         return 'S' . self::longstr((string) $value);
     }
 
-    public static function deliver(int $channel, string $tag, int $deliveryTag, string $routingKey, int $deliveryMode, string $body, bool $redelivered = false, string $exchange = '', ?string $propRaw = null, array $headers = []): string
+    public static function deliver(int $channel, string $tag, int $deliveryTag, string $routingKey, int $deliveryMode, string $body, bool $redelivered = false, string $exchange = '', ?string $propRaw = null, array $headers = [], int $frameMax = self::FRAME_MAX): string
     {
         $method = self::shortstr($tag) . self::u64($deliveryTag) . chr($redelivered ? 1 : 0) . self::shortstr($exchange) . self::shortstr($routingKey);
         return self::method($channel, 60, 60, $method)
             . self::frame(2, $channel, self::contentHeader(strlen($body), $deliveryMode, $propRaw, $headers))
-            . ($body === '' ? '' : self::frame(3, $channel, $body));
+            . self::body($channel, $body, $frameMax);
+    }
+
+    /** The frame_max this broker proposes in connection.tune. */
+    public const FRAME_MAX = 131072;
+
+    /**
+     * Body frames no larger than the negotiated frame_max: a payload of
+     * frame_max minus the 8 bytes of frame header and end marker. One frame
+     * for a 1 MiB body made clients drop the connection ("frame size is
+     * invalid") and redeliver it forever.
+     */
+    public static function body(int $channel, string $body, int $frameMax = self::FRAME_MAX): string
+    {
+        $max = max(1, ($frameMax > 0 ? $frameMax : self::FRAME_MAX) - 8);
+        $n = strlen($body);
+        if ($n <= $max) return $n === 0 ? '' : self::frame(3, $channel, $body);
+        $out = '';
+        for ($at = 0; $at < $n; $at += $max) $out .= self::frame(3, $channel, substr($body, $at, $max));
+        return $out;
     }
 
     /** Heartbeat frame: type 8 on channel 0 with an empty payload. */
@@ -374,7 +393,7 @@ final class Codec
     }
 
     /** basic.get-ok, followed by the content header and body frames. */
-    public static function getOk(int $channel, int $deliveryTag, bool $redelivered, string $exchange, string $routingKey, int $messageCount, int $deliveryMode, string $body, ?string $propRaw = null, array $headers = []): string
+    public static function getOk(int $channel, int $deliveryTag, bool $redelivered, string $exchange, string $routingKey, int $messageCount, int $deliveryMode, string $body, ?string $propRaw = null, array $headers = [], int $frameMax = self::FRAME_MAX): string
     {
         $args = self::u64($deliveryTag)
             . chr($redelivered ? 1 : 0)
@@ -383,7 +402,7 @@ final class Codec
             . pack('N', $messageCount);
         return self::method($channel, 60, 71, $args)
             . self::frame(2, $channel, self::contentHeader(strlen($body), $deliveryMode, $propRaw, $headers))
-            . ($body === '' ? '' : self::frame(3, $channel, $body));
+            . self::body($channel, $body, $frameMax);
     }
 
     public static function getEmpty(int $channel): string

@@ -14,6 +14,16 @@ final class Broker
     public array $queues = [];
     /** @var array<int, array{queue:string,body:string,mode:int}> */
     public array $msgs = [];
+    /**
+     * Message id by "queue\0qid", for quorum ids (a classic message's qid is
+     * its own id). A scan of every message per quorum append and per Raft
+     * drop made a quorum queue slower the deeper it got.
+     *
+     * @var array<string, int>
+     */
+    private array $byQid = [];
+    /** Body bytes (+32 each) of live persistent messages, for the compaction check. */
+    private int $persistBytes = 0;
     /** @var list<array{conn:int,ch:int,tag:int,end:int}> */
     public array $waiting = [];
     /** @var array<string, string> */
@@ -34,6 +44,13 @@ final class Broker
     /** @var array<string, array<string, array<string, mixed>>> vhost to name to body */
     public array $policies = [];
     public bool $raftApplying = false;
+    /**
+     * Vhost scopes whose applied Raft messages still need one store sync.
+     * Message entries are synced once per applied batch, not once each.
+     *
+     * @var array<string, Broker>
+     */
+    public array $raftUnsynced = [];
     /** @var array<string, array<string, array<string, mixed>>> */
     public array $operatorPolicies = [];
     /** @var array<string, array<string, array{write:string,read:string}>> user to exchange */
@@ -205,6 +222,7 @@ final class Broker
                 'qid' => (string) ($meta['qid'] ?? ''),
                 'propRaw' => $msg['propRaw'] ?? null,
             ];
+            $this->indexQid($msg['id']);
             $this->declareRecovered($msg['queue']);
             $this->pushReady($msg['queue'], $msg['id']);
             if ($msg['id'] >= $this->nextId) {
@@ -411,7 +429,7 @@ final class Broker
                 $scope->queues[$name]['ready']=[];$scope->queues[$name]['replicas']=[];
             }
             foreach($messages as $msg)$root->applyRaft($group,'enq',$msg,0);
-            foreach($root->allBrokers() as $scope)$scope->flushDurable();
+            foreach($root->allBrokers() as $scope)$scope->flushDurable();$root->raftUnsynced=[];
         } finally { $root->raftApplying=$previous; }
     }
     public function applyRaft(string $group, string $kind, mixed $data, int $index): void
@@ -469,25 +487,65 @@ final class Broker
                 case 'delete_global_parameter':unset($root->parameters['global']['/'][$name]);break;
                 case 'enq':
                     $body=base64_decode((string)($data['body_b64']??''),true);$raw=isset($data['propRaw'])?base64_decode((string)$data['propRaw'],true):null;if($body===false||$raw===false)throw new RuntimeException('Invalid Raft body');
-                    if(!$scope->enqueueLocal((string)$data['queue'],(string)$data['message_id'],$body,(string)($data['exchange']??''),(string)($data['routing_key']??''),($data['persistent']??false)===true,$raw,(array)($data['headers']??[]),(int)($data['priority']??0),isset($data['expiration'])&&$data['expiration']!==''?(int)$data['expiration']:null))throw new RuntimeException('Raft queue missing');$scope->flushDurable();break;
-                case 'drop':foreach($data['ids']??[($data['id']??'')] as $qid){$queue=(string)$data['queue'];foreach($scope->msgs as $id=>$msg)if($msg['queue']===$queue&&$msg['qid']===(string)$qid)$scope->drop($id);$scope->dropByQid($queue,(string)$qid);$scope->noteConsumed($queue,(string)$qid);}$scope->flushDurable();break;
-                case 'purge':$queue=(string)$data['queue'];foreach($scope->msgs as $id=>$msg)if($msg['queue']===$queue){$scope->noteConsumed($queue,$msg['qid']);$scope->drop($id);}$scope->purge($queue);$scope->queues[$queue]['replicas']=[];$scope->flushDurable();break;
-                case 'sappend':$body=base64_decode((string)($data['body_b64']??''),true);$raw=isset($data['propRaw'])?base64_decode((string)$data['propRaw'],true):null;if($body===false||$raw===false)throw new RuntimeException('Invalid stream body');$scope->stream((string)$data['queue'])->append($body,(array)($data['headers']??[]),$raw,$data['reference']??null,$data['sequence']??null,$group,$index,isset($data['ts'])?(int)$data['ts']:null,(string)($data['exchange']??''),(string)($data['routing_key']??''));break;
+                    if(!$scope->enqueueLocal((string)$data['queue'],(string)$data['message_id'],$body,(string)($data['exchange']??''),(string)($data['routing_key']??''),($data['persistent']??false)===true,$raw,(array)($data['headers']??[]),(int)($data['priority']??0),isset($data['expiration'])&&$data['expiration']!==''?(int)$data['expiration']:null,false))throw new RuntimeException('Raft queue missing');$root->raftUnsynced[$scope->vhost]=$scope;return;
+                case 'drop':foreach($data['ids']??[($data['id']??'')] as $qid){$queue=(string)$data['queue'];$id=$scope->idOfQid($queue,(string)$qid);if($id!==null)$scope->drop($id);$scope->dropByQid($queue,(string)$qid);$scope->noteConsumed($queue,(string)$qid);}$root->raftUnsynced[$scope->vhost]=$scope;return;
+                case 'purge':$queue=(string)$data['queue'];foreach($scope->msgs as $id=>$msg)if($msg['queue']===$queue){$scope->noteConsumed($queue,$msg['qid']);$scope->drop($id);}$scope->purge($queue);$scope->queues[$queue]['replicas']=[];$root->raftUnsynced[$scope->vhost]=$scope;return;
+                case 'sappend':$body=base64_decode((string)($data['body_b64']??''),true);$raw=isset($data['propRaw'])?base64_decode((string)$data['propRaw'],true):null;if($body===false||$raw===false)throw new RuntimeException('Invalid stream body');$scope->stream((string)$data['queue'])->append($body,(array)($data['headers']??[]),$raw,$data['reference']??null,$data['sequence']??null,$group,$index,isset($data['ts'])?(int)$data['ts']:null,(string)($data['exchange']??''),(string)($data['routing_key']??''));return;
                 default:throw new RuntimeException('Unsupported Raft entry '.$kind);
             }
             $root->saveTopology();
         } finally { $root->raftApplying=$previous; }
     }
+    /**
+     * Sync the stores that applied Raft message entries since the last call.
+     * Messages do not change topology, so they skip `saveTopology`; with a
+     * topology rewrite and a store fsync per entry a quorum queue confirmed
+     * about 560 msg/s. Called after each batch of applied entries.
+     */
+    public function finishRaftApply(): void
+    {
+        $root = $this->root();
+        while ($root->raftUnsynced !== []) {
+            $scopes = $root->raftUnsynced; $root->raftUnsynced = [];
+            foreach ($scopes as $scope) $scope->flushDurable();
+        }
+    }
     public function raftLeaderChanged(string $group, ?string $leader): void { foreach($this->allBrokers() as $scope)$scope->refreshRole(); }
     /** Per-reference reservations serialize accepted publisher sequences before proposal. */
     private array $streamReservations = [];
+    /**
+     * Single-node stream appends written but not yet fsynced, as
+     * [callback, offset]. `syncStreams` settles them after one sync.
+     *
+     * @var list<array{0:callable,1:int}>
+     */
+    private array $streamSettle = [];
+    /** Set by a running server, which calls `syncStreams` on every loop pass. */
+    public bool $deferStreamSync = false;
+    /**
+     * Fsync every stream with unsynced appends, then settle their publishes.
+     * An fsync per append held a stream at about 14k msg/s.
+     *
+     * @return bool True when a sync made new records readable.
+     */
+    public function syncStreams(): bool
+    {
+        $synced = false;
+        foreach ($this->streams as $stream) if ($stream->dirty()) { $stream->sync(); $synced = true; }
+        if ($this->streamSettle !== []) {
+            $settle = $this->streamSettle; $this->streamSettle = [];
+            foreach ($settle as [$finish, $offset]) $finish(true, $offset);
+        }
+        return $synced;
+    }
     public function streamAppendAsync(string $name,string $body,array $headers,?string $propRaw,?string $reference,?int $sequence,callable $done): void
     {
         $completed=false;
         $finish=static function(bool $ok,?int $offset=null)use(&$completed,$done):void{if($completed)return;$completed=true;$done($ok,$offset);};
         if ($this->cluster===null || !$this->cluster->raftEnabled() || count($this->members)<=1) {
-            try{$offset=$this->streamAppend($name,$body,$headers,$propRaw,$reference,$sequence);}catch(Throwable){$finish(false);return;}
-            $finish(true,$offset);return;
+            $defer=$this->root()->deferStreamSync;
+            try{$offset=$this->streamAppend($name,$body,$headers,$propRaw,$reference,$sequence,!$defer);}catch(Throwable){$finish(false);return;}
+            if($defer)$this->streamSettle[]=[$finish,$offset];else $finish(true,$offset);return;
         }
         try {
             $stored=$reference===null?null:$this->streamPublisherSequence($name,$reference);
@@ -590,7 +648,7 @@ final class Broker
         }
         return null;
     }
-    public function streamAppend(string $name, string $body, array $headers = [], ?string $propRaw = null, ?string $reference = null, ?int $sequence = null): int { return $this->stream($name)->append($body,$headers,$propRaw,$reference,$sequence); }
+    public function streamAppend(string $name, string $body, array $headers = [], ?string $propRaw = null, ?string $reference = null, ?int $sequence = null, bool $sync = true): int { return $this->stream($name)->append($body,$headers,$propRaw,$reference,$sequence,null,null,null,'','',$sync); }
     public function streamRead(string $name, int $offset, int $count): array { return $this->stream($name)->read($offset,$count); }
     public function streamFirst(string $name): int { return $this->stream($name)->first(); }
     public function streamNext(string $name): int { return $this->stream($name)->next(); }
@@ -599,7 +657,7 @@ final class Broker
     public function streamStoreOffset(string $name, string $reference, int $offset): void { $this->stream($name)->storeOffset($reference,$offset); }
     public function flushDurable(): void
     {
-        $this->store->sync(); foreach ($this->streams as $stream) $stream->sync();
+        $this->syncStreams(); $this->store->sync();
         $still = [];
         $batch = $this->waiting; $this->waiting = [];
         foreach ($batch as $waiting) {
@@ -1254,6 +1312,7 @@ final class Broker
                 'propRaw' => $propRaw,
                 'qid' => $qid,
             ];
+            $this->indexQid($id);
             $ids[] = $id;
             $qids[] = $qid;
             if ($mode === 2) {
@@ -1666,11 +1725,13 @@ final class Broker
             $pri = min($pri, $cap);
             $this->msgs[$id]['priority'] = $pri;
             $at = 0;
-            $ready = $this->queues[$queue]['ready'];
+            // Priority insertion is positional; head removal can leave keys above 0.
+            $ready = array_values($this->queues[$queue]['ready']);
             while ($at < count($ready) && ($this->msgs[$ready[$at]]['priority'] ?? 0) >= $pri) {
                 $at++;
             }
-            array_splice($this->queues[$queue]['ready'], $at, 0, [$id]);
+            array_splice($ready, $at, 0, [$id]);
+            $this->queues[$queue]['ready'] = $ready;
             return;
         }
         $this->queues[$queue]['ready'][] = $id;
@@ -1791,7 +1852,9 @@ final class Broker
         if ($messageId === '') {
             return;
         }
-        foreach ($this->msgs as $id => $msg) {
+        $known = $queue !== '' ? $this->idOfQid($queue, $messageId) : null;
+        $candidates = $known !== null ? [$known => $this->msgs[$known]] : $this->msgs;
+        foreach ($candidates as $id => $msg) {
             if (($msg['qid'] ?? '') !== $messageId) {
                 continue;
             }
@@ -1813,13 +1876,13 @@ final class Broker
     }
 
     /** Store a peer's quorum append. The body is durable before the reply. */
-    public function enqueueLocal(string $queue, string $messageId, string $body, string $exchange, string $key, bool $persistent, ?string $propRaw = null, array $headers = [], int $priority = 0, ?int $expiration = null): bool
+    public function enqueueLocal(string $queue, string $messageId, string $body, string $exchange, string $key, bool $persistent, ?string $propRaw = null, array $headers = [], int $priority = 0, ?int $expiration = null, bool $sync = true): bool
     {
         if (!isset($this->queues[$queue])) {
             return false;
         }
         if ($this->wasConsumed($queue, $messageId)) return true;
-        foreach ($this->msgs as $msg) if ($msg['queue'] === $queue && ($msg['qid'] ?? '') === $messageId) return true;
+        if ($messageId !== '' && isset($this->byQid[$queue . "\0" . $messageId])) return true;
         $id = $this->nextId++;
         $this->msgs[$id] = [
             'queue' => $queue,
@@ -1833,9 +1896,11 @@ final class Broker
             'expires' => $expiration === null ? null : (int)(microtime(true)*1000) + $expiration,
             'qid' => $messageId,
         ];
+        $this->indexQid($id);
         if ($persistent) {
             $this->store->appendPublish($id, $queue, $body, 2, $propRaw, self::meta($this->msgs[$id]));
-            $this->store->sync();
+            // A Raft apply syncs once for its whole batch (finishRaftApply).
+            if ($sync) $this->store->sync();
         }
         $this->hold($queue, $id);
         return true;
@@ -1858,6 +1923,7 @@ final class Broker
     /** @return list<array{conn:int,ch:int,tag:int,nack:bool}> */
     public function flush(): array
     {
+        $this->syncStreams();
         $this->store->sync();
         $ready = [];
         $still = [];
@@ -2004,6 +2070,7 @@ final class Broker
         $queue = $this->msgs[$id]['queue'];
         // The queue was deleted while the message was out; there is nowhere to put it back.
         if (!isset($this->queues[$queue])) {
+            $this->unindexQid($id);
             unset($this->msgs[$id]);
             return false;
         }
@@ -2054,7 +2121,31 @@ final class Broker
         if (($this->msgs[$id]['mode'] ?? 1) === 2) {
             $this->store->appendAck($id);
         }
+        $this->unindexQid($id);
         unset($this->msgs[$id]);
+    }
+
+    private function indexQid(int $id): void
+    {
+        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes += strlen($this->msgs[$id]['body']) + 32;
+        $qid = (string) ($this->msgs[$id]['qid'] ?? '');
+        if ($qid !== '' && $qid !== (string) $id) $this->byQid[$this->msgs[$id]['queue'] . "\0" . $qid] = $id;
+    }
+
+    private function unindexQid(int $id): void
+    {
+        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes -= strlen($this->msgs[$id]['body']) + 32;
+        $qid = (string) ($this->msgs[$id]['qid'] ?? '');
+        if ($qid === '' || $qid === (string) $id) return;
+        $key = $this->msgs[$id]['queue'] . "\0" . $qid;
+        if (($this->byQid[$key] ?? null) === $id) unset($this->byQid[$key]);
+    }
+
+    /** The local id of a quorum message, by queue and quorum id. */
+    public function idOfQid(string $queue, string $qid): ?int
+    {
+        $id = $this->byQid[$queue . "\0" . $qid] ?? null;
+        return $id !== null && isset($this->msgs[$id]) ? $id : null;
     }
 
     /**
@@ -2214,26 +2305,29 @@ final class Broker
             return false;
         }
         $this->store->sinceCompact = 0;
-        $live = [];
-        $bytes = 0;
-        foreach ($this->queues as $name => $queue) {
-            foreach (array_merge($queue['ready'], $queue['replicas']) as $id) {
-                $msg = $this->msgs[$id] ?? null;
-                if ($msg === null || ($msg['mode'] ?? 1) !== 2) {
-                    continue;
-                }
-                $live[] = [
-                    'id' => $id,
-                    'queue' => $name,
-                    'body' => $msg['body'],
-                    'mode' => 2,
-                    'propRaw' => $msg['propRaw'] ?? null,
-                ];
-                $bytes += strlen($msg['body']) + 32;
-            }
-        }
-        if (!$this->store->shouldCompact($bytes)) {
+        // The byte count is kept as messages come and go. Building the live
+        // list just to decide was a pass over every message per 256 syncs,
+        // which made a 300,000-message drain slower the deeper it was.
+        if (!$this->store->shouldCompact($this->persistBytes)) {
             return false;
+        }
+        // Every live persistent message, delivered and unacked included: a
+        // compacted log that kept only ready ones lost in-flight messages to
+        // a crash. Ids ascend in publish order, which replay keeps.
+        $live = [];
+        foreach ($this->msgs as $id => $msg) {
+            if (($msg['mode'] ?? 1) !== 2 || !isset($this->queues[$msg['queue']])) {
+                continue;
+            }
+            $live[] = [
+                'id' => $id,
+                'queue' => $msg['queue'],
+                'body' => $msg['body'],
+                'mode' => 2,
+                'propRaw' => $msg['propRaw'] ?? null,
+                // Headers, priority, expiry and the quorum id survive a rewrite.
+                'meta' => self::meta($msg),
+            ];
         }
         return $this->store->compact($live);
     }
@@ -2259,21 +2353,54 @@ final class Broker
         if (($this->queues[$queue]['args']['queueType'] ?? '') === 'quorum' && !$this->queueIsLeader($queue)) return null;
         $this->expire($queue);
         $now = (int) (microtime(true) * 1000);
-        foreach ($this->queues[$queue]['ready'] as $position => $id) {
-            if (($this->msgs[$id]['notBefore'] ?? 0) > $now) continue;
-            // A gated quorum body is not available yet, and the queue is
-            // ordered, so nothing behind it is either.
-            if (is_int($id) && $this->isGated($id)) {
+        for (;;) {
+            $found = null;
+            foreach ($this->queues[$queue]['ready'] as $position => $id) {
+                if (($this->msgs[$id]['notBefore'] ?? 0) > $now) continue;
+                // A gated quorum body is not available yet, and the queue is
+                // ordered, so nothing behind it is either.
+                if (is_int($id) && $this->isGated($id)) {
+                    return null;
+                }
+                $found = $position;
+                break;
+            }
+            if ($found === null) {
                 return null;
             }
-            array_splice($this->queues[$queue]['ready'], $position, 1);
+            // Remove by key, outside the foreach: array_splice at the head of
+            // a 300,000-message queue reindexed all of it (1.2 ms a message),
+            // and changing the array inside the foreach copied it.
+            $id = $this->queues[$queue]['ready'][$found];
+            unset($this->queues[$queue]['ready'][$found]);
+            $this->repackReady($queue, $found);
             if (!is_int($id) || !isset($this->msgs[$id])) {
                 continue;
             }
             $this->noteConsumed($queue, (string) ($this->msgs[$id]['qid'] ?? ''));
             return $id;
         }
-        return null;
+    }
+
+    /**
+     * Renumber a ready list from 0 once enough heads were removed by key.
+     *
+     * A packed array keeps a removed head slot as a hole that foreach and
+     * array_key_first() still step over. Renumbering after 1,024 removals
+     * bounds that scan and costs depth/1,024 copies per removal.
+     */
+    private function repackReady(string $queue, int|string $removed): void
+    {
+        if (is_int($removed) && $removed >= 1024) {
+            $this->queues[$queue]['ready'] = array_values($this->queues[$queue]['ready']);
+        }
+    }
+
+    /** The first ready id, whatever its key. */
+    public function readyHead(string $queue): mixed
+    {
+        $ready = $this->queues[$queue]['ready'] ?? [];
+        return $ready === [] ? null : $ready[array_key_first($ready)];
     }
 
     /** Ready message count, for basic.get-ok and queue.declare-ok. */

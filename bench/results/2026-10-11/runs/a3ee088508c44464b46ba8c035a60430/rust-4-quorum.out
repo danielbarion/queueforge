@@ -1,0 +1,179 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-051141-428, starting consumer #0
+id: test-051141-428, starting consumer #0, channel #0
+id: test-051141-428, starting consumer #1
+id: test-051141-428, starting consumer #1, channel #0
+id: test-051141-428, starting consumer #2
+id: test-051141-428, starting consumer #2, channel #0
+id: test-051141-428, starting consumer #3
+id: test-051141-428, starting consumer #3, channel #0
+id: test-051141-428, starting producer #0
+id: test-051141-428, starting producer #0, channel #0
+id: test-051141-428, starting producer #1
+id: test-051141-428, starting producer #1, channel #0
+id: test-051141-428, starting producer #2
+id: test-051141-428, starting producer #2, channel #0
+id: test-051141-428, starting producer #3
+id: test-051141-428, starting producer #3, channel #0
+id: test-051141-428, time 1.000 s, sent: 73299 msg/s, confirmed: 73198 msg/s, nacked: 0 msg/s, received: 72827 msg/s, min/median/75th/95th/99th/max consumer latency: 29/1417/3301/10618/16495/26897 µs, confirm latency: 252/1098/1738/4086/10610/35652 µs
+id: test-051141-428, time 2.000 s, sent: 225734 msg/s, confirmed: 225458 msg/s, nacked: 0 msg/s, received: 87548 msg/s, min/median/75th/95th/99th/max consumer latency: 2079/105949/272888/466752/536726/540147 µs, confirm latency: 255/960/1393/3353/5496/8536 µs
+id: test-051141-428, time 3.000 s, sent: 237976 msg/s, confirmed: 237980 msg/s, nacked: 0 msg/s, received: 63794 msg/s, min/median/75th/95th/99th/max consumer latency: 542831/902341/1136140/1252893/1260931/1275961 µs, confirm latency: 408/1082/1429/4751/7228/22730 µs
+id: test-051141-428, time 4.000 s, sent: 233247 msg/s, confirmed: 233320 msg/s, nacked: 0 msg/s, received: 58005 msg/s, min/median/75th/95th/99th/max consumer latency: 1278952/1655222/1810523/2014844/2055294/2061278 µs, confirm latency: 418/1125/1391/4480/7396/19500 µs
+id: test-051141-428, time 5.000 s, sent: 199054 msg/s, confirmed: 198971 msg/s, nacked: 0 msg/s, received: 51026 msg/s, min/median/75th/95th/99th/max consumer latency: 2063513/2358093/2528187/2771317/2855031/2876300 µs, confirm latency: 466/1254/1663/4314/10662/49879 µs
+id: test-051141-428, time 6.000 s, sent: 245219 msg/s, confirmed: 245322 msg/s, nacked: 0 msg/s, received: 41534 msg/s, min/median/75th/95th/99th/max consumer latency: 2877535/3377194/3514635/3657424/3701960/3705406 µs, confirm latency: 404/1197/1517/3922/7859/9405 µs
+id: test-051141-428, time 7.000 s, sent: 209863 msg/s, confirmed: 209813 msg/s, nacked: 0 msg/s, received: 44918 msg/s, min/median/75th/95th/99th/max consumer latency: 3702865/4102536/4344366/4466618/4494801/4498641 µs, confirm latency: 381/1253/1609/4383/9510/27901 µs
+id: test-051141-428, time 8.000 s, sent: 227753 msg/s, confirmed: 227684 msg/s, nacked: 0 msg/s, received: 55500 msg/s, min/median/75th/95th/99th/max consumer latency: 4474817/4895121/5122269/5242584/5254536/5259736 µs, confirm latency: 404/1242/1553/4781/6797/8111 µs
+id: test-051141-428, time 9.000 s, sent: 209331 msg/s, confirmed: 209331 msg/s, nacked: 0 msg/s, received: 44188 msg/s, min/median/75th/95th/99th/max consumer latency: 5266184/5606517/5856108/6041466/6080113/6085145 µs, confirm latency: 470/1330/1752/5148/8370/22277 µs
+id: test-051141-428, time 10.000 s, sent: 229485 msg/s, confirmed: 229533 msg/s, nacked: 0 msg/s, received: 44641 msg/s, min/median/75th/95th/99th/max consumer latency: 6081838/6487793/6639375/6858426/6886566/6894070 µs, confirm latency: 495/1335/1644/4173/5785/8361 µs
+id: test-051141-428, time 11.000 s, sent: 208198 msg/s, confirmed: 208183 msg/s, nacked: 0 msg/s, received: 42431 msg/s, min/median/75th/95th/99th/max consumer latency: 6895715/7317814/7460405/7676637/7708875/7720464 µs, confirm latency: 550/1424/1797/4908/7192/20367 µs
+id: test-051141-428, time 12.000 s, sent: 208079 msg/s, confirmed: 208046 msg/s, nacked: 0 msg/s, received: 34919 msg/s, min/median/75th/95th/99th/max consumer latency: 7725982/8296534/8420897/8544713/8570148/8571194 µs, confirm latency: 452/1337/1666/4055/5855/97597 µs
+id: test-051141-428, time 13.000 s, sent: 113914 msg/s, confirmed: 113981 msg/s, nacked: 0 msg/s, received: 113570 msg/s, min/median/75th/95th/99th/max consumer latency: 8571238/8667078/8850544/8931452/9041150/9054785 µs, confirm latency: 453/1305/1623/5153/251145/252683 µs
+id: test-051141-428, time 14.000 s, sent: 114051 msg/s, confirmed: 114015 msg/s, nacked: 0 msg/s, received: 127881 msg/s, min/median/75th/95th/99th/max consumer latency: 9065927/9148657/9173361/9248713/9287067/9312825 µs, confirm latency: 494/1315/1699/4759/250643/251567 µs
+id: test-051141-428, time 15.000 s, sent: 133197 msg/s, confirmed: 133166 msg/s, nacked: 0 msg/s, received: 102829 msg/s, min/median/75th/95th/99th/max consumer latency: 9319567/9431301/9862708/9932501/9936409/9938293 µs, confirm latency: 418/1294/1658/4420/6933/250875 µs
+id: test-051141-428, time 16.000 s, sent: 106493 msg/s, confirmed: 106505 msg/s, nacked: 0 msg/s, received: 133338 msg/s, min/median/75th/95th/99th/max consumer latency: 9937840/10008861/10244722/10256296/10374616/10399000 µs, confirm latency: 507/1295/1585/2983/242014/501310 µs
+id: test-051141-428, time 17.000 s, sent: 118508 msg/s, confirmed: 118496 msg/s, nacked: 0 msg/s, received: 119186 msg/s, min/median/75th/95th/99th/max consumer latency: 10402572/10561773/10732747/10755566/10872606/10893928 µs, confirm latency: 531/1241/1513/3177/8391/252680 µs
+id: test-051141-428, time 18.000 s, sent: 118160 msg/s, confirmed: 118160 msg/s, nacked: 0 msg/s, received: 129615 msg/s, min/median/75th/95th/99th/max consumer latency: 10899143/11117130/11155912/11198604/11228817/11238552 µs, confirm latency: 460/1253/1538/4353/250514/259088 µs
+id: test-051141-428, time 19.000 s, sent: 141988 msg/s, confirmed: 141988 msg/s, nacked: 0 msg/s, received: 103664 msg/s, min/median/75th/95th/99th/max consumer latency: 11240208/11511039/11737080/11753937/11764754/11799337 µs, confirm latency: 435/1240/1536/3823/6922/250987 µs
+id: test-051141-428, time 20.000 s, sent: 118380 msg/s, confirmed: 118470 msg/s, nacked: 0 msg/s, received: 132325 msg/s, min/median/75th/95th/99th/max consumer latency: 11796975/11824582/12055996/12073931/12142061/12216285 µs, confirm latency: 429/1212/1502/2121/3486/501392 µs
+id: test-051141-428, time 21.000 s, sent: 139483 msg/s, confirmed: 139477 msg/s, nacked: 0 msg/s, received: 117486 msg/s, min/median/75th/95th/99th/max consumer latency: 12232014/12434499/12519707/12532600/12641565/12673869 µs, confirm latency: 527/1226/1481/2126/4323/251694 µs
+id: test-051141-428, time 22.000 s, sent: 125151 msg/s, confirmed: 125076 msg/s, nacked: 0 msg/s, received: 112547 msg/s, min/median/75th/95th/99th/max consumer latency: 12688400/12953089/12961377/13005620/13074562/13119669 µs, confirm latency: 536/1256/1513/2458/7022/252351 µs
+id: test-051141-428, time 23.000 s, sent: 87843 msg/s, confirmed: 87834 msg/s, nacked: 0 msg/s, received: 144662 msg/s, min/median/75th/95th/99th/max consumer latency: 13124199/13217653/13385187/13474028/13480283/13482103 µs, confirm latency: 444/1259/1511/2445/3961/501157 µs
+id: test-051141-428, time 24.000 s, sent: 126151 msg/s, confirmed: 126151 msg/s, nacked: 0 msg/s, received: 115498 msg/s, min/median/75th/95th/99th/max consumer latency: 13475531/13725746/13965426/13981003/13984745/13985944 µs, confirm latency: 469/1242/1531/2458/4787/280675 µs
+id: test-051141-428, time 25.000 s, sent: 133832 msg/s, confirmed: 133832 msg/s, nacked: 0 msg/s, received: 116263 msg/s, min/median/75th/95th/99th/max consumer latency: 13980482/14220141/14444840/14450887/14452828/14453989 µs, confirm latency: 447/1287/1546/2305/247332/251143 µs
+05:12:06.595 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+java.net.SocketException: Broken pipe
+	at java.base/sun.nio.ch.SocketDispatcher.write0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.write(SocketDispatcher.java:65)
+	at java.base/sun.nio.ch.NioSocketImpl.tryWrite(NioSocketImpl.java:403)
+	at java.base/sun.nio.ch.NioSocketImpl.implWrite(NioSocketImpl.java:419)
+	at java.base/sun.nio.ch.NioSocketImpl.write(NioSocketImpl.java:449)
+	at java.base/sun.nio.ch.NioSocketImpl$2.write(NioSocketImpl.java:856)
+	at java.base/java.net.Socket$SocketOutputStream.write(Socket.java:1207)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:125)
+	at java.base/java.io.BufferedOutputStream.implFlush(BufferedOutputStream.java:252)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:240)
+	at java.base/java.io.DataOutputStream.flush(DataOutputStream.java:131)
+	at com.rabbitmq.client.impl.SocketFrameHandler.flush(SocketFrameHandler.java:231)
+	at com.rabbitmq.client.impl.AMQConnection.flush(AMQConnection.java:673)
+	at com.rabbitmq.client.impl.AMQCommand.transmit(AMQCommand.java:163)
+	at com.rabbitmq.client.impl.AMQChannel.quiescingTransmit(AMQChannel.java:503)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:470)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:460)
+	at com.rabbitmq.client.impl.recovery.RecoveryAwareChannelN.basicAck(RecoveryAwareChannelN.java:97)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.basicAck(AutorecoveringChannel.java:445)
+	at com.rabbitmq.perf.Consumer.lambda$static$0(Consumer.java:57)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$ackIfNecessary$0(Consumer.java:353)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.ackIfNecessary(Consumer.java:350)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:320)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+05:12:06.595 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+java.net.SocketException: Broken pipe
+	at java.base/sun.nio.ch.SocketDispatcher.write0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.write(SocketDispatcher.java:65)
+	at java.base/sun.nio.ch.NioSocketImpl.tryWrite(NioSocketImpl.java:403)
+	at java.base/sun.nio.ch.NioSocketImpl.implWrite(NioSocketImpl.java:419)
+	at java.base/sun.nio.ch.NioSocketImpl.write(NioSocketImpl.java:449)
+	at java.base/sun.nio.ch.NioSocketImpl$2.write(NioSocketImpl.java:856)
+	at java.base/java.net.Socket$SocketOutputStream.write(Socket.java:1207)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:125)
+	at java.base/java.io.BufferedOutputStream.implFlush(BufferedOutputStream.java:252)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:240)
+	at java.base/java.io.DataOutputStream.flush(DataOutputStream.java:131)
+	at com.rabbitmq.client.impl.SocketFrameHandler.flush(SocketFrameHandler.java:231)
+	at com.rabbitmq.client.impl.AMQConnection.flush(AMQConnection.java:673)
+	at com.rabbitmq.client.impl.AMQCommand.transmit(AMQCommand.java:163)
+	at com.rabbitmq.client.impl.AMQChannel.quiescingTransmit(AMQChannel.java:503)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:470)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:460)
+	at com.rabbitmq.client.impl.recovery.RecoveryAwareChannelN.basicAck(RecoveryAwareChannelN.java:97)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.basicAck(AutorecoveringChannel.java:445)
+	at com.rabbitmq.perf.Consumer.lambda$static$0(Consumer.java:57)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$ackIfNecessary$0(Consumer.java:353)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.ackIfNecessary(Consumer.java:350)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:320)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+05:12:06.596 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+java.net.SocketException: Broken pipe
+	at java.base/sun.nio.ch.SocketDispatcher.write0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.write(SocketDispatcher.java:65)
+	at java.base/sun.nio.ch.NioSocketImpl.tryWrite(NioSocketImpl.java:403)
+	at java.base/sun.nio.ch.NioSocketImpl.implWrite(NioSocketImpl.java:419)
+	at java.base/sun.nio.ch.NioSocketImpl.write(NioSocketImpl.java:449)
+	at java.base/sun.nio.ch.NioSocketImpl$2.write(NioSocketImpl.java:856)
+	at java.base/java.net.Socket$SocketOutputStream.write(Socket.java:1207)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:125)
+	at java.base/java.io.BufferedOutputStream.implFlush(BufferedOutputStream.java:252)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:240)
+	at java.base/java.io.DataOutputStream.flush(DataOutputStream.java:131)
+	at com.rabbitmq.client.impl.SocketFrameHandler.flush(SocketFrameHandler.java:231)
+	at com.rabbitmq.client.impl.AMQConnection.flush(AMQConnection.java:673)
+	at com.rabbitmq.client.impl.AMQCommand.transmit(AMQCommand.java:163)
+	at com.rabbitmq.client.impl.AMQChannel.quiescingTransmit(AMQChannel.java:503)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:470)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:460)
+	at com.rabbitmq.client.impl.recovery.RecoveryAwareChannelN.basicAck(RecoveryAwareChannelN.java:97)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.basicAck(AutorecoveringChannel.java:445)
+	at com.rabbitmq.perf.Consumer.lambda$static$0(Consumer.java:57)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$ackIfNecessary$0(Consumer.java:353)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.ackIfNecessary(Consumer.java:350)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:320)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+05:12:06.595 [RabbitMQ Error On Write Thread] ERROR c.r.perf.RelaxedExceptionHandler - An unexpected connection driver error occurred
+java.net.SocketException: Broken pipe
+	at java.base/sun.nio.ch.SocketDispatcher.write0(Native Method)
+	at java.base/sun.nio.ch.SocketDispatcher.write(SocketDispatcher.java:65)
+	at java.base/sun.nio.ch.NioSocketImpl.tryWrite(NioSocketImpl.java:403)
+	at java.base/sun.nio.ch.NioSocketImpl.implWrite(NioSocketImpl.java:419)
+	at java.base/sun.nio.ch.NioSocketImpl.write(NioSocketImpl.java:449)
+	at java.base/sun.nio.ch.NioSocketImpl$2.write(NioSocketImpl.java:856)
+	at java.base/java.net.Socket$SocketOutputStream.write(Socket.java:1207)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:125)
+	at java.base/java.io.BufferedOutputStream.implFlush(BufferedOutputStream.java:252)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:240)
+	at java.base/java.io.DataOutputStream.flush(DataOutputStream.java:131)
+	at com.rabbitmq.client.impl.SocketFrameHandler.flush(SocketFrameHandler.java:231)
+	at com.rabbitmq.client.impl.AMQConnection.flush(AMQConnection.java:673)
+	at com.rabbitmq.client.impl.AMQCommand.transmit(AMQCommand.java:163)
+	at com.rabbitmq.client.impl.AMQChannel.quiescingTransmit(AMQChannel.java:503)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:470)
+	at com.rabbitmq.client.impl.AMQChannel.transmit(AMQChannel.java:460)
+	at com.rabbitmq.client.impl.recovery.RecoveryAwareChannelN.basicAck(RecoveryAwareChannelN.java:97)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.basicAck(AutorecoveringChannel.java:445)
+	at com.rabbitmq.perf.Consumer.lambda$static$0(Consumer.java:57)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$ackIfNecessary$0(Consumer.java:353)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.ackIfNecessary(Consumer.java:350)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:320)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+test stopped (Reached time limit)
+id: test-051141-428, sending rate avg: 162741 msg/s
+id: test-051141-428, receiving rate avg: 88743 msg/s
+id: test-051141-428, consumer latency min/median/75th/95th/99th/max 111/11117215/12774836/14219660/14455683/14460737 µs
+id: test-051141-428, confirm latency min/median/75th/95th/99th/max 418/1237/1566/3978/6686/500469 µs

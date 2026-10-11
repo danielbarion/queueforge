@@ -62,7 +62,7 @@ export default function Page() {
               <Bars rows={paced} unit="/s" base={rabbit} />
               <p className="caption">
                 128 confirms in flight. Durable 256-byte body. Mac client through the published
-                port, 1 CPU / 512 MiB, measured 2026-10-09. A step counts only when confirms and
+                port, 1 CPU / 512 MiB, measured 2026-10-11. A step counts only when confirms and
                 acks both reach 95% of the offer.
               </p>
             </div>
@@ -74,13 +74,13 @@ export default function Page() {
         <div className="wrap split-proof">
           <div>
             <p className="kicker">At four cores</p>
-            <h2>Bun, Rust and PHP follow the cores when the queues are separate.</h2>
+            <h2>Bun and Rust follow the cores when the queues are separate.</h2>
             <p className="section-lead">
-              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-09. Rust is{" "}
+              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-11. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ. Bun, one process per core, is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust. Confirms and deliveries both stay
-              near {formatRate(scale[2].rate)}/s. PHP, one process per core, is{" "}
+              near {formatRate(scale[2].rate)}/s. PHP, one process by default, is{" "}
               {formatTimes(scale[3].rate, scale[0].rate)}× RabbitMQ.
             </p>
             <p className="note">

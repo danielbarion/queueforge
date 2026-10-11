@@ -1,0 +1,26 @@
+04:17:02 START ncpu=2 mem=8320565248
+04:17:02 RUN docker compose -f docker-compose.bench.yml up -d
+04:17:05 ready rabbit after 2s
+04:17:05 CELL rabbit inflight=1
+04:17:48 DONE rabbit inflight=1 exit=0
+04:17:48 CELL rabbit inflight=128
+04:18:48 DONE rabbit inflight=128 exit=0
+04:18:49 RUN docker compose -f docker-compose.bench.yml up -d
+04:18:52 ready rust after 2s
+04:18:52 CELL rust inflight=1
+04:19:35 DONE rust inflight=1 exit=0
+04:19:35 CELL rust inflight=128
+04:20:35 DONE rust inflight=128 exit=0
+04:20:35 RUN docker compose -f docker-compose.bench.yml up -d
+04:20:37 ready bun after 2s
+04:20:37 CELL bun inflight=1
+04:21:21 DONE bun inflight=1 exit=0
+04:21:21 CELL bun inflight=128
+04:22:20 DONE bun inflight=128 exit=0
+04:22:24 RUN docker compose -f docker-compose.bench.yml up -d
+04:22:26 ready php after 2s
+04:22:26 CELL php inflight=1
+04:23:09 DONE php inflight=1 exit=0
+04:23:09 CELL php inflight=128
+04:24:09 DONE php inflight=128 exit=0
+04:24:13 END ncpu=2 mem=8320565248

@@ -145,6 +145,23 @@ final class Raft
     /** @return list<string> */
     public function voters(): array
     {
+        // Log matching: the same length, last index, last term and snapshot
+        // mean the same log, so the same newest config. Scanning the log on
+        // every call ran three times per proposal and was most of a quorum
+        // publish once thousands of entries waited for a snapshot.
+        $key = count($this->log) . ':' . $this->lastIndex() . ':' . $this->lastTerm() . ':' . $this->snapIndex;
+        if ($this->votersKey === $key) return $this->votersCache;
+        $this->votersKey = $key;
+        return $this->votersCache = $this->scanVoters();
+    }
+
+    private ?string $votersKey = null;
+    /** @var list<string> */
+    private array $votersCache = [];
+
+    /** @return list<string> */
+    private function scanVoters(): array
+    {
         for ($i = count($this->log) - 1; $i >= 0; $i--) {
             $entry = $this->log[$i];
             if ($entry['kind'] === 'config' && is_array($entry['data']) && isset($entry['data']['voters']) && is_array($entry['data']['voters'])) {

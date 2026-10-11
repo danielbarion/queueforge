@@ -53,10 +53,20 @@ function localClassicFast(
     mandatory?: boolean;
   },
 ): "ack" | "nack" | Promise<"ack"> | typeof SLOW {
-  if (input.exchange !== "") return SLOW;
   if (input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
   if (fedLinks.some((link) => link.upstream === input.vhost)) return SLOW;
-  const q = this.queues.get(this.key(input.vhost, input.routingKey));
+  let name = input.routingKey;
+  if (input.exchange !== "") {
+    // A named exchange that routes to one queue is the common publish
+    // (PerfTest uses amq.direct). The async multi-destination path was a
+    // third of the work-queue cell. Routes are cached in `route`.
+    const ex = this.exchanges.get(this.key(input.vhost, input.exchange));
+    if (!ex || ex.kind === "x-delayed-message" || ex.kind === "headers") return SLOW;
+    const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers);
+    if (dests.length !== 1) return SLOW;
+    name = dests[0]!;
+  }
+  const q = this.queues.get(this.key(input.vhost, name));
   if (!q || q.argsParsed.queueType === "quorum" || q.raftGroup || !this.isLocalHome(q.home)) return SLOW;
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;

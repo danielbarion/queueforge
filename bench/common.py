@@ -12,9 +12,13 @@ Environment:
   DOCKER_SETTINGS    Docker Desktop settings-store.json path
 """
 import os
+import http.client
+import json
 import re
+import socket
 import subprocess
 import time
+from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "bench")
@@ -223,24 +227,63 @@ def cgroup_text(name, path):
     return p.stdout or "" if p.returncode == 0 else ""
 
 
+_stats_endpoint = None
+
+
+class _UnixHTTP(http.client.HTTPConnection):
+    def __init__(self, path, timeout=10):
+        self.socket_path = path
+        super().__init__("localhost", timeout=timeout)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
+def container_usage(name):
+    """Read host-side counters without launching a process in the measured cgroup.
+
+    Engine memory_stats.usage includes file cache; stats.anon is anonymous
+    memory on cgroup v2 (total_rss on v1). CPU is cumulative nanoseconds.
+    https://docs.docker.com/reference/api/engine/version/v1.51/
+    """
+    global _stats_endpoint
+    if _stats_endpoint is None:
+        _stats_endpoint = os.environ.get("DOCKER_HOST") or run(
+            ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
+        ).stdout.strip()
+    if not _stats_endpoint.startswith("unix://"):
+        raise RuntimeError("Benchmark stats require a local Unix Docker endpoint")
+    conn = _UnixHTTP(_stats_endpoint[7:], timeout=10)
+    try:
+        conn.request("GET", "/containers/" + quote(name, safe="") + "/stats?stream=false&one-shot=true")
+        response = conn.getresponse()
+        if response.status == 404:
+            return {"memory": None, "anonymous": None, "cpu_usec": None}
+        if response.status != 200:
+            raise RuntimeError(f"Docker stats HTTP {response.status}")
+        data = json.load(response)
+        memory = data.get("memory_stats", {})
+        detail = memory.get("stats", {})
+        cpu = data.get("cpu_stats", {}).get("cpu_usage", {}).get("total_usage")
+        return {"memory": memory.get("usage"), "anonymous": detail.get("anon", detail.get("total_rss", detail.get("rss"))),
+                "cpu_usec": cpu // 1000 if cpu is not None else None}
+    finally:
+        conn.close()
+
+
 def cpu_usec(name):
-    for line in cgroup_text(name, "/sys/fs/cgroup/cpu.stat").splitlines():
-        if line.startswith("usage_usec "):
-            return int(line.split()[1])
-    return None
+    return container_usage(name)["cpu_usec"]
 
 
 def mem_bytes(name):
-    text = cgroup_text(name, "/sys/fs/cgroup/memory.current").strip()
-    return int(text) if text.isdigit() else None
+    return container_usage(name)["memory"]
 
 
 def anon_bytes(name):
     """Anonymous memory (heap and stacks, no page cache) from memory.stat."""
-    for line in cgroup_text(name, "/sys/fs/cgroup/memory.stat").splitlines():
-        if line.startswith("anon "):
-            return int(line.split()[1])
-    return None
+    return container_usage(name)["anonymous"]
 
 
 def container_state(name):

@@ -1,0 +1,13 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: php-tests
+    image: php:8.5-cli-bookworm
+    commands:
+      - docker-php-ext-install sockets
+      - cd php && php test/run.php

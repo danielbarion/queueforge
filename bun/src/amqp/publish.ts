@@ -7,13 +7,20 @@
 import { ChanError } from "../broker/index.ts";
 import { bodyFrame, contentHeaderFrame, emptyProps, encodeSettle, method, methodFrame, R, readContentHeader } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
+import { headerList } from "../broker/routing.ts";
 
-/** Join body chunks into one buffer, in arrival order. */
+/**
+ * Join body chunks into one buffer, in arrival order.
+ * The result is always a copy: a chunk is a view of the socket read buffer.
+ */
 function concat(parts: Uint8Array[]): Uint8Array {
-  const n = parts.reduce((a, p) => a + p.length, 0);
+  if (parts.length === 1) return parts[0]!.slice();
+  let n = 0;
+  for (let i = 0; i < parts.length; i++) n += parts[i]!.length;
   const out = new Uint8Array(n);
   let o = 0;
-  for (const p of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!;
     out.set(p, o);
     o += p.length;
   }
@@ -46,6 +53,7 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
   const c = this.ch(channel);
   const parsed = readContentHeader(payload);
   c.bodySize = parsed.bodySize;
+  if (c.bodySize > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - message exceeds 64 MiB");
   // A copy: the parsed bytes are a view of the socket read buffer, and a stored
   // message holding that view kept the whole buffer (64 KiB and more) alive.
   c.propRaw = parsed.props.raw.slice();
@@ -70,6 +78,7 @@ export function onBody(this: Conn, channel: number, payload: Uint8Array): Promis
   const c = this.ch(channel);
   c.chunks.push(payload);
   c.got += payload.length;
+  if (c.got > c.bodySize) throw new ChanError(505, "UNEXPECTED_FRAME - body exceeds declared size");
   if (c.got >= c.bodySize) return this.finishPublish(channel, c);
 }
 
@@ -92,9 +101,13 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   if (this.broker.blocked) return this.broker.whenUnblocked().then(() => this.finishPublish(channel, c));
   if (!c.flow) {
     c.publish = null;
+    c.chunks = [];
+    c.got = 0;
     return;
   }
   const body = concat(c.chunks);
+  c.chunks = [];
+  c.got = 0;
   const headers = c.headers;
   let propRaw = c.propRaw.length ? c.propRaw : emptyProps();
   const persistent = c.deliveryMode === 2;
@@ -199,15 +212,34 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
     if (!(err instanceof ChanError)) console.error("publish failed", err);
     return this.chanClose(channel, code, text, 60, 40);
   };
+  const names = new Set(this.broker.route(this.vhost, pub.exchange, pub.routingKey, headers));
+  for (const key of [...headerList(headers, "CC"), ...headerList(headers, "BCC")]) {
+    for (const queue of this.broker.route(this.vhost, pub.exchange, key, headers)) names.add(queue);
+  }
+  const pressured = () => {
+    for (const name of names) {
+      const queue = this.broker.queues.get(this.broker.key(this.vhost, name));
+      if (queue && this.broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
+    }
+    return false;
+  };
   if (c.tx) {
-    c.txBatch.push(run);
+    this.stageTransaction(c, () => {
+      const pending = run();
+      this.deferredPublish.push({ channel, bytes: 0, pressured, run: () => {} });
+      return pending;
+    }, body.length + propRaw.length);
     return;
   }
   // A persistent confirm waits on the group-commit flush. Parking it lets the
   // parser reach basic.ack frames before this body is enqueued, so one prefetch
   // window can turn over inside a publish burst. `driveInbound` starts the batch.
-  if (confirm && persistent) {
-    this.deferredPublish.push(() => {
+  {
+    const bytes = body.length + propRaw.length;
+    if (this.deferredPublish.length + this.inFlightPublishes.size >= 65536) throw new ChanError(506, "RESOURCE_ERROR - pending publish operation limit");
+    this.publishBytes += bytes;
+    if (this.publishBytes > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - pending publishes exceed 64 MiB");
+    this.deferredPublish.push({ channel, bytes, batchConfirm: confirm && persistent, pressured, run: () => {
       try {
         const pending = run();
         if (!pending) return Promise.resolve();
@@ -215,14 +247,8 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
       } catch (err) {
         return fail(err);
       }
-    });
+    }});
     return;
-  }
-  try {
-    const pending = run();
-    return pending instanceof Promise ? pending.catch(fail) : pending;
-  } catch (err) {
-    return fail(err);
   }
 }
 

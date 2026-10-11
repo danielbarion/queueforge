@@ -9,6 +9,17 @@ import { managementApp } from "../src/http/app.ts";
 import { sessions } from "../src/http/session.ts";
 import { writeProps, type BasicProps } from "../src/amqp10/map.ts";
 
+/** The successful POST /api/queues/:vhost/:name/get response. */
+type InspectionRow = {
+  payload: string;
+  payload_encoding: "base64" | "string";
+  payload_bytes: number;
+  redelivered: boolean;
+  exchange: string;
+  routing_key: string;
+  properties: Record<string, unknown>;
+};
+
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "qf-http-inspection-"));
   const cfg = parseConfig(""); cfg.dataDir = dir;
@@ -32,12 +43,12 @@ test("inspection requeues batches without duplicate reads or unacked leaks", asy
     for (const body of ["one", "two", "three"]) await f.publish(body);
     for (const ackmode of ["ack_requeue_true", "reject_requeue_true"]) {
       const response = await f.get({ count: 20, ackmode, encoding: "auto" }); expect(response.status).toBe(200);
-      const rows = await response.json();
+      const rows = await response.json() as InspectionRow[];
       expect(rows.map((row: { payload: string }) => row.payload)).toEqual(["one", "two", "three"]);
       expect(rows.every((row: { redelivered: boolean }) => row.redelivered === (ackmode === "reject_requeue_true"))).toBe(true);
       expect(f.queue().ready.length).toBe(3); expect(f.queue().unacked.size).toBe(0);
     }
-    expect((await (await f.get({ count: 2, ackmode: "ack_requeue_false" })).json()).map((row: { payload: string }) => row.payload)).toEqual(["one", "two"]);
+    expect((await (await f.get({ count: 2, ackmode: "ack_requeue_false" })).json() as InspectionRow[]).map((row: { payload: string }) => row.payload)).toEqual(["one", "two"]);
     expect(f.queue().ready.length).toBe(1);
     await f.get({ ackmode: "reject_requeue_false" });
     expect(f.queue().ready.length).toBe(0); expect(f.queue().unacked.size).toBe(0);
@@ -52,7 +63,7 @@ test("inspection exposes basic properties and recursive x-death headers", async 
       ["nested", { t: "F", v: [["enabled", { t: "t", v: true }], ["empty", { t: "V" }]] }],
       ["binary", { t: "x", v: new Uint8Array([255, 0]) }],
     ] });
-    const [row] = await (await f.get({ ackmode: "ack_requeue_true" })).json();
+    const [row] = await (await f.get({ ackmode: "ack_requeue_true" })).json() as InspectionRow[];
     expect(row.properties).toEqual({ content_type: "text/plain", content_encoding: "utf-8", delivery_mode: 2, priority: 3, correlation_id: "correlation", reply_to: "reply", expiration: "60000", message_id: "message", timestamp: 1234567, type: "event", user_id: "inspector", app_id: "app", headers: { "x-death": [{ queue: "source", count: 2, time: 1234, "routing-keys": ["original"] }], nested: { enabled: true, empty: null }, binary: { encoding: "base64", value: "/wA=" } } });
     expect(f.queue().ready.length).toBe(1); expect(f.queue().unacked.size).toBe(0);
   } finally { f.close(); }
@@ -62,12 +73,12 @@ test("inspection preserves binary payloads and omits absent headers", async () =
   const f = await fixture();
   try {
     await f.publish(new Uint8Array([255, 0, 128]));
-    let [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "auto" })).json();
+    let [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "auto" })).json() as InspectionRow[];
     expect(row.payload_encoding).toBe("base64"); expect(Buffer.from(row.payload, "base64")).toEqual(Buffer.from([255, 0, 128]));
     expect(row.payload_bytes).toBe(3); expect(row.properties).toEqual({});
-    [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "base64" })).json(); expect(row.payload_encoding).toBe("base64");
+    [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "base64" })).json() as InspectionRow[]; expect(row.payload_encoding).toBe("base64");
     await f.get({ ackmode: "ack_requeue_false" }); await f.publish("plain");
-    [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "auto" })).json(); expect(row.payload_encoding).toBe("string"); expect(row.payload).toBe("plain");
+    [row] = await (await f.get({ ackmode: "ack_requeue_true", encoding: "auto" })).json() as InspectionRow[]; expect(row.payload_encoding).toBe("string"); expect(row.payload).toBe("plain");
   } finally { f.close(); }
 });
 
@@ -85,7 +96,7 @@ test("inspection caps large batches at twenty messages", async () => {
   const f = await fixture();
   try {
     for (let i = 0; i < 25; i++) await f.publish(`message-${i}`);
-    const rows = await (await f.get({ count: 100, ackmode: "ack_requeue_true" })).json();
+    const rows = await (await f.get({ count: 100, ackmode: "ack_requeue_true" })).json() as InspectionRow[];
     expect(rows.length).toBe(20); expect(new Set(rows.map((row: { payload: string }) => row.payload)).size).toBe(20);
     expect(f.queue().ready.length).toBe(25); expect(f.queue().unacked.size).toBe(0);
   } finally { f.close(); }

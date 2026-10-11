@@ -43,8 +43,26 @@ export type MsgRow = {
   meta: string;
 };
 
+/**
+ * Body of a synced row that was dropped from memory. Its insert record in the
+ * durable log is read back on demand.
+ */
+const PAGED = new Uint8Array(0);
+/** Synced bodies kept in memory before the oldest are paged out to the log. */
+const SHADOW_BODY_BYTES = 64 * 1024 * 1024;
+/** Deletes of sqlite-held rows applied to sqlite in one catch-up. */
+const TOMBSTONE_CATCHUP = 80_000;
+
 /** Waiters that the end of a burst still flushes at once. See {@link Store.armLoneFlush}. */
 const SMALL_GROUP = 16;
+
+/**
+ * Largest confirm group the sync worker fsyncs; a larger one syncs inline.
+ * Every group by default: an inline fsync on a container disk took up to
+ * 30 ms and held every socket, and the worker measured as fast for deep
+ * windows (work-queue, heavy, routing-64). `QUEUEFORGE_ASIDE_GROUP` caps it.
+ */
+const ASIDE_GROUP = Number(process.env.QUEUEFORGE_ASIDE_GROUP) || Infinity;
 
 export type FsyncMode = "never" | "every_n_ms" | "always" | "every_n_messages";
 
@@ -115,6 +133,16 @@ export class Store {
   stagedWithoutFlush = false;
   /** Flushes that finished before the caller returned, for always and every_n_messages. */
   syncFlushCount = 0;
+  /** Cumulative attempted work, including failed attempts; enabled only for profiling. */
+  readonly profileTiming = process.env.QUEUEFORGE_PROFILE === "1" ? {
+    logFlushAttempts: 0,
+    logAppendSyncMs: 0,
+    logAppendSyncMaxMs: 0,
+    sqliteCatchupAttempts: 0,
+    sqliteCatchupRows: 0,
+    sqliteCatchupMs: 0,
+    sqliteCatchupMaxMs: 0,
+  } : null;
   private readonly everyN: number;
   /** Row ids removed from memory. The next group commit deletes them. */
   private pendingDeletes: number[] = [];
@@ -130,8 +158,15 @@ export class Store {
    * A null value is a synced delete that sqlite has not applied yet.
    */
   private shadow = new Map<number, { id: number; vhost: string; queue: string; body: Uint8Array; meta: string } | null>();
-  /** Body bytes added to `shadow` since the last catch-up. Large bodies catch up sooner. */
+  /**
+   * Ids appended since the catch-up that would first write them to sqlite.
+   * New ids are above every sqlite id, so none of these has a sqlite row.
+   */
+  private logOnly = new Set<number>();
+  /** Current live body bytes in `shadow`. Tombstones own no body bytes. */
   private shadowBytes = 0;
+  /** Null entries in `shadow`: deletes sqlite has not applied yet. */
+  private tombstones = 0;
   private insertRow: ReturnType<Database["query"]> | null = null;
   private deleteRow: ReturnType<Database["query"]> | null = null;
   private flushesSinceCheckpoint = 0;
@@ -140,6 +175,14 @@ export class Store {
   private readonly filePath: string;
   /** Durable message log. Null for `:memory:` and for `always`, which fsyncs sqlite itself. */
   private fastLog: FastLog | null = null;
+  /** Confirms waiting on a batch the sync worker has not covered yet, oldest first. */
+  private syncing: Array<{ seq: bigint; waiters: Array<(covered: boolean) => void> }> = [];
+  /**
+   * Confirm groups fsync on a worker thread, so a slow sync does not hold
+   * every socket on this process. See {@link ASIDE_GROUP}.
+   * `QUEUEFORGE_ASYNC_FSYNC=0` keeps every fsync inline.
+   */
+  syncAside = process.env.QUEUEFORGE_ASYNC_FSYNC !== "0";
   private checkpointWorker: Worker | null = null;
   constructor(path: string, mode: FsyncMode | boolean = "every_n_ms", intervalMs = 100, everyN = 1) {
     this.filePath = path;
@@ -191,6 +234,9 @@ export class Store {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vhost TEXT, queue TEXT, body BLOB, meta TEXT
       );
+      CREATE TABLE IF NOT EXISTS message_storage (
+        id INTEGER PRIMARY KEY CHECK (id=1), source TEXT NOT NULL
+      );
     `);
     // Added after the first release. An older database gains the column here.
     try {
@@ -204,30 +250,95 @@ export class Store {
       /* the column already exists */
     }
     const grouped = this.mode === "every_n_ms" || this.mode === "every_n_messages";
-    if (grouped) {
-      this.fastLog = FastLog.open(this.filePath);
-      if (this.fastLog) {
-        const log = this.fastLog;
-        const insert = this.db.query(
-          "INSERT OR REPLACE INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
-        );
-        const remove = this.db.query("DELETE FROM messages WHERE id=?");
-        this.db.transaction(() => {
-          log.replay((op) => {
-            if (op.kind === "delete") remove.run(op.id);
-            else insert.run(op.id, op.vhost, op.queue, op.body, op.meta);
-          });
-        })();
+    const previousSource = this.db.query("SELECT source FROM message_storage WHERE id=1").get() as { source: string } | null;
+    // Keep the id high-water mark even when recovery removes stale cache rows.
+    const previousMax = this.db.query("SELECT COALESCE(MAX(id), 0) AS m FROM messages").get() as { m: number };
+    const markSource = (source: "sqlite" | "log") => {
+      // A migration interrupted before this durable marker retries from the
+      // previous authoritative source. No per-message sqlite fsync is added.
+      this.db.exec("PRAGMA synchronous=FULL");
+      try {
+        this.db.query("INSERT OR REPLACE INTO message_storage (id, source) VALUES (1, ?)").run(source);
+      } finally {
+        this.db.exec(this.mode === "always" ? "PRAGMA synchronous=FULL" : "PRAGMA synchronous=OFF");
       }
+    };
+    if (grouped || previousSource?.source === "log") {
+      const log = FastLog.open(this.filePath);
+      if (log) {
+        try {
+          const insert = this.db.query(
+            "INSERT OR REPLACE INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
+          );
+          const remove = this.db.query("DELETE FROM messages WHERE id=?");
+          if (previousSource?.source === "sqlite") {
+            // A known mode switch: newer sqlite rows win over the old log.
+            log.replay(() => {});
+            const rows = this.db.query("SELECT id, vhost, queue, body, meta FROM messages ORDER BY id").all() as MsgRow[];
+            const ids = new Set(rows.map((row) => Number(row.id)));
+            log.syncRows(rows, [...log.liveMessageIds()].filter((id) => !ids.has(id)));
+          } else {
+            this.db.transaction(() => {
+              log.replay((op) => {
+                if (op.kind === "delete") remove.run(op.id);
+                else insert.run(op.id, op.vhost, op.queue, op.body, op.meta);
+              });
+              if (previousSource?.source === "log") {
+                // Retired delete records need not remain on disk: rows absent
+                // from the authoritative live log must not survive in its cache.
+                const rows = this.db.query("SELECT id FROM messages").all() as Array<{ id: number }>;
+                for (const row of rows) if (!log.hasLiveMessage(Number(row.id))) remove.run(row.id);
+              }
+            })();
+            if (!previousSource) {
+              // Legacy databases have no source provenance. Preserve SQL-only
+              // rows rather than guessing whether they are stale cache entries.
+              markSource("sqlite");
+              const rows = this.db.query("SELECT id, vhost, queue, body, meta FROM messages ORDER BY id").all() as MsgRow[];
+              log.syncRows(rows, []);
+            }
+          }
+          markSource(grouped ? "log" : "sqlite");
+          if (grouped) this.fastLog = log;
+          else log.close();
+        } catch (err) {
+          log.close();
+          this.db.close();
+          throw err;
+        }
+      } else {
+        markSource("sqlite");
+      }
+    } else if (previousSource?.source !== "sqlite") {
+      markSource("sqlite");
     }
     const max = this.db.query("SELECT COALESCE(MAX(id), 0) AS m FROM messages").get() as { m: number };
-    this.nextId = Number(max.m) + 1;
+    this.nextId = Math.max(Number(max.m), Number(previousMax.m)) + 1;
     // A relocated row is appended to the log again while sqlite may already
     // hold it. The copy is identical, so the catch-up replaces it.
     this.insertRow = this.db.query(
       "INSERT OR REPLACE INTO messages (id, vhost, queue, body, meta) VALUES (?, ?, ?, ?, ?)",
     );
     this.deleteRow = this.db.query("DELETE FROM messages WHERE id=?");
+    if (this.fastLog) this.fastLog.onSynced = (seq, ok) => this.synced(seq, ok);
+  }
+
+  /** Release the confirms of every batch through `seq`. */
+  private synced(seq: bigint, ok: boolean) {
+    if (!ok) console.error("queueforge-bun: durable log sync failed");
+    while (this.syncing.length && this.syncing[0]!.seq <= seq) {
+      for (const resolve of this.syncing.shift()!.waiters) resolve(ok);
+    }
+    if (ok && this.pending.length === 0 && this.fastLog?.settled) this.stagedWithoutFlush = false;
+  }
+
+  /** The next small group can sync on the worker. */
+  get syncsAside(): boolean {
+    return this.canSyncAside();
+  }
+
+  private canSyncAside(): boolean {
+    return this.syncAside && this.mode === "every_n_ms" && !this.closed && !!this.fastLog?.canAppend;
   }
 
   putPolicy(p: unknown) {
@@ -364,9 +475,13 @@ export class Store {
     this.db.query("DELETE FROM queues WHERE vhost=? AND name=?").run(vhost, name);
     this.db.query("DELETE FROM bindings WHERE vhost=? AND queue=?").run(vhost, name);
     this.db.query("DELETE FROM messages WHERE vhost=? AND queue=?").run(vhost, name);
-    this.pending = this.pending.filter((row) => row.vhost !== vhost || row.queue !== name);
+    this.pending = this.pending.filter((row) => {
+      if (row.vhost !== vhost || row.queue !== name) return true;
+      this.logOnly.delete(row.id);
+      return false;
+    });
     for (const [id, row] of this.shadow) {
-      if (row && row.vhost === vhost && row.queue === name) this.shadow.delete(id);
+      if (row && row.vhost === vhost && row.queue === name) this.removeShadow(id);
     }
     if (logged.length > 0) {
       for (const id of logged) this.pendingDeletes.push(id);
@@ -512,6 +627,7 @@ export class Store {
     if (this.mode === "every_n_ms" || this.mode === "every_n_messages") {
       const id = this.nextId++;
       this.pending.push({ id, vhost, queue, body, meta });
+      this.logOnly.add(id);
       // The overwrite log is the fsync. Do not mark sqlite dirty or the
       // interval will also fsync the growing database wal.
       this.stagedWithoutFlush = true;
@@ -589,6 +705,8 @@ export class Store {
    */
   flushIfLone(): boolean {
     if (!this.immediateLone || this.closed || this.mode !== "every_n_ms") return false;
+    // The worker syncs it. The confirm waits on that instead of this turn.
+    if (this.canSyncAside()) return false;
     if (this.waiters.length !== 0) return false;
     if (this.pending.length === 0 && !this.stagedWithoutFlush) return false;
     const before = this.fullFlushCount;
@@ -639,11 +757,11 @@ export class Store {
     this.timer = null;
     if (this.warm) clearInterval(this.warm);
     this.warm = null;
-    this.flushGroup();
+    this.flushGroup(true);
     // A consume that settled before the confirm fsync queued its delete here.
     // This second group commit is what a clean shutdown persists. kill -9
     // skips it, so that crash still replays the insert.
-    if (this.pendingDeletes.length > 0) this.flushGroup();
+    if (this.pendingDeletes.length > 0) this.flushGroup(true);
     this.applyShadow();
     this.fastLog?.close();
     this.fastLog = null;
@@ -657,7 +775,7 @@ export class Store {
     this.timer = setInterval(() => this.flushGroup(), this.intervalMs);
   }
 
-  private flushGroup() {
+  private flushGroup(inline = false) {
     const group = this.mode === "every_n_ms" || this.mode === "every_n_messages";
     if (group) {
       const hasRows = this.pending.length > 0 || this.pendingDeletes.length > 0;
@@ -666,6 +784,12 @@ export class Store {
         this.dirty = false;
         const waiting = this.waiters;
         this.waiters = [];
+        // The rows are written and the worker is syncing them.
+        const last = this.syncing.at(-1);
+        if (last && this.stagedWithoutFlush) {
+          last.waiters.push(...waiting);
+          return;
+        }
         // Nothing was synced. A staged append must not be acked from here.
         const covered = !this.stagedWithoutFlush;
         for (const resolve of waiting) resolve(covered);
@@ -678,6 +802,10 @@ export class Store {
       // window keeps its writes for the coalesce microtask: flushing them here
       // cost the paced 128-confirm run about a tenth of its rate.
       if (this.waiters.length <= SMALL_GROUP) this.beforeSync?.();
+      if (!inline && this.fastLog && this.waiters.length <= ASIDE_GROUP && this.canSyncAside()) {
+        this.flushAside();
+        return;
+      }
       this.fullFlushCount++;
       this.syncFlushCount++;
       // Deletes of rows in this batch wait until the next call. Writing them
@@ -685,6 +813,8 @@ export class Store {
       // delivers the body again. A crash before that next call keeps it.
       const deleteNext: number[] = [];
       if (this.fastLog) {
+        const timing = this.profileTiming;
+        const started = timing ? performance.now() : 0;
         try {
           this.fastLog.syncRows(this.pending, this.pendingDeletes);
         } catch (err) {
@@ -696,23 +826,29 @@ export class Store {
           this.waiters = [];
           for (const resolve of waiting) resolve(false);
           return;
+        } finally {
+          if (timing) {
+            const elapsed = performance.now() - started;
+            timing.logFlushAttempts++;
+            timing.logAppendSyncMs += elapsed;
+            timing.logAppendSyncMaxMs = Math.max(timing.logAppendSyncMaxMs, elapsed);
+          }
         }
         for (const row of this.pending) {
           if (this.settledPending.has(row.id)) {
-            this.shadow.delete(row.id);
+            this.dropShadow(row.id);
             deleteNext.push(row.id);
           } else {
-            this.shadow.set(row.id, row);
-            this.shadowBytes += row.body.length;
+            this.setShadow(row.id, row);
           }
         }
-        for (const id of this.pendingDeletes) this.shadow.delete(id);
+        for (const id of this.pendingDeletes) this.dropShadow(id);
         this.pending = [];
         this.pendingDeletes = deleteNext;
         this.settledPending.clear();
         this.relocate();
         // Unacked rows only. A catch-up runs if that index ever gets huge.
-        if (this.shadow.size >= 80_000 || this.shadowBytes >= 64 * 1024 * 1024) this.applyShadow();
+        this.trimShadow();
       } else {
         for (const row of this.pending) {
           if (this.settledPending.has(row.id)) deleteNext.push(row.id);
@@ -740,7 +876,54 @@ export class Store {
     // Skip it while synced rows are still only in memory: the checkpoint
     // fsync shares the disk with the next lone confirm.
     this.flushesSinceCheckpoint++;
-    if (this.flushesSinceCheckpoint >= 200 && this.shadow.size === 0) {
+    if (this.flushesSinceCheckpoint >= 200 && this.tombstones === 0) {
+      this.flushesSinceCheckpoint = 0;
+      this.checkpointAside();
+    }
+  }
+
+  /**
+   * Write the staged rows and let the sync worker fsync them.
+   *
+   * The rows are readable from the shadow index at once, as after an inline
+   * sync. Their confirms wait in `syncing` until the worker covers the batch,
+   * and `stagedWithoutFlush` stays set until then.
+   */
+  private flushAside() {
+    const log = this.fastLog!;
+    this.fullFlushCount++;
+    let seq: bigint;
+    try {
+      seq = log.appendRows(this.pending, this.pendingDeletes);
+    } catch (err) {
+      console.error("queueforge-bun: durable log write failed", err);
+      const waiting = this.waiters;
+      this.waiters = [];
+      for (const resolve of waiting) resolve(false);
+      return;
+    }
+    const deleteNext: number[] = [];
+    for (const row of this.pending) {
+      if (this.settledPending.has(row.id)) {
+        this.dropShadow(row.id);
+        deleteNext.push(row.id);
+      } else {
+        this.setShadow(row.id, row);
+      }
+    }
+    for (const id of this.pendingDeletes) this.dropShadow(id);
+    this.pending = [];
+    this.pendingDeletes = deleteNext;
+    this.settledPending.clear();
+    this.dirty = false;
+    // An entry even without waiters: a confirm for one of these rows can still
+    // arrive before the worker covers them, and joins this batch.
+    this.syncing.push({ seq, waiters: this.waiters });
+    this.waiters = [];
+    this.relocate();
+    this.trimShadow();
+    this.flushesSinceCheckpoint++;
+    if (this.flushesSinceCheckpoint >= 200 && this.tombstones === 0) {
       this.flushesSinceCheckpoint = 0;
       this.checkpointAside();
     }
@@ -765,10 +948,63 @@ export class Store {
     if (moved > 0) this.arm();
   }
 
+  /**
+   * Bound the synced index.
+   *
+   * Past {@link SHADOW_BODY_BYTES} the synced bodies leave memory and are read
+   * back from the durable log; a backlog used to be copied into sqlite in
+   * 80,000-row transactions, which wrote every body a second time and held
+   * the event loop for a second each. Deletes of rows sqlite holds are still
+   * applied to sqlite in batches.
+   */
+  private trimShadow() {
+    if (this.shadowBytes >= SHADOW_BODY_BYTES) this.pageOut();
+    if (this.tombstones >= TOMBSTONE_CATCHUP) this.applyTombstones();
+  }
+
+  /** Drop the bodies of rows whose insert is in a synced log batch. */
+  private pageOut() {
+    const log = this.fastLog;
+    if (!log) {
+      this.applyShadow();
+      return;
+    }
+    for (const [id, row] of this.shadow) {
+      if (!row || row.body === PAGED || !log.hasLiveMessage(id)) continue;
+      this.shadowBytes -= row.body.length;
+      this.shadow.set(id, { id, vhost: row.vhost, queue: row.queue, body: PAGED, meta: "" });
+    }
+    // Rows not yet in a synced batch keep their bodies; nothing else to free.
+    if (this.shadowBytes >= SHADOW_BODY_BYTES) this.applyShadow();
+  }
+
+  /** A shadow row with its body, read back from the log when it was paged out. */
+  private resolve(row: { id: number; vhost: string; queue: string; body: Uint8Array; meta: string }) {
+    if (row.body !== PAGED) return row;
+    return this.fastLog?.readRow(row.id) ?? null;
+  }
+
+  /** Apply queued deletes of sqlite-held rows. Live rows stay in the shadow. */
+  private applyTombstones() {
+    const remove = this.deleteRow;
+    if (!remove) return;
+    const ids: number[] = [];
+    for (const [id, row] of this.shadow) if (row === null) ids.push(id);
+    try {
+      this.db.transaction(() => {
+        for (const id of ids) remove.run(id);
+      })();
+    } catch (err) {
+      console.error("queueforge-bun: sqlite catch-up failed", err);
+      return;
+    }
+    for (const id of ids) if (this.shadow.get(id) === null) this.removeShadow(id);
+  }
+
   /** One stored row with its queue, from the synced index or sqlite. */
   private readRow(id: number): { id: number; vhost: string; queue: string; body: Uint8Array; meta: string } | null {
     const synced = this.shadow.get(id);
-    if (synced) return synced;
+    if (synced) return this.resolve(synced);
     if (synced === null) return null;
     const row = this.db.query("SELECT vhost, queue, body, meta FROM messages WHERE id=?").get(id) as {
       vhost: string;
@@ -781,31 +1017,75 @@ export class Store {
     return { id, vhost: String(row.vhost), queue: String(row.queue), body, meta: String(row.meta ?? "") };
   }
 
+  /** Replace a synced row or tombstone while tracking retained body bytes. */
+  private setShadow(id: number, row: { id: number; vhost: string; queue: string; body: Uint8Array; meta: string } | null) {
+    const old = this.shadow.get(id);
+    this.shadowBytes -= old?.body.length ?? 0;
+    if (old === null) this.tombstones--;
+    this.shadow.set(id, row);
+    this.shadowBytes += row?.body.length ?? 0;
+    if (row === null) this.tombstones++;
+  }
+
+  /**
+   * Record a synced delete. A row sqlite never held needs no tombstone: one
+   * per acked message made the catch-up run every 80,000 acks and hold the
+   * event loop for about 30 ms.
+   */
+  private dropShadow(id: number) {
+    if (this.logOnly.delete(id)) this.removeShadow(id);
+    else this.setShadow(id, null);
+  }
+
+  private removeShadow(id: number) {
+    const old = this.shadow.get(id);
+    if (old === undefined) return;
+    this.shadowBytes -= old?.body.length ?? 0;
+    if (old === null) this.tombstones--;
+    this.shadow.delete(id);
+  }
+
   /** Write fsynced rows into sqlite. Not on the lone confirm path. */
   private applyShadow() {
     if (this.shadow.size === 0) return;
-    const entries = [...this.shadow.entries()];
-    const insert = this.insertRow;
-    const remove = this.deleteRow;
-    if (!insert || !remove) return;
-    const write = this.db.transaction(() => {
-      for (const [id, row] of entries) {
-        if (row == null) remove.run(id);
-        else insert.run(row.id, row.vhost, row.queue, row.body, row.meta);
-      }
-    });
+    const timing = this.profileTiming;
+    const started = timing ? performance.now() : 0;
+    const rows = timing ? this.shadow.size : 0;
     try {
-      write();
-    } catch (err) {
-      // The rows are already in the synced log. Keep them readable from the
-      // shadow and retry on the next catch-up instead of exiting.
-      console.error("queueforge-bun: sqlite catch-up failed", err);
-      return;
-    }
-    this.shadowBytes = 0;
-    // Rows synced after `entries` was taken stay for the next catch-up.
-    for (const [id, row] of entries) {
-      if (this.shadow.get(id) === row) this.shadow.delete(id);
+      const entries = [...this.shadow.entries()];
+      const insert = this.insertRow;
+      const remove = this.deleteRow;
+      if (!insert || !remove) return;
+      const write = this.db.transaction(() => {
+        for (const [id, row] of entries) {
+          if (row == null) remove.run(id);
+          else {
+            const full = this.resolve(row);
+            if (full) insert.run(full.id, full.vhost, full.queue, full.body, full.meta);
+          }
+        }
+      });
+      try {
+        write();
+      } catch (err) {
+        // The rows are already in the synced log. Keep them readable from the
+        // shadow and retry on the next catch-up instead of exiting.
+        console.error("queueforge-bun: sqlite catch-up failed", err);
+        return;
+      }
+      // Rows synced after `entries` was taken stay for the next catch-up.
+      for (const [id, row] of entries) {
+        if (this.shadow.get(id) === row) this.removeShadow(id);
+        if (row) this.logOnly.delete(id);
+      }
+    } finally {
+      if (timing) {
+        const elapsed = performance.now() - started;
+        timing.sqliteCatchupAttempts++;
+        timing.sqliteCatchupRows += rows;
+        timing.sqliteCatchupMs += elapsed;
+        timing.sqliteCatchupMaxMs = Math.max(timing.sqliteCatchupMaxMs, elapsed);
+      }
     }
   }
 
@@ -879,7 +1159,8 @@ export class Store {
     if (this.shadow.has(id)) {
       const synced = this.shadow.get(id);
       if (synced == null) return null;
-      return { body: synced.body, meta: synced.meta };
+      const full = this.resolve(synced);
+      return full ? { body: full.body, meta: full.meta } : null;
     }
     const row = this.db.query("SELECT body, meta FROM messages WHERE id=?").get(id) as {
       body: Uint8Array | ArrayBuffer;
@@ -915,8 +1196,9 @@ export class Store {
     const byId = new Map<number, MsgRow>();
     for (const row of rows) byId.set(Number(row.id), row);
     for (const [id, row] of this.shadow) {
-      if (row == null) byId.delete(id);
-      else byId.set(id, row);
+      const full = row == null ? null : this.resolve(row);
+      if (full == null) byId.delete(id);
+      else byId.set(id, full);
     }
     const merged = [...byId.values()];
     merged.sort((a, b) => a.id - b.id);

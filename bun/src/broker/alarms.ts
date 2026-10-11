@@ -20,12 +20,15 @@ export type { AlarmListener };
 /**
  * The memory limit in bytes. `QUEUEFORGE_MEM_HIGH_WATERMARK` overrides the
  * fraction of RAM, or gives an absolute byte count when it is above 1.
+ * Computed once: the sweep runs every 200 ms and `totalmem()` showed in profiles.
  */
+let limitCache: number | null = null;
 function memLimit(): number {
+  if (limitCache !== null) return limitCache;
   const raw = Number(process.env.QUEUEFORGE_MEM_HIGH_WATERMARK);
-  if (Number.isFinite(raw) && raw > 1) return raw;
+  if (Number.isFinite(raw) && raw > 1) return (limitCache = raw);
   const fraction = Number.isFinite(raw) && raw > 0 ? raw : MEM_RELATIVE;
-  return totalmem() * fraction;
+  return (limitCache = totalmem() * fraction);
 }
 
 /** Sample memory and disk, and tell listeners when the blocked state changes. */

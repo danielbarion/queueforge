@@ -586,6 +586,13 @@ where
             match reply_rx.await {
                 Ok(Ok(completion)) => {
                     success_enqueues = success_enqueues.saturating_add(1);
+                    if self.tx_applying && handle.info.durable {
+                        let key = &handle.info.key;
+                        match self.tx_flush.iter_mut().find(|(k, _, _)| k == key) {
+                            Some(entry) => entry.2 = entry.2.max(completion.offset),
+                            None => self.tx_flush.push((key.clone(), handle.tx.clone(), completion.offset)),
+                        }
+                    }
                     completions.push(completion);
                 }
                 Ok(Err(CoreError::PreconditionFailed(msg))) => {
@@ -613,6 +620,11 @@ where
         // publishes returned above so the next frame can join this flush.
         // Always complete durable_done wait-all for enqueues that were accepted.
         for completion in completions {
+            if self.tx_applying {
+                // tx.commit awaits every publish's fsync together, before commit-ok.
+                self.tx_durable.push(completion.durable_done);
+                continue;
+            }
             match completion.durable_done.await {
                 Ok(Ok(())) => {}
                 // oneshot cancel (actor death) is a durable failure — not success.

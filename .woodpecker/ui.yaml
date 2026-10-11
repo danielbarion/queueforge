@@ -1,0 +1,13 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: build-and-dist-check
+    image: node:20-bookworm
+    commands:
+      - cd rust/ui && npm ci && npm run build && cd ../..
+      - git diff --exit-code -- rust/ui/dist

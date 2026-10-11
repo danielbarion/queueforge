@@ -1,0 +1,25 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: bun-toolchain
+    image: oven/bun:1.4.2
+    commands:
+      - mkdir -p .ci-tools
+      - cp /usr/local/bin/bun .ci-tools/bun
+
+  - name: broker-console-conformance-tests
+    image: rust:bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+    commands:
+      - export PATH="$PWD/.ci-tools:$PATH"
+      - cd rust && cargo build -p queueforge-broker && cd ..
+      - cd bun && bun install --frozen-lockfile && bun test && cd ..
+      - cd console && bun install --frozen-lockfile && bun test && cd ..
+      - cd conformance && bun install --frozen-lockfile && bun test run.test.ts

@@ -358,10 +358,11 @@ export class Cluster {
       }
       let left: number | null = typeof body.credit === "number" ? body.credit : null;
       let reserved = 0;
+      const noAck = !!(body.noAck ?? body.no_ack);
       q.consumers.push({
         tag: `remote-${session}`,
         session,
-        noAck: !!(body.noAck ?? body.no_ack),
+        noAck,
         exclusive: !!body.exclusive,
         want: () => left == null || reserved < left,
         reserve: () => {
@@ -377,8 +378,10 @@ export class Cluster {
           if (reserved > 0) reserved--;
           if (left != null) left = Math.max(0, left - 1);
           const deliveryId = this.nextDelivery++;
-          this.remoteAcks.set(`${vhost}\0${queue}\0${deliveryId}`, m.id);
-          this.remoteSessions.set(`${vhost}\0${queue}\0${deliveryId}`, session);
+          if (!noAck) {
+            this.remoteAcks.set(`${vhost}\0${queue}\0${deliveryId}`, m.id);
+            this.remoteSessions.set(`${vhost}\0${queue}\0${deliveryId}`, session);
+          }
           const bodyB64 = Buffer.from(m.body).toString("base64");
           const propB64 = Buffer.from(m.propRaw).toString("base64");
           write({
@@ -399,7 +402,7 @@ export class Cluster {
               session,
               delivery_id: deliveryId,
               offset: m.rowId ?? 0,
-              settles_on_write: !!(body.noAck ?? body.no_ack),
+              settles_on_write: noAck,
               message: {
                 exchange: m.exchange,
                 routing_key: m.routingKey,
@@ -681,5 +684,11 @@ export class Cluster {
     this.subs.set(payload.session, onDeliver);
     await this.call(home, "sub", payload);
     return payload.session;
+  }
+
+  /** Drop the local callback even when the remote home cannot be reached. */
+  async unsubscribe(home: string, payload: { vhost: string; queue: string; session: number }): Promise<void> {
+    this.subs.delete(payload.session);
+    await this.call(home, "unsub", payload);
   }
 }

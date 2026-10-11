@@ -3,9 +3,7 @@ import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Conn } from "../src/amqp/listen.ts";
-import "../src/amqp/consume.ts";
-import "../src/amqp/frames.ts";
-import "../src/amqp/publish.ts";
+import "../src/amqp/index.ts";
 import { Broker } from "../src/broker/index.ts";
 import type { Config } from "../src/config.ts";
 import { Store } from "../src/store.ts";
@@ -91,6 +89,8 @@ test("a learned lone confirm acks in the same turn after the fsync", async () =>
       args: {},
     });
     store.immediateLone = true;
+    // The inline lone fsync. The sync worker path is covered in store.sync-aside.test.ts.
+    store.syncAside = false;
     const pending = broker.publish({
       vhost: "/",
       exchange: "",
@@ -222,7 +222,7 @@ test("a parked publish confirm is written after the fsync", async () => {
     expect(store.fullFlushCount).toBe(0);
     expect(writes).toHaveLength(0);
     const parked = conn.deferredPublish.shift()!;
-    const pending = parked();
+    const pending = parked.run();
     expect(broker.prom.confirmed).toBe(0);
     expect(store.fullFlushCount).toBe(0);
     expect(writes).toHaveLength(0);
@@ -314,5 +314,35 @@ test("a noAck consumer does not confirm before the append is fsynced", async () 
       if (!closed) store.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("default exchange publishing remains valid after exchange-to-exchange bindings exist", async () => {
+  const { dir, store, broker } = brokerWithQueue(400);
+  try {
+    broker.load();
+    await broker.declareQueue({ vhost: "/", name: "q", durable: true, exclusive: false, autoDelete: false, passive: false, args: {} });
+    broker.e2e.push({ vhost: "/", source: "front", destination: "inner", routingKey: "", args: {} } as never);
+    expect(broker.exchanges.get(broker.key("/", ""))?.internal).toBe(true);
+    expect(broker.route("/", "", "q", [])).toEqual(["q"]);
+    const conn = new Conn({ write: bytes => bytes.length, end() {} }, broker);
+    conn.user = "admin";
+    conn.stage = "frames";
+    conn.writeEx = "";
+    conn.permRef = broker.perms;
+    conn.permLen = broker.perms.length;
+    const ch = conn.ch(1);
+    ch.confirm = true;
+    ch.publish = { exchange: "", routingKey: "q", mandatory: false, immediate: false };
+    ch.chunks = [Uint8Array.of(1)];
+    conn.finishPublish(1, ch);
+    await conn.push(new Uint8Array());
+    await Promise.all(conn.inFlightPublishes);
+    expect(broker.queues.get(broker.key("/", "q"))!.ready.length).toBe(1);
+    broker.exchanges.set(broker.key("/", "private"), { internal: true } as never);
+    expect(() => broker.route("/", "private", "q", [])).toThrow("cannot publish to internal exchange");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

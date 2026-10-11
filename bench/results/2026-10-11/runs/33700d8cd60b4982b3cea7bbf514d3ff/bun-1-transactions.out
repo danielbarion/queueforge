@@ -1,0 +1,38 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-042821-581, starting consumer #0
+id: test-042821-581, starting consumer #0, channel #0
+id: test-042821-581, starting consumer #1
+id: test-042821-581, starting consumer #1, channel #0
+id: test-042821-581, starting producer #0
+id: test-042821-581, starting producer #0, channel #0
+id: test-042821-581, starting producer #1
+id: test-042821-581, starting producer #1, channel #0
+id: test-042821-581, time 1.000 s, sent: 36608 msg/s, received: 36610 msg/s, min/median/75th/95th/99th/max consumer latency: 58/127/184/1614/3563/10605 µs
+id: test-042821-581, time 2.000 s, sent: 56136 msg/s, received: 56136 msg/s, min/median/75th/95th/99th/max consumer latency: 53/102/149/584/1655/1985 µs
+id: test-042821-581, time 3.000 s, sent: 56036 msg/s, received: 56016 msg/s, min/median/75th/95th/99th/max consumer latency: 52/94/145/233/1151/2330 µs
+id: test-042821-581, time 4.000 s, sent: 58500 msg/s, received: 58500 msg/s, min/median/75th/95th/99th/max consumer latency: 55/96/147/236/1476/1715 µs
+id: test-042821-581, time 5.000 s, sent: 56360 msg/s, received: 56370 msg/s, min/median/75th/95th/99th/max consumer latency: 54/101/146/260/1403/16444 µs
+id: test-042821-581, time 6.000 s, sent: 54204 msg/s, received: 54204 msg/s, min/median/75th/95th/99th/max consumer latency: 61/118/162/262/1653/3166 µs
+id: test-042821-581, time 7.000 s, sent: 55575 msg/s, received: 55575 msg/s, min/median/75th/95th/99th/max consumer latency: 54/105/152/222/1079/1891 µs
+id: test-042821-581, time 8.000 s, sent: 59480 msg/s, received: 59489 msg/s, min/median/75th/95th/99th/max consumer latency: 50/99/148/267/1428/3198 µs
+id: test-042821-581, time 9.000 s, sent: 55165 msg/s, received: 55151 msg/s, min/median/75th/95th/99th/max consumer latency: 51/105/159/284/1370/9841 µs
+id: test-042821-581, time 10.000 s, sent: 60847 msg/s, received: 60855 msg/s, min/median/75th/95th/99th/max consumer latency: 54/95/141/196/1215/1648 µs
+id: test-042821-581, time 11.000 s, sent: 56469 msg/s, received: 56476 msg/s, min/median/75th/95th/99th/max consumer latency: 53/101/151/254/1246/1657 µs
+id: test-042821-581, time 12.000 s, sent: 56800 msg/s, received: 56790 msg/s, min/median/75th/95th/99th/max consumer latency: 67/118/161/260/1396/1676 µs
+id: test-042821-581, time 13.000 s, sent: 54934 msg/s, received: 54924 msg/s, min/median/75th/95th/99th/max consumer latency: 55/107/152/421/1492/3768 µs
+id: test-042821-581, time 14.000 s, sent: 58908 msg/s, received: 58908 msg/s, min/median/75th/95th/99th/max consumer latency: 51/109/153/247/1241/1885 µs
+id: test-042821-581, time 15.000 s, sent: 54394 msg/s, received: 54404 msg/s, min/median/75th/95th/99th/max consumer latency: 53/108/151/595/1639/3594 µs
+id: test-042821-581, time 16.000 s, sent: 52130 msg/s, received: 52120 msg/s, min/median/75th/95th/99th/max consumer latency: 53/98/146/507/1243/4964 µs
+id: test-042821-581, time 17.000 s, sent: 55425 msg/s, received: 55435 msg/s, min/median/75th/95th/99th/max consumer latency: 53/99/147/541/1329/15157 µs
+id: test-042821-581, time 18.000 s, sent: 60260 msg/s, received: 60251 msg/s, min/median/75th/95th/99th/max consumer latency: 50/93/150/246/1108/1967 µs
+id: test-042821-581, time 19.000 s, sent: 56010 msg/s, received: 56024 msg/s, min/median/75th/95th/99th/max consumer latency: 50/95/150/259/1178/10679 µs
+id: test-042821-581, time 20.001 s, sent: 59330 msg/s, received: 59335 msg/s, min/median/75th/95th/99th/max consumer latency: 51/90/145/298/1129/1675 µs
+id: test-042821-581, time 21.000 s, sent: 57607 msg/s, received: 57607 msg/s, min/median/75th/95th/99th/max consumer latency: 52/96/148/587/1133/2811 µs
+id: test-042821-581, time 22.000 s, sent: 58258 msg/s, received: 58243 msg/s, min/median/75th/95th/99th/max consumer latency: 54/110/155/260/1157/3690 µs
+id: test-042821-581, time 23.000 s, sent: 54474 msg/s, received: 54489 msg/s, min/median/75th/95th/99th/max consumer latency: 52/114/161/560/1132/1929 µs
+id: test-042821-581, time 24.000 s, sent: 48990 msg/s, received: 48990 msg/s, min/median/75th/95th/99th/max consumer latency: 53/101/147/583/1158/2079 µs
+id: test-042821-581, time 25.000 s, sent: 46676 msg/s, received: 46666 msg/s, min/median/75th/95th/99th/max consumer latency: 54/113/164/611/1268/4379 µs
+test stopped (Reached time limit)
+id: test-042821-581, sending rate avg: 55142 msg/s
+id: test-042821-581, receiving rate avg: 55142 msg/s
+id: test-042821-581, consumer latency min/median/75th/95th/99th/max 52/108/156/604/1513/2726 µs

@@ -92,6 +92,15 @@ final class Harness
 
     private static function waitForPort(int $port, string $dir): void
     {
+        self::waitListening($port, $dir);
+    }
+
+    /**
+     * Waits until a listener of a started broker accepts. `broker()` waits for
+     * AMQP only; a second listener such as management can bind a moment later.
+     */
+    public static function waitListening(int $port, string $dir): void
+    {
         $deadline = microtime(true) + 10.0;
         while (microtime(true) < $deadline) {
             $fp = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 0.1);

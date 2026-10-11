@@ -52,7 +52,7 @@ test("management access does not grant queue read or exchange write", async () =
     await f.broker.putPerm({ user: "restricted", vhost: "/", configure: "^$", write: "^$", read: "^private$" });
     const response = await f.call("/api/queues/%2F/private/get", cookie, "POST", { ackmode: "ack_requeue_false" });
     expect(response.status).toBe(200);
-    expect((await response.json())[0].payload).toBe("secret");
+    expect((await response.json() as Array<{ payload: string }>)[0]!.payload).toBe("secret");
   } finally { f.close(); }
 });
 
@@ -99,7 +99,7 @@ test("OAuth cannot authenticate an existing internal username", async () => {
   const f = await fixture();
   try {
     let calls = 0;
-    f.broker.oauth = { login: async () => { calls++; return { sub: "outsider", principal: { source: "oauth", scopes: [], tags: [], expiresAt: Date.now() + 60000 } }; } } as typeof f.broker.oauth;
+    f.broker.oauth = { login: async () => { calls++; return { sub: "outsider", principal: { source: "oauth", scopes: [], tags: [], expiresAt: Date.now() + 60000 } }; } } as unknown as typeof f.broker.oauth;
     expect(await f.broker.verify("admin", "a.b.c")).toBe(false);
     expect(calls).toBe(0);
     expect(await f.broker.verify("outsider", "a.b.c")).toBe(true);
@@ -111,7 +111,7 @@ test("OAuth management cookie and Basic cache expire with their principal", asyn
   const f = await fixture();
   try {
     const principal: Principal = { source: "oauth", scopes: [], tags: ["administrator"], expiresAt: Date.now() + 60000 };
-    f.broker.oauth = { login: async () => principal.expiresAt! > Date.now() ? { sub: "external", principal } : null } as typeof f.broker.oauth;
+    f.broker.oauth = { login: async () => principal.expiresAt! > Date.now() ? { sub: "external", principal } : null } as unknown as typeof f.broker.oauth;
     const cookie = await f.login("external", "a.b.c");
     const basic = `Basic ${btoa("external:a.b.c")}`;
     expect((await f.call("/api/users", "", "GET", undefined, basic)).status).toBe(200);
@@ -125,7 +125,7 @@ test("equivalent external re-logins keep independent cookie and Basic sessions u
   const f = await fixture();
   try {
     const expiresAt = Date.now() + 60000;
-    f.broker.oauth = { login: async () => ({ sub: "external", principal: { source: "oauth", tags: ["management"], scopes: [], expiresAt } }) } as typeof f.broker.oauth;
+    f.broker.oauth = { login: async () => ({ sub: "external", principal: { source: "oauth", tags: ["management"], scopes: [], expiresAt } }) } as unknown as typeof f.broker.oauth;
     const first = await f.login("external", "a.b.c");
     const basic = `Basic ${btoa("external:a.b.c")}`;
     expect((await f.call("/api/whoami", "", "GET", undefined, basic)).status).toBe(200);

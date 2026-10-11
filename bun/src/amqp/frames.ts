@@ -107,7 +107,7 @@ function armCoalesce(this: Conn) {
 function flushCoalesced(this: Conn) {
   if (!this.staged.length) return;
   if (this.outHead < this.outbound.length) {
-    for (const frame of this.staged) this.outbound.push(frame);
+    for (const frame of this.staged) { this.outbound.push(frame); this.outboundBytes += frame.length; }
     this.staged = [];
     this.stagedBytes = 0;
     flush.call(this);
@@ -139,10 +139,12 @@ function flushCoalesced(this: Conn) {
   const wrote = this.socket.write(buf);
   if (wrote === buf.length) {
     this.socket.flush?.();
+    wakeOutput(this);
     return;
   }
   const tail = wrote > 0 ? buf.subarray(wrote) : buf;
   this.outbound.push(shared ? tail.slice() : tail);
+  this.outboundBytes += tail.length;
   this.outHead = 0;
 }
 
@@ -167,11 +169,14 @@ export function sendMany(this: Conn, frames: Uint8Array[]) {
     return Promise.resolve();
   }
   this.writesPending++;
+  const bytes = frames.reduce((n, frame) => n + frame.length, 0);
+  this.writeQueuedBytes += bytes;
   this.writeChain = this.writeChain.then(() => {
     this.writesPending--;
+    this.writeQueuedBytes -= bytes;
     if (this.closed) return;
     if (this.staged.length) flushCoalesced.call(this);
-    for (const frame of frames) this.outbound.push(frame);
+    for (const frame of frames) { this.outbound.push(frame); this.outboundBytes += frame.length; }
     this.flush();
   });
   return this.writeChain;
@@ -185,7 +190,7 @@ export function sendMany(this: Conn, frames: Uint8Array[]) {
  */
 export function flush(this: Conn) {
   if (this.staged.length) {
-    for (const frame of this.staged) this.outbound.push(frame);
+    for (const frame of this.staged) { this.outbound.push(frame); this.outboundBytes += frame.length; }
     this.staged = [];
     this.stagedBytes = 0;
   }
@@ -194,6 +199,7 @@ export function flush(this: Conn) {
   while (i < q.length) {
     const frame = q[i]!;
     const n = this.socket.write(frame);
+    this.outboundBytes -= Math.max(0, n);
     if (n === frame.length) {
       i++;
       continue;
@@ -209,18 +215,19 @@ export function flush(this: Conn) {
   this.outHead = 0;
   q.length = 0;
   this.socket.flush?.();
+  wakeOutput(this);
+}
+
+function wakeOutput(conn: Conn) {
+  if (!conn.outputBlocked || conn.outboundBytes + conn.stagedBytes + conn.writeQueuedBytes + (conn.socket.pendingBytes?.() ?? 0) >= 1024 * 1024) return;
+  conn.outputBlocked = false;
+  queueMicrotask(() => {
+    if (!conn.closed && !conn.connClosed) for (const wake of conn.outputWakers.values()) wake();
+  });
 }
 
 /** How many staged publishes to enqueue before checking consumer credit again. */
 const PUBLISH_BATCH = 64;
-
-/**
- * Ready messages above this, while this connection still has unacked
- * deliveries, means prefetch is full. Further confirms wait for ack bytes
- * so one burst cannot bury the consumer. Deep enough that 128 in-flight
- * confirms still share one group commit.
- */
-const READY_BACKLOG = 256;
 
 /** Fallback when the socket stays quiet. Ack bytes wake the wait sooner. */
 const SOCKET_WAIT_MS = 1;
@@ -255,6 +262,10 @@ export function push(this: Conn, data: Uint8Array): Promise<void> {
     return Promise.resolve();
   }
   if (data.length) {
+    let retained = this.buf.length + this.publishBytes + data.length;
+    for (const chunk of this.fresh) retained += chunk.length;
+    for (const ch of this.channels.values()) retained += ch.got + ch.txBytes;
+    if (retained > 64 * 1024 * 1024) return this.connClose(506, "RESOURCE_ERROR - inbound buffering exceeds 64 MiB");
     this.fresh.push(data);
     const wake = this.wakeInbound;
     if (wake) {
@@ -272,23 +283,42 @@ export function push(this: Conn, data: Uint8Array): Promise<void> {
   });
 }
 
-/** Messages sitting on ready queues. A deep total means prefetch credit is full. */
-function readyBacklog(conn: Conn): number {
-  let n = 0;
-  for (const q of conn.broker.queues.values()) n += q.ready.length;
-  return n;
+/** Pressure belongs to the destinations of the next ordered publish. */
+function publishAheadOfAcks(conn: Conn): boolean {
+  return conn.deferredPublish[0]?.pressured() ?? false;
 }
 
-/**
- * True when this connection has delivered messages it has not acked yet and
- * the ready queues are already past {@link READY_BACKLOG}.
- */
-function publishAheadOfAcks(conn: Conn): boolean {
-  if (readyBacklog(conn) <= READY_BACKLOG) return false;
-  for (const ch of conn.channels.values()) {
-    if (ch.deliveries.size > 0) return true;
-  }
+function hasConsumers(conn: Conn): boolean {
+  for (const ch of conn.channels.values()) if (ch.consumers.size || ch.deliveries.size) return true;
   return false;
+}
+
+function resumeReads(conn: Conn) {
+  if (!conn.readsPaused) return;
+  conn.readsPaused = false;
+  conn.socket.resume?.();
+}
+
+function startPublish(conn: Conn) {
+  const op = conn.deferredPublish.shift()!;
+  const pending = op.run();
+  if (!pending) { conn.publishBytes -= op.bytes; return; }
+  conn.inFlightBytes += op.bytes;
+  const tracked = Promise.resolve(pending).finally(() => {
+    conn.publishBytes -= op.bytes;
+    conn.inFlightBytes -= op.bytes;
+    conn.inFlightPublishes.delete(tracked);
+  });
+  conn.inFlightPublishes.add(tracked);
+  return tracked;
+}
+
+/** Topology and transaction methods must observe earlier completed publishes. */
+async function publishFence(conn: Conn) {
+  const pending: unknown[] = [];
+  while (conn.deferredPublish.length) pending.push(startPublish(conn));
+  resumeReads(conn);
+  await Promise.all([...pending, ...conn.inFlightPublishes]);
 }
 
 /**
@@ -296,7 +326,7 @@ function publishAheadOfAcks(conn: Conn): boolean {
  * The caller parses those bytes before enqueueing another publish group.
  */
 function waitForSocket(this: Conn): Promise<void> {
-  if (this.fresh.length) return Promise.resolve();
+  if (this.fresh.length && !this.readsPaused) return Promise.resolve();
   return new Promise((resolve) => {
     let settled = false;
     const finish = () => {
@@ -327,13 +357,27 @@ async function driveInbound(this: Conn): Promise<void> {
   let loneQuiet = false;
   try {
     while (!this.closed && !this.connClosed) {
-      await parseAvailable.call(this);
+      if (this.readsPaused && !publishAheadOfAcks(this) && this.inFlightBytes < 32 * 1024 * 1024) resumeReads(this);
+      if (!this.readsPaused) await parseAvailable.call(this);
       if (this.connClosed || this.closed) return;
+      if (this.inFlightBytes >= 32 * 1024 * 1024) {
+        if (!hasConsumers(this) && this.socket.pause && !this.readsPaused) {
+          this.readsPaused = true;
+          this.socket.pause();
+        }
+        await Promise.race(this.inFlightPublishes);
+        continue;
+      }
       let releaseHold = false;
       if (this.deferredPublish.length > 0 && publishAheadOfAcks(this)) {
+        const mixed = hasConsumers(this);
+        if (!mixed && this.socket.pause && !this.readsPaused) {
+          this.readsPaused = true;
+          this.socket.pause();
+        }
         const now = Date.now();
         if (holdStarted === 0) holdStarted = now;
-        if (now - holdStarted < HOLD_MS) {
+        if (!mixed || now - holdStarted < HOLD_MS) {
           await waitForSocket.call(this);
           continue;
         }
@@ -351,13 +395,17 @@ async function driveInbound(this: Conn): Promise<void> {
       // Only the first frame of an idle group waits. A pipeline that already
       // has a staged row keeps enqueueing, so 128 waiters still share one fsync
       // and a hot socket does not pause a millisecond per frame. Once a confirm
-      // has stayed alone, the next one skips that wait.
+      // has stayed alone, the next one skips that wait. With the sync worker
+      // there is nothing to gather: confirms that arrive during its fsync
+      // share the next one, so the publish is not delayed.
       const learnedLone = this.broker.store.immediateLone;
       if (
         !learnedLone &&
         !loneQuiet &&
         !releaseHold &&
+        !this.broker.store.syncsAside &&
         this.deferredPublish.length === 1 &&
+        this.deferredPublish[0]!.batchConfirm &&
         !this.fresh.length &&
         !this.broker.store.stagedWithoutFlush
       ) {
@@ -372,9 +420,8 @@ async function driveInbound(this: Conn): Promise<void> {
       }
       let started = 0;
       while (this.deferredPublish.length && started < PUBLISH_BATCH) {
-        if (!releaseHold && publishAheadOfAcks(this)) break;
-        const op = this.deferredPublish.shift()!;
-        void op();
+        if ((!releaseHold && publishAheadOfAcks(this)) || this.inFlightBytes >= 32 * 1024 * 1024) break;
+        void startPublish(this);
         started++;
       }
       if (this.fresh.length) {
@@ -382,11 +429,25 @@ async function driveInbound(this: Conn): Promise<void> {
         continue;
       }
       if (this.deferredPublish.length > 0) continue;
+      if (this.buf.length >= 7) {
+        const size = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength).getUint32(3);
+        if (this.buf.length >= size + 8) continue;
+      }
+      resumeReads(this);
       return;
     }
   } catch (err) {
-    if (err instanceof ChanError) await this.chanClose(0, err.code, err.message);
+    if (err instanceof ChanError && err.code !== 506) await this.chanClose(0, err.code, err.message);
+    else if (err instanceof ChanError) await this.connClose(err.code, err.message);
     else await this.connClose(541, "INTERNAL_ERROR");
+  } finally {
+    if (this.closed || this.connClosed) {
+      this.deferredPublish = [];
+      this.publishBytes = this.inFlightBytes;
+      this.fresh = [];
+      this.buf = new Uint8Array();
+      this.readsPaused = false;
+    }
   }
 }
 
@@ -440,6 +501,13 @@ function exchangeHome(this: Conn, exchange: string, routingKey: string): string 
  */
 function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   if (!this.handed || this.migrated || buf.length - at < 11 || buf[at] !== 1) return false;
+  // The handoff carries only pristine channel settings, not publish closures,
+  // deliveries or transaction operations. Keep a connection with live work on
+  // this worker and use the normal forwarding path instead.
+  if (this.deferredPublish.length || this.inFlightPublishes.size || this.stagedBytes || this.outboundBytes || this.writesPending) return false;
+  for (const ch of this.channels.values()) {
+    if (ch.tx || ch.publish || ch.nextPub !== 1 || ch.consumers.size || ch.deliveries.size || ch.parked.length) return false;
+  }
   const size = (buf[at + 3]! << 24) | (buf[at + 4]! << 16) | (buf[at + 5]! << 8) | buf[at + 6]!;
   if (buf.length - at < 8 + size) return false;
   const cls = (buf[at + 7]! << 8) | buf[at + 8]!;
@@ -636,8 +704,13 @@ async function parseAvailable(this: Conn): Promise<void> {
       }
       if (type === 1) {
         commit();
+        const cls = payload.length >= 4 ? (payload[0]! << 8) | payload[1]! : 0;
+        const mid = payload.length >= 4 ? (payload[2]! << 8) | payload[3]! : 0;
+        // Settlements and close frames remain readable while publishing is held.
+        if (!(cls === 60 && (mid === 90 || mid === 120)) && (cls !== 10 && cls !== 20 || mid === 40 || mid === 50)) await publishFence(this);
         await this.onMethod(channel, payload);
         buf = this.buf;
+        if (cls === 90 && mid === 20 && !hasConsumers(this) && this.deferredPublish.length) return;
       } else if (type === 2) {
         const header = this.onHeader(channel, payload);
         if (header) {
@@ -653,6 +726,8 @@ async function parseAvailable(this: Conn): Promise<void> {
           buf = this.buf;
         }
       }
+      // Dispatch a bounded publish group before reading another pure-publisher burst.
+      if (!hasConsumers(this) && (this.deferredPublish.length >= PUBLISH_BATCH || this.publishBytes >= 16 * 1024 * 1024)) return;
     }
   } finally {
     commit();

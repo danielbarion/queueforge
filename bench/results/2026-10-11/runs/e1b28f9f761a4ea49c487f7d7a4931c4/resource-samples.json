@@ -1,0 +1,337 @@
+{
+  "error": null,
+  "interval_s": 1,
+  "method": "Docker Engine stats API; total includes cache",
+  "samples": [
+    {
+      "anonymous": 10162176,
+      "cpu_usec": 127789,
+      "elapsed_s": 0.01172249997034669,
+      "memory": 18403328
+    },
+    {
+      "anonymous": 10174464,
+      "cpu_usec": 168722,
+      "elapsed_s": 1.0176141250412911,
+      "memory": 19546112
+    },
+    {
+      "anonymous": 10186752,
+      "cpu_usec": 215948,
+      "elapsed_s": 2.029594875057228,
+      "memory": 19709952
+    },
+    {
+      "anonymous": 12304384,
+      "cpu_usec": 330044,
+      "elapsed_s": 3.0389089999953285,
+      "memory": 22302720
+    },
+    {
+      "anonymous": 16539648,
+      "cpu_usec": 831411,
+      "elapsed_s": 4.0475069580134,
+      "memory": 28672000
+    },
+    {
+      "anonymous": 16543744,
+      "cpu_usec": 1669256,
+      "elapsed_s": 5.0587693330598995,
+      "memory": 31649792
+    },
+    {
+      "anonymous": 20738048,
+      "cpu_usec": 2272118,
+      "elapsed_s": 6.06883900007233,
+      "memory": 38498304
+    },
+    {
+      "anonymous": 29114368,
+      "cpu_usec": 2846592,
+      "elapsed_s": 7.0718230420025066,
+      "memory": 50151424
+    },
+    {
+      "anonymous": 33275904,
+      "cpu_usec": 3544056,
+      "elapsed_s": 8.079301082994789,
+      "memory": 48771072
+    },
+    {
+      "anonymous": 33312768,
+      "cpu_usec": 4277903,
+      "elapsed_s": 9.086388833005913,
+      "memory": 52461568
+    },
+    {
+      "anonymous": 33320960,
+      "cpu_usec": 5011524,
+      "elapsed_s": 10.095567250042222,
+      "memory": 56135680
+    },
+    {
+      "anonymous": 35414016,
+      "cpu_usec": 5716272,
+      "elapsed_s": 11.104151292005554,
+      "memory": 52731904
+    },
+    {
+      "anonymous": 35418112,
+      "cpu_usec": 6398716,
+      "elapsed_s": 12.114789957995526,
+      "memory": 56164352
+    },
+    {
+      "anonymous": 35418112,
+      "cpu_usec": 7086081,
+      "elapsed_s": 13.125884042005055,
+      "memory": 59998208
+    },
+    {
+      "anonymous": 37494784,
+      "cpu_usec": 7772939,
+      "elapsed_s": 14.134699542075396,
+      "memory": 56090624
+    },
+    {
+      "anonymous": 37507072,
+      "cpu_usec": 8480064,
+      "elapsed_s": 15.138191416976042,
+      "memory": 59998208
+    },
+    {
+      "anonymous": 37523456,
+      "cpu_usec": 9182025,
+      "elapsed_s": 16.149979250039905,
+      "memory": 54702080
+    },
+    {
+      "anonymous": 39620608,
+      "cpu_usec": 9823787,
+      "elapsed_s": 17.157334082992747,
+      "memory": 60293120
+    },
+    {
+      "anonymous": 39620608,
+      "cpu_usec": 10526702,
+      "elapsed_s": 18.1679646250559,
+      "memory": 63754240
+    },
+    {
+      "anonymous": 40861696,
+      "cpu_usec": 11232131,
+      "elapsed_s": 19.17928512499202,
+      "memory": 59334656
+    },
+    {
+      "anonymous": 39620608,
+      "cpu_usec": 11886783,
+      "elapsed_s": 20.186682166997343,
+      "memory": 61652992
+    },
+    {
+      "anonymous": 39620608,
+      "cpu_usec": 12589771,
+      "elapsed_s": 21.202653542044573,
+      "memory": 56233984
+    },
+    {
+      "anonymous": 41709568,
+      "cpu_usec": 13286218,
+      "elapsed_s": 22.214196874992922,
+      "memory": 62115840
+    },
+    {
+      "anonymous": 41713664,
+      "cpu_usec": 13982695,
+      "elapsed_s": 23.219276583055034,
+      "memory": 65204224
+    },
+    {
+      "anonymous": 41717760,
+      "cpu_usec": 14673466,
+      "elapsed_s": 24.225753457983956,
+      "memory": 59568128
+    },
+    {
+      "anonymous": 43290624,
+      "cpu_usec": 15397671,
+      "elapsed_s": 25.235065125045367,
+      "memory": 64835584
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 16132442,
+      "elapsed_s": 26.243142417049967,
+      "memory": 59830272
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 16843026,
+      "elapsed_s": 27.254166333004832,
+      "memory": 63172608
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 17545971,
+      "elapsed_s": 28.262917582993396,
+      "memory": 66457600
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 18271474,
+      "elapsed_s": 29.27351179206744,
+      "memory": 60768256
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 18976672,
+      "elapsed_s": 30.283862125012092,
+      "memory": 64335872
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 19670428,
+      "elapsed_s": 31.295905583072454,
+      "memory": 67874816
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 20376161,
+      "elapsed_s": 32.304185417015105,
+      "memory": 62074880
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 21091335,
+      "elapsed_s": 33.314755458035506,
+      "memory": 65556480
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 21792716,
+      "elapsed_s": 34.32735241705086,
+      "memory": 60145664
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 22502116,
+      "elapsed_s": 35.3394507500343,
+      "memory": 63930368
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 23188688,
+      "elapsed_s": 36.35014879202936,
+      "memory": 67391488
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 23904276,
+      "elapsed_s": 37.361864792066626,
+      "memory": 61636608
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 24572278,
+      "elapsed_s": 38.36745854199398,
+      "memory": 65216512
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 25200025,
+      "elapsed_s": 39.3775316249812,
+      "memory": 59318272
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 25851226,
+      "elapsed_s": 40.386133249965496,
+      "memory": 62930944
+    },
+    {
+      "anonymous": 43814912,
+      "cpu_usec": 26540644,
+      "elapsed_s": 41.3963066249853,
+      "memory": 66473984
+    },
+    {
+      "anonymous": 45297664,
+      "cpu_usec": 27241615,
+      "elapsed_s": 42.40051883307751,
+      "memory": 62472192
+    },
+    {
+      "anonymous": 45907968,
+      "cpu_usec": 27914175,
+      "elapsed_s": 43.41078579204623,
+      "memory": 66383872
+    },
+    {
+      "anonymous": 45912064,
+      "cpu_usec": 28621031,
+      "elapsed_s": 44.4185443330789,
+      "memory": 69931008
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 29342153,
+      "elapsed_s": 45.42354687501211,
+      "memory": 64540672
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 30006706,
+      "elapsed_s": 46.4500821250258,
+      "memory": 69169152
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 30659956,
+      "elapsed_s": 47.4556172080338,
+      "memory": 62177280
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 31388895,
+      "elapsed_s": 48.50776358298026,
+      "memory": 66437120
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 32116825,
+      "elapsed_s": 49.51895666704513,
+      "memory": 69849088
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 32833141,
+      "elapsed_s": 50.57214141706936,
+      "memory": 64970752
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 33555198,
+      "elapsed_s": 51.57551679201424,
+      "memory": 67735552
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 34266688,
+      "elapsed_s": 52.593109583016485,
+      "memory": 62279680
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 34942119,
+      "elapsed_s": 53.60165216703899,
+      "memory": 65372160
+    },
+    {
+      "anonymous": 45920256,
+      "cpu_usec": 35630709,
+      "elapsed_s": 54.61352224997245,
+      "memory": 69087232
+    }
+  ]
+}

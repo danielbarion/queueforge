@@ -249,6 +249,14 @@ pub async fn run(
     let mut held: Option<QueueCmd> = None;
     // A lone fsync overlapped a deep burst. Cover the remainder on the next pass.
     let mut flush_remainder = false;
+    // A FlushDurable arrived while the log was parked. Sync again as soon as
+    // that fsync returns, rather than on the next interval tick.
+    let mut flush_requested = false;
+    // The in-flight fsync covered a quiet group of 2..4 waiters.
+    let mut few_inflight = false;
+    // That group stayed alone through its fsync: a few producers with one
+    // confirm each, not a pipeline. The next such group syncs at once.
+    let mut immediate_few = false;
 
     loop {
         // Expire any already-due messages before sleeping.
@@ -291,7 +299,12 @@ pub async fn run(
         } else {
             let deadline = state.next_deadline();
             let waiting_now = state.fsync_waiters.len();
-            let coalesce = waiting_now == 1 || (follow_up && state.pipeline_follow_up_ready());
+            // A few producers with one confirm in flight each park 2..4
+            // waiters. Those waited out the interval tick: two producers ran
+            // at 200 msg/s against a 10 ms interval. A deeper window (one
+            // producer with 20 in flight) keeps the interval and its batching.
+            let few = (2..=4).contains(&waiting_now) && state.wal.is_some();
+            let coalesce = waiting_now == 1 || few || (follow_up && state.pipeline_follow_up_ready());
             let coalesce_deadline = if use_timer && interval_fsync.is_none() && coalesce {
                 if waiting_now == 1 && state.immediate_lone {
                     Some(Instant::now())
@@ -318,6 +331,12 @@ pub async fn run(
                         lone_flush = lone;
                         state.finish_interval_fsync(joined, started);
                     }
+                    if flush_requested {
+                        flush_requested = false;
+                        if !state.fsync_waiters.is_empty() || state.unsynced_appends > 0 {
+                            state.pending_fsync = true;
+                        }
+                    }
                     // Deferred appends landed after the interval fsync. Sync them
                     // before the next command, so a quorum flush cannot confirm early.
                     if state.pending_fsync {
@@ -326,6 +345,8 @@ pub async fn run(
                     follow_up = true;
                     let alone = state.fsync_waiters.is_empty() && state.deferred_appends.is_empty();
                     state.immediate_lone = lone_flush && alone;
+                    immediate_few = few_inflight && alone;
+                    few_inflight = false;
                     // One message of a 96-burst rode this fsync. The rest are
                     // still short of the follow-up mark and must not wait out
                     // the interval.
@@ -361,6 +382,7 @@ pub async fn run(
                     tokio::task::yield_now().await;
                     if let Some(cmd) = take_ready_cmd(&mut rx, &mut internal_rx) {
                         state.immediate_lone = false;
+                        immediate_few = false;
                         held = Some(cmd);
                         continue;
                     }
@@ -371,6 +393,7 @@ pub async fn run(
                     let learned = waiting == 1 && state.immediate_lone;
                     let first_lone = waiting == 1 && quiet;
                     let paused_burst = follow_up && state.pipeline_follow_up_ready() && quiet;
+                    let few = (2..=4).contains(&waiting) && state.wal.is_some() && quiet;
                     if state.needs_group_commit_flush() && (learned || first_lone) {
                         if let Some(handle) = state.begin_lone_fsync() {
                             last_group_commit = tokio::time::Instant::now();
@@ -381,6 +404,16 @@ pub async fn run(
                         } else {
                             // No log to park. A zero deadline would spin this arm.
                             state.immediate_lone = false;
+                        }
+                    } else if few && state.needs_group_commit_flush() {
+                        // Completed straight after the fsync, before compact.
+                        if let Some(handle) = state.begin_lone_fsync() {
+                            last_group_commit = tokio::time::Instant::now();
+                            if let Some(interval) = interval.as_mut() {
+                                interval.reset();
+                            }
+                            few_inflight = true;
+                            interval_fsync = Some((std::time::Instant::now(), handle, false));
                         }
                     } else if paused_burst && state.needs_group_commit_flush() {
                         if let Some(handle) = state.begin_interval_fsync() {
@@ -434,20 +467,25 @@ pub async fn run(
                 // Steady-state lone confirm: fsync as soon as the append is in,
                 // unless the next command is already queued. That command is a
                 // pipeline and has to share the batch.
-                if state.immediate_lone
+                // Two to four waiters (producers with one confirm each) do the
+                // same, without the timer: tokio's next 1 ms tick held each round.
+                let waiting = state.fsync_waiters.len();
+                let few = immediate_few && (2..=4).contains(&waiting);
+                if ((state.immediate_lone && waiting == 1) || few)
                     && use_timer
                     && interval_fsync.is_none()
-                    && state.fsync_waiters.len() == 1
                 {
                     if let Some(cmd) = take_ready_cmd(&mut rx, &mut internal_rx) {
                         state.immediate_lone = false;
+                        immediate_few = false;
                         held = Some(cmd);
                     } else if let Some(handle) = state.begin_lone_fsync() {
                         last_group_commit = tokio::time::Instant::now();
                         if let Some(interval) = interval.as_mut() {
                             interval.reset();
                         }
-                        interval_fsync = Some((std::time::Instant::now(), handle, true));
+                        few_inflight = few;
+                        interval_fsync = Some((std::time::Instant::now(), handle, waiting == 1));
                     }
                 }
             }
@@ -458,6 +496,8 @@ pub async fn run(
                     state.fsync_waiters.push(FsyncWaiter { offset, tx: reply });
                     if !state.wal_parked {
                         state.pending_fsync = true;
+                    } else {
+                        flush_requested = true;
                     }
                 }
             }

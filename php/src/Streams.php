@@ -6,6 +6,19 @@ final class Streams
 {
     private Store $store;
     private array $records = [];
+    /** Body bytes in `records`, kept as they change so `trim` need not sum them. */
+    private int $bytes = 0;
+    /** Offsets below this are fsynced. A reader sees only those. */
+    private int $synced = 0;
+    /**
+     * Synced bodies kept in memory. Older records keep only their log
+     * position, length and time, and are read back from the log: holding a
+     * whole stream in memory reached the 1 GiB limit in a 30 s run.
+     */
+    public const MEMORY_BYTES = 64 * 1024 * 1024;
+    private int $memBytes = 0;
+    /** Records below this offset are paged out or trimmed. */
+    private int $pagedTo = 0;
     private array $sequences = [];
     private array $offsets = [];
     private int $next = 0;
@@ -28,11 +41,16 @@ final class Streams
                 continue;
             }
             $offset = $record['id'] - 1;
-            $this->records[$offset] = ['offset' => $offset, 'body' => $record['body'], 'headers' => $meta['headers'] ?? [], 'propRaw' => $record['propRaw'], 'time' => $meta['time'] ?? 0, 'exchange' => $meta['exchange'] ?? '', 'key' => $meta['key'] ?? ''];
+            $this->bytes += strlen($record['body']) - strlen($this->records[$offset]['body'] ?? '');
+            $this->memBytes += strlen($record['body']) - self::held($this->records[$offset] ?? null);
+            $this->records[$offset] = ['offset' => $offset, 'body' => $record['body'], 'headers' => $meta['headers'] ?? [], 'propRaw' => $record['propRaw'], 'time' => $meta['time'] ?? 0, 'exchange' => $meta['exchange'] ?? '', 'key' => $meta['key'] ?? '', 'pos' => $record['pos']];
             if (is_string($meta['raftGroup'] ?? null)) $this->raftApplied[$meta['raftGroup']] = max($this->raftApplied[$meta['raftGroup']] ?? 0, (int)($meta['raftIndex'] ?? 0));
             $this->next = max($this->next, $offset + 1);
             if (is_string($meta['reference'] ?? null) && is_int($meta['sequence'] ?? null)) $this->sequences[$meta['reference']] = ['sequence' => $meta['sequence'], 'offset' => $offset];
         }
+        $this->synced = $this->next;
+        $this->pagedTo = $this->records === [] ? $this->next : (int) array_key_first($this->records);
+        $this->pageOut();
         if (is_file($this->offsetPath)) {
             $value = json_decode((string) file_get_contents($this->offsetPath), true, 512, JSON_THROW_ON_ERROR);
             if (!is_array($value)) throw new RuntimeException('Invalid stream offsets');
@@ -45,22 +63,34 @@ final class Streams
             }
         }
     }
-    public function append(string $body, array $headers, ?string $propRaw, ?string $reference, ?int $sequence, ?string $raftGroup = null, ?int $raftIndex = null, ?int $timestamp = null, string $exchange = '', string $key = ''): int
+    public function append(string $body, array $headers, ?string $propRaw, ?string $reference, ?int $sequence, ?string $raftGroup = null, ?int $raftIndex = null, ?int $timestamp = null, string $exchange = '', string $key = '', bool $sync = true): int
     {
         if ($raftGroup !== null && $raftIndex !== null && $raftIndex <= ($this->raftApplied[$raftGroup] ?? 0)) return max(0,$this->next-1);
         if ($raftIndex === null && $reference !== null && $sequence !== null && isset($this->sequences[$reference]) && self::unsignedLessOrEqual($sequence, $this->sequences[$reference]['sequence'])) return $this->sequences[$reference]['offset'];
         $offset = $this->next; $time = $timestamp ?? (int) (microtime(true) * 1000);
         $this->store->appendPublish($offset + 1, 'stream', $body, 2, $propRaw, ['headers' => $headers, 'time' => $time, 'reference' => $reference, 'sequence' => $sequence, 'raftGroup'=>$raftGroup, 'raftIndex'=>$raftIndex, 'exchange'=>$exchange, 'key'=>$key]);
-        $this->store->sync();
-        $this->records[$offset] = ['offset' => $offset, 'body' => $body, 'headers' => $headers, 'propRaw' => $propRaw, 'time' => $time, 'exchange' => $exchange, 'key' => $key];
+        // Without `$sync` the caller runs `sync` later, once for many appends.
+        // Readers see the record only after that.
+        $this->bytes += strlen($body);
+        $this->memBytes += strlen($body);
+        $this->records[$offset] = ['offset' => $offset, 'body' => $body, 'headers' => $headers, 'propRaw' => $propRaw, 'time' => $time, 'exchange' => $exchange, 'key' => $key, 'pos' => $this->store->lastStart];
         $this->next++;
         if ($raftGroup !== null && $raftIndex !== null) $this->raftApplied[$raftGroup]=$raftIndex;
         if ($reference !== null && $sequence !== null) $this->sequences[$reference] = ['sequence' => $sequence, 'offset' => $offset];
+        if ($sync) $this->sync();
         $this->trim();
         return $offset;
     }
     private static function unsignedLessOrEqual(int $a,int $b):bool { if(($a<0)!==($b<0))return $a>=0;return $a<=$b; }
-    public function read(int $offset, int $count): array { $this->trim(); return array_values(array_slice($this->records, max(0, $offset - $this->first()), max(0, $count), true)); }
+    /** Records are keyed by offset with no gaps, so a read indexes them directly. */
+    public function read(int $offset, int $count): array
+    {
+        $this->trim();
+        $out = [];
+        $end = min($this->synced, max($offset, $this->first()) + max(0, $count));
+        for ($i = max($offset, $this->first()); $i < $end; $i++) if (isset($this->records[$i])) $out[] = $this->resolve($this->records[$i]);
+        return $out;
+    }
     public function first(): int { return $this->records === [] ? $this->next : (int) array_key_first($this->records); }
     public function next(): int { return $this->next; }
     public function sequence(string $reference): ?int { return $this->sequences[$reference]['sequence'] ?? null; }
@@ -80,12 +110,12 @@ final class Streams
     private function trim(): void
     {
         if (($this->maxBytes === null && $this->maxAgeMs === null) || count($this->records) < 2) return;
-        $bytes = array_sum(array_map(static fn(array $record): int => strlen($record['body']), $this->records));
+        $bytes = $this->bytes;
         $now = (int)(microtime(true) * 1000); $drop = 0;
         foreach ($this->records as $record) {
             if ($drop >= count($this->records) - 1) break;
             if (!($this->maxBytes !== null && $bytes > $this->maxBytes) && !($this->maxAgeMs !== null && $now - $record['time'] > $this->maxAgeMs)) break;
-            $bytes -= strlen($record['body']); $drop++;
+            $bytes -= self::size($record); $drop++;
         }
         if ($drop === 0) return;
         $snapshot = $this->snapshot();
@@ -95,7 +125,46 @@ final class Streams
         // the same atomic log replacement as the retained bodies.
         $this->install($snapshot);
     }
-    public function sync(): void { $this->store->sync(); }
+    public function sync(): void { $this->store->sync(); $this->synced = $this->next; $this->pageOut(); }
+
+    /** Body bytes a record holds in memory. */
+    private static function held(?array $record): int
+    {
+        return $record === null || isset($record['paged']) ? 0 : strlen($record['body']);
+    }
+
+    /** Body length, paged or not. */
+    private static function size(array $record): int
+    {
+        return isset($record['paged']) ? $record['len'] : strlen($record['body']);
+    }
+
+    /** Page the oldest synced bodies out until the memory budget holds. */
+    private function pageOut(): void
+    {
+        if ($this->memBytes <= self::MEMORY_BYTES) return;
+        $this->pagedTo = max($this->pagedTo, $this->first());
+        while ($this->memBytes > self::MEMORY_BYTES && $this->pagedTo < $this->synced) {
+            $r = $this->records[$this->pagedTo] ?? null;
+            if ($r !== null && !isset($r['paged'])) {
+                $this->memBytes -= strlen($r['body']);
+                $this->records[$this->pagedTo] = ['offset' => $r['offset'], 'paged' => true, 'pos' => $r['pos'], 'len' => strlen($r['body']), 'time' => $r['time']];
+            }
+            $this->pagedTo++;
+        }
+    }
+
+    /** A record with its body, read back from the log when it was paged out. */
+    private function resolve(array $record): array
+    {
+        if (!isset($record['paged'])) return $record;
+        $row = $this->store->readAt($record['pos']);
+        if ($row === null) throw new RuntimeException('Stream record unreadable at offset ' . $record['offset']);
+        $meta = $row['meta'];
+        return ['offset' => $record['offset'], 'body' => $row['body'], 'headers' => $meta['headers'] ?? [], 'propRaw' => $row['propRaw'], 'time' => $meta['time'] ?? $record['time'], 'exchange' => $meta['exchange'] ?? '', 'key' => $meta['key'] ?? '', 'pos' => $record['pos']];
+    }
+    /** True when an append is not yet covered by `sync`. */
+    public function dirty(): bool { return $this->synced < $this->next; }
     /** Validate the complete portable snapshot before replacing durable records. */
     public function install(array $state, ?string $group = null): void
     {
@@ -121,18 +190,18 @@ final class Streams
         $checkpoint = ['generation'=>$generation, 'next'=>$snap['next'], 'offsets'=>$snap['offsets'] ?? [], 'sequences'=>$snap['sequences'] ?? [], 'raftApplied'=>$applied];
         $path = $this->store->path; $temp = $path . '.snapshot-' . $generation; $fresh = new Store($temp);
         try {
-            foreach ($records as $record) $fresh->appendPublish($record['offset'] + 1, 'stream', $record['body'], 2, $record['propRaw'], ['headers'=>$record['headers'], 'time'=>$record['time'], 'exchange'=>$record['exchange'], 'key'=>$record['key']]);
+            foreach ($records as $i => $record) { $fresh->appendPublish($record['offset'] + 1, 'stream', $record['body'], 2, $record['propRaw'], ['headers'=>$record['headers'], 'time'=>$record['time'], 'exchange'=>$record['exchange'], 'key'=>$record['key']]); $records[$i]['pos'] = $fresh->lastStart; }
             // Keep replay boundaries and dedup state in the same atomic log replacement.
             $fresh->appendPublish(0, 'stream-state', '', 2, null, $checkpoint); $fresh->sync();
             if (!rename($temp, $path)) throw new RuntimeException('Cannot install stream snapshot');
             fclose($this->store->fp); $fresh->path = $path; $this->store = $fresh;
-            $this->records = $records; $this->next = $snap['next']; $this->offsets = $checkpoint['offsets']; $this->sequences = $checkpoint['sequences']; $this->raftApplied = $applied; $this->generation = $generation;
+            $this->records = $records; $this->bytes = 0; foreach ($records as $record) $this->bytes += strlen($record['body']); $this->memBytes = $this->bytes; $this->pagedTo = $snap['first']; $this->next = $snap['next']; $this->offsets = $checkpoint['offsets']; $this->sequences = $checkpoint['sequences']; $this->raftApplied = $applied; $this->generation = $generation; $this->synced = $this->next; $this->pageOut();
         } finally { if (is_file($temp)) { fclose($fresh->fp); unlink($temp); } }
     }
     public function snapshot(string $vhost = '/', string $queue = ''): array
     {
         return ['stream'=>['vhost'=>$vhost, 'queue'=>$queue, 'first'=>$this->first(), 'next'=>$this->next, 'raftIndex'=>$this->raftApplied === [] ? 0 : max($this->raftApplied),
-            'entries'=>array_map(static fn(array $r): array => ['offset'=>$r['offset'], 'ts'=>$r['time'], 'body_b64'=>base64_encode($r['body']), 'exchange'=>$r['exchange'] ?? '', 'routing_key'=>$r['key'] ?? '', 'headers'=>$r['headers'], 'propRaw'=>$r['propRaw'] === null ? null : base64_encode($r['propRaw'])], array_values($this->records)),
+            'entries'=>array_map(static fn(array $r): array => ['offset'=>$r['offset'], 'ts'=>$r['time'], 'body_b64'=>base64_encode($r['body']), 'exchange'=>$r['exchange'] ?? '', 'routing_key'=>$r['key'] ?? '', 'headers'=>$r['headers'], 'propRaw'=>$r['propRaw'] === null ? null : base64_encode($r['propRaw'])], array_map(fn (array $r): array => $this->resolve($r), array_values($this->records))),
             'offsets'=>$this->offsets, 'sequences'=>$this->sequences, 'raftApplied'=>$this->raftApplied]];
     }
 }

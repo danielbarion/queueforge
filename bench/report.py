@@ -8,8 +8,10 @@ text are edited by hand around those tables.
 import csv
 import glob
 import json
+import math
 import os
 import re
+import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +32,8 @@ def tsv(path):
 
 def num(v):
     try:
-        return float(v)
+        value = float(v)
+        return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 
@@ -142,15 +145,113 @@ def connections(root):
 # --- scenarios -----------------------------------------------------------
 
 def scenario_cells(root):
-    cells = {}
-    for r in tsv(os.path.join(root, "scenarios.tsv")):
-        cells[(r["broker"], r["size"], r["scenario"])] = r
-    return cells
+    return {key: value["row"] for key, value in scenario_repeat_stats(root).items()}
+
+
+SCENARIO_METRICS = ["sent_s", "confirmed_s", "received_s", "mb_s", "lat_p50_ms", "lat_p99_ms",
+                    "confirm_p50_ms", "confirm_p99_ms", "peak_mib", "anon_mib", "broker_cpu", "client_cpu"]
+
+
+def scenario_repeat_stats(root):
+    """Latest invocation/coherent provenance cohort per cell, with all outcomes retained.
+
+    Legacy rows without run IDs keep last-row selection. New run JSON is the
+    authoritative record; unfinished provenance records count as incomplete.
+    Metrics include every numeric observation, including failed-run memory.
+    """
+    rows = tsv(os.path.join(root, "scenarios.tsv"))
+    by_id = {r["run_id"]: i for i, r in enumerate(rows) if r.get("run_id")}
+    def read_object(path):
+        try:
+            with open(path) as f:
+                value = json.load(f)
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
+    for path in sorted(glob.glob(os.path.join(root, "runs", "*", "provenance.json"))):
+        meta = read_object(path)
+        metadata_keys = ("run_id", "cohort_id", "broker_image", "client_image", "harness_sha256", "scenario_sha256", "resources_sha256", "started_utc")
+        if meta is not None and (not all(key in meta for key in metadata_keys) or not isinstance(meta.get("broker"), str)
+                                 or not isinstance(meta.get("scenario"), dict) or not isinstance(meta["scenario"].get("id"), str)
+                                 or not isinstance(meta.get("resources"), dict) or "broker_cpus" not in meta["resources"]):
+            meta = None
+        result = os.path.join(os.path.dirname(path), "row.json")
+        row = read_object(result)
+        if row is not None and not all(isinstance(row.get(key), str) for key in ("broker", "size", "scenario", "ok")):
+            row = None
+        directory_id = os.path.basename(os.path.dirname(path))
+        if meta is None:
+            # Preserve attribution from the redundant TSV/result if possible;
+            # otherwise retain an explicitly unassigned, unscored artifact.
+            row = row or (dict(rows[by_id[directory_id]]) if directory_id in by_id else {})
+            row.update(ok="0", err="incomplete", artifact_error=path)
+            row.setdefault("run_id", directory_id)
+            row.setdefault("broker", "unknown")
+            row.setdefault("size", "unknown")
+            row.setdefault("scenario", "unreadable:" + directory_id)
+        else:
+            if row is None:
+                resource = meta["resources"]
+                row = {"broker": meta["broker"], "scenario": meta["scenario"]["id"],
+                       "size": next((size for cpus, _mem, size in S.SIZES if cpus == resource["broker_cpus"]), str(resource)),
+                       "ok": "0", "err": "incomplete"}
+                if os.path.exists(result):
+                    row["artifact_error"] = result
+            row.update({k: meta[k] for k in ("run_id", "cohort_id", "broker_image", "client_image", "harness_sha256", "scenario_sha256", "resources_sha256", "started_utc")})
+            row.update({k: meta[k] for k in ("expected_repeats", "repeat_ordinal") if k in meta})
+        if row["run_id"] in by_id:
+            rows[by_id[row["run_id"]]] = row
+        else:
+            rows.append(row)
+    groups = {}
+    latest = {}
+    for index, row in enumerate(rows):
+        cell = (row["broker"], row["size"], row["scenario"])
+        cohort = tuple(row.get(k, "") for k in ("cohort_id", "broker_image", "client_image", "harness_sha256", "scenario_sha256", "resources_sha256")) if row.get("run_id") else ("legacy", index)
+        groups.setdefault((cell, cohort), []).append(row)
+        # Timestamps are UTC ISO strings. A legacy row's append position is
+        # the only available time; retain its existing last-row semantics.
+        order = (row.get("started_utc", ""), index)
+        if cell not in latest or order > latest[cell][0]:
+            latest[cell] = (order, cohort)
+    out = {}
+    for cell, (_order, cohort) in latest.items():
+        repeats = groups[(cell, cohort)]
+        sc = next((s for s in S.SCENARIOS if s["id"] == cell[2]), {"id": cell[2]})
+        failed = sum(r.get("ok") != "1" and r.get("err") != "incomplete" for r in repeats)
+        incomplete = sum(r.get("err") == "incomplete" or (sc["id"] == "backlog" and r.get("ok") == "1" and r.get("kept") != "yes") for r in repeats)
+        missed = sum(r.get("ok") == "1" and sc["id"] != "backlog" and (r.get("kept") != "yes" if sc["id"] in LATENCY else r.get("kept") not in (None, "", "yes")) for r in repeats)
+        success = len(repeats) - failed - incomplete - missed
+        planned = [int(value) for r in repeats if (value := num(r.get("expected_repeats"))) is not None and value >= 1 and value.is_integer()]
+        expected = max([len(repeats), *planned])
+        missing = expected - len(repeats)
+        incomplete += missing
+        metrics = {}
+        for metric in SCENARIO_METRICS:
+            values = [v for r in repeats if (v := num(r.get(metric))) is not None]
+            metrics[metric] = {"n": len(values), "median": statistics.median(values) if values else None,
+                               "min": min(values) if values else None, "max": max(values) if values else None}
+        row = dict(repeats[-1])
+        for metric, summary in metrics.items():
+            row[metric] = summary["median"]
+        summary = {"cohort": cohort, "n": len(repeats), "expected": expected, "missing": missing, "success": success, "failed": failed,
+                   "incomplete": incomplete, "missed": missed, "metrics": metrics, "run_ids": [r.get("run_id") for r in repeats],
+                   "unreadable_artifacts": [r["artifact_error"] for r in repeats if r.get("artifact_error")]}
+        row["_repeat_stats"] = summary
+        out[cell] = {**summary, "row": row}
+    return out
 
 
 def primary(sc, r):
     """(value, unit, higher_is_better) for one cell, or None when it did not run cleanly."""
     if not r or r.get("ok") != "1":
+        return None
+    repeats = r.get("_repeat_stats", {})
+    if repeats.get("failed", 0) or repeats.get("incomplete", 0) or repeats.get("missed", 0):
+        return None
+    if sc["id"] == "backlog" and r.get("kept") != "yes":
+        return None
+    if sc["id"] in LATENCY and r.get("kept") != "yes":
         return None
     if sc["id"] == "backlog":
         if r.get("kept") != "yes":
@@ -166,20 +267,32 @@ def primary(sc, r):
 def cell_text(sc, r):
     if not r:
         return "–"
+    repeat = r.get("_repeat_stats", {})
+    if (repeat.get("n", 0) > 1 or repeat.get("missing", 0)) and (repeat["failed"] or repeat["incomplete"] or repeat["missed"]):
+        return f"unscored ({repeat['success']}/{repeat.get('expected', repeat['n'])} complete; {repeat['failed']} failed, {repeat['incomplete']} incomplete, {repeat['missed']} missed rate)"
     if r.get("ok") != "1":
         return f"failed ({r.get('err') or 'no result'})"
     if sc["id"] == "backlog" and r.get("kept") != "yes":
         return (f"{fmt(num(r.get('sent_s')))} / {fmt(num(r.get('received_s')))} "
                 f"(incomplete: {r.get('kept') or 'completion not verified'})")
     v = primary(sc, r)
+    def repeat_range(metric, digits=0):
+        if repeat.get("n", 0) < 2:
+            return ""
+        stats = repeat["metrics"][metric]
+        return f" [{fmt(stats['min'], digits)}–{fmt(stats['max'], digits)}; n={repeat['n']}]"
     if sc["id"] == "backlog":
-        return f"{fmt(v[0])} / {fmt(v[1])}"
+        if v is None:
+            return f"incomplete ({r.get('kept') or 'drain unverified'})"
+        return f"{fmt(v[0])} / {fmt(v[1])}" + repeat_range("received_s")
     if sc.get("bytes"):
-        return f"{fmt(v, 1)} MB/s"
+        note = " (missed delivery rate)" if v is None and r.get("kept") == "no" else ""
+        return f"{fmt(num(r.get('mb_s')), 1)} MB/s{note}" + repeat_range("mb_s", 1)
     if sc["id"] in LATENCY:
         kept = "" if r.get("kept") == "yes" else " (missed rate)"
-        return f"{fmt(v, 2)} ms{kept}"
-    return fmt(v)
+        return f"{fmt(num(r.get('lat_p99_ms')), 2)} ms{kept}" + repeat_range("lat_p99_ms", 2)
+    note = " (missed delivery rate)" if v is None and r.get("kept") == "no" else ""
+    return fmt(num(r.get("received_s"))) + note + repeat_range("received_s")
 
 
 def scenarios_md(cells, size):
@@ -214,7 +327,10 @@ def scenarios_mem_md(cells, size):
         def m(r):
             if not r:
                 return "–"
-            return f"{r.get('anon_mib') or '?'} / {r.get('peak_mib') or '?'}"
+            def metric(name):
+                value = num(r.get(name))
+                return "?" if value is None else fmt(value)
+            return f"{metric('anon_mib')} / {metric('peak_mib')}"
 
         lines.append(f"| {sc['title']} | " + " | ".join(m(r) for r in row) + " |")
     return "\n".join(lines)
@@ -269,9 +385,11 @@ def site_ts(paced_data, cells, conns, sc_cells):
                 vals[TONE[k]] = None if v is None else round(v, 2)
             kind = "latency" if sc["id"] in LATENCY else ("bytes" if sc.get("bytes") else "rate")
             texts = {TONE[k]: cell_text(sc, r) for k, r in row.items()}
+            memory = {TONE[k]: {"anonymous": num((r or {}).get("anon_mib")),
+                                "cgroup": num((r or {}).get("peak_mib"))} for k, r in row.items()}
             out.append(
                 f'  {{ size: "{size}", id: "{sc["id"]}", title: {json.dumps(sc["title"])}, real: {json.dumps(sc["real"])}, '
-                f'kind: "{kind}", values: {json.dumps(vals)}, text: {json.dumps(texts)} }},'
+                f'kind: "{kind}", values: {json.dumps(vals)}, text: {json.dumps(texts)}, memory: {json.dumps(memory)} }},'
             )
     out.append("];")
     return "\n".join(out) + "\n"

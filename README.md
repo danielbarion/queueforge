@@ -8,6 +8,8 @@ Three AMQP 0-9-1 brokers live in this folder: Rust, Bun, and PHP. All three can 
 | [`bun/`](bun/) | The Bun broker. Messages live in SQLite. Management HTTP is Elysia. AMQP is a Bun TCP listener. |
 | [`php/`](php/) | The PHP broker. One process, one `stream_select()` loop, no Composer and no dependencies beyond `ext-sockets`. Messages live in an append-only log. Classic and quorum queues, policies, management HTTP, Prometheus, TLS, MQTT, STOMP, streams, and an AMQP 1.0 shim. A cluster member. Client-visible behaviour matches Rust and Bun; see [`php/README.md`](php/README.md) for where it deliberately does not. |
 
+Results against RabbitMQ are in [`BENCHMARK.md`](BENCHMARK.md), produced by the harness in [`bench/`](bench/). Open problems those runs found, with evidence and where to look, are in [`PENDING.md`](PENDING.md).
+
 Build and test the Rust broker from its subdirectory:
 
 ```bash
@@ -44,6 +46,8 @@ docker compose -f docker-compose.bench.yml run --rm --no-deps \
   --entrypoint php -v ./php/test:/opt/queueforge/test \
   php test/run.php
 ```
+
+CI runs with Woodpecker; see [setup, checks, and GitHub CI rollback](docs/ci.md).
 
 ## Cluster
 

@@ -37,7 +37,15 @@ export async function handleChannelOpen(this: Conn, channel: number) {
  */
 export async function handleChannelClose(this: Conn, channel: number) {
   const open = this.channels.has(channel);
-  await this.requeueChannel(this.ch(channel));
+  const c = this.ch(channel);
+  for (const [tag, queue] of c.consumers) {
+    this.outputWakers.delete(`${channel}\0${tag}`);
+    await this.broker.cancel(this.vhost, queue, tag);
+  }
+  this.txOperations = Math.max(0, this.txOperations - c.txBatch.length);
+  c.txBatch = [];
+  c.txBytes = 0;
+  await this.requeueChannel(c);
   await this.send(methodFrame(channel, method(20, 41, () => {})));
   this.channels.delete(channel);
   this.broker.forgetMgmtChannelConsumers(this.mgmtName, channel);
@@ -108,6 +116,7 @@ export function syncMgmt(this: Conn) {
  * A missing queue home is ignored so connection teardown can continue.
  */
 export async function requeueChannel(this: Conn, c: Ch) {
+  await this.requeueParked(c);
   const pending = [...c.deliveries.values()];
   c.deliveries.clear();
   for (const d of pending) {
@@ -115,6 +124,23 @@ export async function requeueChannel(this: Conn, c: Ch) {
       await this.broker.nack(d.vhost, d.queue, d.id, true);
     } catch {
       /* home is gone; this connection is already closing */
+    }
+  }
+}
+
+/** Return claimed deliveries that never reached the client's socket. */
+export async function requeueParked(this: Conn, c: Ch, tag?: string) {
+  const pending = c.parked.filter(item => tag == null || item.tag === tag);
+  c.parked = c.parked.filter(item => tag != null && item.tag !== tag);
+  for (const item of pending) {
+    this.parkedBytes = Math.max(0, this.parkedBytes - item.msg.body.length - item.msg.propRaw.length);
+    this.parkedOperations = Math.max(0, this.parkedOperations - 1);
+    item.release?.();
+    if (item.noAck) continue;
+    try {
+      await this.broker.nack(this.vhost, item.queue, item.msg.id, true);
+    } catch {
+      /* home is gone; teardown must still release the retained body */
     }
   }
 }
@@ -127,6 +153,7 @@ export async function requeueChannel(this: Conn, c: Ch) {
 export async function dropConsumers(this: Conn) {
   for (const [channel, c] of this.channels) {
     for (const [tag, queue] of c.consumers) {
+      this.outputWakers.delete(`${channel}\0${tag}`);
       await this.broker.cancel(this.vhost, queue, tag);
       this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
     }
@@ -145,5 +172,6 @@ Conn.prototype.handleChannelFlow = handleChannelFlow;
 Conn.prototype.chanClose = chanClose;
 Conn.prototype.syncMgmt = syncMgmt;
 Conn.prototype.requeueChannel = requeueChannel;
+Conn.prototype.requeueParked = requeueParked;
 Conn.prototype.dropConsumers = dropConsumers;
 Conn.prototype.requeueAll = requeueAll;

@@ -8,7 +8,7 @@ use queueforge_amqp::confirm as confirm_method;
 use queueforge_amqp::tx as tx_method;
 use queueforge_amqp::Method;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::debug;
+use tracing::{debug, warn};
 
 impl<'a, S> Connection<'a, S>
 where
@@ -68,10 +68,38 @@ where
             };
             if step == Step::Done {
                 self.tx_applying = false;
+                self.tx_durable.clear();
+                self.tx_flush.clear();
                 return Ok(Step::Done);
             }
         }
         self.tx_applying = false;
+        // The publishes were applied in order. Their fsyncs are awaited
+        // together: commit-ok still follows the covering sync of every one.
+        // One fsync per queue the commit wrote to, now. The group-commit
+        // interval would add up to 10 ms to every commit.
+        for (_, tx, offset) in std::mem::take(&mut self.tx_flush) {
+            let (reply, _done) = oneshot::channel();
+            let _ = tx.send(QueueCmd::FlushDurable { offset, reply }).await;
+        }
+        let mut failed = false;
+        for wait in std::mem::take(&mut self.tx_durable) {
+            match wait.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(error = %e, "durable_done error on tx.commit publish");
+                    failed = true;
+                }
+                Err(_) => {
+                    warn!("durable_done oneshot canceled during tx.commit (queue actor gone?)");
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            metrics::counter!("queueforge_publish_partial_failure_total").increment(1);
+            return self.publish_partial_failure(channel, None).await;
+        }
         self.send_method(channel, &Method::TxCommitOk(tx_method::CommitOk))
             .await?;
         Ok(Step::Continue)

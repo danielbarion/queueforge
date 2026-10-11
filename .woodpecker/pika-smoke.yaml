@@ -1,0 +1,21 @@
+labels:
+  backend: docker
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: pika-smoke
+    image: rust:bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+      QUEUEFORGE_ADMIN_USER: admin
+      QUEUEFORGE_ADMIN_PASSWORD: devpassword12
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv curl
+      - python3 -m venv .ci-tools/pika
+      - .ci-tools/pika/bin/pip install pika
+      - cd rust && cargo build -p queueforge-broker && cd ..
+      - sh .ci/pika-smoke.sh

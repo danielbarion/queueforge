@@ -347,8 +347,12 @@ export async function cancel(this: Broker, vhost: string, queue: string, tag: st
   q.consumers = q.consumers.filter((c) => c.tag !== tag);
   const session = consumer?.session ?? this.remoteQuorum.get(`${vhost}\0${queue}\0${tag}`);
   this.remoteQuorum.delete(`${vhost}\0${queue}\0${tag}`);
-  if (session != null && q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
-    await this.cluster!.call(this.quorumLeader(q), "unsub", { vhost, queue, session });
+  if (session != null && this.cluster) {
+    if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
+      await this.cluster.unsubscribe(this.quorumLeader(q), { vhost, queue, session });
+    } else if (q.argsParsed.queueType === "classic" && !this.isLocalHome(q.home)) {
+      await this.cluster.unsubscribe(q.home!, { vhost, queue, session });
+    }
   }
   // An auto-delete queue goes once the last consumer it ever had is gone.
   if (consumer && q.autoDelete && q.consumers.length === 0 && this.isLocalHome(q.home)) {

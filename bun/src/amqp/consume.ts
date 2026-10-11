@@ -35,6 +35,11 @@ export async function qos(this: Conn, channel: number, c: Ch, payload: Uint8Arra
  * or a global prefetch (when set) is full. Zero prefetch means unlimited.
  */
 export function creditOk(this: Conn, c: Ch, tag: string): boolean {
+  if (this.closed || this.connClosed) return false;
+  if (this.outboundBytes + this.stagedBytes + this.writeQueuedBytes + (this.socket.pendingBytes?.() ?? 0) >= 2 * 1024 * 1024) {
+    this.outputBlocked = true;
+    return false;
+  }
   if (!c.flow) return false;
   const own = c.byConsumer.get(tag) ?? 0;
   if (c.prefetch !== 0 && own >= c.prefetch) return false;
@@ -105,27 +110,48 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     },
     onCancel: () => {
       c.consumers.delete(tag);
+      this.outputWakers.delete(`${channel}\0${tag}`);
       void this.send(methodFrame(channel, method(60, 30, (w) => {
         w.shortstr(tag);
         w.bits([true]);
       })));
     },
     deliver: (msg) => {
+      if (this.closed || this.connClosed || !c.consumers.has(tag)) {
+        if (reserved > 0) reserved--;
+        if (!noAck) void Promise.resolve(this.broker.nack(this.vhost, queue, msg.id, true)).catch(() => {});
+        return;
+      }
       if (!this.creditOk(c, tag)) {
+        this.parkedBytes += msg.body.length + msg.propRaw.length;
+        this.parkedOperations++;
         c.parked.push({
           channel,
           tag,
           queue,
           msg,
+          noAck,
           release: reserved > 0 ? () => {
             if (reserved > 0) reserved--;
           } : undefined,
         });
+        if (this.parkedBytes > 64 * 1024 * 1024 || this.parkedOperations > 65536) {
+          void this.connClose(506, "RESOURCE_ERROR - parked deliveries exceed connection limit");
+        }
         return;
       }
       if (reserved > 0) reserved--;
-      this.handOff(channel, c, tag, queue, msg);
+      this.handOff(channel, c, tag, queue, msg, noAck);
     },
+  });
+  this.outputWakers.set(`${channel}\0${tag}`, () => {
+    this.flushParked(c);
+    const target = this.broker.queues.get(this.broker.key(this.vhost, queue));
+    if (!target) return;
+    // Stream readers consume this node's local log, including replicated logs.
+    // kick() establishes remote subscriptions; a drain must never repeat that.
+    if (target.argsParsed.queueType === "stream") this.broker.pumpStream(target);
+    else if (target.argsParsed.queueType === "quorum" ? this.broker.isQuorumLeader(target) : this.broker.isLocalHome(target.home)) this.broker.pump(target);
   });
   if (!nowait) await this.send(methodFrame(channel, method(60, 21, (w) => w.shortstr(tag))));
   await this.broker.kick(this.vhost, queue, session);
@@ -139,12 +165,15 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
  * @param tag Consumer tag.
  * @param queue Queue the message came from.
  * @param msg Message to put on the wire.
+ * @param noAck Auto-ack deliveries have tags but no outstanding settlement state.
  */
-export function handOff(this: Conn, channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg) {
+export function handOff(this: Conn, channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg, noAck = false) {
   const dtag = c.nextDel++;
-  c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag });
-  c.byConsumer.set(tag, (c.byConsumer.get(tag) ?? 0) + 1);
-  c.globalUnacked++;
+  if (!noAck) {
+    c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag });
+    c.byConsumer.set(tag, (c.byConsumer.get(tag) ?? 0) + 1);
+    c.globalUnacked++;
+  }
   void this.deliver(channel, tag, dtag, msg);
 }
 
@@ -161,7 +190,9 @@ export function flushParked(this: Conn, c: Ch) {
       continue;
     }
     item.release?.();
-    this.handOff(item.channel, c, item.tag, item.queue, item.msg);
+    this.parkedBytes = Math.max(0, this.parkedBytes - item.msg.body.length - item.msg.propRaw.length);
+    this.parkedOperations = Math.max(0, this.parkedOperations - 1);
+    this.handOff(item.channel, c, item.tag, item.queue, item.msg, item.noAck);
   }
   c.parked = rest;
 }
@@ -214,6 +245,8 @@ export async function cancel(this: Conn, channel: number, c: Ch, payload: Uint8A
   const queue = c.consumers.get(tag);
   if (queue) await this.broker.cancel(this.vhost, queue, tag);
   c.consumers.delete(tag);
+  await this.requeueParked(c, tag);
+  this.outputWakers.delete(`${channel}\0${tag}`);
   this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
   await this.send(methodFrame(channel, method(60, 31, (w) => w.shortstr(tag))));
 }
@@ -230,7 +263,7 @@ export function ack(this: Conn, c: Ch, payload: Uint8Array): Promise<void> | voi
   const tag = r.u64();
   const multiple = (r.u8() & 1) !== 0;
   if (c.tx) {
-    c.txBatch.push(() => this.settle(c, tag, multiple, false, false));
+    this.stageTransaction(c, () => this.settle(c, tag, multiple, false, false));
     return;
   }
   return this.settle(c, tag, multiple, false, false);
@@ -252,7 +285,7 @@ export async function reject(this: Conn, c: Ch, payload: Uint8Array, fromNack: b
   const requeue = fromNack ? (bits & 2) !== 0 : (bits & 1) !== 0;
   const multiple = fromNack ? (bits & 1) !== 0 : false;
   const op = async () => this.settle(c, tag, multiple, true, requeue);
-  if (c.tx) c.txBatch.push(op);
+  if (c.tx) this.stageTransaction(c, op);
   else await op();
 }
 

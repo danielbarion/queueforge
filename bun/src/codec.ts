@@ -513,6 +513,21 @@ export function encodeSettle(channel: number, deliveryTag: number, nack: boolean
 }
 
 /**
+ * UTF-8 bytes of a consumer tag, exchange or routing key. The same few
+ * strings go out on every delivery, so their encoding is kept. Callers only
+ * read the bytes.
+ */
+const shortCache = new Map<string, Uint8Array>();
+function shortBytes(s: string): Uint8Array {
+  let b = shortCache.get(s);
+  if (b) return b;
+  b = enc.encode(s);
+  if (shortCache.size >= 4096) shortCache.clear();
+  shortCache.set(s, b);
+  return b;
+}
+
+/**
  * basic.deliver, content header, and body as one buffer.
  * Returns null when a shortstr would not fit or the body needs more than one
  * frame, so the caller uses the generic builder.
@@ -524,9 +539,9 @@ export function encodeDeliver(
   msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array },
   frameMax = FRAME_MAX,
 ): Uint8Array | null {
-  const tagB = enc.encode(tag);
-  const exB = enc.encode(msg.exchange);
-  const rkB = enc.encode(msg.routingKey);
+  const tagB = shortBytes(tag);
+  const exB = shortBytes(msg.exchange);
+  const rkB = shortBytes(msg.routingKey);
   if (tagB.length > 255 || exB.length > 255 || rkB.length > 255) return null;
   // A body past one frame goes through `bodyFrame`, which splits it at frame-max.
   if (msg.body.length + 8 > frameMax) return null;

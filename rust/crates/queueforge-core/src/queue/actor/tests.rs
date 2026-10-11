@@ -399,6 +399,57 @@ async fn one_hundred_twenty_eight_waiters_share_one_fsync() {
     shutdown(tx, actor).await;
 }
 
+/// Two producers with one confirm in flight each must not wait for the
+/// interval: they ran at 200 msg/s against a 10 ms group-commit interval.
+#[tokio::test]
+async fn two_one_confirm_producers_do_not_wait_out_the_interval() {
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "two-producers");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(8);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let started = std::time::Instant::now();
+    for round in 0..20u8 {
+        let mut a = (*sample_msg(&[round, 0])).clone();
+        a.persistent = true;
+        let mut b = (*sample_msg(&[round, 1])).clone();
+        b.persistent = true;
+        let first = enqueue(&tx, Arc::new(a)).await;
+        let second = enqueue(&tx, Arc::new(b)).await;
+        first.durable_done.await.unwrap().unwrap();
+        second.durable_done.await.unwrap().unwrap();
+    }
+    let elapsed = started.elapsed();
+    // Each pair is covered by an fsync, never released before one.
+    assert!(syncs.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+    // The first pair learns on a 1 ms quiet window; later pairs sync at once.
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "20 rounds of two one-confirm producers took {elapsed:?}"
+    );
+    shutdown(tx, actor).await;
+}
+
 /// The second and later lone confirms must not sit out the 1 ms quiet window.
 #[tokio::test]
 async fn steady_lone_confirm_does_not_wait_a_millisecond() {

@@ -7,11 +7,14 @@ import {
   loadRows,
   paced,
   scale,
+  scenarioAverages,
   scenarioRows,
+  type Bar,
   type LoadRow,
   type Tone,
 } from "../bench";
 import { ScenarioTable } from "../scenario-table";
+import { SizeCharts } from "../size-chart";
 
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
 const RATES = ["one", "shared", "spread"] as const;
@@ -65,16 +68,25 @@ export const metadata: Metadata = {
 
 export default function BenchmarkPage() {
   const rabbit = paced[0].rate;
+  const averages = scenarioAverages(scenarioRows);
+  const score = Object.fromEntries(averages.map((row) => [row.tone, row])) as Record<Tone, (typeof averages)[number]>;
+  const averageBars: Bar[] = averages.map((row) => ({
+    name: row.name,
+    rate: row.mean,
+    tone: row.tone,
+    note: row.tone === "mq" ? `${row.used} scenarios` : `${row.used} of ${row.possible}`,
+  }));
   return (
     <main id="content">
       <section className="page-intro">
         <div className="wrap">
-          <p className="kicker">Benchmark · 2026-10-09</p>
+          <p className="kicker">Benchmark · 2026-10-11</p>
           <h1>Measured against RabbitMQ 4.3.</h1>
           <p className="lede">
-            QueueForge waits for the covering fsync. RabbitMQ 4.3 classic confirms before its
-            flush. These are not the same moment. The rates below are not a slogan, and the
-            scenarios where QueueForge loses are in the table too.
+            QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
+            batch write, or a consumer ack if that happens first, and classic does not fsync before
+            the confirm. The figure below is the average across scenarios, not one of them. The
+            rows where QueueForge loses stay in the table.
           </p>
         </div>
       </section>
@@ -83,20 +95,34 @@ export default function BenchmarkPage() {
         <div className="wrap split-proof">
           <div>
             <h2>
-              {formatTimes(paced[1].rate, rabbit)}× Rust. {formatTimes(paced[2].rate, rabbit)}× Bun.{" "}
-              {formatTimes(paced[3].rate, rabbit)}× PHP.
+              {formatTimes(score.rust.mean, 1)}× Rust. {formatTimes(score.bun.mean, 1)}× Bun.{" "}
+              {formatTimes(score.php.mean, 1)}× PHP.
             </h2>
             <p className="section-lead">
-              Paced messages/s that stayed kept. Durable 256-byte body, 128 confirms in flight, 1
-              CPU / 512 MiB, Mac client through the published port, measured 2026-10-09. Same
-              client and scenarios as the 2026-10-05 run. A step counts only when confirms and acks
-              both reach 95% of the offer.
+              Geometric mean of each finished application scenario divided by RabbitMQ. A lower
+              latency counts as faster. A missing cell is left out, not scored as zero. RabbitMQ
+              has a number on {score.mq.used} scenarios; Rust is scored on {score.rust.used}, Bun on{" "}
+              {score.bun.used} and PHP on {score.php.used} of them. The durable 256-byte paced score, 128 confirms in flight, is separate:{" "}
+              {formatTimes(paced[1].rate, rabbit)}× Rust, {formatTimes(paced[2].rate, rabbit)}× Bun,{" "}
+              {formatTimes(paced[3].rate, rabbit)}× PHP.
             </p>
           </div>
           <div className="panel chart">
-            <p className="chart-title">Kept messages/s</p>
-            <Bars rows={paced} unit="/s" base={rabbit} />
+            <p className="chart-title">Average, × RabbitMQ</p>
+            <Bars rows={averageBars} unit="×" />
           </div>
+        </div>
+      </section>
+
+      <section className="band">
+        <div className="wrap">
+          <h2>Across container sizes.</h2>
+          <p className="section-lead">
+            Unpaced message rate at each container in the load sweep. 16 connections is consume/s,
+            the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
+            The numbers are the same ones in the table further down.
+          </p>
+          <SizeCharts rows={loadRows} />
         </div>
       </section>
 
@@ -106,11 +132,11 @@ export default function BenchmarkPage() {
             <h2>Sixteen queues, four cores.</h2>
             <p className="section-lead">
               Unpaced confirm/s inside the Docker network. 4 CPU / 4 GiB, durable classic, 256-byte
-              body, measure 8 s, 2026-10-09. Rust is{" "}
+              body, measure 8 s, 2026-10-11. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ here. Bun is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust, and consume/s matches confirm/s.
-              PHP, one process per core with each queue on its home process, is{" "}
+              PHP, which runs one process unless told otherwise, is{" "}
               {formatTimes(scale[3].rate, scale[0].rate)}× RabbitMQ.
             </p>
           </div>
@@ -136,9 +162,13 @@ export default function BenchmarkPage() {
           <h3 className="table-heading">4 CPU / 4 GiB</h3>
           <ScenarioTable rows={scenarioRows.filter((row) => row.size === "4 CPU / 4 GiB")} />
           <p className="caption">
-            RabbitMQ confirms before its flush; QueueForge confirms after the fsync. Large bodies
-            are where that costs QueueForge the most. Backlog is fill / drain msg/s for 300,000
-            durable 1 KiB messages. Memory peaks and every caveat are in{" "}
+            RabbitMQ classic confirms after the batch write, or after a consumer ack if that
+            happens first, and does not fsync before the confirm. QueueForge confirms after the
+            fsync. Large bodies are where that costs QueueForge the most. Backlog is fill / drain msg/s for 300,000
+            durable 1 KiB messages. Below each score: anonymous / total cgroup memory peaks
+            in MiB, sampled once per second. Total includes file cache; anonymous memory
+            includes more than the language heap. For repeats, these are medians of sampled
+            run peaks. Every caveat and raw result is in{" "}
             <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>
