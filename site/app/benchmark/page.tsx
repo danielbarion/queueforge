@@ -167,11 +167,13 @@ export default function BenchmarkPage() {
             happens first, and does not fsync before the confirm. QueueForge confirms after the
             fsync. Large bodies are where that costs QueueForge the most. Backlog is the fill and
             drain rate for 300,000 durable 1 KiB messages. Under each score: the lowest and highest
-            of its runs, then peak memory, sampled once per second. The first memory figure is the
-            broker&apos;s own processes (anonymous memory, which includes more than the language
-            heap); the one in brackets is the whole container, file cache included. With repeats,
-            memory is the median of the runs&apos; peaks. Every caveat and raw result is in{" "}
-            <a href={BENCH_MD}>BENCHMARK.md</a>.
+            of its runs. Memory is the peak of the broker&apos;s own processes (anonymous memory,
+            which includes more than the language heap), sampled once per second. With cache is
+            the whole container as Linux counts it: it adds the page cache of the files the broker
+            writes, which grows with how much it logs, not with what it holds, and which the kernel
+            takes back under pressure. A durable broker can sit at its 1 GiB limit that way
+            without being short of memory. With repeats, memory is the median of the runs&apos;
+            peaks. Every caveat and raw result is in <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>
       </section>

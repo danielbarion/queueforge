@@ -13,10 +13,12 @@ const UNIT: Record<ScenarioRow["kind"], string> = {
   latency: "p99 ms",
 };
 
-function memoryText(memory: ScenarioRow["memory"][Tone]) {
-  const format = (value: number | null) => value == null ? "–" : `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} MiB`;
-  if (memory.anonymous == null && memory.cgroup == null) return "";
-  return `Memory ${format(memory.anonymous)} (${format(memory.cgroup)} with cache)`;
+const MEMORY_TITLE = "Peak memory of the broker's own processes (anonymous memory), sampled once per second.";
+const CACHE_TITLE =
+  "Peak memory of the whole container, which adds the page cache of the files the broker writes. The kernel gives that cache back under pressure.";
+
+function mib(value: number | null) {
+  return value == null ? "–" : value.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
 /** The best value in a row: highest rate, or lowest p99 latency. */
@@ -34,21 +36,32 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
         <table>
           <colgroup>
             <col className="scenario-column" />
-            <col className="score-column" />
-            {COLUMNS.map((c) => <col className="broker-column" key={c.tone} />)}
+            <col className="unit-column" />
+            {COLUMNS.map((c) => [
+              <col className="score-column" key={`${c.tone}-score`} />,
+              <col className="memory-column" key={`${c.tone}-memory`} />,
+              <col className="memory-column" key={`${c.tone}-cache`} />,
+            ])}
           </colgroup>
           <thead>
             <tr>
-              <th scope="col">Scenario</th>
-              <th scope="col">Score</th>
+              <th scope="col" rowSpan={2}>Scenario</th>
+              <th scope="col" rowSpan={2}>Unit</th>
               {COLUMNS.map((c) => (
-                <th scope="col" key={c.tone}>
+                <th scope="colgroup" colSpan={3} key={c.tone} className="broker-group">
                   <span className={`app tone-${c.tone}`}>
                     <span className="dot" aria-hidden="true" />
                     {c.name}
                   </span>
                 </th>
               ))}
+            </tr>
+            <tr className="sub">
+              {COLUMNS.map((c) => [
+                <th scope="col" key={`${c.tone}-score`} className="broker-group">Score</th>,
+                <th scope="col" key={`${c.tone}-memory`} title={MEMORY_TITLE}>Memory MiB</th>,
+                <th scope="col" key={`${c.tone}-cache`} title={CACHE_TITLE}>With cache MiB</th>,
+              ])}
             </tr>
           </thead>
           <tbody>
@@ -63,17 +76,16 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                   <td className="na">{UNIT[row.kind]}</td>
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
-                    const text = row.text[c.tone];
                     const spread = row.spread[c.tone];
-                    return (
-                      <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
-                        <span>{text}</span>
+                    const memory = row.memory[c.tone];
+                    return [
+                      <td key={`${c.tone}-score`} className={["broker-group", v == null ? "na" : v === top ? "best" : ""].join(" ").trim()}>
+                        <span>{row.text[c.tone]}</span>
                         {spread ? <span className="scenario-spread">{spread}</span> : null}
-                        <span className="scenario-memory" title="Peak memory of the broker's own processes, then the container's total, which includes file cache. Sampled once per second.">
-                          {memoryText(row.memory[c.tone])}
-                        </span>
-                      </td>
-                    );
+                      </td>,
+                      <td key={`${c.tone}-memory`} className="memory" title={MEMORY_TITLE}>{mib(memory.anonymous)}</td>,
+                      <td key={`${c.tone}-cache`} className="memory cache" title={CACHE_TITLE}>{mib(memory.cgroup)}</td>,
+                    ];
                   })}
                 </tr>
               );
