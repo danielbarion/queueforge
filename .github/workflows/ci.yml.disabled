@@ -37,7 +37,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
 
       - name: Install Bun broker dependencies
         working-directory: bun
@@ -167,7 +167,7 @@ jobs:
           workspaces: rust
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Build Rust peer for mixed-stack tests
         working-directory: rust
         run: cargo build -p queueforge-broker
@@ -211,7 +211,7 @@ jobs:
           workspaces: rust
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Install PHP CLI
         run: |
           sudo apt-get update
