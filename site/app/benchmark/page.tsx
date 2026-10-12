@@ -165,11 +165,12 @@ export default function BenchmarkPage() {
           <p className="caption">
             RabbitMQ classic confirms after the batch write, or after a consumer ack if that
             happens first, and does not fsync before the confirm. QueueForge confirms after the
-            fsync. Large bodies are where that costs QueueForge the most. Backlog is fill / drain msg/s for 300,000
-            durable 1 KiB messages. Below each score: anonymous / total cgroup memory peaks
-            in MiB, sampled once per second. Total includes file cache; anonymous memory
-            includes more than the language heap. For repeats, these are medians of sampled
-            run peaks. Every caveat and raw result is in{" "}
+            fsync. Large bodies are where that costs QueueForge the most. Backlog is the fill and
+            drain rate for 300,000 durable 1 KiB messages. Under each score: the lowest and highest
+            of its runs, then peak memory, sampled once per second. The first memory figure is the
+            broker&apos;s own processes (anonymous memory, which includes more than the language
+            heap); the one in brackets is the whole container, file cache included. With repeats,
+            memory is the median of the runs&apos; peaks. Every caveat and raw result is in{" "}
             <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>

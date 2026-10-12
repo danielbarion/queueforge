@@ -80,7 +80,7 @@ export default function Page() {
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ. Bun, one process per core, is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust. Confirms and deliveries both stay
-              near {formatRate(scale[2].rate)}/s. PHP, one process by default, is{" "}
+              near {formatRate(scale[2].rate)} msg/s. PHP, one process by default, is{" "}
               {formatTimes(scale[3].rate, scale[0].rate)}× RabbitMQ.
             </p>
             <p className="note">

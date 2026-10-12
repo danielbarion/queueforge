@@ -14,8 +14,9 @@ const UNIT: Record<ScenarioRow["kind"], string> = {
 };
 
 function memoryText(memory: ScenarioRow["memory"][Tone]) {
-  const format = (value: number | null) => value == null ? "–" : value.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  return `${format(memory.anonymous)} / ${format(memory.cgroup)} MiB`;
+  const format = (value: number | null) => value == null ? "–" : `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} MiB`;
+  if (memory.anonymous == null && memory.cgroup == null) return "";
+  return `Memory ${format(memory.anonymous)} (${format(memory.cgroup)} with cache)`;
 }
 
 /** The best value in a row: highest rate, or lowest p99 latency. */
@@ -63,10 +64,12 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
                     const text = row.text[c.tone];
+                    const spread = row.spread[c.tone];
                     return (
                       <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
                         <span>{text}</span>
-                        <span className="scenario-memory" title="Anonymous / total cgroup memory peaks; total includes file cache. Sampled once per second.">
+                        {spread ? <span className="scenario-spread">{spread}</span> : null}
+                        <span className="scenario-memory" title="Peak memory of the broker's own processes, then the container's total, which includes file cache. Sampled once per second.">
                           {memoryText(row.memory[c.tone])}
                         </span>
                       </td>

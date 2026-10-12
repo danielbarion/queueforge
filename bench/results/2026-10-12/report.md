@@ -113,19 +113,19 @@ Peak memory, 4 CPU / 4 GiB (anonymous / cgroup total MiB):
 
 | Broker | Size | Held | Memory at hold |
 | --- | --- | ---: | ---: |
-| RabbitMQ | 1 CPU / 512m | 3,500 | 454.7MiB |
-| RabbitMQ | 2 CPU / 2g | 18,750 | 1.93GiB |
-| RabbitMQ | 4 CPU / 4g | 41,622 | 3.579GiB |
-| RabbitMQ | 4 CPU / 8g | 62,065 | 5.55GiB |
-| Rust | 1 CPU / 512m | 8,980 | 503.4MiB |
-| Rust | 2 CPU / 2g | 34,600 | 1.876GiB |
-| Rust | 4 CPU / 4g | 67,086 | 3.634GiB |
-| Rust | 4 CPU / 8g | 95,000 | 5.126GiB |
-| Bun | 1 CPU / 512m | 37,173 | 382.4MiB |
-| Bun | 2 CPU / 2g | 117,789 | 1.525GiB |
-| Bun | 4 CPU / 4g | 239,120 | 2.978GiB |
-| Bun | 4 CPU / 8g | 260,000 | 3.499GiB |
-| PHP | 1 CPU / 512m | 28,000 | 210.9MiB |
-| PHP | 2 CPU / 2g | 40,000 | 296.4MiB |
-| PHP | 4 CPU / 4g | 40,000 | 298.6MiB |
-| PHP | 4 CPU / 8g | 20,000 | 159.5MiB |
+| RabbitMQ | 1 CPU / 512m | 3,500 | 454.7 MiB |
+| RabbitMQ | 2 CPU / 2g | 18,750 | 1.93 GiB |
+| RabbitMQ | 4 CPU / 4g | 41,622 | 3.579 GiB |
+| RabbitMQ | 4 CPU / 8g | 62,065 | 5.55 GiB |
+| Rust | 1 CPU / 512m | 8,980 | 503.4 MiB |
+| Rust | 2 CPU / 2g | 34,600 | 1.876 GiB |
+| Rust | 4 CPU / 4g | 67,086 | 3.634 GiB |
+| Rust | 4 CPU / 8g | 95,000 | 5.126 GiB |
+| Bun | 1 CPU / 512m | 37,173 | 382.4 MiB |
+| Bun | 2 CPU / 2g | 117,789 | 1.525 GiB |
+| Bun | 4 CPU / 4g | 239,120 | 2.978 GiB |
+| Bun | 4 CPU / 8g | 260,000 | 3.499 GiB |
+| PHP | 1 CPU / 512m | 28,000 | 210.9 MiB |
+| PHP | 2 CPU / 2g | 40,000 | 296.4 MiB |
+| PHP | 4 CPU / 4g | 40,000 | 298.6 MiB |
+| PHP | 4 CPU / 8g | 20,000 | 159.5 MiB |

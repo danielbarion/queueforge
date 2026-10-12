@@ -651,7 +651,8 @@ th.scenario {
 .scenario-table .broker-column { width: 15%; }
 .scenario-table th.scenario { min-width: 0; max-width: none; }
 .scenario-table td { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
-.scenario-memory { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.scenario-spread { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.scenario-memory { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; }
 table.sr-only { min-width: 0; table-layout: fixed; }
 thead th .app { display: inline-flex; align-items: center; gap: 8px; }
 .table-heading {

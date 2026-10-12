@@ -57,6 +57,8 @@ export type ScenarioRow = {
   kind: "rate" | "bytes" | "latency";
   values: Record<Tone, number | null>;
   text: Record<Tone, string>;
+  /** The range over repeats, such as `2 runs: 129,918–130,911`; empty for one run. */
+  spread: Record<Tone, string>;
   /** Sampled memory peaks in MiB; cgroup includes file cache as well as process memory. */
   memory: Record<Tone, { anonymous: number | null; cgroup: number | null }>;
 };

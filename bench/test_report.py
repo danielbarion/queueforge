@@ -99,6 +99,24 @@ class RepeatReportTests(unittest.TestCase):
             scenarios.immutable_json(str(path), {"value": 2})
         self.assertEqual(json.loads(path.read_text()), {"value": 1})
 
+    def test_site_text_puts_the_spread_on_its_own_line(self):
+        self.write([self.row("run1", 100), self.row("run2", 300)])
+        stats = self.selected()
+        sc = {"id": "work-queue"}
+        self.assertEqual(report.cell_text(sc, stats["row"], site=True), "200")
+        self.assertEqual(report.repeat_text(sc, stats["row"]), "2 runs: 100–300")
+        self.assertIn("100–300; n=2", report.cell_text(sc, stats["row"]))
+
+    def test_equal_runs_and_backlog_read_as_words(self):
+        self.write([self.row("run1", 150), self.row("run2", 150)])
+        self.assertEqual(report.repeat_text({"id": "work-queue"}, self.selected()["row"]), "2 runs: both 150")
+        self.assertEqual(report.repeat_text({"id": "work-queue"}, {}), "")
+
+    def test_units_are_spaced(self):
+        self.assertEqual(report.spaced_units("454.7MiB"), "454.7 MiB")
+        self.assertEqual(report.spaced_units("1.93GiB"), "1.93 GiB")
+        self.assertEqual(report.spaced_units("298.6 MiB"), "298.6 MiB")
+
     def test_site_keeps_memory_when_a_cell_is_unscored(self):
         row = self.row("run1", "", ok="0", err="oom", anon_mib="999", peak_mib="1024")
         generated = report.site_ts({}, {}, {}, {("bun", row["size"], "work-queue"): row})
