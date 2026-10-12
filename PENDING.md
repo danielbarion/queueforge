@@ -47,6 +47,11 @@ Published numbers: `BENCHMARK.md` section "Session (2026-10-11)", raw cells in
 
 ### Benchmark commands
 
+The full run is `python3 bench/run.py` (see the README, "Running the benchmarks");
+it reports progress in `bench/last-run.json`. AI sessions: ask the user to start
+it rather than running it from the chat, then read that file once they say it
+finished. Single cells for A/B work:
+
 ```
 docker compose -f docker-compose.bench.yml build <bun|rust|php>
 python3 bench/scenarios.py one <scenario> <rabbit|rust|bun|php>   # one cell, 1 CPU / 1 GiB

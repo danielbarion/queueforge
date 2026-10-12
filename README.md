@@ -6,7 +6,7 @@ Three AMQP 0-9-1 brokers live in this folder: Rust, Bun, and PHP. All three can 
 |------|------------|
 | [`rust/`](rust/) | The Rust broker (Tokio, redb metadata, write-ahead log, management HTTP, SPA, bench). The repository root is not a Cargo workspace. |
 | [`bun/`](bun/) | The Bun broker. Messages live in SQLite. Management HTTP is Elysia. AMQP is a Bun TCP listener. |
-| [`php/`](php/) | The PHP broker. One process, one `stream_select()` loop, no Composer and no dependencies beyond `ext-sockets`. Messages live in an append-only log. Classic and quorum queues, policies, management HTTP, Prometheus, TLS, MQTT, STOMP, streams, and an AMQP 1.0 shim. A cluster member. Client-visible behaviour matches Rust and Bun; see [`php/README.md`](php/README.md) for where it deliberately does not. |
+| [`php/`](php/) | The PHP broker. One process, one event loop (epoll through the optional `ev` extension, which the Docker image installs, else `stream_select()`), no Composer, and nothing required beyond `ext-sockets`. Messages live in an append-only log. Classic and quorum queues, policies, management HTTP, Prometheus, TLS, MQTT, STOMP, streams, and an AMQP 1.0 shim. A cluster member. Client-visible behaviour matches Rust and Bun; see [`php/README.md`](php/README.md) for where it deliberately does not. |
 
 Results against RabbitMQ are in [`BENCHMARK.md`](BENCHMARK.md), produced by the harness in [`bench/`](bench/). Open problems those runs found, with evidence and where to look, are in [`PENDING.md`](PENDING.md).
 
@@ -48,6 +48,49 @@ docker compose -f docker-compose.bench.yml run --rm --no-deps \
 ```
 
 CI runs with Woodpecker; see [setup, checks, and GitHub CI rollback](docs/ci.md).
+
+## Running the benchmarks
+
+Every benchmark runs in Docker on this machine, one broker at a time, with
+RabbitMQ 4.3 as the baseline and RabbitMQ's PerfTest as the client. One command
+builds the images, runs everything and regenerates the tables:
+
+```bash
+python3 bench/run.py
+```
+
+Requirements: Docker Desktop running (the script resizes it to 8 CPUs / 24 GiB
+for the big steps and puts it back to 2 CPUs / 8 GiB at the end, even after a
+failure), Python 3, and a Rust toolchain for the paced step. A full run takes
+several hours. Close other heavy work, since CPU contention skews the numbers.
+On a Mac the script runs under `caffeinate` so the machine does not sleep.
+
+Options:
+
+```bash
+python3 bench/run.py --kinds bun,php              # only these brokers; their rows replace older ones
+python3 bench/run.py --steps build,scenarios,report
+python3 bench/run.py --repeat 3                   # repeats per scenario cell (default 2)
+python3 bench/run.py --out /tmp/qf-ab/try         # keep an experiment out of bench/results
+```
+
+Steps, in order: `build`, `scenarios`, `load`, `connections`, `paced`, `report`.
+A failing step is recorded and the others still run.
+
+What it writes:
+
+- `bench/results/<UTC date>/`: raw cells, `bench.log` and `report.md`.
+- `site/app/bench-data.ts`: the site's numbers, regenerated from those results.
+- `bench/last-run.json`: progress and outcome, rewritten after every step.
+  `status` is `running`, then `done`, `done-with-errors` or `interrupted`. It
+  also lists each step's status and duration, the results directory, the image
+  ids, and the commit the run measured.
+
+`BENCHMARK.md` is written by hand around `report.md`; update it from the new
+report. Only one benchmark may use the machine at a time: the script holds
+`/tmp/queueforge-benchmark.lock` and refuses to start while it exists. Rules
+for A/B comparisons are in [`PENDING.md`](PENDING.md) ("Measurement rules"),
+and the harness details are in [`docs/benchmark-repeats.md`](docs/benchmark-repeats.md).
 
 ## Cluster
 
