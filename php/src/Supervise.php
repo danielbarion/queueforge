@@ -10,6 +10,14 @@ declare(strict_types=1);
  */
 final class Supervise
 {
+    /**
+     * Sockets already passed to a child, closed a second later. On macOS,
+     * closing this copy while the descriptor is still in the datagram can
+     * leave the child's copy at end of file, like `Server::$retired`.
+     *
+     * @var list<array{0: resource, 1: float}>
+     */
+    private static array $handed = [];
     /** @param array<string, mixed> $cfg */
     public static function run(string $script, string $configPath, bool $dev, array $cfg): void
     {
@@ -77,6 +85,7 @@ final class Supervise
         $next = 0;
         while (true) {
             self::pump($kids);
+            self::closeHanded();
             $read = [$listen];
             $write = [];
             $except = [];
@@ -101,10 +110,18 @@ final class Supervise
                     usleep(2000);
                 }
             }
-            fclose($client);
+            self::$handed[] = [$client, microtime(true) + 1.0];
             if (!$ok) {
                 fwrite(STDERR, "queueforge-php handoff to $id failed\n");
             }
+        }
+    }
+
+    private static function closeHanded(): void
+    {
+        $now = microtime(true);
+        while (self::$handed !== [] && self::$handed[0][1] <= $now) {
+            @fclose(array_shift(self::$handed)[0]);
         }
     }
 
@@ -148,7 +165,7 @@ final class Supervise
                         usleep(1000);
                     }
                 }
-                fclose($packet['fp']);
+                self::$handed[] = [$packet['fp'], microtime(true) + 1.0];
                 if (!$sent) {
                     fwrite(STDERR, "queueforge-php migrate to $home failed\n");
                 }

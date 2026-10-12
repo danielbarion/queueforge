@@ -1,6 +1,9 @@
 FROM php:8.5-cli
 WORKDIR /opt/queueforge
 RUN docker-php-ext-install sockets \
+    && printf '\n' | pecl install ev-1.2.3 \
+    && docker-php-ext-enable ev \
+    && rm -rf /tmp/pear \
     && printf '%s\n' \
         'opcache.enable=1' \
         'opcache.enable_cli=1' \

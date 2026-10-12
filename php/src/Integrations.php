@@ -210,7 +210,10 @@ final class IntegrationPeer
             }
             if ($this->phase==='connecting') {
                 $read=[];$write=[$this->socket];$except=[];
-                if (@stream_select($read,$write,$except,0,0)!==1) { if(microtime(true)-$this->seen>10)throw new RuntimeException('AMQP connect timed out');return; }
+                $ready=@stream_select($read,$write,$except,0,0);
+                // Past FD_SETSIZE select fails; a peer name means connected.
+                if ($ready===false) $ready=@stream_socket_get_name($this->socket,true)===false?0:1;
+                if ($ready!==1) { if(microtime(true)-$this->seen>10)throw new RuntimeException('AMQP connect timed out');return; }
                 $this->phase=$this->uri['scheme']==='amqps'?'tls':'start';
                 if($this->phase==='start')$this->output="AMQP\0\0\x09\x01";
             }

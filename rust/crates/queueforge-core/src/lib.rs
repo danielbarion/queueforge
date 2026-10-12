@@ -62,18 +62,18 @@ pub use domain::{
 pub use error::{Error, Result};
 pub use memory::MemoryTracker;
 pub use policy::{apply_queue_policy, effective_alternate, select_policy, Policy, PolicyTarget};
+pub use queue::parse_age as queue_parse_age;
 pub use queue::{
     death_hop_count, effective_priority, generate_server_queue_name, is_cycle_destination,
     prepare_dead_letter, should_drop_for_cycle, AppHeaderValue, ArgValue, ConsumerDeliveryId,
     ConsumerSessionId, DeadLetterStrategy, DeathEntry, DeathReason, DeclareResult, DlxFailAction,
     DlxOutcome, DlxPublishResult, DlxRouter, DurabilityPolicy, DurableLogFactory, DurableQueueLog,
-    EnqueueCompletion, Message, MessageHeaders, NoopMetaStore, OpenedDurableLog, OverflowPolicy,
-    PrepareDeath, QueueActorBootstrap, QueueActorState, QueueArgs, QueueCmd, QueueDeclareOpts,
-    QueueDelivery, QueueHandle, QueueInfo, QueueKey, QueueMessage, QueueMetaStore, QueueOffset,
-    QueueRegistry, QueueStats, QueueType, Ready, SharedDurableLogFactory, ShutdownReport,
-    DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
+    EnqueueCompletion, LogPosition, Message, MessageHeaders, NoopMetaStore, OpenedDurableLog,
+    OverflowPolicy, PrepareDeath, QueueActorBootstrap, QueueActorState, QueueArgs, QueueCmd,
+    QueueDeclareOpts, QueueDelivery, QueueHandle, QueueInfo, QueueKey, QueueMessage,
+    QueueMetaStore, QueueOffset, QueueRegistry, QueueStats, QueueType, Ready,
+    SharedDurableLogFactory, ShutdownReport, DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
 };
-pub use queue::parse_age as queue_parse_age;
 pub use queue::{ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart};
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};
 pub use sysinfo::{disk_free_bytes, system_total_memory_bytes};

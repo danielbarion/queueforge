@@ -211,7 +211,6 @@ final class Server
                     $write[] = $sock->fp;
                 }
             }
-            $except = [];
             $left = $this->nextSync - microtime(true);
             $wait = $this->broker->waiting === [] ? 1.0 : max(0.001, $left);
             $wait = min($wait, max(0.001, $this->nextSweep - microtime(true)));
@@ -221,9 +220,7 @@ final class Server
                 $wait = min($wait, 0.002);
                 $this->closeRetired();
             }
-            $sec = (int) $wait;
-            $usec = (int) (($wait - $sec) * 1000000);
-            $selected = ($read === [] && $write === []) ? 0 : @stream_select($read, $write, $except, $sec, $usec);
+            $selected = ($read === [] && $write === []) ? 0 : Poller::select($read, $write, $wait);
             if ($selected === false) {
                 continue;
             }
@@ -256,6 +253,12 @@ final class Server
                     continue;
                 }
                 $this->onData($id, $chunk);
+                // OpenSSL can hold decrypted bytes the poller cannot see.
+                for ($more = 0; $more < 16 && isset($this->conns[$id]) && !$this->conns[$id]->gone && $this->conns[$id]->tls; $more++) {
+                    $chunk = @fread($fp, 65536);
+                    if ($chunk === false || $chunk === '') break;
+                    $this->onData($id, $chunk);
+                }
             }
             foreach ($write as $fp) {
                 if ($this->extras !== null && $this->extras->owns($fp)) { $this->extras->flush($fp); continue; }
@@ -346,39 +349,26 @@ final class Server
         if (($ssl['queueforge_tls'] ?? false) !== true || isset(stream_get_meta_data($fp)['crypto'])) return true;
         stream_set_blocking($fp, false);
         $deadline = microtime(true) + 5;
-        // Accepted sockets share the listener's context, so these options are
-        // shared too. The accept is synchronous and `take` reads the peer
-        // certificate before the next one starts.
-        $verify = ($ssl['verify_peer'] ?? false) === true || ($ssl['queueforge_peer_verified'] ?? false) === true;
-        if ($verify) {
-            // A client that sends no certificate must not see the previous one.
+        // Accepted sockets share the listener's context, so a captured
+        // certificate is shared too. The accept is synchronous and `take`
+        // reads it before the next one starts; a client that sends none must
+        // not see the previous one.
+        //
+        // The listener leaves `verify_peer` unset (bin/queueforge): OpenSSL
+        // still refuses a certificate that does not chain to the CA, and
+        // PHP's own check, which would also refuse a client that sent none,
+        // stays off. Turning it off after the first handshake step raced:
+        // a fast client can finish the handshake within that step.
+        if (($ssl['queueforge_peer_verified'] ?? false) === true) {
             stream_context_set_option($fp, 'ssl', 'peer_certificate', null);
             stream_context_set_option($fp, 'ssl', 'peer_certificate_chain', null);
-            stream_context_set_option($fp, 'ssl', 'verify_peer', true);
-            stream_context_set_option($fp, 'ssl', 'queueforge_peer_verified', true);
         }
-        try {
-            $first = true;
-            do {
-                $result = @stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_SERVER);
-                if ($result !== 0) return $result === true && isset(stream_get_meta_data($fp)['crypto']);
-                // The first call built this connection's TLS state: it asks for
-                // a client certificate and OpenSSL rejects one that does not
-                // chain to the CA. The handshake cannot finish in that call,
-                // since the certificate only comes after the request. PHP's
-                // later check also refuses a client that sent none, which
-                // RabbitMQ (fail_if_no_peer_cert = false) accepts for PLAIN.
-                // Drop only that check; `verifiedPeerCN` still needs a
-                // certificate OpenSSL verified.
-                if ($first && $verify) stream_context_set_option($fp, 'ssl', 'verify_peer', false);
-                $first = false;
-                $read = [$fp]; $write = []; $except = [];
-                if (@stream_select($read, $write, $except, 0, 10000) === false) return false;
-            } while (microtime(true) < $deadline);
-            return false;
-        } finally {
-            if ($verify) stream_context_set_option($fp, 'ssl', 'verify_peer', true);
-        }
+        do {
+            $result = @stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_SERVER);
+            if ($result !== 0) return $result === true && isset(stream_get_meta_data($fp)['crypto']);
+            Poller::one($fp, 0.01);
+        } while (microtime(true) < $deadline);
+        return false;
     }
 
     /** Context verification happened during accept; a captured certificate alone proves nothing. */
@@ -1495,8 +1485,7 @@ final class Server
         while ($done < $pending && microtime(true) < $deadline) {
             $read = $this->extras->reads();
             $write = $this->extras->writes();
-            $except = [];
-            if ($read === [] || @stream_select($read, $write, $except, 0, 20000) === false) {
+            if ($read === [] || Poller::select($read, $write, 0.02, 'sync') === false) {
                 break;
             }
             foreach ($write as $fp) $this->extras->flush($fp);
@@ -1920,8 +1909,10 @@ final class Server
 
     private function pump(): void
     {
-        foreach ($this->broker->allBrokers() as $broker) foreach ($broker->queues as $name => $q) {
-            if (($q["args"]["queueType"] ?? "") === "stream") { $this->pumpStream($broker,$name); continue; }
+        // By name: a `$q` copy would share each ready list, so the first
+        // removal in getReady() copied the whole list, once per ack.
+        foreach ($this->broker->allBrokers() as $broker) foreach (array_keys($broker->queues) as $name) {
+            if (($broker->queues[$name]["args"]["queueType"] ?? "") === "stream") { $this->pumpStream($broker,$name); continue; }
             while (($broker->queues[$name]['ready'] ?? []) !== []
                 && ($broker->queues[$name]['consumers'] ?? []) !== []) {
                 $pick = $broker->pickConsumer($name, function (array $cons): bool {

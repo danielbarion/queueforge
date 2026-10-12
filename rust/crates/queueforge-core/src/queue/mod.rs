@@ -12,21 +12,21 @@ mod stream;
 
 pub use actor::{run as run_queue_actor, DEFAULT_MAILBOX_CAPACITY};
 pub use args::{
-    parse_age,
-    ArgValue, DeadLetterStrategy, OverflowPolicy, QueueArgs, QueueType, DEFAULT_MAX_DEATH_HOPS,
+    parse_age, ArgValue, DeadLetterStrategy, OverflowPolicy, QueueArgs, QueueType,
+    DEFAULT_MAX_DEATH_HOPS,
 };
 pub use cmd::{
-    ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart,
     AppHeaderValue, ConsumerDeliveryId, ConsumerSessionId, DlxFailAction, EnqueueCompletion,
     Message, MessageHeaders, QueueCmd, QueueDelivery, QueueMessage, QueueOffset, QueueStats,
+    ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart,
 };
 pub use dlx::{
     death_hop_count, is_cycle_destination, prepare_dead_letter, should_drop_for_cycle, DeathEntry,
     DeathReason, DlxOutcome, DlxPublishResult, DlxRouter, PrepareDeath,
 };
 pub use durable::{
-    DurabilityPolicy, DurableLogFactory, DurableQueueLog, OpenedDurableLog, QueueActorBootstrap,
-    SharedDurableLogFactory,
+    DurabilityPolicy, DurableLogFactory, DurableQueueLog, LogPosition, OpenedDurableLog,
+    QueueActorBootstrap, SharedDurableLogFactory,
 };
 pub use meta::{NoopMetaStore, QueueMetaStore};
 pub use ready::{effective_priority, Ready};

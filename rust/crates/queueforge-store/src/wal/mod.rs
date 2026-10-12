@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use queueforge_core::{
-    DurableLogFactory, DurableQueueLog, Error as CoreError, Message, OpenedDurableLog,
+    DurableLogFactory, DurableQueueLog, Error as CoreError, LogPosition, Message, OpenedDurableLog,
     QueueMessage, QueueOffset, Result as CoreResult,
 };
 use tracing::{debug, error, info, warn};
@@ -74,6 +74,10 @@ pub struct QueueWal {
     /// watermark from that segment, so the flag does not mean the json sidecar
     /// was rewritten.
     meta_dirty: bool,
+    /// Where the last enqueue record went.
+    last_pos: Option<LogPosition>,
+    /// Read handle for one closed segment, reused by [`DurableQueueLog::read_at`].
+    reader: Option<(u64, File)>,
 }
 
 struct ActiveSegment {
@@ -239,10 +243,7 @@ impl ActiveSegment {
         let target = extend_target(start, needed, self.segment_max);
         if target < needed {
             self.extending.store(false, Ordering::Release);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "wal segment is full",
-            ));
+            return Err(io::Error::new(io::ErrorKind::Other, "wal segment is full"));
         }
         let result = materialize_range(&self.file, start, target);
         if result.is_ok() {
@@ -351,6 +352,8 @@ impl QueueWal {
             durable_offset: 0,
             pending_acks: std::collections::BTreeSet::new(),
             meta_dirty: false,
+            last_pos: None,
+            reader: None,
         };
         wal.scan_segments()?;
         Ok(wal)
@@ -702,9 +705,7 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
             }
             // A zero page inside a preallocated segment is the logical end,
             // not a corrupt record. A non-zero bad magic still halts.
-            Err(StoreError::WalCorrupt { reason, .. })
-                if preamble && reason == "bad magic 0x0" =>
-            {
+            Err(StoreError::WalCorrupt { reason, .. }) if preamble && reason == "bad magic 0x0" => {
                 truncated_to = Some(rec_start);
                 break;
             }
@@ -779,10 +780,16 @@ impl DurableQueueLog for QueueWal {
             .active
             .as_mut()
             .ok_or_else(|| CoreError::Store("no active WAL segment".into()))?;
+        let at = active.len;
         active
             .push_record(&bytes)
             .map_err(|e| CoreError::Store(e.to_string()))?;
         active.max_offset = active.max_offset.max(offset.0);
+        self.last_pos = Some(LogPosition {
+            segment: active.id,
+            pos: at,
+            len: bytes.len() as u32,
+        });
         if offset.0.saturating_add(1) > self.meta.next_offset {
             self.meta.next_offset = offset.0.saturating_add(1);
             self.meta_dirty = true;
@@ -900,6 +907,45 @@ impl DurableQueueLog for QueueWal {
         }
         Ok(())
     }
+
+    fn last_position(&self) -> Option<LogPosition> {
+        self.last_pos
+    }
+
+    fn read_at(&mut self, at: LogPosition) -> CoreResult<Message> {
+        let mut buf = vec![0u8; at.len as usize];
+        let read = match self.active.as_mut() {
+            Some(active) if active.id == at.segment => {
+                // A record still in the write buffer is not on disk yet.
+                if at.pos + at.len as u64 > active.len - active.buf.len() as u64 {
+                    active
+                        .flush_buf()
+                        .map_err(|e| CoreError::Store(format!("segment flush: {e}")))?;
+                }
+                active.file.read_exact_at(&mut buf, at.pos)
+            }
+            _ => {
+                if self.reader.as_ref().map(|(id, _)| *id) != Some(at.segment) {
+                    let seg = self.closed.get(&at.segment).ok_or_else(|| {
+                        CoreError::Store(format!("WAL segment {} is gone", at.segment))
+                    })?;
+                    let file = File::open(&seg.path)
+                        .map_err(|e| CoreError::Store(format!("WAL open: {e}")))?;
+                    self.reader = Some((at.segment, file));
+                }
+                let (_, file) = self.reader.as_ref().expect("opened above");
+                file.read_exact_at(&mut buf, at.pos)
+            }
+        };
+        read.map_err(|e| CoreError::Store(format!("WAL read: {e}")))?;
+        match codec::read_record(&mut buf.as_slice()) {
+            Ok(Some(rec)) => rec
+                .message
+                .ok_or_else(|| CoreError::Store("WAL record is not an enqueue".into())),
+            Ok(None) => Err(CoreError::Store("WAL record is empty".into())),
+            Err(e) => Err(CoreError::Store(e.to_string())),
+        }
+    }
 }
 
 /// Factory that opens [`QueueWal`] instances under a data directory.
@@ -1002,6 +1048,39 @@ mod tests {
     }
 
     #[test]
+    fn read_at_returns_records_from_closed_active_and_buffered_segments() {
+        let dir = TempDir::new().unwrap();
+        // 4 KiB segments rotate every few records.
+        let mut wal = QueueWal::open(dir.path(), "/", "s", 4096).unwrap();
+        let mut positions = Vec::new();
+        for i in 1..=40u64 {
+            let body = vec![b'a' + (i % 26) as u8; 500 + i as usize];
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(i), &sample(&body, true))
+                .unwrap();
+            positions.push((body, wal.last_position().unwrap()));
+        }
+        let segments: std::collections::BTreeSet<u64> =
+            positions.iter().map(|(_, at)| at.segment).collect();
+        assert!(segments.len() > 2, "rotated: {segments:?}");
+        // The newest records are still in the write buffer; read_at flushes them.
+        for (body, at) in positions.iter().rev() {
+            let message = DurableQueueLog::read_at(&mut wal, *at).unwrap();
+            assert_eq!(message.body.as_ref(), body.as_slice());
+            assert_eq!(message.priority, Some(5));
+        }
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        for (body, at) in &positions {
+            assert_eq!(
+                DurableQueueLog::read_at(&mut wal, *at)
+                    .unwrap()
+                    .body
+                    .as_ref(),
+                body.as_slice()
+            );
+        }
+    }
+
+    #[test]
     fn append_fsync_recover_roundtrip() {
         let dir = TempDir::new().unwrap();
         let mut wal = QueueWal::open(dir.path(), "/", "orders", 1024 * 1024).unwrap();
@@ -1058,12 +1137,12 @@ mod tests {
         assert!(p.ends_with("queues/%2F/q") || p.to_string_lossy().contains("%2F"));
     }
 
-fn logical_len(path: &std::path::Path) -> u64 {
-    let f = std::fs::File::open(path).unwrap();
-    super::read_preamble_len(&f)
-        .unwrap()
-        .expect("preallocated segment")
-}
+    fn logical_len(path: &std::path::Path) -> u64 {
+        let f = std::fs::File::open(path).unwrap();
+        super::read_preamble_len(&f)
+            .unwrap()
+            .expect("preallocated segment")
+    }
 
     /// A torn tail rewinds the logical end and keeps the preallocated file.
     #[test]
@@ -1108,7 +1187,11 @@ fn logical_len(path: &std::path::Path) -> u64 {
         assert_eq!(recovered.messages[0].1.body.as_ref(), b"one");
         assert_eq!(recovered.messages[1].1.body.as_ref(), b"two");
         assert_eq!(recovered.next_offset, 3);
-        assert_eq!(logical_len(&seg_path), logical, "torn tail rewinds the header");
+        assert_eq!(
+            logical_len(&seg_path),
+            logical,
+            "torn tail rewinds the header"
+        );
         assert_eq!(
             std::fs::metadata(&seg_path).unwrap().len(),
             phys,

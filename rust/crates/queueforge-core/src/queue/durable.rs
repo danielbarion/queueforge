@@ -66,6 +66,31 @@ pub trait DurableQueueLog: Send {
 
     /// Compact: delete segments whose max offset is `≤ ack_watermark`.
     fn compact(&mut self) -> Result<()>;
+
+    /// Where the last [`Self::append_enqueue`] record was written, for
+    /// [`Self::read_at`]. `None` when this log cannot read records back.
+    fn last_position(&self) -> Option<LogPosition> {
+        None
+    }
+
+    /// The message of an enqueue record this log wrote at `at`.
+    fn read_at(&mut self, at: LogPosition) -> Result<Message> {
+        let _ = at;
+        Err(crate::error::Error::Store(
+            "this log cannot read records back".into(),
+        ))
+    }
+}
+
+/// The place of one record in a segmented log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogPosition {
+    /// Segment id.
+    pub segment: u64,
+    /// Byte position of the record in that segment.
+    pub pos: u64,
+    /// Encoded record length in bytes.
+    pub len: u32,
 }
 
 /// Fsync / group-commit settings for a durable queue actor.

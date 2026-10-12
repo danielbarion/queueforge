@@ -2,6 +2,33 @@
 import { heapStats } from "bun:jsc";
 import type { Broker } from "./broker/index.ts";
 
+export const profiling = process.env.QUEUEFORGE_PROFILE === "1";
+
+/** Open AMQP connections, tracked only while profiling. */
+export const profiledConns = new Set<{
+  closed: boolean; outboundBytes: number; stagedBytes: number; writeQueuedBytes: number;
+  outputBlocked: boolean; readsPaused: boolean; inboundRunning: boolean; deferredPublish: unknown[];
+  inFlightPublishes: Set<unknown>; publishBytes: number; fresh: unknown[]; wakeInbound: unknown;
+  outputWakers: Map<string, unknown>; channels: Map<number, { deliveries: Map<unknown, unknown>; consumers: Map<unknown, unknown> }>;
+  socket: { pendingBytes?: () => number };
+}>();
+
+function connSample() {
+  const rows = [];
+  for (const c of profiledConns) {
+    if (c.closed) continue;
+    let unacked = 0, consumers = 0;
+    for (const ch of c.channels.values()) { unacked += ch.deliveries.size; consumers += ch.consumers.size; }
+    rows.push({
+      out: c.outboundBytes, staged: c.stagedBytes, queued: c.writeQueuedBytes, pending: c.socket.pendingBytes?.() ?? 0,
+      blocked: c.outputBlocked, paused: c.readsPaused, running: c.inboundRunning, waiting: c.wakeInbound !== null,
+      deferred: c.deferredPublish.length, inFlight: c.inFlightPublishes.size, publishBytes: c.publishBytes,
+      fresh: c.fresh.length, wakers: c.outputWakers.size, consumers, unacked,
+    });
+  }
+  return rows;
+}
+
 export function profileSample(broker: Broker) {
   let ready = 0, readyBytes = 0, unacked = 0, replicas = 0, consumers = 0;
   for (const q of broker.queues.values()) {
@@ -24,11 +51,12 @@ export function profileSample(broker: Broker) {
       timing: broker.store.profileTiming ? { ...broker.store.profileTiming } : null,
     },
     published: broker.prom.received, delivered: broker.prom.delivered,
+    conns: connSample(),
   };
 }
 
 export function startProfile(broker: Broker) {
-  if (process.env.QUEUEFORGE_PROFILE !== "1") return;
+  if (!profiling) return;
   // Event-loop lag: how late a 1 ms timer fires. A stall delays every socket.
   let last = performance.now(), lagMax = 0, stalls = 0;
   const lag = setInterval(() => {

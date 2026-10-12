@@ -10,6 +10,7 @@ import type { Socket as NodeSocket } from "node:net";
 import tls from "node:tls";
 import type { Amqp10Session } from "../amqp10/session.ts";
 import { emptyProps, R } from "../codec.ts";
+import { profiledConns, profiling } from "../profile.ts";
 
 /** One basic.publish waiting for its header and body. */
 export type Pub = { exchange: string; routingKey: string; mandatory: boolean; immediate: boolean };
@@ -257,6 +258,7 @@ export function startAmqp(host: string, port: number, broker: Broker, reusePort 
         const conn = new Conn(socket, broker);
         conn.reuseWrites = true;
         socket.data = conn;
+        if (profiling) profiledConns.add(conn);
       },
       data(socket: ListenSocket, data: Uint8Array | ArrayBuffer) {
         const conn = socket.data as Conn;
@@ -277,6 +279,7 @@ export function startAmqp(host: string, port: number, broker: Broker, reusePort 
       close(socket: ListenSocket) {
         const conn = socket.data;
         if (!conn) return;
+        profiledConns.delete(conn);
         conn.closed = true;
         conn.connClosed = true;
         conn.noteMetricsClosed();

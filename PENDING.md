@@ -217,7 +217,13 @@ so it is limited to groups of 16 or fewer.
 
 ### B9. Fanout stall at 1 CPU (new, 2026-10-11)
 
-Status: open, cause not found
+Status: open, not reproduced since the sync-worker fix (Cortex Code, 2026-10-12):
+22 fanout-20 repeats in a row at 1 CPU passed (225k–244k deliveries/s), 8 of
+them with `QF_BENCH_PROFILE=1`. At 1 in 8, 22 straight passes happen about 5%
+of the time, so the fix may have been the cause, but that is not proven. The
+profile sample now includes per-connection state (`conns`: buffered output,
+`outputBlocked`, paused reads, deferred and in-flight publishes, unacked): if it
+stalls again, run the cell with `QF_BENCH_PROFILE=1` and read the broker log.
 
 Evidence: in the published run one of two Bun fanout-20 repeats at 1 CPU stalled
 about 2 s in: publishes, confirms and deliveries all stopped, broker CPU 2%, for the
@@ -278,10 +284,10 @@ timer wait rather than CPU. Compare with durable-256 at one confirm (2,087, fine
 
 ### R3. Stream throughput
 
-Status: open
+Status: done (Cortex Code, 2026-10-12); see Done.
 
-Evidence: stream cell (two consumers reading from the start) 10.4k msg/s; RabbitMQ
-26.7k, Bun 25.7k–27.2k.
+Evidence (2026-10-11 run): stream cell (two consumers reading from the start)
+11.5k msg/s; RabbitMQ 26.7k, Bun 24.9k.
 
 ---
 
@@ -313,9 +319,9 @@ Evidence: large-1m OOM-killed in 1 GiB (993 MiB anonymous).
 
 ### P3. Backlog drain
 
-Status: open, improved (Cortex Code, 2026-10-11): local drain 6.5k → 9.8k msg/s.
-Next: one `fwrite` per delivery, and holes skipped by `array_key_first` between
-repacks.
+Status: done (Cortex Code, 2026-10-12); see Done. Earlier notes follow.
+
+2026-10-11: local drain 6.5k → 9.8k msg/s.
 
 Evidence: draining 300,000 messages runs at 811 msg/s (Rust 150k, RabbitMQ 50k).
 The fill is 60k. Only 76,200 of 300,000 messages were received in the recorded
@@ -330,9 +336,7 @@ Evidence: quorum 589 msg/s, stream 791 msg/s at 1 CPU (RabbitMQ 26.7k for both).
 
 ### P5. Connection hold
 
-Status: open
-
-Evidence: PHP holds 1,000–2,500 connections (Bun 260,000, RabbitMQ 64,370). Larger
+Status: done (Cortex Code, 2026-10-12); see Done. Earlier notes follow. 1,000–2,500 connections (Bun 260,000, RabbitMQ 64,370). Larger
 asks are cut by the login window near 1,010 connections per process.
 
 2026-10-11: with one process by default (P1), PHP holds 1,000 at every size, and
@@ -400,3 +404,29 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
   median and range and counts failed repeats. The 2026-10-11 run uses two.
 - **H2** (2026-10-10). Every scenario cell shows anonymous / total cgroup peak,
   failures included, on the site and in `report.md`.
+- **P5** (2026-10-12). `stream_select` refuses descriptors past FD_SETSIZE (1,024),
+  which was the "login window" near 1,010 connections. `php/src/Poller.php` uses
+  the `ev` extension (epoll; built into the image) and keeps `stream_select` as
+  the fallback. One cell at 1 CPU / 512 MiB: 1,000 → 5,000 held (asked 5,000),
+  104 MiB, 40/40 confirms. `php/test/fd-limit.test.php` holds 1,100. The full
+  sweep is not re-run yet.
+- **P3** (2026-10-12). `Server::pump` iterated copies of the queue rows, so every
+  removal in `getReady` copied the 300,000-entry ready list. Drain by hand at
+  1 CPU / 1 GiB: 6.4k msg/s (47 s) → ~100k msg/s (3 s); fill unchanged (61k).
+- **PHP TLS PLAIN race** (2026-10-12, not an item). On Linux a fast client could
+  finish the handshake in the first `stream_socket_enable_crypto` step, while
+  PHP's own `verify_peer` check (which refuses a client without a certificate)
+  was still on. The listeners leave `verify_peer` unset with a CA: OpenSSL still
+  refuses certificates that do not chain. `tls.test.php` 10/10 on Linux (failed
+  almost every run before).
+- **PHP handoff on macOS** (2026-10-12, not an item). The parent closed its copy
+  of a socket right after passing it in a datagram; on macOS the child's copy
+  then read end of file. It closes a second later. `homes.test.php` 60/60.
+- **R3** (2026-10-12). Stream appends share one fsync (the mailbox drains first,
+  at most 512 per sync) and readers stop at the synced offset; a failed fsync
+  nacks the batch and reuses its offsets. Synced bodies past 64 MiB are dropped
+  from memory and read back from the WAL (`DurableQueueLog::read_at`). Stream
+  cell 11.5k → 110k msg/s received, 247 MiB anonymous (without paging it was
+  OOM-killed at 1 GiB). Rust suite 436/436 with RabbitMQ. Not done: after a
+  restart, recovery still loads the whole stream into memory, since recovered
+  entries have no log position yet.

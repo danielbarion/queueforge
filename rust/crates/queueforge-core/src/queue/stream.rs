@@ -27,12 +27,16 @@ use super::cmd::{
     QueueDelivery, QueueMessage, QueueOffset, QueueStats, StreamCopy, StreamEntryCopy,
     StreamReplicator, StreamStart,
 };
-use super::durable::{DurableQueueLog, QueueActorBootstrap};
+use super::durable::{DurableQueueLog, LogPosition, QueueActorBootstrap};
 use super::registry::{QueueInfo, QueueKey};
 use crate::error::Error;
 
 /// Header holding the Raft index of a replicated entry. Never delivered.
 const RAFT_HEADER: &str = "x-qf-raft";
+
+/// Bodies kept in memory. Older synced entries are read back from the log,
+/// as Bun and PHP page their streams past 64 MiB.
+const RESIDENT_BYTES: u64 = 64 * 1024 * 1024;
 
 fn raft_index_of(message: &Message) -> u64 {
     message
@@ -56,7 +60,37 @@ fn without_raft_header(message: &Message) -> Message {
 struct Entry {
     offset: u64,
     at_ms: u64,
-    message: Arc<Message>,
+    /// Body length, for retention and the resident count.
+    size: u64,
+    /// `None` once paged out; `pos` then finds it in the log.
+    message: Option<Arc<Message>>,
+    pos: Option<LogPosition>,
+}
+
+impl Entry {
+    fn new(offset: u64, at_ms: u64, message: Arc<Message>, pos: Option<LogPosition>) -> Self {
+        Entry {
+            offset,
+            at_ms,
+            size: message.body.len() as u64,
+            message: Some(message),
+            pos,
+        }
+    }
+
+    /// The message, from memory or read back from the log.
+    fn load(&self, wal: &mut Option<Box<dyn DurableQueueLog>>) -> Result<Arc<Message>, Error> {
+        if let Some(message) = &self.message {
+            return Ok(message.clone());
+        }
+        match (self.pos, wal.as_mut()) {
+            (Some(at), Some(wal)) => wal.read_at(at).map(Arc::new),
+            _ => Err(Error::Store(format!(
+                "stream entry {} has no body",
+                self.offset
+            ))),
+        }
+    }
 }
 
 struct Reader {
@@ -75,7 +109,15 @@ fn now_ms() -> u64 {
 struct Stream {
     log: VecDeque<Entry>,
     next: u64,
+    /// Entries below this offset are on disk; readers stop here.
+    synced: u64,
+    /// Publishes appended since the last fsync, confirmed by the next one.
+    pending: Vec<oneshot::Sender<Result<(), Error>>>,
     bytes: u64,
+    /// Bodies of entries still in memory.
+    resident: u64,
+    /// Entries below this offset have been paged out, where they could be.
+    paged: u64,
     readers: HashMap<ConsumerSessionId, Reader>,
     starts: HashMap<ConsumerSessionId, StreamStart>,
     wal: Option<Box<dyn DurableQueueLog>>,
@@ -126,20 +168,67 @@ impl Stream {
     }
 
     fn append(&mut self, msg: Arc<Message>, at_ms: u64) -> Result<u64, Error> {
+        let offset = self.stage(msg, at_ms)?;
+        self.sync()?;
+        Ok(offset)
+    }
+
+    /// Append without an fsync. `sync` makes it durable and readable.
+    fn stage(&mut self, msg: Arc<Message>, at_ms: u64) -> Result<u64, Error> {
         let offset = self.next;
+        let mut pos = None;
         if let Some(wal) = self.wal.as_mut() {
             wal.append_enqueue(QueueOffset(offset), &msg)?;
-            wal.fsync()?;
+            pos = wal.last_position();
         }
         self.next += 1;
-        self.bytes = self.bytes.saturating_add(msg.body.len() as u64);
-        self.log.push_back(Entry {
-            offset,
-            at_ms,
-            message: msg,
-        });
+        let entry = Entry::new(offset, at_ms, msg, pos);
+        self.bytes = self.bytes.saturating_add(entry.size);
+        self.resident = self.resident.saturating_add(entry.size);
+        self.log.push_back(entry);
         self.trim();
         Ok(offset)
+    }
+
+    /// One fsync for every staged entry, then their confirms. On failure the
+    /// staged entries are dropped and their offsets reused, as a failed
+    /// single append did.
+    fn sync(&mut self) -> Result<(), Error> {
+        if self.synced >= self.next {
+            return Ok(());
+        }
+        let result = match self.wal.as_mut() {
+            Some(wal) => wal.fsync().map(|_| ()),
+            None => Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                self.synced = self.next;
+                for tx in self.pending.drain(..) {
+                    let _ = tx.send(Ok(()));
+                }
+                self.page_out();
+                Ok(())
+            }
+            Err(e) => {
+                while self
+                    .log
+                    .back()
+                    .is_some_and(|entry| entry.offset >= self.synced)
+                {
+                    let entry = self.log.pop_back().expect("non-empty");
+                    self.forget(&entry);
+                }
+                self.next = self.synced;
+                let why = e.to_string();
+                for tx in self.pending.drain(..) {
+                    let _ = tx.send(Err(Error::Unavailable(format!(
+                        "stream fsync failed: {why}"
+                    ))));
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Append one committed replicated entry, unless it is a replay.
@@ -158,25 +247,63 @@ impl Stream {
         Ok(())
     }
 
-    fn dump(&self) -> StreamCopy {
+    /// Drop the oldest synced bodies past [`RESIDENT_BYTES`]. They stay in
+    /// the log, which is fsynced, so they are read back on delivery.
+    fn page_out(&mut self) {
+        if self.resident <= RESIDENT_BYTES {
+            return;
+        }
+        let first = self.first();
+        let mut at = self.paged.saturating_sub(first) as usize;
+        while self.resident > RESIDENT_BYTES {
+            let Some(entry) = self.log.get_mut(at) else {
+                break;
+            };
+            if entry.offset >= self.synced {
+                break;
+            }
+            if entry.pos.is_some() && entry.message.take().is_some() {
+                self.resident = self.resident.saturating_sub(entry.size);
+            }
+            at += 1;
+            self.paged = entry.offset + 1;
+        }
+    }
+
+    /// Byte counts for an entry leaving the log.
+    fn forget(&mut self, entry: &Entry) {
+        self.bytes = self.bytes.saturating_sub(entry.size);
+        if entry.message.is_some() {
+            self.resident = self.resident.saturating_sub(entry.size);
+        }
+    }
+
+    fn dump(&mut self) -> StreamCopy {
+        let mut entries = Vec::with_capacity(self.log.len());
+        for e in &self.log {
+            match e.load(&mut self.wal) {
+                Ok(message) => entries.push(StreamEntryCopy {
+                    offset: visible(e.offset),
+                    at_ms: e.at_ms,
+                    message: Arc::new(without_raft_header(&message)),
+                }),
+                Err(err) => {
+                    warn!(offset = e.offset, error = %err, "stream entry unreadable for a snapshot")
+                }
+            }
+        }
         StreamCopy {
             first: visible(self.first()),
             next: visible(self.next),
             raft_index: self.raft_index,
-            entries: self
-                .log
-                .iter()
-                .map(|e| StreamEntryCopy {
-                    offset: visible(e.offset),
-                    at_ms: e.at_ms,
-                    message: Arc::new(without_raft_header(&e.message)),
-                })
-                .collect(),
+            entries,
         }
     }
 
     /// Replace every entry with a leader's copy.
     fn install(&mut self, copy: StreamCopy) -> Result<(), Error> {
+        // Staged appends are settled before the copy replaces them.
+        let _ = self.sync();
         // Stage the new view. WAL errors leave the applied index and visible state unchanged.
         let count = copy.entries.len();
         let mut log = VecDeque::new();
@@ -189,13 +316,9 @@ impl Stream {
                     AppHeaderValue::I64(copy.raft_index as i64),
                 ));
             }
-            let message = Arc::new(message);
-            bytes = bytes.saturating_add(message.body.len() as u64);
-            log.push_back(Entry {
-                offset: stored(e.offset),
-                at_ms: e.at_ms,
-                message,
-            });
+            let entry = Entry::new(stored(e.offset), e.at_ms, Arc::new(message), None);
+            bytes = bytes.saturating_add(entry.size);
+            log.push_back(entry);
         }
         if let Some(wal) = self.wal.as_mut() {
             // Retained offsets must not be acknowledged: that watermark would hide them on restart.
@@ -204,14 +327,20 @@ impl Stream {
                     wal.acknowledge(QueueOffset(old.offset))?;
                 }
             }
-            for e in &log {
-                wal.append_enqueue(QueueOffset(e.offset), &e.message)?;
+            for e in log.iter_mut() {
+                let message = e.message.as_ref().expect("installed entries are resident");
+                wal.append_enqueue(QueueOffset(e.offset), message)?;
+                e.pos = wal.last_position();
             }
             wal.fsync()?;
         }
         self.log = log;
         self.bytes = bytes;
+        self.resident = bytes;
+        self.paged = 0;
         self.next = stored(copy.next).max(self.log.back().map(|e| e.offset + 1).unwrap_or(0));
+        self.synced = self.next;
+        self.page_out();
         self.raft_index = copy.raft_index;
         let (first, next) = (self.first(), self.next);
         for reader in self.readers.values_mut() {
@@ -233,7 +362,7 @@ impl Stream {
                 break;
             }
             let e = self.log.pop_front().expect("non-empty");
-            self.bytes = self.bytes.saturating_sub(e.message.body.len() as u64);
+            self.forget(&e);
             if let Some(wal) = self.wal.as_mut() {
                 let _ = wal.acknowledge(QueueOffset(e.offset));
             }
@@ -247,10 +376,17 @@ impl Stream {
             if reader.cursor < first {
                 reader.cursor = first;
             }
-            while reader.cursor < self.next && reader.credit.is_none_or(|c| c > 0) {
+            while reader.cursor < self.synced && reader.credit.is_none_or(|c| c > 0) {
                 let at = (reader.cursor - first) as usize;
                 let Some(entry) = self.log.get(at) else { break };
-                let mut message = (*entry.message).clone();
+                let stored = match entry.load(&mut self.wal) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        warn!(offset = entry.offset, error = %err, "stream entry unreadable");
+                        break;
+                    }
+                };
+                let mut message = (*stored).clone();
                 message
                     .headers
                     .app
@@ -321,7 +457,11 @@ pub async fn run_stream(
     let mut s = Stream {
         log: VecDeque::new(),
         next: boot.next_offset,
+        synced: boot.next_offset,
+        pending: Vec::new(),
         bytes: 0,
+        resident: 0,
+        paged: 0,
         readers: HashMap::new(),
         starts: HashMap::new(),
         wal: boot.durable_log,
@@ -333,23 +473,46 @@ pub async fn run_stream(
     // Recovered entries keep their offsets. Arrival times are not stored, so
     // they count as now for x-max-age.
     for qm in boot.ready {
-        s.bytes = s.bytes.saturating_add(qm.message.body.len() as u64);
         s.next = s.next.max(qm.offset.0 + 1);
         s.raft_index = s.raft_index.max(raft_index_of(&qm.message));
-        s.log.push_back(Entry {
-            offset: qm.offset.0,
-            at_ms: now_ms(),
-            message: qm.message,
-        });
+        let entry = Entry::new(qm.offset.0, now_ms(), qm.message, None);
+        s.bytes = s.bytes.saturating_add(entry.size);
+        s.resident = s.resident.saturating_add(entry.size);
+        s.log.push_back(entry);
     }
+    s.synced = s.next;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
-        let cmd = tokio::select! {
-            cmd = rx.recv() => match cmd { Some(c) => c, None => break },
-            _ = tick.tick() => {
-                s.trim();
-                s.pump();
-                continue;
+        // Appends staged by the commands already queued share one fsync.
+        // It runs once the mailbox is empty, or every 512 appends under
+        // constant traffic, and only then can readers see them.
+        let cmd = if s.pending.is_empty() {
+            tokio::select! {
+                cmd = rx.recv() => match cmd { Some(c) => c, None => break },
+                _ = tick.tick() => {
+                    s.trim();
+                    s.pump();
+                    continue;
+                }
+            }
+        } else {
+            match rx.try_recv() {
+                Ok(c) => {
+                    if s.pending.len() >= 512 {
+                        let _ = s.sync();
+                        s.pump();
+                    }
+                    c
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    let _ = s.sync();
+                    s.pump();
+                    continue;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    let _ = s.sync();
+                    break;
+                }
             }
         };
         match cmd {
@@ -371,16 +534,19 @@ pub async fn run_stream(
                     }));
                     continue;
                 }
-                let done = s.append(msg, now_ms()).map(|offset| {
-                    let (tx, rx) = oneshot::channel();
-                    let _ = tx.send(Ok(()));
-                    EnqueueCompletion {
-                        offset: QueueOffset(offset),
-                        durable_done: rx,
+                match s.stage(msg, now_ms()) {
+                    Ok(offset) => {
+                        let (tx, rx) = oneshot::channel();
+                        s.pending.push(tx);
+                        let _ = reply.send(Ok(EnqueueCompletion {
+                            offset: QueueOffset(offset),
+                            durable_done: rx,
+                        }));
                     }
-                });
-                let _ = reply.send(done);
-                s.pump();
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
             }
             QueueCmd::ResetReplicas { reply } => {
                 let _ = reply.send(Err(Error::PreconditionFailed(
@@ -388,7 +554,8 @@ pub async fn run_stream(
                 )));
             }
             QueueCmd::FlushDurable { reply, .. } => {
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(s.sync());
+                s.pump();
             }
             QueueCmd::StreamStart { session, start } => {
                 s.starts.insert(session, start);
@@ -485,6 +652,7 @@ pub async fn run_stream(
             }
             QueueCmd::DlxResolved { .. } => {}
             QueueCmd::Shutdown { reply } => {
+                let _ = s.sync();
                 if let Some(wal) = s.wal.as_mut() {
                     let _ = wal.fsync();
                 }
@@ -588,7 +756,11 @@ mod tests {
         Stream {
             log: VecDeque::new(),
             next: 1,
+            synced: 1,
+            pending: Vec::new(),
             bytes: 0,
+            resident: 0,
+            paged: 0,
             readers: HashMap::new(),
             starts: HashMap::new(),
             wal: Some(Box::new(TestLog(state))),
@@ -636,5 +808,128 @@ mod tests {
         assert_eq!((s.raft_index, s.next, s.log.len()), (9, 3, 1));
         assert_eq!(s.log.front().unwrap().offset, 2);
         assert!(!state.acknowledged.lock().unwrap().contains(&2));
+    }
+    #[test]
+    fn staged_appends_share_one_fsync_and_stay_unread_until_it() {
+        let state = Arc::new(LogState::default());
+        let mut s = stream(state.clone());
+        let (tx, mut deliveries) = mpsc::channel(16);
+        s.readers.insert(
+            ConsumerSessionId(1),
+            Reader {
+                cursor: 1,
+                credit: None,
+                tx,
+            },
+        );
+        let mut confirms = Vec::new();
+        for _ in 0..3 {
+            s.stage(Arc::new(Message::blank()), 100).unwrap();
+            let (tx, rx) = oneshot::channel();
+            s.pending.push(tx);
+            confirms.push(rx);
+        }
+        s.pump();
+        assert!(deliveries.try_recv().is_err(), "read before the fsync");
+        // A failed fsync nacks every staged append and reuses the offsets.
+        state.fail_fsync.store(true, Ordering::Relaxed);
+        assert!(s.sync().is_err());
+        for rx in confirms.iter_mut() {
+            assert!(rx.try_recv().unwrap().is_err());
+        }
+        assert_eq!((s.next, s.synced, s.log.len(), s.bytes), (1, 1, 0, 0));
+        state.fail_fsync.store(false, Ordering::Relaxed);
+        let mut confirms = Vec::new();
+        for _ in 0..3 {
+            s.stage(Arc::new(Message::blank()), 100).unwrap();
+            let (tx, rx) = oneshot::channel();
+            s.pending.push(tx);
+            confirms.push(rx);
+        }
+        s.sync().unwrap();
+        for rx in confirms.iter_mut() {
+            assert!(rx.try_recv().unwrap().is_ok());
+        }
+        s.pump();
+        let offsets: Vec<u64> = std::iter::from_fn(|| deliveries.try_recv().ok())
+            .map(|d| d.message.offset.0)
+            .collect();
+        assert_eq!(offsets, vec![1, 2, 3]);
+    }
+
+    /// Keeps every record and reads it back by position.
+    struct MemLog(Vec<Message>);
+    impl DurableQueueLog for MemLog {
+        fn append_enqueue(&mut self, _: QueueOffset, msg: &Message) -> Result<(), Error> {
+            self.0.push(msg.clone());
+            Ok(())
+        }
+        fn acknowledge(&mut self, _: QueueOffset) -> Result<(), Error> {
+            Ok(())
+        }
+        fn fsync(&mut self) -> Result<QueueOffset, Error> {
+            Ok(QueueOffset(u64::MAX))
+        }
+        fn durable_offset(&self) -> QueueOffset {
+            QueueOffset(0)
+        }
+        fn ack_watermark(&self) -> QueueOffset {
+            QueueOffset(0)
+        }
+        fn meta_dirty(&self) -> bool {
+            false
+        }
+        fn compact(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn last_position(&self) -> Option<LogPosition> {
+            Some(LogPosition {
+                segment: 0,
+                pos: self.0.len() as u64 - 1,
+                len: 0,
+            })
+        }
+        fn read_at(&mut self, at: LogPosition) -> Result<Message, Error> {
+            Ok(self.0[at.pos as usize].clone())
+        }
+    }
+
+    #[test]
+    fn synced_bodies_past_the_resident_limit_are_read_back() {
+        let mut s = stream(Arc::new(LogState::default()));
+        s.wal = Some(Box::new(MemLog(Vec::new())));
+        let mib = 1024 * 1024;
+        for i in 0..80u8 {
+            let mut message = Message::blank();
+            message.body = bytes::Bytes::from(vec![i; mib]);
+            s.stage(Arc::new(message), 100).unwrap();
+        }
+        assert_eq!(
+            s.resident,
+            80 * mib as u64,
+            "nothing pages before the fsync"
+        );
+        s.sync().unwrap();
+        assert!(s.resident <= RESIDENT_BYTES);
+        assert_eq!(s.bytes, 80 * mib as u64);
+        assert!(s.log.front().unwrap().message.is_none());
+        assert!(s.log.back().unwrap().message.is_some());
+        let (tx, mut deliveries) = mpsc::channel(128);
+        s.readers.insert(
+            ConsumerSessionId(1),
+            Reader {
+                cursor: 1,
+                credit: None,
+                tx,
+            },
+        );
+        s.pump();
+        let got: Vec<(u64, u8)> = std::iter::from_fn(|| deliveries.try_recv().ok())
+            .map(|d| (d.message.offset.0, d.message.message.body[0]))
+            .collect();
+        assert_eq!(
+            got,
+            (0..80u8).map(|i| (i as u64 + 1, i)).collect::<Vec<_>>()
+        );
     }
 }

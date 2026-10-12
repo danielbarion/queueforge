@@ -154,7 +154,8 @@ final class Extras
             }
             $secure = $kind === 'amqps' || ($kind !== 'metrics' && $kind !== 'cluster' && !empty($cfg['tls']));
             $scheme = 'tcp';
-            $context=stream_context_create($secure?['ssl'=>['local_cert'=>$cfg['cert'],'local_pk'=>$cfg['key'],'cafile'=>$cfg['ca']?:null,'verify_peer'=>(bool)($cfg['ca']??''),'verify_peer_name'=>false,'allow_self_signed'=>false,'capture_peer_cert'=>true,'capture_peer_cert_chain'=>true,'crypto_method'=>STREAM_CRYPTO_METHOD_TLS_SERVER,'queueforge_tls'=>true,'fail_if_no_peer_cert'=>false]]:[]);
+            // `verify_peer` stays unset with a CA, as for the AMQP listener in bin/queueforge.
+            $context=stream_context_create($secure?['ssl'=>['local_cert'=>$cfg['cert'],'local_pk'=>$cfg['key'],'cafile'=>$cfg['ca']?:null,...(($cfg['ca']??'')!==''?['queueforge_peer_verified'=>true]:['verify_peer'=>false]),'verify_peer_name'=>false,'allow_self_signed'=>false,'capture_peer_cert'=>true,'capture_peer_cert_chain'=>true,'crypto_method'=>STREAM_CRYPTO_METHOD_TLS_SERVER,'queueforge_tls'=>true,'fail_if_no_peer_cert'=>false]]:[]);
             $fp = stream_socket_server("$scheme://$addr", $errno, $errstr, STREAM_SERVER_BIND|STREAM_SERVER_LISTEN,$context);
             if ($fp === false) {
                 fwrite(STDERR, "listen $kind $addr: $errstr\n");
@@ -198,7 +199,7 @@ final class Extras
             $kind = $this->listens[$id]['kind'];
             $conn = $kind === 'mqtt' ? $this->protocols->nextMqtt() : ($kind === 'stomp' ? $this->protocols->nextStomp() : 0);
             if ($kind === 'amqps' && $this->onAmqp !== null) { ($this->onAmqp)($client); return; }
-            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => ['fp'=>$client,'advertised'=>['host'=>'127.0.0.1','port'=>self::port($this->cfg['stream']??'')]], 'out'=>'', 'closing'=>false];
+            $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => ['fp'=>$client,'advertised'=>['host'=>'127.0.0.1','port'=>self::port($this->cfg['stream']??'')]], 'out'=>'', 'closing'=>false, 'tls'=>isset(stream_get_meta_data($client)['crypto'])];
             return;
         }
         $row = $this->conns[$id] ?? null;
@@ -214,6 +215,12 @@ final class Extras
             return;
         }
         $this->conns[$id]['buf'] .= $chunk;
+        // OpenSSL can hold decrypted bytes the poller cannot see.
+        for ($more = 0; $more < 16 && ($row['tls'] ?? false); $more++) {
+            $chunk = @fread($fp, 65536);
+            if ($chunk === false || $chunk === '') break;
+            $this->conns[$id]['buf'] .= $chunk;
+        }
         $this->dispatch($id);
     }
 

@@ -15,6 +15,7 @@ require dirname(__DIR__) . '/src/Http.php';
 require dirname(__DIR__) . '/src/Protocols.php';
 require dirname(__DIR__) . '/src/Amqp10.php';
 require dirname(__DIR__) . '/src/Extras.php';
+require dirname(__DIR__) . '/src/Poller.php';
 require dirname(__DIR__) . '/src/Server.php';
 require dirname(__DIR__) . '/src/Cores.php';
 require dirname(__DIR__) . '/src/Handoff.php';
@@ -176,7 +177,12 @@ if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
         'local_cert' => $cfg['cert'],
         'local_pk' => $cfg['key'],
         'cafile' => $cfg['ca'] !== '' ? $cfg['ca'] : null,
-        'verify_peer' => $cfg['ca'] !== '',
+        // With a CA, PHP asks for a client certificate and OpenSSL refuses
+        // one that does not chain to it. `verify_peer` stays unset: PHP's
+        // check after the handshake would also refuse a client that sent
+        // none, which RabbitMQ (fail_if_no_peer_cert = false) accepts for
+        // PLAIN. `queueforge_peer_verified` marks a certificate as checked.
+        ...($cfg['ca'] !== '' ? ['queueforge_peer_verified' => true] : ['verify_peer' => false]),
         // Server-side client verification checks the chain, not a client DNS name.
         'verify_peer_name' => false,
         'allow_self_signed' => false,

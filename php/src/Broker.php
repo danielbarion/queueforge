@@ -609,8 +609,9 @@ final class Broker
     public function pumpConsumers():void
     {
         $remaining=128;
-        foreach($this->queues as $name=>$queue) {
-            if(($queue['args']['queueType']??'')==='stream')continue;
+        // By name, so a removal does not copy the ready list (see Server::pump).
+        foreach(array_keys($this->queues) as $name) {
+            if(($this->queues[$name]['args']['queueType']??'')==='stream')continue;
             while($remaining>0 && ($this->queues[$name]['ready']??[])!==[]) {
                 $pick=$this->pickConsumer($name,static fn($c)=>isset($c['readyFn'])&&($c['readyFn'])());
                 if($pick===null)break;$consumer=$this->queues[$name]['consumers'][$pick];if(!isset($consumer['deliverFn']))break;
