@@ -178,8 +178,13 @@ final class Store
      *
      * @param list<array{id:int,queue:string,body:string,mode:int,propRaw:?string,meta:array<string, mixed>}> $live
      */
+    /** Where `compact` wrote each record, by message id, for paged bodies. */
+    public array $compactedAt = [];
+
     public function compact(array $live): bool
     {
+        $this->compactedAt = [];
+        $at = 0;
         $temp = $this->path . '.compact';
         $fp = fopen($temp, 'w+b');
         if ($fp === false) {
@@ -200,6 +205,8 @@ final class Store
                 . pack('N', strlen($props)) . $props
                 . pack('N', strlen($encoded)) . $encoded;
             $record = chr(1) . pack('N', strlen($payload)) . $payload;
+            $this->compactedAt[$msg['id']] = $at;
+            $at += strlen($record);
             if (fwrite($fp, $record) !== strlen($record)) {
                 fclose($fp);
                 @unlink($temp);
@@ -229,6 +236,9 @@ final class Store
         $this->synced = $this->end;
         fseek($this->fp, $this->end);
         $this->sinceCompact = 0;
+        // The rewritten log has other bytes at the old offsets.
+        $this->ahead = '';
+        $this->aheadAt = -1;
         return true;
     }
 
@@ -253,6 +263,56 @@ final class Store
      *
      * @return ?array{id:int,queue:string,body:string,mode:int,propRaw:?string,meta:array<string, mixed>}
      */
+    /**
+     * The id and body of the publish record at `$pos`, for paged bodies. A
+     * drain reads records one after another, so reads go through a 256 KiB
+     * read-ahead buffer, and the metadata is not decoded.
+     *
+     * @return ?array{id:int,body:string}
+     */
+    public function bodyAt(int $pos): ?array
+    {
+        if ($pos < 0 || !$this->ahead($pos, 5) || ord($this->ahead[$pos - $this->aheadAt]) !== 1) return null;
+        $at = $pos - $this->aheadAt;
+        $len = unpack('N', $this->ahead, $at + 1)[1];
+        if ($len < 13 || !$this->ahead($pos, 5 + $len)) return null;
+        $at = $pos - $this->aheadAt + 5;
+        $id = Codec::readU64($this->ahead, $at);
+        $o = $at + 8;
+        $o += 1 + ord($this->ahead[$o]);
+        $bodyLen = unpack('N', $this->ahead, $o)[1];
+        if ($o + 4 + $bodyLen > $at + $len) return null;
+        return ['id' => $id, 'body' => substr($this->ahead, $o + 4, $bodyLen)];
+    }
+
+    private const AHEAD_BYTES = 256 * 1024;
+    private string $ahead = '';
+    private int $aheadAt = -1;
+
+    /** Makes `[$pos, $pos + $len)` readable from the read-ahead buffer. */
+    private function ahead(int $pos, int $len): bool
+    {
+        if ($this->aheadAt >= 0 && $pos >= $this->aheadAt && $pos + $len <= $this->aheadAt + strlen($this->ahead)) return true;
+        if ($pos + $len > $this->end) return false;
+        $want = min(max($len, self::AHEAD_BYTES), $this->end - $pos);
+        $data = '';
+        try {
+            if (fseek($this->fp, $pos) !== 0) return false;
+            while (strlen($data) < $want) {
+                $chunk = fread($this->fp, $want - strlen($data));
+                if ($chunk === false || $chunk === '') break;
+                $data .= $chunk;
+            }
+        } finally {
+            // Appends write at the current position.
+            fseek($this->fp, $this->end);
+        }
+        if (strlen($data) < $len) return false;
+        $this->ahead = $data;
+        $this->aheadAt = $pos;
+        return true;
+    }
+
     public function readAt(int $pos): ?array
     {
         if ($pos < 0 || $pos + 5 > $this->end) return null;

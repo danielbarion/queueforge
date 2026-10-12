@@ -10,6 +10,7 @@ require dirname(__DIR__) . '/src/Auth.php';
 require dirname(__DIR__) . '/src/Store.php';
 require dirname(__DIR__) . '/src/Cluster.php';
 require dirname(__DIR__) . '/src/Discovery.php';
+require dirname(__DIR__) . '/src/Alarms.php';
 require dirname(__DIR__) . '/src/Broker.php';
 require dirname(__DIR__) . '/src/Http.php';
 require dirname(__DIR__) . '/src/Protocols.php';
@@ -146,8 +147,11 @@ if (getenv('QUEUEFORGE_CHILD') !== '1') {
 }
 if (getenv('QUEUEFORGE_BIND_MGMT') === '0') {
     $cfg['management'] = '';
+    // The first child serves the other client listeners; the rest would only
+    // fail to bind them. It reaches their queues over the cluster links.
+    foreach (['mqtt', 'stomp', 'stream', 'amqps'] as $kind) $cfg[$kind] = '';
 }
-if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1 && !$cfg['tls'] && $cfg['amqps'] === '') {
+if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1) {
     Supervise::run(__FILE__, $configPath, $dev, $cfg);
     exit(0);
 }
@@ -170,7 +174,7 @@ $context = stream_context_create([]);
 $scheme = 'tcp';
 if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
     $scheme = 'tcp';
-    $context = stream_context_create(['ssl' => [
+    $tlsOptions = [
         'crypto_method' => STREAM_CRYPTO_METHOD_TLS_SERVER,
         'queueforge_tls' => true,
         'capture_peer_cert_chain' => true,
@@ -187,7 +191,10 @@ if ($cfg['tls'] && $cfg['cert'] !== '' && $cfg['key'] !== '') {
         'verify_peer_name' => false,
         'allow_self_signed' => false,
         'capture_peer_cert' => true,
-    ]]);
+    ];
+    $context = stream_context_create(['ssl' => $tlsOptions]);
+    // A child gets raw TCP from the parent and runs the handshake itself.
+    if (getenv('QUEUEFORGE_CHILD') === '1') Server::$handedTls = $tlsOptions;
 }
 $listen = null;
 if (getenv('QUEUEFORGE_CHILD') !== '1') {

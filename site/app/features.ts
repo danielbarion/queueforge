@@ -7,7 +7,11 @@
 // PHP on 2026-10-09: 126/126 real-client tests across 11 non-auth files;
 // external authentication checked separately with focused fixtures. Cluster
 // and queue-home gates passed 7/7 and 3/3. These results do not establish
-// advanced mixed-implementation Raft parity or optional client-certificate TLS.
+// advanced mixed-implementation Raft parity.
+// PHP on 2026-10-12: memory alarm and connection.blocked (alarms.test),
+// classic backlog paging (classic-page.test), TLS clients without a
+// certificate beside a client CA (tls.test), and one child per core with TLS
+// or an amqps port (tls-cores.test, fanout-cores.test).
 
 export type Level = "y" | "p" | "n";
 export type Cell = Level | readonly [Level, string];
@@ -68,7 +72,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "MQTT 5.0",
         detail: "Properties, session expiry, reason codes",
-        cells: { mq: ["y", "plugin"], rust: ["p", "properties and reason codes"], bun: ["p", "properties and reason codes"], php: ["p", "properties and reason codes; session expiry incomplete"] },
+        cells: { mq: ["y", "plugin"], rust: ["p", "properties and reason codes"], bun: ["p", "properties and reason codes"], php: ["p", "properties and reason codes"] },
       },
       {
         name: "STOMP",
@@ -102,7 +106,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: ["y", "AMQP, HTTPS, MQTT, STOMP, streams"],
           bun: ["y", "AMQP, HTTPS, MQTT, STOMP, streams"],
-          php: ["p", "all client listeners; configured client CA requires a certificate"],
+          php: ["y", "all client listeners"],
         },
       },
     ],
@@ -445,7 +449,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "x.509 client certificates",
         detail: "The EXTERNAL SASL mechanism",
-        cells: { mq: ["y", "plugin"], rust: ["p", "AMQP 0-9-1 only"], bun: ["p", "AMQP 0-9-1 only"], php: ["p", "AMQP 0-9-1 EXTERNAL; configured CA requires a certificate"] },
+        cells: { mq: ["y", "plugin"], rust: ["p", "AMQP 0-9-1 only"], bun: ["p", "AMQP 0-9-1 only"], php: ["p", "AMQP 0-9-1 only"] },
       },
       {
         name: "LDAP",
@@ -544,7 +548,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: "y",
           bun: "y",
-          php: ["p", "disk only, no memory watermark"],
+          php: "y",
         },
       },
       {
@@ -634,7 +638,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: "y",
           bun: ["y", "one child per core"],
-          php: ["p", "off with TLS"],
+          php: ["y", "one child per core"],
         },
       },
     ],

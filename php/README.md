@@ -91,9 +91,14 @@ Not the same:
   preallocated fsync log. This is a single append-only log, rewritten when it is
   mostly dead records. Nothing crosses processes on disk, so only the wire
   formats have to agree.
-- **TLS with a configured client CA requires a client certificate.** PHP's
-  standard verified handshake does not provide RabbitMQ's optional-certificate
-  behavior.
+- **Memory and disk alarms follow RabbitMQ.** Past 0.6 of RAM (the cgroup
+  limit in a container; `QUEUEFORGE_MEM_HIGH_WATERMARK` overrides it) or under
+  50 MB of free disk, connections that have published are no longer read, and
+  clients that advertise `connection.blocked` are told so.
+- **One child per core, TLS included.** The parent hands raw TCP to a child,
+  which runs the TLS handshake. TLS connections stay on that child and reach
+  queues homed elsewhere over the cluster links; a separate `amqps` port and
+  the MQTT, STOMP and stream listeners are served by the first child.
 - **Integration transports.** Shovels and federation currently bridge AMQP
   0-9-1; AMQP 1.0 and native-stream bridge transports are unsupported.
 - **Remaining cluster work.** Mixed-stack rolling upgrades need additional
@@ -105,10 +110,12 @@ Not the same:
   auto-delete runs when the last consumer leaves a queue that had a consumer.
 - **One thread means one connection at a time gets served.** There is no flow
   control beyond prefetch, and `channel.flow` only echoes the requested state.
-- **Every message is held in memory**, and log compaction transiently needs a
-  second copy, so an unbounded queue with no consumer exhausts PHP's 128 MiB
-  `memory_limit` at roughly 100,000 queued 256-byte messages. Bound a queue
-  with `x-max-length` if nothing is consuming it.
+- **Every message is held in memory until 64 MiB of persistent classic
+  bodies**; past that, new persistent bodies are read back from the log when
+  delivered, as Bun pages its backlog. A restart replays the whole log before
+  paging again, so it briefly needs the whole backlog in memory. Transient
+  messages are never paged: bound a queue with `x-max-length` if nothing is
+  consuming it.
 
 ## Running
 

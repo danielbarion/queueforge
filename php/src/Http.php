@@ -136,22 +136,23 @@ final class Http
     }
 
     /**
-     * The alarm fields of a RabbitMQ node row. This broker has no memory
-     * watermark, so mem_alarm stays false; the disk alarm uses RabbitMQ's
-     * default 50 MB free limit on the data directory's filesystem.
+     * The alarm fields of a RabbitMQ node row: this process's memory against
+     * its high watermark (0.6 of RAM by default) and the data directory's free
+     * disk against RabbitMQ's 50 MB limit, as last sampled by the server.
      *
      * @return array<string, mixed>
      */
     private function alarms(): array
     {
-        $free = @disk_free_space(dirname($this->broker->userFile));
-        $free = $free === false ? null : (int) $free;
+        $alarms = $this->broker->alarms();
+        if ($alarms->memUsed === 0) $alarms->check();
         return [
-            'mem_used' => memory_get_usage(true),
-            'mem_alarm' => false,
-            'disk_free' => $free,
-            'disk_free_limit' => 50_000_000,
-            'disk_free_alarm' => $free !== null && $free < 50_000_000,
+            'mem_used' => $alarms->memUsed,
+            'mem_limit' => $alarms->memLimit,
+            'mem_alarm' => $alarms->memAlarm,
+            'disk_free' => $alarms->diskFree,
+            'disk_free_limit' => Alarms::DISK_FREE_LIMIT,
+            'disk_free_alarm' => $alarms->diskAlarm,
         ];
     }
 
@@ -1031,8 +1032,8 @@ final class Http
             ...$counter('rabbitmq_global_messages_dead_lettered_maxlen_total', $p['dlxMaxlen']),
             ...$counter('rabbitmq_global_messages_dead_lettered_delivery_limit_total', $p['dlxDeliveryLimit']),
             ...$counter('rabbitmq_global_messages_dead_lettered_confirmed_total', 0),
-            ...$gauge('rabbitmq_alarms_memory_used_watermark', 0),
-            ...$gauge('rabbitmq_alarms_free_disk_space_watermark', 0),
+            ...$gauge('rabbitmq_alarms_memory_used_watermark', $this->broker->alarms()->memAlarm ? 1 : 0),
+            ...$gauge('rabbitmq_alarms_free_disk_space_watermark', $this->broker->alarms()->diskAlarm ? 1 : 0),
             ...$gauge('rabbitmq_disk_space_available_bytes', $this->diskFree()),
             ...$gauge('rabbitmq_unreachable_cluster_peers_count', 0),
         ];

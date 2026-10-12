@@ -21,8 +21,13 @@ final class Amqp
         private string $pass = 'devpassword12',
         bool $open = true,
         private float $timeout = 5.0,
+        private bool $wantsBlocked = false,
+        /** TLS client options; null connects in plain TCP. */
+        private ?array $ssl = null,
     ) {
-        $fp = @stream_socket_client("tcp://$host:$port", $errno, $errstr, $this->timeout);
+        $fp = $this->ssl === null
+            ? @stream_socket_client("tcp://$host:$port", $errno, $errstr, $this->timeout)
+            : @stream_socket_client("tls://$host:$port", $errno, $errstr, $this->timeout, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => $this->ssl]));
         if ($fp === false) {
             throw new RuntimeException("connect $host:$port failed: $errstr");
         }
@@ -48,7 +53,12 @@ final class Amqp
         $this->write("AMQP\x00\x00\x09\x01");
         $this->expect(10, 10);
         $response = "\0" . $this->user . "\0" . $this->pass;
-        $this->method(0, 10, 11, pack('N', 0) . Codec::shortstr('PLAIN') . Codec::longstr($response) . Codec::shortstr('en_US'));
+        $props = '';
+        if ($this->wantsBlocked) {
+            $caps = Codec::shortstr('connection.blocked') . 't' . chr(1);
+            $props = Codec::shortstr('capabilities') . 'F' . pack('N', strlen($caps)) . $caps;
+        }
+        $this->method(0, 10, 11, pack('N', strlen($props)) . $props . Codec::shortstr('PLAIN') . Codec::longstr($response) . Codec::shortstr('en_US'));
         $this->expect(10, 30);
         $this->method(0, 10, 31, pack('nNn', 0, 131072, 0));
         $this->method(0, 10, 40, Codec::shortstr('/') . Codec::shortstr('') . chr(0));
@@ -377,6 +387,14 @@ final class Amqp
             $left = $deadline - microtime(true);
             if ($left <= 0) {
                 return null;
+            }
+            // OpenSSL can hold decrypted records that select does not see.
+            if ($this->ssl !== null) {
+                $chunk = @fread($this->fp, 65536);
+                if (is_string($chunk) && $chunk !== '') {
+                    $this->buf .= $chunk;
+                    continue;
+                }
             }
             $read = [$this->fp];
             $write = [];

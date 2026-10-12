@@ -244,6 +244,7 @@ final class Cluster
     {
         $this->maybeEnable();
         $this->raft?->tick();
+        $this->retryDeferred();
         $now = microtime(true);
         foreach ($this->pending as $correlation => $row) {
             if ($row['deadline'] > $now) {
@@ -352,6 +353,12 @@ final class Cluster
             return;
         }
         ($this->peers[$peer]['write'])($line . "\n");
+    }
+
+    /** Writes an already encoded line, such as a deferred reply, to a peer. */
+    private function sendLine(string $peer, string $line): void
+    {
+        if ($line !== '' && isset($this->peers[$peer])) ($this->peers[$peer]['write'])($line . "\n");
     }
 
     /**
@@ -487,6 +494,7 @@ final class Cluster
             return null;
         }
         try {
+            if ($op === 'enqueue' && $this->deferEnqueue($msg, $payload, $from)) return null;
             $body = $this->handle($op, $payload, $from);
         } catch (RuntimeException $err) {
             return $this->reply((int) ($msg['id'] ?? 0), false, [], $err->getMessage());
@@ -634,7 +642,7 @@ final class Cluster
             return true;
         }
         if ($op === 'deliver') {
-            $this->onDeliver($payload);
+            if ($this->onRemoteDeliver === null || !($this->onRemoteDeliver)($payload, $from)) $this->onDeliver($payload);
             return null;
         }
         if ($op === 'stats') {
@@ -674,6 +682,15 @@ final class Cluster
      *
      * @param array<string, mixed> $payload
      */
+    /**
+     * Delivers a push from a queue's home to the consumer that subscribed
+     * for it. Returns false for a session it does not know, which is then
+     * queued here as before.
+     *
+     * @var ?\Closure(array<string, mixed>, string): bool
+     */
+    public ?\Closure $onRemoteDeliver = null;
+
     private function onDeliver(array $payload): void
     {
         $queue = (string) ($payload['queue'] ?? '');
@@ -709,6 +726,51 @@ final class Cluster
     }
 
     /** @param mixed $payload */
+    /**
+     * Forwarded publishes for a queue this node has not applied yet, by
+     * vhost and queue, oldest first. A declare is acknowledged once the Raft
+     * leader commits it, and a follower applies it on the next heartbeat, so
+     * a publish can arrive first. It waits rather than being lost.
+     *
+     * @var array<string, list<array{id:int,payload:array<string,mixed>,from:string,until:float}>>
+     */
+    private array $deferred = [];
+    private const DEFER_SECONDS = 1.0;
+
+    /** @param array<string, mixed> $msg @param array<string, mixed> $payload */
+    private function deferEnqueue(array $msg, array $payload, string $from): bool
+    {
+        $vhost = (string) ($payload['vhost'] ?? '/');
+        $queue = (string) ($payload['queue'] ?? '');
+        $key = $vhost . "\0" . $queue;
+        // Behind an earlier publish to the same queue, to keep the order.
+        if (!isset($this->deferred[$key]) && ($this->raft === null || isset($this->broker->forVhost($vhost)->queues[$queue]))) return false;
+        $this->deferred[$key][] = ['id' => (int) ($msg['id'] ?? 0), 'payload' => $payload, 'from' => $from, 'until' => microtime(true) + self::DEFER_SECONDS];
+        return true;
+    }
+
+    /** Stores deferred publishes whose queue arrived; refuses those past their deadline. */
+    private function retryDeferred(): void
+    {
+        $now = microtime(true);
+        foreach ($this->deferred as $key => $rows) {
+            [$vhost, $queue] = explode("\0", $key, 2);
+            $ready = isset($this->broker->forVhost($vhost)->queues[$queue]);
+            while ($rows !== [] && ($ready || $rows[0]['until'] <= $now)) {
+                $row = array_shift($rows);
+                try {
+                    $line = $ready && $this->handle('enqueue', $row['payload'], $row['from']) === true
+                        ? $this->reply($row['id'], true, true)
+                        : $this->reply($row['id'], false, [], "NOT_FOUND - no queue '$queue'");
+                } catch (RuntimeException $err) {
+                    $line = $this->reply($row['id'], false, [], $err->getMessage());
+                }
+                $this->sendLine($row['from'], $line);
+            }
+            if ($rows === []) unset($this->deferred[$key]); else $this->deferred[$key] = $rows;
+        }
+    }
+
     private function reply(int $id, bool $ok, mixed $payload, string $error = ''): string
     {
         $encoded = json_encode([

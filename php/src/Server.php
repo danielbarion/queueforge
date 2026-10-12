@@ -83,6 +83,14 @@ final class Sock
     public bool $settled = false;
     public ?string $metadataQueue = null;
     public float $metadataDeadline = 0;
+    /** A soft wait runs the frame at the deadline instead of closing. */
+    public bool $metadataSoft = false;
+    /** @var array<string, true> queues this connection already waited for */
+    public array $metadataWaited = [];
+    /** The client advertised the `connection.blocked` capability. */
+    public bool $wantsBlocked = false;
+    /** This connection has published, so an alarm stops reading it. */
+    public bool $published = false;
     /** @var array<int, Chan> */
     public array $channels = [];
     /** @var array<string, mixed> AMQP 1.0 phase and link state */
@@ -128,6 +136,8 @@ final class Server
      * counting toward queue depth for another half minute.
      */
     private const SWEEP_SECONDS = 0.25;
+    /** How long a frame waits for a queue declared through another node. */
+    private const METADATA_WAIT_SECONDS = 0.5;
     private float $nextSweep = 0;
     /** True while tx.commit applies what a transaction held. */
     private bool $replaying = false;
@@ -146,7 +156,9 @@ final class Server
         $this->nextSync = microtime(true) + $this->fsyncMs / 1000;
         $this->nextBeat = microtime(true) + self::BEAT_SECONDS;
         $this->bootAt = microtime(true);
+        if (getenv('QUEUEFORGE_CHILD') === '1' && function_exists('posix_getppid')) $this->parentPid = posix_getppid();
         $this->amqp10 = new Amqp10($broker);
+        if ($extras !== null) $extras->cluster->onRemoteDeliver = fn (array $payload, string $from): bool => $this->remoteDeliver($payload, $from);
         $broker->onDeleteQueue = function (string $vhost, string $name, array $consumers): void {
             foreach ($consumers as $consumer) {
                 $client = $this->conns[$consumer['conn']] ?? null;
@@ -202,11 +214,13 @@ final class Server
                 }
             }
             $write = $this->extras?->writes() ?? [];
+            // A memory or disk alarm stops reading publishers, as RabbitMQ does.
+            $alarmed = $this->broker->alarms()->blocked();
             foreach ($this->conns as $sock) {
                 if ($sock->gone) {
                     continue;
                 }
-                $read[] = $sock->fp;
+                if (!$alarmed || !$sock->published) $read[] = $sock->fp;
                 if ($sock->off < strlen($sock->out)) {
                     $write[] = $sock->fp;
                 }
@@ -300,8 +314,20 @@ final class Server
     }
 
     /** @param resource $fp */
+    /**
+     * TLS options for sockets the parent hands over, in cores mode. The parent
+     * reads no bytes; this child runs the handshake, as Bun's children do. A
+     * TLS connection never migrates, so a migrated socket is always plain.
+     *
+     * @var array<string, mixed>
+     */
+    public static array $handedTls = [];
+
     private function take($fp, ?array $state = null, string $bytes = ''): void
     {
+        if ($state === null && self::$handedTls !== []) {
+            foreach (self::$handedTls as $key => $value) stream_context_set_option($fp, 'ssl', $key, $value);
+        }
         if (!self::acceptTls($fp)) { fclose($fp); return; }
         stream_set_blocking($fp, false);
         $initial = stream_get_meta_data($fp);
@@ -427,6 +453,27 @@ final class Server
      *
      * @return 'no'|'pending'|'moved'
      */
+    /**
+     * Holds a publish or consume naming a queue this node has not applied yet.
+     * With Raft, a declare is acknowledged once the leader commits it; a
+     * follower applies it on the next heartbeat. A client that declares on
+     * one node and publishes on another must not get a 404 in that window.
+     * Each queue is waited for once per connection; after that the frame
+     * runs and a missing queue is a real 404.
+     */
+    private function awaitMetadata(Broker $broker, Sock $sock): bool
+    {
+        if (!($broker->cluster?->raftEnabled() ?? false)) return false;
+        $queue = Handoff::namedQueue($sock->in, $sock->inAt);
+        if ($queue === null || isset($broker->queues[$queue]) || isset($sock->metadataWaited[$queue])) return false;
+        if (count($sock->metadataWaited) >= 64) $sock->metadataWaited = [];
+        $sock->metadataWaited[$queue] = true;
+        $sock->metadataQueue = $queue;
+        $sock->metadataSoft = true;
+        $sock->metadataDeadline = microtime(true) + self::METADATA_WAIT_SECONDS;
+        return true;
+    }
+
     private function maybeMigrate(int $id): string
     {
         $broker = $this->brokerFor($id);
@@ -602,8 +649,10 @@ final class Server
         // and max-length until something happens to dequeue it.
         if ($now >= $this->nextSweep) {
             $this->nextSweep = $now + self::SWEEP_SECONDS;
+            $this->exitIfOrphaned();
             foreach ($this->broker->allBrokers() as $scope) $scope->sweep();
             $this->pump();
+            $this->checkAlarms();
         }
         if ($now < $this->nextBeat) {
             return;
@@ -617,6 +666,37 @@ final class Server
                 continue;
             }
             $sock->send(Codec::heartbeat());
+            $sock->flush();
+        }
+    }
+
+    /** The supervisor's pid, for a cores child; 0 otherwise. */
+    private int $parentPid = 0;
+
+    /**
+     * A cores child whose supervisor is gone, even by SIGKILL, exits. Left
+     * running, it would keep its fixed cluster port and the next start would
+     * fail to bind it.
+     */
+    private function exitIfOrphaned(): void
+    {
+        if ($this->parentPid === 0 || !function_exists('posix_getppid') || posix_getppid() === $this->parentPid) return;
+        fwrite(STDERR, "queueforge-php {$this->broker->nodeId}: supervisor gone, exiting\n");
+        exit(1);
+    }
+
+    /** Sample the alarms; on a change, tell every client that asked. */
+    private function checkAlarms(): void
+    {
+        $alarms = $this->broker->alarms();
+        if (!$alarms->check()) return;
+        $frame = $alarms->blocked()
+            ? Codec::method(0, 10, 60, Codec::shortstr($alarms->reason()))
+            : Codec::method(0, 10, 61);
+        fwrite(STDERR, 'queueforge-php alarm ' . ($alarms->blocked() ? 'set: ' . $alarms->reason() : 'cleared') . "\n");
+        foreach ($this->conns as $sock) {
+            if ($sock->gone || !$sock->wantsBlocked || $sock->stage !== 'frames' || $sock->user === '') continue;
+            $sock->send($frame);
             $sock->flush();
         }
     }
@@ -675,6 +755,7 @@ final class Server
                 $broker->requeue($msgId);
             }
         }
+        foreach (array_keys($ch->remote) as $tag) $this->unsubscribeRemote($broker, $ch, (string) $tag);
         $ch->txPub = [];
         $ch->txAcks = [];
         $touched = [];
@@ -727,10 +808,11 @@ final class Server
         $sock->in .= $data;
         if($sock->metadataQueue!==null){
             if(!isset($broker->queues[$sock->metadataQueue])){
-                if(microtime(true)>=$sock->metadataDeadline){$sock->send(Codec::connectionClose(541,'INTERNAL_ERROR - queue metadata unavailable',0,0));$sock->flush();$this->drop($id);}
-                return;
+                if(microtime(true)<$sock->metadataDeadline)return;
+                if(!$sock->metadataSoft){$sock->send(Codec::connectionClose(541,'INTERNAL_ERROR - queue metadata unavailable',0,0));$sock->flush();$this->drop($id);return;}
             }
             $sock->metadataQueue=null;
+            $sock->metadataSoft=false;
         }
         if ($sock->stage === 'header') {
             if (strlen($sock->in) < 8) {
@@ -781,6 +863,9 @@ final class Server
             if ($sock->in[$i + 7 + $len] !== "\xce") {
                 $this->drop($id);
                 return;
+            }
+            if ($type === 1 && $this->awaitMetadata($broker, $sock)) {
+                break;
             }
             if ($type === 1) {
                 $move = $this->maybeMigrate($id);
@@ -952,6 +1037,8 @@ final class Server
             }
             $sock->vhost = $vhost;
             $sock->send(Codec::connectionOpenOk());
+            $alarms = $this->broker->alarms();
+            if ($sock->wantsBlocked && $alarms->blocked()) $sock->send(Codec::method(0, 10, 60, Codec::shortstr($alarms->reason())));
         } elseif ($class === 10 && $method === 50) {
             $sock->send(Codec::connectionCloseOk());
             $sock->flush();
@@ -989,6 +1076,7 @@ final class Server
         } elseif ($class === 60 && $method === 20 && $ch !== null) {
             $this->consume($id, $channel, $payload, $o);
         } elseif ($class === 60 && $method === 40 && $ch !== null) {
+            $sock->published = true;
             if (!$this->beginPublish($ch, $payload, $o)) {
                 $sock->send(Codec::channelClose($channel, 540, 'NOT_IMPLEMENTED - immediate=true', 60, 40));
             }
@@ -1049,13 +1137,7 @@ final class Server
         $nowait = isset($payload[$o]) && (ord($payload[$o]) & 1) === 1;
         $ch = $this->conns[$id]->channels[$channel];
         // A consumer served by another node is unsubscribed there.
-        if (isset($ch->remote[$tag]) && $this->extras !== null) {
-            $this->extras->cluster->request($ch->remote[$tag]['peer'], 'unsub', [
-                'vhost' => $broker->vhost,
-                'session' => $ch->remote[$tag]['session'],
-            ]);
-            unset($ch->remote[$tag]);
-        }
+        if (isset($ch->remote[$tag])) $this->unsubscribeRemote($broker, $ch, $tag);
         $touched = [];
         foreach ($broker->queues as $name => $queue) {
             $before = count($queue['consumers']);
@@ -1385,6 +1467,10 @@ final class Server
     private function startOk(int $id, string $payload, int $o): void
     {
         $broker = $this->brokerFor($id);
+        $props = $o;
+        $client = Codec::readTable($payload, $props);
+        $caps = is_array($client['capabilities'] ?? null) ? $client['capabilities'] : [];
+        $this->conns[$id]->wantsBlocked = ($caps['connection.blocked'] ?? 0) === 1;
         $table = unpack('N', substr($payload, $o, 4))[1];
         $o += 4 + $table;
         $mech = Codec::readShortstr($payload, $o);
@@ -1574,7 +1660,8 @@ final class Server
             $ch->consumer = $tag;
             $ch->queue = $queue;
             $ch->noAck[$tag] = $noAck;
-            $ch->remote[$tag] = ['peer' => $home, 'session' => $session];
+            $ch->remote[$tag] = ['peer' => $home, 'session' => $session, 'queue' => $queue];
+            $this->remoteSubs[$broker->vhost . "\0" . $session] = ['conn' => $id, 'ch' => $channel, 'tag' => $tag, 'noAck' => $noAck];
             if (!$nowait) {
                 $this->conns[$id]->send(Codec::consumeOk($channel, $tag));
             }
@@ -1885,9 +1972,62 @@ final class Server
         return $this->extras === null ? null : ($scope ?? $this->broker)->remoteHomeOf($queue);
     }
 
+    /** @var array<string, array{conn:int,ch:int,tag:string,noAck:bool}> remote sessions by vhost and session */
+    private array $remoteSubs = [];
+
+    /** Ends a subscription served by another node. */
+    private function unsubscribeRemote(Broker $broker, Chan $ch, string $tag): void
+    {
+        $remote = $ch->remote[$tag];
+        unset($ch->remote[$tag], $this->remoteSubs[$broker->vhost . "\0" . $remote['session']]);
+        $this->extras?->cluster->request($remote['peer'], 'unsub', [
+            'vhost' => $broker->vhost, 'queue' => $remote['queue'] ?? '', 'session' => $remote['session'],
+        ]);
+    }
+
+    /**
+     * A delivery pushed by a queue's home for a consumer subscribed from
+     * here. Without an auto-ack it stays at the home until this consumer
+     * settles it; see Broker::holdRemote. A session nobody holds any more is
+     * handed back to the home.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function remoteDeliver(array $payload, string $from): bool
+    {
+        $vhost = (string) ($payload['vhost'] ?? '/');
+        $broker = $this->broker->forVhost($vhost);
+        $queue = (string) ($payload['queue'] ?? '');
+        $delivery = (int) ($payload['delivery_id'] ?? 0);
+        $sub = $this->remoteSubs[$vhost . "\0" . (int) ($payload['session'] ?? 0)] ?? null;
+        $source = is_array($payload['message'] ?? null) ? $payload['message'] : [];
+        $body = base64_decode((string) ($source['body_b64'] ?? ''), true);
+        if ($sub === null || !isset($this->conns[$sub['conn']]) || $body === false) {
+            if (($payload['settles_on_write'] ?? false) !== true) {
+                $this->extras?->cluster->request($from, 'nack', ['vhost' => $vhost, 'queue' => $queue, 'delivery_id' => $delivery, 'requeue' => true]);
+            }
+            return true;
+        }
+        $raw = base64_decode((string) ($source['propRaw'] ?? ''), true);
+        $msg = [
+            'queue' => $queue,
+            'key' => (string) ($source['routing_key'] ?? $queue),
+            'exchange' => (string) ($source['exchange'] ?? ''),
+            'body' => $body,
+            'mode' => ($source['persistent'] ?? true) !== false ? 2 : 1,
+            'redelivered' => ($source['redelivered'] ?? false) === true,
+            'propRaw' => is_string($raw) && $raw !== '' ? $raw : null,
+            'headers' => is_array($source['headers'] ?? null) ? $source['headers'] : [],
+        ];
+        $msgId = $sub['noAck'] ? -1 : $broker->holdRemote(['peer' => $from, 'queue' => $queue, 'delivery' => $delivery]);
+        $this->deliverMessage($broker, $sub['conn'], $sub['ch'], $sub['tag'], $sub['noAck'], $msg, $msgId);
+        $this->conns[$sub['conn']]->flush();
+        return true;
+    }
+
     private function deliverMessage(Broker $broker,int $id,int $channel,string $tag,bool $noAck,array $msg,int $msgId):void
     {
-        $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId>=0)$broker->requeue($msgId);return;}
+        $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId!==-1)$broker->requeue($msgId);return;}
         $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;}
         $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[],$sock->frameMax));$sock->flush();
         $broker->prom['delivered']++;$broker->prom[$noAck?'deliveredConsumeAuto':'deliveredConsumeManual']++;if($msg['redelivered']??false)$broker->prom['redelivered']++;

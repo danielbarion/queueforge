@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/Alarms.php';
+
 /**
  * Single-node and clustered queues. A classic confirm is not released until the
  * covering fsync. A quorum confirm also waits for a durable majority.
@@ -208,6 +210,7 @@ final class Broker
             $this->msgs[$msg['id']] = [
                 'queue' => $msg['queue'],
                 'body' => $msg['body'],
+                'replayPos' => $msg['pos'] ?? null,
                 'mode' => $msg['mode'],
                 'redelivered' => false,
                 // Recovered from the metadata field, so priority ordering,
@@ -236,6 +239,13 @@ final class Broker
             foreach (['policies','operatorPolicies','topicPermissions','vhostLimits','userLimits','parameters','featureFlags'] as $field) if (isset($state[$field])) $this->$field = $state[$field];
             $this->restoreTopology($state['states']['/'] ?? []);
         }
+        // Queue types are known now, so recovered bodies past the resident
+        // limit can go back to the log. Other vhost scopes keep theirs.
+        foreach ($this->msgs as $id => $msg) {
+            if (!array_key_exists('replayPos', $msg)) continue;
+            unset($this->msgs[$id]['replayPos']);
+            if ($this->registry === null && $msg['replayPos'] !== null) $this->residentOrPaged($id, (int) $msg['replayPos']);
+        }
     }
 
     /**
@@ -250,6 +260,93 @@ final class Broker
     private array $savedTopology = [];
 
     public function root(): Broker { return $this->registry ?? $this; }
+
+    private ?Alarms $alarmState = null;
+
+    /**
+     * Deliveries pushed by a queue's home to a consumer here, by stand-in id.
+     * The ids are below -1 (-1 means no message) so they never meet a local
+     * one; settling one
+     * acks or nacks it at the home, which holds the message.
+     *
+     * @var array<int, array{peer:string,queue:string,delivery:int}>
+     */
+    public array $remoteHeld = [];
+    private int $nextRemote = -2;
+
+    /** @param array{peer:string,queue:string,delivery:int} $ref */
+    public function holdRemote(array $ref): int
+    {
+        $id = $this->nextRemote--;
+        $this->remoteHeld[$id] = $ref;
+        return $id;
+    }
+
+    /** Tells the home what became of a delivery it pushed here. */
+    private function settleRemote(int $id, bool $ack, bool $requeue): void
+    {
+        $ref = $this->remoteHeld[$id] ?? null;
+        unset($this->remoteHeld[$id]);
+        if ($ref === null || $this->cluster === null) return;
+        $this->cluster->request($ref['peer'], $ack ? 'ack' : 'nack', [
+            'vhost' => $this->vhost, 'queue' => $ref['queue'], 'delivery_id' => $ref['delivery'], 'requeue' => $requeue,
+        ]);
+    }
+
+    /**
+     * Persistent classic bodies kept in memory, for the whole process. Past
+     * this a newly logged body is dropped from memory and read back from the
+     * log when it is delivered, as Bun pages its backlog (store.ts PAGED).
+     */
+    public const RESIDENT_BYTES = 64 * 1024 * 1024;
+    private int $residentBytes = 0;
+
+    /**
+     * Account for a persistent body just written at `$pos` in this scope's log,
+     * and page it out when the resident bytes are past the limit. Quorum and
+     * stream queues keep their bodies: they replicate and snapshot them.
+     */
+    private function residentOrPaged(int $id, int $pos): void
+    {
+        $msg = $this->msgs[$id] ?? null;
+        if ($msg === null || ($msg['mode'] ?? 1) !== 2 || !is_string($msg['body'])) return;
+        $len = strlen($msg['body']);
+        $this->msgs[$id]['len'] = $len;
+        $root = $this->root();
+        if (($this->queues[$msg['queue']]['args']['queueType'] ?? 'classic') === 'classic' && $root->residentBytes + $len > self::RESIDENT_BYTES) {
+            $this->msgs[$id]['body'] = null;
+            $this->msgs[$id]['pos'] = $pos;
+            return;
+        }
+        $root->residentBytes += $len;
+    }
+
+    /** Read a paged body back from the log. Delivered messages stay resident until acked. */
+    public function loadBody(int $id): void
+    {
+        if (!isset($this->msgs[$id]) || $this->msgs[$id]['body'] !== null) return;
+        $row = $this->store->bodyAt((int) ($this->msgs[$id]['pos'] ?? -1));
+        if ($row === null || $row['id'] !== $id) {
+            fwrite(STDERR, "queueforge-php: body of message $id is not in the log\n");
+            $this->msgs[$id]['body'] = '';
+            return;
+        }
+        $this->msgs[$id]['body'] = $row['body'];
+        $this->root()->residentBytes += strlen($row['body']);
+    }
+
+    /** Body length of a message, paged or not. */
+    private static function bodyLen(array $msg): int
+    {
+        return $msg['len'] ?? strlen((string) ($msg['body'] ?? ''));
+    }
+
+    /** Memory and disk alarms, one set for the whole process. */
+    public function alarms(): Alarms
+    {
+        $root = $this->root();
+        return $root->alarmState ??= new Alarms(dirname($root->store->path));
+    }
     public function forVhost(string $vhost): Broker
     {
         $root = $this->root();
@@ -1318,6 +1415,7 @@ final class Broker
             $qids[] = $qid;
             if ($mode === 2) {
                 $end = $this->store->appendPublish($id, $queue, $body, $mode, $propRaw, self::meta($this->msgs[$id]));
+                $this->residentOrPaged($id, $this->store->lastStart);
             } else {
                 $this->hold($queue, $id, true);
             }
@@ -1659,7 +1757,7 @@ final class Broker
     {
         $n = 0;
         foreach (array_merge($this->queues[$queue]['ready'], $this->queues[$queue]['replicas']) as $id) {
-            $n += isset($this->msgs[$id]) ? strlen($this->msgs[$id]['body']) : 0;
+            $n += isset($this->msgs[$id]) ? self::bodyLen($this->msgs[$id]) : 0;
         }
         return $n;
     }
@@ -1900,6 +1998,7 @@ final class Broker
         $this->indexQid($id);
         if ($persistent) {
             $this->store->appendPublish($id, $queue, $body, 2, $propRaw, self::meta($this->msgs[$id]));
+            $this->residentOrPaged($id, $this->store->lastStart);
             // A Raft apply syncs once for its whole batch (finishRaftApply).
             if ($sync) $this->store->sync();
         }
@@ -1916,6 +2015,7 @@ final class Broker
         if (!is_int($id) || !isset($this->msgs[$id])) {
             return null;
         }
+        $this->loadBody($id);
         $body = $this->msgs[$id]['body'];
         $this->ack($id);
         return $body;
@@ -2065,6 +2165,7 @@ final class Broker
      */
     public function requeue(int $id): bool
     {
+        if ($id < 0) { $this->settleRemote($id, false, true); return true; }
         if (!isset($this->msgs[$id])) {
             return false;
         }
@@ -2092,6 +2193,7 @@ final class Broker
 
     public function ack(int $id): void
     {
+        if ($id < 0) { $this->settleRemote($id, true, false); return; }
         if (!isset($this->msgs[$id])) {
             return;
         }
@@ -2128,14 +2230,15 @@ final class Broker
 
     private function indexQid(int $id): void
     {
-        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes += strlen($this->msgs[$id]['body']) + 32;
+        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes += self::bodyLen($this->msgs[$id]) + 32;
         $qid = (string) ($this->msgs[$id]['qid'] ?? '');
         if ($qid !== '' && $qid !== (string) $id) $this->byQid[$this->msgs[$id]['queue'] . "\0" . $qid] = $id;
     }
 
     private function unindexQid(int $id): void
     {
-        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes -= strlen($this->msgs[$id]['body']) + 32;
+        if (($this->msgs[$id]['mode'] ?? 1) === 2) $this->persistBytes -= self::bodyLen($this->msgs[$id]) + 32;
+        if (isset($this->msgs[$id]['len']) && $this->msgs[$id]['body'] !== null) $this->root()->residentBytes -= $this->msgs[$id]['len'];
         $qid = (string) ($this->msgs[$id]['qid'] ?? '');
         if ($qid === '' || $qid === (string) $id) return;
         $key = $this->msgs[$id]['queue'] . "\0" . $qid;
@@ -2160,8 +2263,10 @@ final class Broker
      */
     public function deadLetter(int $id, string $reason = 'rejected'): bool
     {
+        if ($id < 0) { $this->settleRemote($id, false, false); return true; }
         if (!isset($this->msgs[$id])) return false;
         if($this->msgs[$id]['dlxPending']??false)return true;
+        $this->loadBody($id);
         $msg=$this->msgs[$id];$queue=$msg['queue'];$args=$this->queues[$queue]['args']??Features::parseArgs([]);
         $exchange=$args['dlx']??null;$atLeastOnce=($args['dlxStrategy']??'at-most-once')==='at-least-once';
         if(!is_string($exchange)||$this->dlxDepth>=self::DLX_DEPTH){if(!$atLeastOnce)$this->settleDeadLetter($id);return false;}
@@ -2320,17 +2425,28 @@ final class Broker
             if (($msg['mode'] ?? 1) !== 2 || !isset($this->queues[$msg['queue']])) {
                 continue;
             }
+            $body = $msg['body'];
+            if ($body === null) {
+                $row = $this->store->bodyAt((int) ($msg['pos'] ?? -1));
+                if ($row === null || $row['id'] !== $id) return false;
+                $body = $row['body'];
+            }
             $live[] = [
                 'id' => $id,
                 'queue' => $msg['queue'],
-                'body' => $msg['body'],
+                'body' => $body,
                 'mode' => 2,
                 'propRaw' => $msg['propRaw'] ?? null,
                 // Headers, priority, expiry and the quorum id survive a rewrite.
                 'meta' => self::meta($msg),
             ];
         }
-        return $this->store->compact($live);
+        if (!$this->store->compact($live)) return false;
+        foreach ($this->store->compactedAt as $id => $pos) {
+            if (isset($this->msgs[$id]) && $this->msgs[$id]['body'] === null) $this->msgs[$id]['pos'] = $pos;
+        }
+        $this->store->compactedAt = [];
+        return true;
     }
 
     public function expired(int $id): bool
@@ -2379,6 +2495,7 @@ final class Broker
                 continue;
             }
             $this->noteConsumed($queue, (string) ($this->msgs[$id]['qid'] ?? ''));
+            $this->loadBody($id);
             return $id;
         }
     }
