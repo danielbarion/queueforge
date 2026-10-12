@@ -13,14 +13,6 @@ const UNIT: Record<ScenarioRow["kind"], string> = {
   latency: "p99 ms",
 };
 
-const MEMORY_TITLE = "Peak memory of the broker's own processes (anonymous memory), sampled once per second.";
-const CACHE_TITLE =
-  "Peak memory of the whole container, which adds the page cache of the files the broker writes. The kernel gives that cache back under pressure.";
-
-function mib(value: number | null) {
-  return value == null ? "–" : value.toLocaleString("en-US", { maximumFractionDigits: 0 });
-}
-
 /** The best value in a row: highest rate, or lowest p99 latency. */
 function best(row: ScenarioRow): number | null {
   const vals = COLUMNS.map((c) => row.values[c.tone]).filter((v): v is number => v != null);
@@ -36,32 +28,21 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
         <table>
           <colgroup>
             <col className="scenario-column" />
-            <col className="unit-column" />
-            {COLUMNS.map((c) => [
-              <col className="score-column" key={`${c.tone}-score`} />,
-              <col className="memory-column" key={`${c.tone}-memory`} />,
-              <col className="memory-column" key={`${c.tone}-cache`} />,
-            ])}
+            <col className="score-column" />
+            {COLUMNS.map((c) => <col className="broker-column" key={c.tone} />)}
           </colgroup>
           <thead>
             <tr>
-              <th scope="col" rowSpan={2}>Scenario</th>
-              <th scope="col" rowSpan={2}>Unit</th>
+              <th scope="col">Scenario</th>
+              <th scope="col">Score</th>
               {COLUMNS.map((c) => (
-                <th scope="colgroup" colSpan={3} key={c.tone} className="broker-group">
+                <th scope="col" key={c.tone}>
                   <span className={`app tone-${c.tone}`}>
                     <span className="dot" aria-hidden="true" />
                     {c.name}
                   </span>
                 </th>
               ))}
-            </tr>
-            <tr className="sub">
-              {COLUMNS.map((c) => [
-                <th scope="col" key={`${c.tone}-score`} className="broker-group">Score</th>,
-                <th scope="col" key={`${c.tone}-memory`} title={MEMORY_TITLE}>Memory MiB</th>,
-                <th scope="col" key={`${c.tone}-cache`} title={CACHE_TITLE}>With cache MiB</th>,
-              ])}
             </tr>
           </thead>
           <tbody>
@@ -77,20 +58,75 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
                     const spread = row.spread[c.tone];
-                    const memory = row.memory[c.tone];
-                    return [
-                      <td key={`${c.tone}-score`} className={["broker-group", v == null ? "na" : v === top ? "best" : ""].join(" ").trim()}>
+                    return (
+                      <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
                         <span>{row.text[c.tone]}</span>
                         {spread ? <span className="scenario-spread">{spread}</span> : null}
-                      </td>,
-                      <td key={`${c.tone}-memory`} className="memory" title={MEMORY_TITLE}>{mib(memory.anonymous)}</td>,
-                      <td key={`${c.tone}-cache`} className="memory cache" title={CACHE_TITLE}>{mib(memory.cgroup)}</td>,
-                    ];
+                      </td>
+                    );
                   })}
                 </tr>
               );
             })}
           </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Peak memory per scenario and broker, grouped by container size. `field`
+ * picks the broker's own processes or the whole container. The lowest
+ * process memory in a row is highlighted; container totals are not ranked,
+ * since page cache is the kernel's to reclaim.
+ */
+export function MemoryTable({ rows, field, label }: { rows: ScenarioRow[]; field: "anonymous" | "cgroup"; label: string }) {
+  const sizes = [...new Set(rows.map((row) => row.size))];
+  const format = (value: number | null) => value == null ? "–" : `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} MiB`;
+  return (
+    <div className="panel table-panel bench-table memory-table">
+      <div className="scroll" tabIndex={0} role="region" aria-label={label}>
+        <table>
+          <colgroup>
+            <col className="scenario-column" />
+            {COLUMNS.map((c) => <col className="broker-column" key={c.tone} />)}
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col">Scenario</th>
+              {COLUMNS.map((c) => (
+                <th scope="col" key={c.tone}>
+                  <span className={`app tone-${c.tone}`}>
+                    <span className="dot" aria-hidden="true" />
+                    {c.name}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          {sizes.map((size) => (
+            <tbody key={size}>
+              <tr className="group">
+                <th scope="rowgroup" colSpan={COLUMNS.length + 1}>{size}</th>
+              </tr>
+              {rows.filter((row) => row.size === size).map((row) => {
+                const values = COLUMNS.map((c) => row.memory[c.tone][field]);
+                const known = values.filter((v): v is number => v != null);
+                const low = field === "anonymous" && known.length ? Math.min(...known) : null;
+                return (
+                  <tr key={`${size}-${row.id}`}>
+                    <th scope="row" className="memory-scenario">{row.title}</th>
+                    {COLUMNS.map((c, i) => (
+                      <td key={c.tone} className={values[i] == null ? "na" : values[i] === low ? "best" : undefined}>
+                        {format(values[i])}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          ))}
         </table>
       </div>
     </div>

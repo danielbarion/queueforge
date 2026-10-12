@@ -14,7 +14,7 @@ import {
   type LoadRow,
   type Tone,
 } from "../bench";
-import { ScenarioTable } from "../scenario-table";
+import { MemoryTable, ScenarioTable } from "../scenario-table";
 import { SizeCharts } from "../size-chart";
 
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
@@ -167,14 +167,38 @@ export default function BenchmarkPage() {
             happens first, and does not fsync before the confirm. QueueForge confirms after the
             fsync. Large bodies are where that costs QueueForge the most. Backlog is the fill and
             drain rate for 300,000 durable 1 KiB messages. Under each score: the lowest and highest
-            of its runs. Memory is the peak of the broker&apos;s own processes (anonymous memory,
-            which includes more than the language heap), sampled once per second. With cache is
-            the whole container as Linux counts it: it adds the page cache of the files the broker
-            writes, which grows with how much it logs, not with what it holds, and which the kernel
-            takes back under pressure. A durable broker can sit at its 1 GiB limit that way
-            without being short of memory. With repeats, memory is the median of the runs&apos;
-            peaks. Every caveat and raw result is in <a href={BENCH_MD}>BENCHMARK.md</a>.
+            of its runs. Memory for the same cells is below. Every caveat and raw result is in{" "}
+            <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
+        </div>
+      </section>
+
+      <section className="rule">
+        <div className="wrap">
+          <h2>Memory.</h2>
+          <p className="section-lead">
+            The peak memory of each scenario cell above, sampled once per second. With repeats,
+            each value is the median of the runs&apos; peaks. There are two ways to count it, so
+            there are two tables.
+          </p>
+          <h3 className="table-heading">Process memory</h3>
+          <p className="caption">
+            What the broker itself uses: the anonymous memory of its processes, which is the
+            language heap plus buffers, queues held in memory, and the runtime. This is the number
+            to compare. Highlighted: the lowest in that row.
+          </p>
+          <MemoryTable rows={scenarioRows} field="anonymous" label="Process memory" />
+          <h3 className="table-heading">Container memory, page cache included</h3>
+          <p className="caption">
+            What Linux charges to the container: process memory plus the page cache, the kernel&apos;s
+            copy of the files the broker has written (its message log). The cache grows with how
+            much the broker has written, not with what it still holds, and the kernel reclaims it
+            as soon as anything needs the memory. That is how a durable broker writing fast sits
+            at its 1 GiB limit here while its own processes use far less: Rust in the 1 CPU
+            broadcast cell is 12 MiB of process memory and 1,024 MiB of container memory. It is
+            not ranked, because a high value means a lot was written, not that memory ran short.
+          </p>
+          <MemoryTable rows={scenarioRows} field="cgroup" label="Container memory, page cache included" />
         </div>
       </section>
 
