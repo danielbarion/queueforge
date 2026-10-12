@@ -72,7 +72,17 @@ python3 bench/run.py --kinds bun,php              # only these brokers; their ro
 python3 bench/run.py --steps build,scenarios,report
 python3 bench/run.py --repeat 3                   # repeats per scenario cell (default 2)
 python3 bench/run.py --out /tmp/qf-ab/try         # keep an experiment out of bench/results
+python3 bench/run.py --kinds bun --steps build,scenarios,report --scenarios quorum --sizes 4
+python3 bench/run.py --kinds rust,bun,php --baseline bench/results/2026-10-12
 ```
+
+`--scenarios` and `--sizes` (1 and/or 4 CPUs) pick scenario cells; ids are in
+`bench/scenarios.py`, and 4 CPU runs only its heavy subset. `--baseline DIR`
+starts the new results directory as a copy of an earlier run, so RabbitMQ (or
+any broker left out of `--kinds`) is not measured again. Re-run RabbitMQ now
+and then, for example after a Docker Desktop or macOS update. Cells run one at
+a time on purpose: they share the VM's disk, memory bandwidth and the Mac's
+mixed performance/efficiency cores, so parallel cells would skew each other.
 
 Steps, in order: `build`, `scenarios`, `load`, `connections`, `paced`, `report`.
 A failing step is recorded and the others still run.

@@ -10,6 +10,14 @@ Usage:
   python3 bench/run.py --kinds bun,php       only these brokers (their rows replace older ones)
   python3 bench/run.py --steps scenarios,report --repeat 3
   python3 bench/run.py --out /tmp/qf-ab/x    results somewhere other than bench/results/<UTC date>
+  python3 bench/run.py --kinds bun --steps build,scenarios,report --scenarios quorum --sizes 4
+  python3 bench/run.py --kinds rust,bun,php --baseline bench/results/2026-10-12
+
+`--scenarios` and `--sizes` pick scenario cells (ids from bench/scenarios.py;
+sizes 1 and 4 CPUs, where 4 CPU runs only its heavy subset). `--baseline DIR`
+starts the new results directory as a copy of DIR, so brokers that are not
+re-run (usually RabbitMQ) keep their rows there: scenario cells, load rows,
+paced files and connection rows of the brokers being re-run are replaced.
 
 Steps, in order: build, scenarios, load, connections, paced, report.
 Kinds: rabbit, rust, bun, php.
@@ -43,12 +51,23 @@ def parse():
     p.add_argument("--steps", default=",".join(STEPS), help="comma list of " + ",".join(STEPS))
     p.add_argument("--repeat", type=int, default=2, help="repeats per scenario cell (default 2)")
     p.add_argument("--out", default="", help="results directory (default bench/results/<UTC date>)")
+    p.add_argument("--scenarios", default="", help="comma list of scenario ids (default all)")
+    p.add_argument("--sizes", default="", help="comma list of CPU counts, 1 and/or 4 (default both)")
+    p.add_argument("--baseline", default="", help="copy this results directory first and keep the rows of brokers not re-run")
     opts = p.parse_args()
     opts.kinds = [k for k in opts.kinds.split(",") if k]
     opts.steps = [s for s in opts.steps.split(",") if s]
+    opts.scenarios = [s for s in opts.scenarios.split(",") if s]
+    try:
+        opts.sizes = [int(s) for s in opts.sizes.split(",") if s]
+    except ValueError:
+        p.error("--sizes takes 1 and/or 4")
     bad = [k for k in opts.kinds if k not in KINDS] + [s for s in opts.steps if s not in STEPS]
+    bad += [f"size {s}" for s in opts.sizes if s not in (1, 4)]
     if bad or not opts.kinds or not opts.steps or opts.repeat < 1:
         p.error(f"unknown or empty: {bad or 'kinds/steps/repeat'}")
+    if opts.baseline and not os.path.isdir(opts.baseline):
+        p.error(f"--baseline {opts.baseline} is not a directory")
     opts.steps = [s for s in STEPS if s in opts.steps]
     return opts
 
@@ -70,6 +89,9 @@ class Status:
             "site_data": os.path.join(ROOT, "site", "app", "bench-data.ts"),
             "kinds": opts.kinds,
             "repeat": opts.repeat,
+            "scenarios": opts.scenarios or "all",
+            "sizes": opts.sizes or "all",
+            "baseline": os.path.abspath(opts.baseline) if opts.baseline else None,
             "commit": git("rev-parse", "HEAD"),
             "dirty": git("status", "--porcelain") != "",
             "images": {},
@@ -133,6 +155,16 @@ def main():
 
     if not C.docker_up():
         raise SystemExit("Docker is not running. Start Docker Desktop first.")
+    if opts.scenarios:
+        import scenarios
+
+        unknown = [s for s in opts.scenarios if s not in {sc["id"] for sc in scenarios.SCENARIOS}]
+        if unknown:
+            raise SystemExit(f"unknown scenario ids: {unknown}")
+        if opts.sizes == [4] and not set(opts.scenarios) & set(scenarios.HEAVY):
+            raise SystemExit(f"4 CPU runs only {scenarios.HEAVY}")
+    if opts.baseline:
+        copy_baseline(C, os.path.abspath(opts.baseline), opts)
     take_lease()
     status = Status(opts, C.OUT_DIR)
     failed = False
@@ -186,7 +218,7 @@ def main():
 
                 def run_scenarios():
                     try:
-                        scenarios.run_matrix(opts.kinds, opts.repeat)
+                        scenarios.run_matrix(opts.kinds, opts.repeat, only=opts.scenarios or None, cpus_only=opts.sizes or None)
                     finally:
                         C.run(["docker", "rm", "-f", scenarios.BROKER, scenarios.CLIENT], check=False)
 
@@ -232,6 +264,39 @@ def main():
             status.data["status"] = "interrupted"
         status.write()
         C.log(f"RUN {status.data['status']}: {STATUS}")
+
+
+def copy_baseline(C, src, opts):
+    """Start the results directory as a copy of `src`, minus logs and report.
+
+    Scenario cells of re-run brokers are superseded by their newer cohort, load
+    rows and paced files are replaced, and connection rows (the report keeps
+    the best held count) of re-run brokers are dropped here.
+    """
+    dst = C.OUT_DIR
+    if os.path.abspath(src) == os.path.abspath(dst):
+        raise SystemExit("--baseline is the results directory itself")
+    # Importing common creates the directory and an empty `paced/`; nothing else may be there yet.
+    leftover = [
+        name for name in os.listdir(dst)
+        if name != "bench.log" and not (name == "paced" and not os.listdir(os.path.join(dst, name)))
+    ]
+    if leftover:
+        raise SystemExit(f"{dst} already has results ({', '.join(sorted(leftover)[:5])}); use --out for a fresh directory")
+    skip = shutil.ignore_patterns("*.log", "report.md", "c[0-9]*.txt")
+    for name in os.listdir(src):
+        path = os.path.join(src, name)
+        if os.path.isdir(path):
+            shutil.copytree(path, os.path.join(dst, name), ignore=skip, dirs_exist_ok=True)
+        elif not skip(src, [name]):
+            shutil.copy2(path, os.path.join(dst, name))
+    conns = os.path.join(dst, "connections.tsv")
+    if "connections" in opts.steps and os.path.exists(conns):
+        lines = open(conns).readlines()
+        keep = lines[:1] + [ln for ln in lines[1:] if ln.split("\t", 1)[0] not in opts.kinds]
+        with open(conns, "w") as f:
+            f.writelines(keep)
+    C.log(f"BASELINE copied from {src}")
 
 
 def merge_load(C, fresh, kinds):

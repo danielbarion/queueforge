@@ -630,7 +630,8 @@ def run_cell(kind, cpus, mem, size, sc, run_id=None, cohort_id=None, broker_imag
 
 
 
-def run_matrix(kinds=KINDS, repeat=1):
+def run_matrix(kinds=KINDS, repeat=1, only=None, cpus_only=None):
+    """Every cell, or only the scenario ids in `only` at the CPU counts in `cpus_only`."""
     if repeat < 1:
         raise ValueError("repeat must be positive")
     C.run(["docker", "pull", "-q", PERF_TEST], check=False, timeout=600)
@@ -638,8 +639,12 @@ def run_matrix(kinds=KINDS, repeat=1):
     client_image = image_digest(PERF_TEST)
     cohort_id = uuid.uuid4().hex
     for cpus, mem, size in SIZES:
+        if cpus_only and cpus not in cpus_only:
+            continue
         for sc in SCENARIOS:
             if cpus > 1 and sc["id"] not in HEAVY:
+                continue
+            if only and sc["id"] not in only:
                 continue
             for kind in kinds:
                 for ordinal in range(1, repeat + 1):
