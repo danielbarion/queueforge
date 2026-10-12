@@ -47,10 +47,14 @@ Published numbers: `BENCHMARK.md` section "Session (2026-10-11)", raw cells in
 
 ### Benchmark commands
 
-The full run is `python3 bench/run.py` (see the README, "Running the benchmarks");
-it reports progress in `bench/last-run.json`. AI sessions: ask the user to start
-it rather than running it from the chat, then read that file once they say it
-finished. Single cells for A/B work:
+The full run is `python3 bench/run.py` (see the README, "Running the benchmarks"),
+about 3¼ hours; it reports progress in `bench/last-run.json`. To check a change,
+ask for `python3 bench/run.py --quick` instead. It measures only brokers whose
+image differs from the newest full results, one repeat each (about 15 minutes per
+broker), and writes `compare.md` in its results directory (`compare` in
+`bench/last-run.json`). AI sessions: ask the user to start either one rather than
+running it from the chat, then read that file once they say it finished. Single
+cells for A/B work:
 
 ```
 docker compose -f docker-compose.bench.yml build <bun|rust|php>
@@ -131,9 +135,20 @@ fanout-20 cell at 4 CPU.
 
 ### B3. Quorum queues on more than one core
 
-Status: open, measured (Cortex Code, 2026-10-10). Same image at 4 CPU: one process
-(`QUEUEFORGE_CORES=1`) 97.9k msg/s, two 13.6k, four 11.8k. Not attempted: single-
-member core-mode groups change about 50 quorum-specific paths.
+Status: implemented, partly better (Cortex Code, 2026-10-12). Worker processes
+of one supervisor share a broker id (`data/broker-id`); a quorum queue declared
+there gets a single-voter group, `q:s1:<voter>:<vhost>:<name>`, whose voter is
+its leader, and the other workers forward to it. Multi-node clusters keep
+whole-membership groups. `bun/test/quorum-cores.test.ts` 2/2 (one voter,
+messages kept across a restart); Bun suite 196/196. Quick run (one repeat): 4 CPU
+quorum 11.4k → 16.8k msg/s. That is still far below one process (97.9k) and
+RabbitMQ (89.8k): the voter is a single worker, and every publish arriving on
+another worker is forwarded to it. Next: profile the 4 CPU cell; compare with
+routing quorum publishes to the voter's worker at connection handoff, as PHP
+does for classic queues.
+
+Before: same image at 4 CPU, one process (`QUEUEFORGE_CORES=1`) 97.9k msg/s, two
+13.6k, four 11.8k.
 
 Every quorum queue gets a Raft group across all of the sibling child processes,
 which share one disk. That means more fsyncs and IPC for no added safety on one
@@ -435,3 +450,57 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
   OOM-killed at 1 GiB). Rust suite 436/436 with RabbitMQ. Not done: after a
   restart, recovery still loads the whole stream into memory, since recovered
   entries have no log position yet.
+- **PHP parity** (2026-10-12, not an item). Brings PHP to Bun's behaviour in
+  five places. Each has a focused test; the full PHP suite and the benchmark
+  cells have not been rerun yet.
+  - Memory alarm: 0.6 of RAM, or the cgroup limit, as Rust does. While it or the
+    disk alarm is on, connections that have published are not read, and
+    `connection.blocked`/`unblocked` go to clients that ask
+    (`alarms.test.php` 7/7). Before, only the disk alarm was reported, and
+    nothing was blocked.
+  - Classic paging: persistent classic bodies past 64 MiB are read back from
+    the log, through compaction and restart (`classic-page.test.php` 9/9).
+    Without paging, the new memory alarm would have blocked the backlog cell
+    (~706 MiB against a 614 MiB watermark). Quick run 2026-10-12: backlog anonymous
+    648 → 352 MiB, but drain 100k → 60k msg/s, from four syscalls and a JSON decode
+    per paged message. `Store::bodyAt` now reads through a 256 KiB read-ahead and
+    skips the metadata. In-process drain of 300,000 × 1 KiB: 160k → 480k msg/s
+    (unpaged: ~700k). Not re-measured in Docker yet.
+  - Cores mode with TLS or an `amqps` port: the parent hands raw TCP to a child,
+    which runs the handshake (`tls-cores.test.php` 11/11, five runs). Before,
+    TLS disabled cores mode.
+  - Remote consumers. A delivery pushed by a queue's home was queued in the
+    consuming child's local copy, which nothing drained. A consumer on a child
+    other than the home got nothing, and `unsub` named no queue. Deliveries now
+    go to the subscribed channel; acks, nacks and rejects travel back to the
+    home.
+  - Raft metadata lag. A declare is acknowledged on the leader's commit, and a
+    follower applies it on the next heartbeat (~150 ms later):
+    - A publish or consume naming a queue the node has not applied yet now
+      waits up to 0.5 s; before, it got 404 NOT_FOUND.
+    - A forwarded enqueue for such a queue now waits up to 1 s, then is
+      refused. Before, it was dropped while the publisher was still confirmed.
+    - With this, plain cores mode passed 12/12 declare/publish/consume orders,
+      up from 10/12.
+  - `fanout-cores.test.php` matches `bun/test/fanout-cores.test.ts`: 9
+    queues × 200 messages in order, across 3 children.
+- **Orphaned cores workers** (2026-10-12, not an item). A supervisor killed with
+  SIGKILL left its workers running on the fixed cluster and metrics ports
+  (25672+, 25680+), so the next cores-mode start failed with EADDRINUSE. A
+  cancelled `quorum-cores` run caused `fanout-cores` to fail in the Bun suite.
+  - Bun workers now exit when the supervisor's IPC channel closes; PHP workers
+    when their parent pid changes.
+  - `quorum-cores.test.ts` stops with SIGTERM, not SIGKILL.
+  - Checked: SIGKILL of a 3-worker supervisor left 3 listeners before the fix,
+    0 after, in both Bun and PHP.
+- **Quick run 2026-10-12** (`bench/results-quick/2026-10-12T143411Z`, Rust, Bun and
+  PHP; 43 min, against 3¼ h for the full run).
+  - Noise: with one repeat, cells whose code did not change moved by up to
+    ±13% (Rust telemetry +11%, fanout-20 4 CPU +13%).
+  - Bun: some 1 CPU cells went down (transactions −34%, large-1m −26%, quorum
+    −21%, work-queue −15%). At 1 CPU Bun runs a single process, and none of the
+    changes since the baseline (B3, cores-only) run there. Rust lost 7–9% on the
+    same cells, so these look like machine variation. Recheck with
+    `--scenarios transactions,large-1m,quorum,work-queue --sizes 1 --kinds bun
+    --repeat 2`.
+  - PHP: backlog drain fell 100k → 60k from paging (see PHP parity).

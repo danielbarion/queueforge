@@ -396,7 +396,10 @@ def site_ts(paced_data, cells, conns, sc_cells):
 
 
 def main():
-    root = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob(os.path.join(C.BENCH, "results", "*")))[-1]
+    # `--no-site` leaves site/app/bench-data.ts alone, for quick runs.
+    args = [a for a in sys.argv[1:] if a != "--no-site"]
+    write_site = "--no-site" not in sys.argv[1:]
+    root = args[0] if args else sorted(glob.glob(os.path.join(C.BENCH, "results", "*")))[-1]
     p = paced(root)
     cells = load(root)
     conns = connections(root)
@@ -409,7 +412,8 @@ def main():
     for (kind, cpus, mem), (held, used) in sorted(conns.items(), key=lambda kv: (ORDER.index(kv[0][0]), kv[0][1], kv[0][2])):
         parts.append(f"| {C.NAMES[kind]} | {cpus} CPU / {mem} | {held:,} | {used} |")
     open(os.path.join(root, "report.md"), "w").write("\n".join(parts) + "\n")
-    open(os.path.join(C.ROOT, "site", "app", "bench-data.ts"), "w").write(site_ts(p, cells, conns, sc))
+    if write_site:
+        open(os.path.join(C.ROOT, "site", "app", "bench-data.ts"), "w").write(site_ts(p, cells, conns, sc))
     print(os.path.join(root, "report.md"))
 
 

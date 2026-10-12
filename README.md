@@ -59,15 +59,44 @@ builds the images, runs everything and regenerates the tables:
 python3 bench/run.py
 ```
 
+A full run takes about 3¼ hours. Measured on 2026-10-12, with 4 brokers and 2
+repeats:
+
+| Step | Time |
+| --- | ---: |
+| scenarios | 108 min |
+| connections | 64 min |
+| load | 12 min |
+| paced | 8 min |
+| build | 2.5 min |
+
+To check a change, use the quick run instead:
+
+```bash
+python3 bench/run.py --quick
+```
+
+It builds every image and compares each broker's image ID with the newest
+full results in `bench/results`. Only brokers whose image changed are measured;
+RabbitMQ and unchanged brokers keep their earlier cells. It runs the scenario
+cells once each (about 15 minutes per changed broker) and writes `compare.md`,
+which lists every re-measured cell against the baseline and marks changes past
+10%. Its results go to `bench/results-quick/<UTC time>`, and it does not touch
+the site data. One repeat is noisier than two, so confirm a flagged cell with a
+rerun of that cell before trusting it, and use a full run (or `--changed`, below)
+to publish numbers.
+
 Requirements: Docker Desktop running (the script resizes it to 8 CPUs / 24 GiB
 for the big steps and puts it back to 2 CPUs / 8 GiB at the end, even after a
-failure), Python 3, and a Rust toolchain for the paced step. A full run takes
-several hours. Close other heavy work, since CPU contention skews the numbers.
+failure), Python 3, and a Rust toolchain for the paced step. Close other heavy
+work, since CPU contention skews the numbers.
 On a Mac the script runs under `caffeinate` so the machine does not sleep.
 
 Options:
 
 ```bash
+python3 bench/run.py --changed                    # every step, but only for brokers whose image changed
+python3 bench/run.py --quick --scenarios backlog --sizes 1   # one cell, against the baseline
 python3 bench/run.py --kinds bun,php              # only these brokers; their rows replace older ones
 python3 bench/run.py --steps build,scenarios,report
 python3 bench/run.py --repeat 3                   # repeats per scenario cell (default 2)

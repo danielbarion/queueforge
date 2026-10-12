@@ -12,6 +12,19 @@ Usage:
   python3 bench/run.py --out /tmp/qf-ab/x    results somewhere other than bench/results/<UTC date>
   python3 bench/run.py --kinds bun --steps build,scenarios,report --scenarios quorum --sizes 4
   python3 bench/run.py --kinds rust,bun,php --baseline bench/results/2026-10-12
+  python3 bench/run.py --changed             re-measure only brokers whose image changed
+  python3 bench/run.py --quick               daily check: see below
+
+`--changed` builds every image, then compares each broker's image ID with the
+newest full results directory under bench/results (or `--baseline DIR`).
+Brokers whose image is the same keep their rows from there; only the others
+are measured. RabbitMQ's image does not change, so it is normally skipped.
+
+`--quick` is `--changed --repeat 1 --steps build,scenarios,report`, written
+to bench/results-quick/<UTC time> without touching site/app/bench-data.ts.
+It ends with `compare.md`: each re-measured cell against the baseline, with
+changes past 10% marked. One changed broker takes about 15 minutes; the full
+run about 3 hours. Use it to check a change, then a full run to publish.
 
 `--scenarios` and `--sizes` pick scenario cells (ids from bench/scenarios.py;
 sizes 1 and 4 CPUs, where 4 CPU runs only its heavy subset). `--baseline DIR`
@@ -28,6 +41,7 @@ passed) or "done-with-errors". Docker Desktop is resized to 8 CPUs for the
 big steps and put back to 2 CPUs / 8 GiB afterwards, even after a failure.
 """
 import argparse
+import csv
 import json
 import os
 import platform
@@ -48,13 +62,27 @@ KINDS = ["rabbit", "rust", "bun", "php"]
 def parse():
     p = argparse.ArgumentParser(description="Run the Docker benchmarks and report.")
     p.add_argument("--kinds", default=",".join(KINDS), help="comma list of rabbit,rust,bun,php")
-    p.add_argument("--steps", default=",".join(STEPS), help="comma list of " + ",".join(STEPS))
-    p.add_argument("--repeat", type=int, default=2, help="repeats per scenario cell (default 2)")
+    p.add_argument("--steps", default=None, help="comma list of " + ",".join(STEPS))
+    p.add_argument("--repeat", type=int, default=None, help="repeats per scenario cell (default 2, 1 with --quick)")
+    p.add_argument("--changed", action="store_true", help="measure only brokers whose image differs from the baseline")
+    p.add_argument("--quick", action="store_true", help="--changed, 1 repeat, scenarios only, compare.md, no site update")
     p.add_argument("--out", default="", help="results directory (default bench/results/<UTC date>)")
     p.add_argument("--scenarios", default="", help="comma list of scenario ids (default all)")
     p.add_argument("--sizes", default="", help="comma list of CPU counts, 1 and/or 4 (default both)")
     p.add_argument("--baseline", default="", help="copy this results directory first and keep the rows of brokers not re-run")
     opts = p.parse_args()
+    if opts.quick:
+        opts.changed = True
+        if opts.steps is None:
+            opts.steps = "build,scenarios,report"
+        if opts.repeat is None:
+            opts.repeat = 1
+        if not opts.out:
+            opts.out = os.path.join(HERE, "results-quick", time.strftime("%Y-%m-%dT%H%M%SZ", time.gmtime()))
+    if opts.steps is None:
+        opts.steps = ",".join(STEPS)
+    if opts.repeat is None:
+        opts.repeat = 2
     opts.kinds = [k for k in opts.kinds.split(",") if k]
     opts.steps = [s for s in opts.steps.split(",") if s]
     opts.scenarios = [s for s in opts.scenarios.split(",") if s]
@@ -68,6 +96,18 @@ def parse():
         p.error(f"unknown or empty: {bad or 'kinds/steps/repeat'}")
     if opts.baseline and not os.path.isdir(opts.baseline):
         p.error(f"--baseline {opts.baseline} is not a directory")
+    if opts.changed and "build" not in opts.steps:
+        p.error("--changed compares freshly built images, so it needs the build step")
+    if opts.changed and not opts.baseline:
+        opts.baseline = latest_results(os.path.join(HERE, "results")) or ""
+        if not opts.baseline:
+            p.error("--changed found no results under bench/results; run the full benchmark once")
+    if opts.changed and not opts.out:
+        # Today's directory is often the baseline itself; a merged run gets its own.
+        day = os.path.join(HERE, "results", time.strftime("%Y-%m-%d", time.gmtime()))
+        opts.out = day if not os.path.exists(day) else day + time.strftime("-%H%M", time.gmtime())
+    if opts.baseline and opts.out and os.path.abspath(opts.baseline) == os.path.abspath(opts.out):
+        p.error("--out is the baseline directory itself")
     opts.steps = [s for s in STEPS if s in opts.steps]
     return opts
 
@@ -163,7 +203,7 @@ def main():
             raise SystemExit(f"unknown scenario ids: {unknown}")
         if opts.sizes == [4] and not set(opts.scenarios) & set(scenarios.HEAVY):
             raise SystemExit(f"4 CPU runs only {scenarios.HEAVY}")
-    if opts.baseline:
+    if opts.baseline and not opts.changed:
         copy_baseline(C, os.path.abspath(opts.baseline), opts)
     take_lease()
     status = Status(opts, C.OUT_DIR)
@@ -204,6 +244,16 @@ def main():
 
         run_step("build", build)
         status.data["images"] = C.image_ids()
+        if opts.changed:
+            opts.kinds = changed_kinds(status.data["images"], baseline_images(opts.baseline), opts.kinds)
+            C.log(f"CHANGED {','.join(opts.kinds) or 'none'} against {opts.baseline}")
+            status.data["kinds"] = opts.kinds
+            copy_baseline(C, os.path.abspath(opts.baseline), opts)
+            if not opts.kinds:
+                for name in opts.steps:
+                    if name not in ("build", "report"):
+                        status.step(name, status="skipped")
+                opts.steps = [s for s in opts.steps if s in ("build", "report")]
         status.write()
 
         big = [s for s in ("scenarios", "load", "connections") if s in opts.steps]
@@ -255,7 +305,15 @@ def main():
             paced.main()
 
         run_step("paced", run_paced)
-        run_step("report", lambda: sh([sys.executable, os.path.join(HERE, "report.py"), C.OUT_DIR]))
+        run_step("report", lambda: sh([sys.executable, os.path.join(HERE, "report.py"), C.OUT_DIR, *(["--no-site"] if opts.quick else [])]))
+        if opts.changed and "scenarios" in opts.steps:
+            path = os.path.join(C.OUT_DIR, "compare.md")
+            text = compare_md(read_tsv(os.path.join(opts.baseline, "scenarios.tsv")),
+                              read_tsv(os.path.join(C.OUT_DIR, "scenarios.tsv")), opts.kinds, opts.baseline)
+            with open(path, "w") as f:
+                f.write(text)
+            status.data["compare"] = path
+            print(text, flush=True)
     finally:
         release_lease()
         status.data["status"] = "done-with-errors" if failed else "done"
@@ -297,6 +355,109 @@ def copy_baseline(C, src, opts):
         with open(conns, "w") as f:
             f.writelines(keep)
     C.log(f"BASELINE copied from {src}")
+
+
+def latest_results(root):
+    """The newest results directory under `root` that has scenario rows."""
+    if not os.path.isdir(root):
+        return None
+    dirs = sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "scenarios.tsv")))
+    return os.path.join(root, dirs[-1]) if dirs else None
+
+
+def read_tsv(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+
+def baseline_images(directory):
+    """Each broker's image ID in its newest scenario row in `directory`."""
+    images = {}
+    for row in sorted(read_tsv(os.path.join(directory, "scenarios.tsv")), key=lambda r: r.get("started_utc", "")):
+        if row.get("broker_image"):
+            images[row["broker"]] = row["broker_image"]
+    return images
+
+
+def changed_kinds(current, baseline, kinds):
+    """Brokers to measure: a different or unknown image, or none in the baseline."""
+    return [k for k in kinds if not current.get(k) or current.get(k) != baseline.get(k)]
+
+
+def _cells(rows, kinds, skip_ids=()):
+    """(broker, size, scenario) -> lists of score and p99, over ok rows."""
+    out = {}
+    for row in rows:
+        if row.get("broker") not in kinds or row.get("run_id") in skip_ids or row.get("ok") != "1":
+            continue
+        score = row.get("mb_s") or row.get("received_s")
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            continue
+        try:
+            p99 = float(row.get("lat_p99_ms") or "")
+        except ValueError:
+            p99 = None
+        cell = out.setdefault((row["broker"], row["size"], row["scenario"]), {"score": [], "p99": [], "mb": bool(row.get("mb_s"))})
+        cell["score"].append(score)
+        if p99 is not None:
+            cell["p99"].append(p99)
+    return out
+
+
+def _median(values):
+    values = sorted(values)
+    if not values:
+        return None
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def _delta(new, old):
+    if new is None or old is None or old == 0:
+        return ""
+    return f"{(new - old) / old * 100:+.0f}%"
+
+
+def compare_md(base_rows, out_rows, kinds, baseline_dir, threshold=10.0):
+    """Re-measured cells against the baseline's cells for the same brokers.
+
+    The results directory starts as a copy of the baseline, so its new rows
+    are the ones whose run_id the baseline does not have.
+    """
+    base_ids = {r.get("run_id") for r in base_rows}
+    old = _cells(base_rows, kinds)
+    new = _cells(out_rows, kinds, skip_ids=base_ids)
+    lines = [
+        f"# Compared with {baseline_dir}",
+        "",
+        f"Score is MB/s for the large-message cells, received msg/s for the rest; medians over repeats. "
+        f"`!` marks a score change past {threshold:.0f}%. One repeat is noisier than two: confirm a",
+        "change with a rerun of that cell (`--scenarios ID --sizes N`) before trusting it.",
+        "",
+        "| Broker | Size | Scenario | Baseline | Now | Change | p99 ms baseline | p99 ms now |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    flagged = 0
+    for key in sorted(new):
+        n, o = new[key], old.get(key, {"score": [], "p99": []})
+        ns, os_ = _median(n["score"]), _median(o["score"])
+        change = _delta(ns, os_)
+        mark = ""
+        if ns is not None and os_:
+            if abs((ns - os_) / os_ * 100) > threshold:
+                mark = " !"
+                flagged += 1
+        fmt = (lambda v: "" if v is None else f"{v:,.1f}") if n["mb"] else (lambda v: "" if v is None else f"{v:,.0f}")
+        p99 = lambda v: "" if v is None else f"{v:,.2f}"
+        lines.append(f"| {key[0]} | {key[1]} | {key[2]} | {fmt(os_)} | {fmt(ns)} | {change}{mark} | {p99(_median(o['p99']))} | {p99(_median(n['p99']))} |")
+    if not new:
+        lines.append("| | | nothing re-measured | | | | | |")
+    lines += ["", f"{len(new)} cells, {flagged} past {threshold:.0f}%.", ""]
+    return "\n".join(lines)
 
 
 def merge_load(C, fresh, kinds):

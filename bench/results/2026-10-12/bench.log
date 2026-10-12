@@ -1,0 +1,206 @@
+07:59:39 STEP build start
+08:02:08 STEP build done in 149s
+08:02:08 PROGRESS vm before ncpu=2 mem=8320565248
+08:02:08 PROGRESS docker quit
+08:02:13 PROGRESS docker start
+08:02:16 PROGRESS vm large ncpu=8 mem=25159827456
+08:02:16 STEP scenarios start
+08:02:48 CELL rabbit 1 CPU / 1 GiB work-queue ok=1 err= sent=43074.6 recv=43074.4 mb= p50=5.11 p99=13.44 mib=232 anon=125 cpu=99 client= kept=yes
+08:03:19 CELL rabbit 1 CPU / 1 GiB work-queue ok=1 err= sent=43610.0 recv=43607.5 mb= p50=5.00 p99=9.11 mib=155 anon=120 cpu=99 client= kept=yes
+08:03:48 CELL rust 1 CPU / 1 GiB work-queue ok=1 err= sent=130911.4 recv=130910.8 mb= p50=2.01 p99=4.27 mib=108 anon=8 cpu=97 client= kept=yes
+08:04:16 CELL rust 1 CPU / 1 GiB work-queue ok=1 err= sent=129913.3 recv=129918.5 mb= p50=2.10 p99=4.21 mib=78 anon=10 cpu=97 client= kept=yes
+08:04:46 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=124608.2 recv=124595.8 mb= p50=0.71 p99=4.41 mib=192 anon=101 cpu=89 client= kept=yes
+08:05:16 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=120960.4 recv=120968.8 mb= p50=0.73 p99=4.71 mib=118 anon=106 cpu=89 client= kept=yes
+08:05:45 CELL php 1 CPU / 1 GiB work-queue ok=1 err= sent=39515.2 recv=39504.9 mb= p50=9.97 p99=16.21 mib=135 anon=12 cpu=52 client= kept=yes
+08:06:15 CELL php 1 CPU / 1 GiB work-queue ok=1 err= sent=38773.5 recv=38773.5 mb= p50=10.14 p99=13.73 mib=81 anon=12 cpu=50 client= kept=yes
+08:06:45 CELL rabbit 1 CPU / 1 GiB telemetry ok=1 err= sent=104450.0 recv=104457.0 mb= p50=55.36 p99=77.74 mib=252 anon=191 cpu=99 client= kept=yes
+08:07:15 CELL rabbit 1 CPU / 1 GiB telemetry ok=1 err= sent=103745.1 recv=103744.9 mb= p50=58.95 p99=80.07 mib=256 anon=195 cpu=99 client= kept=yes
+08:07:47 CELL rust 1 CPU / 1 GiB telemetry ok=1 err= sent=91050.1 recv=94377.9 mb= p50=3492.13 p99=3574.97 mib=187 anon=64 cpu=99 client= kept=yes
+08:08:20 CELL rust 1 CPU / 1 GiB telemetry ok=1 err= sent=85915.5 recv=94142.6 mb= p50=3475.40 p99=3567.74 mib=186 anon=65 cpu=99 client= kept=yes
+08:08:49 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=456102.3 recv=456105.6 mb= p50=0.86 p99=3.13 mib=97 anon=61 cpu=99 client= kept=yes
+08:09:19 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=457199.1 recv=457200.1 mb= p50=0.84 p99=3.14 mib=95 anon=59 cpu=99 client= kept=yes
+08:09:49 CELL php 1 CPU / 1 GiB telemetry ok=1 err= sent=89615.6 recv=89844.5 mb= p50=5.09 p99=11.63 mib=26 anon=12 cpu=99 client= kept=yes
+08:10:18 CELL php 1 CPU / 1 GiB telemetry ok=1 err= sent=91696.4 recv=91658.7 mb= p50=5.08 p99=11.85 mib=24 anon=12 cpu=99 client= kept=yes
+08:10:49 CELL rabbit 1 CPU / 1 GiB fanout-20 ok=1 err= sent=2398.2 recv=47987.9 mb= p50=18.49 p99=37.11 mib=183 anon=145 cpu=99 client= kept=yes
+08:11:19 CELL rabbit 1 CPU / 1 GiB fanout-20 ok=1 err= sent=2355.7 recv=47106.5 mb= p50=18.91 p99=37.71 mib=188 anon=143 cpu=99 client= kept=yes
+08:11:48 CELL rust 1 CPU / 1 GiB fanout-20 ok=1 err= sent=6712.2 recv=134243.6 mb= p50=0.72 p99=3.50 mib=1024 anon=12 cpu=96 client= kept=yes
+08:12:17 CELL rust 1 CPU / 1 GiB fanout-20 ok=1 err= sent=6849.5 recv=136995.4 mb= p50=0.71 p99=3.62 mib=1024 anon=12 cpu=96 client= kept=yes
+08:12:47 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=12316.9 recv=246336.8 mb= p50=3.08 p99=8.05 mib=123 anon=111 cpu=89 client= kept=yes
+08:13:16 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=12354.3 recv=247131.8 mb= p50=3.10 p99=8.61 mib=125 anon=113 cpu=89 client= kept=yes
+08:13:46 CELL php 1 CPU / 1 GiB fanout-20 ok=1 err= sent=4391.7 recv=87835.5 mb= p50=28.84 p99=64.68 mib=336 anon=18 cpu=92 client= kept=yes
+08:14:16 CELL php 1 CPU / 1 GiB fanout-20 ok=1 err= sent=4070.4 recv=81360.1 mb= p50=34.12 p99=58.56 mib=365 anon=18 cpu=94 client= kept=yes
+08:14:46 CELL rabbit 1 CPU / 1 GiB routing-64 ok=1 err= sent=42686.3 recv=42681.6 mb= p50=18.72 p99=31.79 mib=217 anon=186 cpu=99 client= kept=yes
+08:15:17 CELL rabbit 1 CPU / 1 GiB routing-64 ok=1 err= sent=41921.6 recv=41914.5 mb= p50=18.75 p99=33.24 mib=224 anon=193 cpu=99 client= kept=yes
+08:15:46 CELL rust 1 CPU / 1 GiB routing-64 ok=1 err= sent=94185.1 recv=94189.2 mb= p50=7.56 p99=12.21 mib=1024 anon=26 cpu=96 client= kept=yes
+08:16:16 CELL rust 1 CPU / 1 GiB routing-64 ok=1 err= sent=87781.2 recv=87815.2 mb= p50=7.62 p99=10.94 mib=1024 anon=27 cpu=89 client= kept=yes
+08:16:46 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=136955.9 recv=136970.5 mb= p50=4.01 p99=11.26 mib=128 anon=114 cpu=96 client= kept=yes
+08:17:15 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=135007.6 recv=134987.9 mb= p50=3.93 p99=10.92 mib=112 anon=98 cpu=94 client= kept=yes
+08:17:46 CELL php 1 CPU / 1 GiB routing-64 ok=1 err= sent=51283.5 recv=51252.9 mb= p50=26.51 p99=48.90 mib=252 anon=22 cpu=92 client= kept=yes
+08:18:16 CELL php 1 CPU / 1 GiB routing-64 ok=1 err= sent=52874.4 recv=52874.4 mb= p50=25.37 p99=45.82 mib=234 anon=22 cpu=95 client= kept=yes
+08:18:46 CELL rabbit 1 CPU / 1 GiB large-64k ok=1 err= sent=11856.4 recv=11854.7 mb=776.9 p50=1.68 p99=5.63 mib=371 anon=268 cpu=98 client= kept=yes
+08:19:16 CELL rabbit 1 CPU / 1 GiB large-64k ok=1 err= sent=11888.9 recv=11887.8 mb=779.1 p50=1.67 p99=5.42 mib=366 anon=263 cpu=98 client= kept=yes
+08:19:45 CELL rust 1 CPU / 1 GiB large-64k ok=1 err= sent=3848.4 recv=3848.4 mb=252.2 p50=0.89 p99=6.66 mib=81 anon=10 cpu=29 client= kept=yes
+08:20:15 CELL rust 1 CPU / 1 GiB large-64k ok=1 err= sent=3853.2 recv=3853.3 mb=252.5 p50=1.03 p99=5.13 mib=82 anon=9 cpu=32 client= kept=yes
+08:20:44 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=7283.1 recv=7282.9 mb=477.3 p50=0.69 p99=3.60 mib=101 anon=91 cpu=93 client= kept=yes
+08:21:14 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=7082.4 recv=7082.5 mb=464.2 p50=0.68 p99=3.75 mib=107 anon=94 cpu=91 client= kept=yes
+08:21:43 CELL php 1 CPU / 1 GiB large-64k ok=1 err= sent=3755.7 recv=3755.7 mb=246.1 p50=3.56 p99=11.34 mib=53 anon=12 cpu=37 client= kept=yes
+08:22:13 CELL php 1 CPU / 1 GiB large-64k ok=1 err= sent=3283.1 recv=3283.1 mb=215.2 p50=3.63 p99=12.20 mib=55 anon=12 cpu=37 client= kept=yes
+08:22:43 CELL rabbit 1 CPU / 1 GiB large-1m ok=1 err= sent=1274.3 recv=1274.3 mb=1336.2 p50=1.74 p99=6.15 mib=333 anon=238 cpu=97 client= kept=yes
+08:23:13 CELL rabbit 1 CPU / 1 GiB large-1m ok=1 err= sent=1292.6 recv=1292.6 mb=1355.4 p50=1.66 p99=5.70 mib=337 anon=242 cpu=98 client= kept=yes
+08:23:42 CELL rust 1 CPU / 1 GiB large-1m ok=1 err= sent=565.5 recv=565.5 mb=592.9 p50=1.97 p99=7.84 mib=85 anon=14 cpu=51 client= kept=yes
+08:24:11 CELL rust 1 CPU / 1 GiB large-1m ok=1 err= sent=529.4 recv=529.2 mb=554.9 p50=2.99 p99=5.43 mib=79 anon=12 cpu=53 client= kept=yes
+08:24:41 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=421.9 recv=421.9 mb=442.4 p50=3.97 p99=11.64 mib=103 anon=92 cpu=88 client= kept=yes
+08:25:10 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=424.9 recv=424.9 mb=445.5 p50=3.97 p99=9.08 mib=101 anon=90 cpu=88 client= kept=yes
+08:25:40 CELL php 1 CPU / 1 GiB large-1m ok=1 err= sent=591.1 recv=591.1 mb=619.8 p50=5.48 p99=11.86 mib=154 anon=16 cpu=52 client= kept=yes
+08:26:09 CELL php 1 CPU / 1 GiB large-1m ok=1 err= sent=562.8 recv=562.7 mb=590.1 p50=4.12 p99=10.57 mib=160 anon=16 cpu=52 client= kept=yes
+08:26:39 CELL rabbit 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.5 recv=1000.5 mb= p50=0.20 p99=1.30 mib=156 anon=121 cpu=42 client= kept=yes
+08:27:09 CELL rabbit 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.5 recv=1000.5 mb= p50=0.25 p99=2.16 mib=149 anon=120 cpu=54 client= kept=yes
+08:27:38 CELL rust 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.6 recv=1000.6 mb= p50=0.15 p99=0.79 mib=42 anon=6 cpu=13 client= kept=yes
+08:28:07 CELL rust 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.5 recv=1000.5 mb= p50=0.21 p99=1.36 mib=41 anon=6 cpu=16 client= kept=yes
+08:28:37 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=0.15 p99=2.08 mib=87 anon=58 cpu=24 client= kept=yes
+08:29:06 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.6 recv=1000.6 mb= p50=0.15 p99=2.06 mib=83 anon=55 cpu=25 client= kept=yes
+08:29:36 CELL php 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=0.38 p99=15.57 mib=27 anon=10 cpu=11 client= kept=yes
+08:30:06 CELL php 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.5 mb= p50=0.38 p99=25.80 mib=27 anon=10 cpu=11 client= kept=yes
+08:30:36 CELL rabbit 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10005.4 mb= p50=0.38 p99=12.07 mib=155 anon=121 cpu=99 client= kept=yes
+08:31:06 CELL rabbit 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.9 recv=10008.9 mb= p50=0.38 p99=13.54 mib=151 anon=122 cpu=99 client= kept=yes
+08:31:35 CELL rust 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.8 recv=10004.8 mb= p50=0.04 p99=1.00 mib=74 anon=6 cpu=25 client= kept=yes
+08:32:04 CELL rust 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10005.3 mb= p50=0.04 p99=1.14 mib=75 anon=7 cpu=24 client= kept=yes
+08:32:33 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10005.1 mb= p50=0.04 p99=3.01 mib=88 anon=70 cpu=58 client= kept=yes
+08:33:03 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.8 recv=10004.8 mb= p50=0.05 p99=2.44 mib=87 anon=73 cpu=52 client= kept=yes
+08:33:32 CELL php 1 CPU / 1 GiB latency-10k ok=1 err= sent=10157.2 recv=10162.5 mb= p50=9.68 p99=66.55 mib=37 anon=10 cpu=29 client= kept=yes
+08:34:02 CELL php 1 CPU / 1 GiB latency-10k ok=1 err= sent=10006.0 recv=10007.3 mb= p50=6.59 p99=40.93 mib=32 anon=12 cpu=33 client= kept=yes
+08:35:00 CELL rabbit 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.8 mb= p50=0.39 p99=15.29 mib=414 anon=368 cpu=93 client= kept=yes
+08:35:58 CELL rabbit 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.38 p99=17.77 mib=430 anon=385 cpu=90 client= kept=yes
+08:36:55 CELL rust 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.29 p99=10.75 mib=1024 anon=110 cpu=60 client= kept=yes
+08:37:52 CELL rust 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.26 p99=2.14 mib=1024 anon=111 cpu=61 client= kept=yes
+08:38:48 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.14 p99=1.97 mib=128 anon=92 cpu=45 client= kept=yes
+08:39:45 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.10 p99=2.30 mib=139 anon=98 cpu=40 client= kept=yes
+08:40:42 CELL php 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.3 mb= p50=6.04 p99=24.67 mib=65 anon=42 cpu=63 client= kept=yes
+08:41:39 CELL php 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.2 recv=5002.5 mb= p50=5.09 p99=23.66 mib=68 anon=46 cpu=63 client= kept=yes
+08:42:10 CELL rabbit 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5003.2 recv=5003.5 mb= p50=0.09 p99=11.01 mib=169 anon=129 cpu=88 client= kept=yes
+08:42:40 CELL rabbit 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.7 recv=5002.6 mb= p50=0.09 p99=10.44 mib=182 anon=136 cpu=87 client= kept=yes
+08:43:09 CELL rust 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5005.1 recv=5005.1 mb= p50=0.04 p99=3.48 mib=77 anon=9 cpu=14 client= kept=yes
+08:43:39 CELL rust 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.3 recv=5002.5 mb= p50=0.04 p99=1.01 mib=76 anon=8 cpu=13 client= kept=yes
+08:44:08 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.4 recv=4998.4 mb= p50=0.04 p99=7.32 mib=88 anon=67 cpu=30 client= kept=yes
+08:44:38 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.04 p99=3.45 mib=93 anon=66 cpu=25 client= kept=yes
+08:45:07 CELL php 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.1 recv=5314.5 mb= p50=91.50 p99=262.25 mib=43 anon=24 cpu=22 client= kept=yes
+08:45:37 CELL php 1 CPU / 1 GiB slow-consumers ok=1 err= sent=4999.1 recv=4939.6 mb= p50=89.64 p99=257.89 mib=32 anon=14 cpu=23 client= kept=yes
+08:46:07 CELL rabbit 1 CPU / 1 GiB quorum ok=1 err= sent=26865.6 recv=21416.2 mb= p50=3300.41 p99=3422.81 mib=953 anon=549 cpu=78 client= kept=no
+08:46:38 CELL rabbit 1 CPU / 1 GiB quorum ok=1 err= sent=37090.9 recv=27461.0 mb= p50=3440.62 p99=3587.20 mib=989 anon=607 cpu=87 client= kept=no
+08:47:07 CELL rust 1 CPU / 1 GiB quorum ok=1 err= sent=85211.3 recv=79628.2 mb= p50=5345.00 p99=5519.80 mib=1024 anon=791 cpu=98 client= kept=no
+08:47:36 CELL rust 1 CPU / 1 GiB quorum ok=1 err= sent=87126.1 recv=75478.9 mb= p50=5488.17 p99=5589.23 mib=1024 anon=791 cpu=98 client= kept=no
+08:48:06 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=84436.2 recv=84438.2 mb= p50=3.77 p99=14.92 mib=517 anon=503 cpu=88 client= kept=yes
+08:48:35 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=86611.4 recv=86610.9 mb= p50=3.68 p99=12.88 mib=520 anon=507 cpu=89 client= kept=yes
+08:49:05 CELL php 1 CPU / 1 GiB quorum ok=1 err= sent=8524.6 recv=8524.1 mb= p50=41.81 p99=99.14 mib=311 anon=34 cpu=95 client= kept=yes
+08:49:34 CELL php 1 CPU / 1 GiB quorum ok=1 err= sent=8304.1 recv=8304.1 mb= p50=42.59 p99=99.51 mib=298 anon=32 cpu=95 client= kept=yes
+08:50:04 CELL rabbit 1 CPU / 1 GiB stream ok=1 err= sent=61639.5 recv=26670.9 mb= p50=10890.08 p99=11319.90 mib=1024 anon=120 cpu=99 client= kept=no
+08:50:35 CELL rabbit 1 CPU / 1 GiB stream ok=1 err= sent=54130.2 recv=30820.7 mb= p50=11108.72 p99=11513.04 mib=1024 anon=120 cpu=99 client= kept=no
+08:51:04 CELL rust 1 CPU / 1 GiB stream ok=1 err= sent=82662.5 recv=104035.2 mb= p50=5808.33 p99=5999.64 mib=1024 anon=234 cpu=87 client= kept=yes
+08:51:33 CELL rust 1 CPU / 1 GiB stream ok=1 err= sent=78784.6 recv=98822.9 mb= p50=5879.33 p99=6039.49 mib=1024 anon=227 cpu=83 client= kept=yes
+08:52:03 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=17216.7 recv=20998.3 mb= p50=7004.84 p99=7058.26 mib=1024 anon=217 cpu=50 client= kept=yes
+08:52:33 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=22476.7 recv=31450.0 mb= p50=5212.11 p99=5267.09 mib=1024 anon=227 cpu=61 client= kept=yes
+08:53:03 CELL php 1 CPU / 1 GiB stream ok=1 err= sent=16767.5 recv=33535.4 mb= p50=3.08 p99=13.18 mib=753 anon=260 cpu=42 client= kept=yes
+08:53:32 CELL php 1 CPU / 1 GiB stream ok=1 err= sent=17078.2 recv=34156.5 mb= p50=2.83 p99=7.49 mib=763 anon=262 cpu=41 client= kept=yes
+08:54:03 CELL rabbit 1 CPU / 1 GiB priority ok=1 err= sent=32590.4 recv=32588.5 mb= p50=3.24 p99=6.63 mib=152 anon=119 cpu=99 client= kept=yes
+08:54:33 CELL rabbit 1 CPU / 1 GiB priority ok=1 err= sent=32685.7 recv=32682.1 mb= p50=3.24 p99=6.21 mib=151 anon=121 cpu=99 client= kept=yes
+08:55:02 CELL rust 1 CPU / 1 GiB priority ok=1 err= sent=107073.6 recv=107073.0 mb= p50=0.66 p99=1.80 mib=75 anon=7 cpu=86 client= kept=yes
+08:55:31 CELL rust 1 CPU / 1 GiB priority ok=1 err= sent=118409.5 recv=118408.0 mb= p50=0.65 p99=1.80 mib=79 anon=7 cpu=92 client= kept=yes
+08:56:00 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=107963.9 recv=107961.5 mb= p50=0.44 p99=2.99 mib=104 anon=92 cpu=89 client= kept=yes
+08:56:30 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=101259.6 recv=101263.9 mb= p50=0.45 p99=3.09 mib=107 anon=98 cpu=87 client= kept=yes
+08:56:59 CELL php 1 CPU / 1 GiB priority ok=1 err= sent=17847.7 recv=17847.3 mb= p50=11.07 p99=17.28 mib=51 anon=12 cpu=33 client= kept=yes
+08:57:29 CELL php 1 CPU / 1 GiB priority ok=1 err= sent=17870.2 recv=17870.7 mb= p50=11.06 p99=15.78 mib=50 anon=12 cpu=34 client= kept=yes
+08:57:59 CELL rabbit 1 CPU / 1 GiB transactions ok=1 err= sent=22033.3 recv=22033.3 mb= p50=0.39 p99=8.40 mib=153 anon=121 cpu=98 client= kept=yes
+08:58:30 CELL rabbit 1 CPU / 1 GiB transactions ok=1 err= sent=20235.1 recv=20235.1 mb= p50=0.39 p99=9.10 mib=149 anon=121 cpu=98 client= kept=yes
+08:58:59 CELL rust 1 CPU / 1 GiB transactions ok=1 err= sent=32089.5 recv=32089.5 mb= p50=0.27 p99=1.22 mib=75 anon=7 cpu=66 client= kept=yes
+08:59:28 CELL rust 1 CPU / 1 GiB transactions ok=1 err= sent=38582.5 recv=38583.2 mb= p50=0.26 p99=0.73 mib=75 anon=7 cpu=78 client= kept=yes
+08:59:58 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=48757.2 recv=48757.7 mb= p50=0.10 p99=1.26 mib=81 anon=67 cpu=81 client= kept=yes
+09:00:27 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=47147.1 recv=47147.6 mb= p50=0.11 p99=1.36 mib=83 anon=72 cpu=79 client= kept=yes
+09:00:57 CELL php 1 CPU / 1 GiB transactions ok=1 err= sent=27016.2 recv=27005.7 mb= p50=9.61 p99=49.17 mib=34 anon=12 cpu=54 client= kept=yes
+09:01:26 CELL php 1 CPU / 1 GiB transactions ok=1 err= sent=26858.6 recv=26848.1 mb= p50=25.60 p99=74.03 mib=34 anon=12 cpu=57 client= kept=yes
+09:01:58 CELL rabbit 1 CPU / 1 GiB heavy ok=1 err= sent=34762.0 recv=34828.7 mb= p50=190.04 p99=384.16 mib=233 anon=201 cpu=99 client= kept=yes
+09:02:28 CELL rabbit 1 CPU / 1 GiB heavy ok=1 err= sent=34862.4 recv=34857.8 mb= p50=193.11 p99=383.59 mib=236 anon=204 cpu=99 client= kept=yes
+09:02:58 CELL rust 1 CPU / 1 GiB heavy ok=1 err= sent=97400.9 recv=97422.2 mb= p50=91.98 p99=230.15 mib=1024 anon=58 cpu=98 client= kept=yes
+09:03:27 CELL rust 1 CPU / 1 GiB heavy ok=1 err= sent=93966.1 recv=93921.9 mb= p50=93.73 p99=231.36 mib=1024 anon=67 cpu=97 client= kept=yes
+09:03:57 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=115400.9 recv=115368.1 mb= p50=48.60 p99=180.20 mib=346 anon=298 cpu=97 client= kept=yes
+09:04:27 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=113608.5 recv=113936.4 mb= p50=44.26 p99=189.96 mib=350 anon=305 cpu=97 client= kept=yes
+09:04:58 CELL php 1 CPU / 1 GiB heavy ok=1 err= sent=59407.5 recv=59256.1 mb= p50=210.40 p99=301.39 mib=915 anon=49 cpu=95 client= kept=yes
+09:05:28 CELL php 1 CPU / 1 GiB heavy ok=1 err= sent=60138.2 recv=60235.6 mb= p50=206.53 p99=293.94 mib=949 anon=52 cpu=95 client= kept=yes
+09:07:09 CELL rabbit 1 CPU / 1 GiB backlog ok=1 err= sent=73517.8 recv=50002.3 mb= p50= p99= mib=533 anon=158 cpu=6 client= kept=yes
+09:08:48 CELL rabbit 1 CPU / 1 GiB backlog ok=1 err= sent=74951.8 recv=50011.8 mb= p50= p99= mib=535 anon=167 cpu=6 client= kept=yes
+09:10:25 CELL rust 1 CPU / 1 GiB backlog ok=1 err= sent=148564.0 recv=150000.0 mb= p50= p99= mib=813 anon=465 cpu=1 client= kept=yes
+09:12:03 CELL rust 1 CPU / 1 GiB backlog ok=1 err= sent=144420.0 recv=150000.0 mb= p50= p99= mib=813 anon=465 cpu=1 client= kept=yes
+09:13:40 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=133195.5 recv=149666.0 mb= p50= p99= mib=858 anon=566 cpu=2 client= kept=yes
+09:15:18 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=128352.5 recv=149670.0 mb= p50= p99= mib=874 anon=569 cpu=2 client= kept=yes
+09:16:58 CELL php 1 CPU / 1 GiB backlog ok=1 err= sent=66318.0 recv=99930.7 mb= p50= p99= mib=1024 anon=648 cpu=4 client= kept=yes
+09:18:38 CELL php 1 CPU / 1 GiB backlog ok=1 err= sent=66740.5 recv=99989.3 mb= p50= p99= mib=1008 anon=644 cpu=4 client= kept=yes
+09:19:09 CELL rabbit 4 CPU / 4 GiB work-queue ok=1 err= sent=80152.0 recv=80153.9 mb= p50=2.12 p99=4.55 mib=174 anon=146 cpu=280 client= kept=yes
+09:19:40 CELL rabbit 4 CPU / 4 GiB work-queue ok=1 err= sent=76720.4 recv=76724.1 mb= p50=2.18 p99=4.80 mib=170 anon=139 cpu=276 client= kept=yes
+09:20:09 CELL rust 4 CPU / 4 GiB work-queue ok=1 err= sent=203261.0 recv=203259.9 mb= p50=1.09 p99=2.73 mib=79 anon=11 cpu=305 client= kept=yes
+09:20:38 CELL rust 4 CPU / 4 GiB work-queue ok=1 err= sent=190774.5 recv=190760.1 mb= p50=1.30 p99=3.15 mib=79 anon=11 cpu=309 client= kept=yes
+09:21:07 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=105539.5 recv=105538.2 mb= p50=1.31 p99=4.70 mib=319 anon=205 cpu=127 client= kept=yes
+09:21:37 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=127539.1 recv=127538.4 mb= p50=1.23 p99=4.61 mib=315 anon=200 cpu=138 client= kept=yes
+09:22:07 CELL php 4 CPU / 4 GiB work-queue ok=1 err= sent=35855.4 recv=35842.4 mb= p50=10.42 p99=17.82 mib=75 anon=12 cpu=57 client= kept=yes
+09:22:36 CELL php 4 CPU / 4 GiB work-queue ok=1 err= sent=37408.5 recv=37406.3 mb= p50=10.47 p99=15.04 mib=83 anon=12 cpu=55 client= kept=yes
+09:23:11 CELL rabbit 4 CPU / 4 GiB telemetry ok=1 err= sent=325076.5 recv=325030.1 mb= p50=9.30 p99=20.10 mib=242 anon=183 cpu=369 client= kept=yes
+09:23:41 CELL rabbit 4 CPU / 4 GiB telemetry ok=1 err= sent=328201.5 recv=328199.2 mb= p50=9.27 p99=19.28 mib=234 anon=184 cpu=370 client= kept=yes
+09:24:12 CELL rust 4 CPU / 4 GiB telemetry ok=1 err= sent=179108.9 recv=175806.0 mb= p50=1895.72 p99=1944.83 mib=229 anon=110 cpu=329 client= kept=yes
+09:24:43 CELL rust 4 CPU / 4 GiB telemetry ok=1 err= sent=175995.2 recv=175792.1 mb= p50=1843.62 p99=1920.47 mib=230 anon=110 cpu=331 client= kept=yes
+09:25:13 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=352288.0 recv=352285.5 mb= p50=1.16 p99=3.21 mib=307 anon=167 cpu=123 client= kept=yes
+09:25:43 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=355615.5 recv=355620.9 mb= p50=1.12 p99=3.17 mib=309 anon=169 cpu=124 client= kept=yes
+09:26:12 CELL php 4 CPU / 4 GiB telemetry ok=1 err= sent=83855.6 recv=83860.4 mb= p50=5.49 p99=9.27 mib=25 anon=12 cpu=99 client= kept=yes
+09:26:42 CELL php 4 CPU / 4 GiB telemetry ok=1 err= sent=82637.0 recv=82633.9 mb= p50=5.53 p99=8.87 mib=20 anon=10 cpu=99 client= kept=yes
+09:27:13 CELL rabbit 4 CPU / 4 GiB fanout-20 ok=1 err= sent=8078.3 recv=161575.5 mb= p50=4.80 p99=12.58 mib=216 anon=179 cpu=394 client= kept=yes
+09:27:43 CELL rabbit 4 CPU / 4 GiB fanout-20 ok=1 err= sent=8118.0 recv=162328.6 mb= p50=4.69 p99=12.12 mib=213 anon=177 cpu=394 client= kept=yes
+09:28:13 CELL rust 4 CPU / 4 GiB fanout-20 ok=1 err= sent=9212.6 recv=184267.9 mb= p50=0.53 p99=3.82 mib=1336 anon=14 cpu=204 client= kept=yes
+09:28:42 CELL rust 4 CPU / 4 GiB fanout-20 ok=1 err= sent=9139.2 recv=182792.9 mb= p50=0.45 p99=3.48 mib=1335 anon=13 cpu=187 client= kept=yes
+09:29:12 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=7295.6 recv=145960.9 mb= p50=5.02 p99=15.80 mib=4084 anon=2085 cpu=303 client= kept=yes
+09:29:41 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=7697.1 recv=153969.1 mb= p50=4.59 p99=14.53 mib=4033 anon=2015 cpu=305 client= kept=yes
+09:30:11 CELL php 4 CPU / 4 GiB fanout-20 ok=1 err= sent=4318.1 recv=86408.7 mb= p50=30.46 p99=55.05 mib=365 anon=20 cpu=95 client= kept=yes
+09:30:41 CELL php 4 CPU / 4 GiB fanout-20 ok=1 err= sent=4175.3 recv=83472.8 mb= p50=33.14 p99=47.74 mib=366 anon=22 cpu=95 client= kept=yes
+09:31:12 CELL rabbit 4 CPU / 4 GiB routing-64 ok=1 err= sent=137122.2 recv=137458.4 mb= p50=5.95 p99=15.69 mib=296 anon=235 cpu=386 client= kept=yes
+09:31:43 CELL rabbit 4 CPU / 4 GiB routing-64 ok=1 err= sent=141064.6 recv=141070.0 mb= p50=5.75 p99=15.45 mib=302 anon=238 cpu=391 client= kept=yes
+09:32:13 CELL rust 4 CPU / 4 GiB routing-64 ok=1 err= sent=124364.8 recv=124430.0 mb= p50=0.60 p99=2.78 mib=1894 anon=42 cpu=182 client= kept=yes
+09:32:42 CELL rust 4 CPU / 4 GiB routing-64 ok=1 err= sent=123039.4 recv=123030.3 mb= p50=0.57 p99=2.61 mib=1889 anon=37 cpu=176 client= kept=yes
+09:33:13 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=293800.3 recv=293842.7 mb= p50=1.83 p99=11.98 mib=449 anon=405 cpu=321 client= kept=yes
+09:33:43 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=275646.3 recv=275945.8 mb= p50=1.90 p99=11.97 mib=455 anon=412 cpu=311 client= kept=yes
+09:34:13 CELL php 4 CPU / 4 GiB routing-64 ok=1 err= sent=48040.7 recv=48040.7 mb= p50=28.20 p99=52.52 mib=243 anon=22 cpu=95 client= kept=yes
+09:34:43 CELL php 4 CPU / 4 GiB routing-64 ok=1 err= sent=48449.0 recv=48449.1 mb= p50=28.04 p99=52.44 mib=246 anon=22 cpu=95 client= kept=yes
+09:35:42 CELL rabbit 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.23 p99=3.01 mib=476 anon=430 cpu=180 client= kept=yes
+09:36:40 CELL rabbit 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.2 recv=5002.2 mb= p50=0.22 p99=3.56 mib=484 anon=435 cpu=179 client= kept=yes
+09:37:37 CELL rust 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.11 p99=1.63 mib=2226 anon=139 cpu=82 client= kept=yes
+09:38:34 CELL rust 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.4 recv=5003.2 mb= p50=0.13 p99=3.50 mib=2222 anon=134 cpu=94 client= kept=yes
+09:39:34 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.3 recv=5002.2 mb= p50=0.10 p99=0.80 mib=490 anon=340 cpu=80 client= kept=yes
+09:40:32 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.10 p99=3.10 mib=490 anon=344 cpu=77 client= kept=yes
+09:41:36 CELL php 4 CPU / 4 GiB many-queues ok=1 err= sent=5003.3 recv=5002.7 mb= p50=10.19 p99=40.79 mib=67 anon=44 cpu=57 client= kept=yes
+09:42:39 CELL php 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.2 recv=5003.2 mb= p50=8.20 p99=61.26 mib=67 anon=44 cpu=63 client= kept=yes
+09:43:10 CELL rabbit 4 CPU / 4 GiB quorum ok=1 err= sent=85494.3 recv=85270.5 mb= p50=32.59 p99=78.06 mib=779 anon=314 cpu=234 client= kept=yes
+09:43:41 CELL rabbit 4 CPU / 4 GiB quorum ok=1 err= sent=85201.4 recv=85557.1 mb= p50=5.57 p99=29.34 mib=760 anon=312 cpu=255 client= kept=yes
+09:44:10 CELL rust 4 CPU / 4 GiB quorum ok=1 err= sent=146919.8 recv=77355.9 mb= p50=7772.73 p99=8132.20 mib=4097 anon=3076 cpu=259 client= kept=no
+09:44:40 CELL rust 4 CPU / 4 GiB quorum ok=1 err= sent=145620.1 recv=86320.0 mb= p50=10079.99 p99=10438.99 mib=4096 anon=3079 cpu=260 client= kept=no
+09:45:10 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=11611.4 recv=11611.3 mb= p50=20.91 p99=275.82 mib=844 anon=771 cpu=133 client= kept=yes
+09:45:40 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=11272.1 recv=11272.1 mb= p50=22.89 p99=326.43 mib=786 anon=729 cpu=130 client= kept=yes
+09:46:09 CELL php 4 CPU / 4 GiB quorum ok=1 err= sent=7567.4 recv=7569.1 mb= p50=47.62 p99=104.76 mib=286 anon=34 cpu=92 client= kept=yes
+09:46:39 CELL php 4 CPU / 4 GiB quorum ok=1 err= sent=7929.7 recv=7929.7 mb= p50=47.32 p99=104.96 mib=289 anon=32 cpu=93 client= kept=yes
+09:47:11 CELL rabbit 4 CPU / 4 GiB heavy ok=1 err= sent=122163.5 recv=122137.6 mb= p50=33.52 p99=89.75 mib=442 anon=305 cpu=379 client= kept=yes
+09:47:42 CELL rabbit 4 CPU / 4 GiB heavy ok=1 err= sent=123109.7 recv=123069.3 mb= p50=33.47 p99=91.19 mib=379 anon=294 cpu=377 client= kept=yes
+09:48:11 CELL rust 4 CPU / 4 GiB heavy ok=1 err= sent=249513.8 recv=249582.0 mb= p50=37.80 p99=93.04 mib=1140 anon=115 cpu=352 client= kept=yes
+09:48:41 CELL rust 4 CPU / 4 GiB heavy ok=1 err= sent=255011.0 recv=256014.7 mb= p50=36.51 p99=89.23 mib=1109 anon=102 cpu=352 client= kept=yes
+09:49:11 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=315335.7 recv=315680.3 mb= p50=19.00 p99=92.35 mib=691 anon=618 cpu=349 client= kept=yes
+09:49:41 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=304693.7 recv=304727.5 mb= p50=19.41 p99=92.50 mib=660 anon=585 cpu=343 client= kept=yes
+09:50:12 CELL php 4 CPU / 4 GiB heavy ok=1 err= sent=55476.2 recv=55476.0 mb= p50=224.19 p99=313.68 mib=1097 anon=48 cpu=96 client= kept=yes
+09:50:42 CELL php 4 CPU / 4 GiB heavy ok=1 err= sent=61859.2 recv=61859.7 mb= p50=202.52 p99=286.53 mib=1114 anon=50 cpu=95 client= kept=yes
+09:50:42 DONE scenarios
+09:50:42 STEP scenarios done in 6506s
+09:50:42 STEP load start
+10:02:17 STEP load done in 694s
+10:02:17 STEP connections start
+11:06:39 STEP connections done in 3862s
+11:06:39 PROGRESS restore docker to 2 cpu 8192 MiB
+11:06:39 PROGRESS docker quit
+11:06:47 PROGRESS docker start
+11:06:51 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+11:06:51 STEP paced start
+11:14:03 STEP paced done in 433s
+11:14:03 STEP report start
+11:14:04 STEP report done in 0s
+11:14:04 RUN done: /Users/danielbarion/Desktop/projects/queueforge/bench/last-run.json
