@@ -1,9 +1,11 @@
-// Feature support audited from source and focused tests through 2026-10-09.
+// Feature support audited from source and focused tests through 2026-10-12.
 // "p" means partial; each note identifies a remaining limitation. RabbitMQ
 // notes identify plugins; core features have no plugin note.
 //
 // Historical full conformance on 2026-10-08: RabbitMQ 133/134 (delayed
 // exchange requires a plugin), Rust 134/134, Bun 134/134.
+// Full conformance on 2026-10-12 with the LDAP, OAuth and PKI fixtures:
+// RabbitMQ 134/135 (the delayed-message plugin), Rust, Bun and PHP 135/135.
 // PHP on 2026-10-09: 126/126 real-client tests across 11 non-auth files;
 // external authentication checked separately with focused fixtures. Cluster
 // and queue-home gates passed 7/7 and 3/3. These results do not establish
@@ -33,7 +35,7 @@ export const BROKERS: { key: Broker; name: string }[] = [
   { key: "php", name: "PHP" },
 ];
 
-export const AUDITED = "2026-10-09";
+export const AUDITED = "2026-10-12";
 
 export const featureGroups: FeatureGroup[] = [
   {

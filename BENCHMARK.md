@@ -51,8 +51,27 @@ followed:
 
 - Bun's single-voter quorum groups (B3): quorum at 4 CPU 11.4k → 16.8k msg/s.
 - PHP's classic paging: backlog drain 100k → 60k msg/s, anonymous memory 648 →
-  352 MiB. A read-ahead for paged bodies was added afterwards and has not been
-  re-measured in Docker.
+  352 MiB. A read-ahead for paged bodies was added afterwards. A second quick
+  run with two repeats measured 87k msg/s median (one repeat 99.7k) at 352–462 MiB.
+
+An A/B run that evening (`python3 bench/ab.py`, Bun, 1 CPU / 1 GiB, three repeats
+interleaved, `bench/results-quick/ab-2026-10-12T181818Z/ab.md`) compared three
+images: this run's code on Bun 1.4.2 (`old`), the code after the work above on
+Bun 1.4.2 (`today`), and that code on Bun 1.4.3 (`new`). Medians, MB/s or msg/s:
+
+| Scenario | old | today | new |
+| --- | ---: | ---: | ---: |
+| large-1m | 380.4 (368.3–416.2) | 394.6 (350.9–434.2) | 527.0 (505.2–532.2) |
+| work-queue | 112,779 (109,318–120,899) | 106,794 (105,991–119,803) | 124,722 (119,630–136,764) |
+| telemetry | 440,633 (385,481–450,626) | 398,195 (395,700–457,037) | 441,024 (427,006–448,338) |
+| backlog drain | 149,681 (100,033–150,000) | 100,051 (99,975–149,681) | 149,837 (100,057–149,846) |
+
+Bun 1.4.3 is +34% on 1 MiB messages against the same code on 1.4.2, with no
+overlap between the ranges. The other cells overlap and show no clear change.
+`old` and `today` agree on large-1m. The 445 MB/s this session measured that
+morning was the machine, not the code. The backlog drain is 300,000 messages over
+2 or 3 seconds, so it reads as 150k or 100k and its medians do not separate
+images.
 
 See PENDING.md.
 

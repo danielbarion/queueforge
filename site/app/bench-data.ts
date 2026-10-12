@@ -2,6 +2,8 @@
 
 import type { Bar, LoadRow, ScenarioRow } from "./bench";
 
+export const MEASURED = "2026-10-12";
+
 export const paced: Bar[] = [
   { name: "RabbitMQ", rate: 9310.34, tone: "mq" },
   { name: "Rust", rate: 19026.76, tone: "rust" },

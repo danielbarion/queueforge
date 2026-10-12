@@ -97,9 +97,11 @@ export default function AboutPage() {
                 </h3>
                 <span className="store">append-only log</span>
                 <p>
-                  One process on one core. More cores start one child per core, and the parent hands
-                  each connection to a child. Messages stay on that child. The example config listens
-                  on 5675, so it can run alongside the other two.
+                  One process by default. With <code>QUEUEFORGE_CORES</code> set, it starts one child
+                  per core and the parent hands each connection to a child, TLS included; a
+                  connection that names a queue on another child moves there, or reaches it over
+                  the cluster links. The example config listens on 5675, so it can run alongside
+                  the other two.
                 </p>
               </div>
               <CopyCommand text={PHP} />

@@ -103,7 +103,7 @@ def main():
         raise SystemExit("Docker is not running.")
     digests = {name: S.image_digest(image) for name, image in opts.images}
     cpus, mem, size = next(s for s in S.SIZES if s[0] == opts.cpus)
-    run.take_lease()
+    run.take_lease("bench/ab.py", f"A/B of {opts.kind} images")
     rows = {}
     try:
         C.ensure_big()

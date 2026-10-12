@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Bars } from "./bars";
-import { formatRate, formatTimes, GITHUB, paced, scale } from "./bench";
+import { formatRate, formatTimes, GITHUB, MEASURED, paced, scale } from "./bench";
 import { FeatureTease } from "./feature-table";
 
 export default function Page() {
@@ -62,7 +62,7 @@ export default function Page() {
               <Bars rows={paced} unit="/s" base={rabbit} />
               <p className="caption">
                 128 confirms in flight. Durable 256-byte body. Mac client through the published
-                port, 1 CPU / 512 MiB, measured 2026-10-11. A step counts only when confirms and
+                port, 1 CPU / 512 MiB, measured {MEASURED}. A step counts only when confirms and
                 acks both reach 95% of the offer.
               </p>
             </div>
@@ -76,7 +76,7 @@ export default function Page() {
             <p className="kicker">At four cores</p>
             <h2>Bun and Rust follow the cores when the queues are separate.</h2>
             <p className="section-lead">
-              Unpaced, 16 queues, 4 CPU / 4 GiB, measured 2026-10-11. Rust is{" "}
+              Unpaced, 16 queues, 4 CPU / 4 GiB, measured {MEASURED}. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ. Bun, one process per core, is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust. Confirms and deliveries both stay

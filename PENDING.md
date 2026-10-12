@@ -465,7 +465,8 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
     648 → 352 MiB, but drain 100k → 60k msg/s, from four syscalls and a JSON decode
     per paged message. `Store::bodyAt` now reads through a 256 KiB read-ahead and
     skips the metadata. In-process drain of 300,000 × 1 KiB: 160k → 480k msg/s
-    (unpaged: ~700k). Not re-measured in Docker yet.
+    (unpaged: ~700k). Docker, two repeats: drain 87k median (one repeat 99.7k), anonymous
+    352–462 MiB.
   - Cores mode with TLS or an `amqps` port: the parent hands raw TCP to a child,
     which runs the handshake (`tls-cores.test.php` 11/11, five runs). Before,
     TLS disabled cores mode.
@@ -500,7 +501,13 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
   - Bun: some 1 CPU cells went down (transactions −34%, large-1m −26%, quorum
     −21%, work-queue −15%). At 1 CPU Bun runs a single process, and none of the
     changes since the baseline (B3, cores-only) run there. Rust lost 7–9% on the
-    same cells, so these look like machine variation. Recheck with
-    `--scenarios transactions,large-1m,quorum,work-queue --sizes 1 --kinds bun
-    --repeat 2`.
-  - PHP: backlog drain fell 100k → 60k from paging (see PHP parity).
+    same cells, so these look like machine variation. Rechecked with two repeats:
+    transactions +13%, quorum +6%, so those were noise.
+    - large-1m stayed low (340 against 445 MB/s), so I ran an A/B
+      (`bench/ab.py`, three repeats, `bench/results-quick/ab-2026-10-12T181818Z`).
+      This morning's code on Bun 1.4.2 gave 380 MB/s and today's code on 1.4.2
+      gave 395, so the code did not cause the drop.
+    - Bun 1.4.3 gave 527 MB/s, +34%, with no overlap between the ranges. See
+      BENCHMARK.md, 2026-10-12.
+  - PHP: backlog drain fell 100k → 60k from paging, and rose to 87k after the
+    read-ahead (see PHP parity).

@@ -10,7 +10,7 @@ export type Bar = {
   note?: string;
 };
 
-export { paced, scale, loadRows, scenarioRows } from "./bench-data";
+export { MEASURED, paced, scale, loadRows, scenarioRows } from "./bench-data";
 
 export function formatRate(rate: number) {
   return rate.toLocaleString("en-US", {

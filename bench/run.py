@@ -163,7 +163,7 @@ def sh(args, cwd=ROOT):
     subprocess.run(args, cwd=cwd, check=True)
 
 
-def take_lease():
+def take_lease(owner="bench/run.py", purpose="benchmark run"):
     try:
         os.mkdir(LOCK)
     except FileExistsError:
@@ -175,7 +175,7 @@ def take_lease():
         raise SystemExit(f"{LOCK} exists: another benchmark is running ({owner or 'no owner file'}). "
                          "Remove it only if nothing else is measuring.")
     with open(os.path.join(LOCK, "owner"), "w") as f:
-        f.write(f"owner: bench/run.py pid {os.getpid()}\npurpose: full benchmark run\nstart: {now()}\n")
+        f.write(f"owner: {owner} pid {os.getpid()}\npurpose: {purpose}\nstart: {now()}\n")
 
 
 def release_lease():

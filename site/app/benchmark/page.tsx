@@ -5,6 +5,7 @@ import {
   formatRate,
   formatTimes,
   loadRows,
+  MEASURED,
   paced,
   scale,
   scenarioAverages,
@@ -80,7 +81,7 @@ export default function BenchmarkPage() {
     <main id="content">
       <section className="page-intro">
         <div className="wrap">
-          <p className="kicker">Benchmark · 2026-10-11</p>
+          <p className="kicker">Benchmark · {MEASURED}</p>
           <h1>Measured against RabbitMQ 4.3.</h1>
           <p className="lede">
             QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
@@ -132,7 +133,7 @@ export default function BenchmarkPage() {
             <h2>Sixteen queues, four cores.</h2>
             <p className="section-lead">
               Unpaced confirm/s inside the Docker network. 4 CPU / 4 GiB, durable classic, 256-byte
-              body, measure 8 s, 2026-10-11. Rust is{" "}
+              body, measure 8 s, {MEASURED}. Rust is{" "}
               {formatTimes(scale[1].rate, scale[0].rate)}× RabbitMQ here. Bun is{" "}
               {formatTimes(scale[2].rate, scale[0].rate)}× RabbitMQ and{" "}
               {formatTimes(scale[2].rate, scale[1].rate)}× Rust, and consume/s matches confirm/s.
@@ -152,10 +153,10 @@ export default function BenchmarkPage() {
           <h2>Application scenarios.</h2>
           <p className="section-lead">
             RabbitMQ&apos;s own load tool, PerfTest 2.25, against each broker in turn: a fresh
-            container per cell, the client on three other CPUs, 25 s with the first 5 s dropped.
-            Rates are delivered messages per second unless the row says otherwise; latency rows are
-            the p99 from publish to delivery at a fixed offered rate. A failed cell names what
-            stopped it. Highlighted: the best broker in that row.
+            container per cell, the client on three other CPUs, 25 s with the first 5 s dropped,
+            two repeats per cell. Rates are delivered messages per second unless the row says
+            otherwise; latency rows are the p99 from publish to delivery at a fixed offered rate. A
+            failed cell names what stopped it. Highlighted: the best broker in that row.
           </p>
           <h3 className="table-heading">1 CPU / 1 GiB</h3>
           <ScenarioTable rows={scenarioRows.filter((row) => row.size === "1 CPU / 1 GiB")} />
@@ -231,15 +232,17 @@ export default function BenchmarkPage() {
             Highlighted: the highest comparable message rate for that container size, per column.
           </p>
           <p className="caption">
-            A PHP cell marked no delivery stopped on 404 NOT_FOUND for its queue: with more than
-            one CPU, a PHP connection can reach a process that has not seen the declare yet.
+            A cell marked no delivery moved no messages in its measure window. PHP runs one process
+            unless <code>QUEUEFORGE_CORES</code> is set, so its rates do not grow with the container.
           </p>
           <p className="caption">
-            Bun at 4 CPU held 247,316 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
-            GiB held 95,000, RabbitMQ 64,370; RabbitMQ asks stop near 65,527 sockets. PHP held
-            1,000 to 2,500. Rust confirm/s on the shared queue, small size to large, was 59,836.4,
-            116,388.6, 189,525.0, 244,256.8, and 239,698.4; consume/s is the rate in the table. The
-            source table is <a href={BENCH_MD}>BENCHMARK.md</a>.
+            Bun at 4 CPU held 239,120 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
+            GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near 65,527 sockets. PHP held
+            28,000 at 1 CPU and 40,000 at 2 and 4 CPU; at 4 CPU / 8 GiB its 40,000 logins took longer
+            than the login window, so it is listed at 20,000. Rust confirm/s on the shared queue,
+            small size to large, was 100,552.1, 105,525.9, 183,290.0, 245,078.6, and 216,175.0;
+            consume/s is the rate in the table. The source table is{" "}
+            <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>
       </section>
