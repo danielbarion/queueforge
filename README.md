@@ -97,6 +97,8 @@ Options:
 ```bash
 python3 bench/run.py --changed                    # every step, but only for brokers whose image changed
 python3 bench/run.py --quick --scenarios backlog --sizes 1   # one cell, against the baseline
+python3 bench/ab.py bun old=qf-coco:bun-old new=queueforge-bun:bench --scenarios large-1m --repeat 3
+                                                  # images of one broker, interleaved, summary in ab.md
 python3 bench/run.py --kinds bun,php              # only these brokers; their rows replace older ones
 python3 bench/run.py --steps build,scenarios,report
 python3 bench/run.py --repeat 3                   # repeats per scenario cell (default 2)
