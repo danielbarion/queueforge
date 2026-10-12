@@ -269,8 +269,8 @@ def primary(sc, r):
     return num(r["received_s"])
 
 
-def cell_text(sc, r, site=False):
-    """A cell's score. The site gets the spread on its own line (`repeat_text`)."""
+def cell_text(sc, r):
+    """A cell's score for BENCHMARK.md, with the range across repeats."""
     if not r:
         return "–"
     repeat = r.get("_repeat_stats", {})
@@ -283,15 +283,13 @@ def cell_text(sc, r, site=False):
                 f"(incomplete: {r.get('kept') or 'completion not verified'})")
     v = primary(sc, r)
     def repeat_range(metric, digits=0):
-        if repeat.get("n", 0) < 2 or site:
+        if repeat.get("n", 0) < 2:
             return ""
         stats = repeat["metrics"][metric]
         return f" [{fmt(stats['min'], digits)}–{fmt(stats['max'], digits)}; n={repeat['n']}]"
     if sc["id"] == "backlog":
         if v is None:
             return f"incomplete ({r.get('kept') or 'drain unverified'})"
-        if site:
-            return f"{fmt(v[0])} fill / {fmt(v[1])} drain"
         return f"{fmt(v[0])} / {fmt(v[1])}" + repeat_range("received_s")
     if sc.get("bytes"):
         note = " (missed delivery rate)" if v is None and r.get("kept") == "no" else ""
@@ -303,23 +301,24 @@ def cell_text(sc, r, site=False):
     return fmt(num(r.get("received_s"))) + note + repeat_range("received_s")
 
 
-def repeat_text(sc, r):
-    """`2 runs: 129,918–130,911` for a scored cell with repeats, else empty."""
-    repeat = (r or {}).get("_repeat_stats", {})
-    if repeat.get("n", 0) < 2 or r.get("ok") != "1" or (repeat["failed"] or repeat["incomplete"] or repeat["missed"]):
-        return ""
-    metric, digits, unit = "received_s", 0, ""
+def site_text(sc, r):
+    """A cell's score for the site: the number alone, since the row names the
+    unit, or a short reason it has none."""
+    if not r:
+        return "–"
+    repeat = r.get("_repeat_stats", {})
+    if (repeat.get("n", 0) > 1 or repeat.get("missing", 0)) and (repeat["failed"] or repeat["incomplete"] or repeat["missed"]):
+        return "missed rate" if repeat["missed"] else "failed" if repeat["failed"] else "incomplete"
+    if r.get("ok") != "1":
+        return "failed"
+    v = primary(sc, r)
+    if sc["id"] == "backlog":
+        return "incomplete" if v is None else f"{fmt(v[0])} / {fmt(v[1])}"
     if sc.get("bytes"):
-        metric, digits, unit = "mb_s", 1, " MB/s"
-    elif sc["id"] in LATENCY:
-        metric, digits, unit = "lat_p99_ms", 2, " ms"
-    stats = repeat["metrics"].get(metric)
-    if not stats or stats.get("min") is None:
-        return ""
-    what = "Drain, " if sc["id"] == "backlog" else ""
-    low, high = fmt(stats["min"], digits), fmt(stats["max"], digits)
-    span = (("both " if repeat["n"] == 2 else "all ") + low) if low == high else f"{low}–{high}"
-    return f"{what}{repeat['n']} runs: {span}{unit}"
+        return fmt(num(r.get("mb_s")), 1) + (" (missed rate)" if v is None and r.get("kept") == "no" else "")
+    if sc["id"] in LATENCY:
+        return fmt(num(r.get("lat_p99_ms")), 2) + ("" if r.get("kept") == "yes" else " (missed rate)")
+    return fmt(num(r.get("received_s"))) + (" (missed rate)" if v is None and r.get("kept") == "no" else "")
 
 
 def scenarios_md(cells, size):
@@ -413,13 +412,12 @@ def site_ts(paced_data, cells, conns, sc_cells, measured=""):
                     v = v[1]
                 vals[TONE[k]] = None if v is None else round(v, 2)
             kind = "latency" if sc["id"] in LATENCY else ("bytes" if sc.get("bytes") else "rate")
-            texts = {TONE[k]: cell_text(sc, r, site=True) for k, r in row.items()}
-            spreads = {TONE[k]: repeat_text(sc, r) for k, r in row.items()}
+            texts = {TONE[k]: site_text(sc, r) for k, r in row.items()}
             memory = {TONE[k]: {"anonymous": num((r or {}).get("anon_mib")),
                                 "cgroup": num((r or {}).get("peak_mib"))} for k, r in row.items()}
             out.append(
                 f'  {{ size: "{size}", id: "{sc["id"]}", title: {json.dumps(sc["title"])}, real: {json.dumps(sc["real"])}, '
-                f'kind: "{kind}", values: {json.dumps(vals)}, text: {json.dumps(texts)}, spread: {json.dumps(spreads)}, memory: {json.dumps(memory)} }},'
+                f'kind: "{kind}", values: {json.dumps(vals)}, text: {json.dumps(texts)}, memory: {json.dumps(memory)} }},'
             )
     out.append("];")
     return "\n".join(out) + "\n"

@@ -34,7 +34,7 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
           <thead>
             <tr>
               <th scope="col">Scenario</th>
-              <th scope="col">Score</th>
+              <th scope="col">Unit</th>
               {COLUMNS.map((c) => (
                 <th scope="col" key={c.tone}>
                   <span className={`app tone-${c.tone}`}>
@@ -54,14 +54,12 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                     <span className="scenario-title">{row.title}</span>
                     <span className="scenario-real">{row.real}</span>
                   </th>
-                  <td className="na">{UNIT[row.kind]}</td>
+                  <td className="unit">{row.id === "backlog" ? "fill / drain msg/s" : UNIT[row.kind]}</td>
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
-                    const spread = row.spread[c.tone];
                     return (
                       <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
-                        <span>{row.text[c.tone]}</span>
-                        {spread ? <span className="scenario-spread">{spread}</span> : null}
+                        {row.text[c.tone]}
                       </td>
                     );
                   })}

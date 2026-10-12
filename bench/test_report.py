@@ -99,18 +99,18 @@ class RepeatReportTests(unittest.TestCase):
             scenarios.immutable_json(str(path), {"value": 2})
         self.assertEqual(json.loads(path.read_text()), {"value": 1})
 
-    def test_site_text_puts_the_spread_on_its_own_line(self):
+    def test_site_text_is_the_number_alone(self):
         self.write([self.row("run1", 100), self.row("run2", 300)])
         stats = self.selected()
         sc = {"id": "work-queue"}
-        self.assertEqual(report.cell_text(sc, stats["row"], site=True), "200")
-        self.assertEqual(report.repeat_text(sc, stats["row"]), "2 runs: 100–300")
+        self.assertEqual(report.site_text(sc, stats["row"]), "200")
         self.assertIn("100–300; n=2", report.cell_text(sc, stats["row"]))
+        self.assertEqual(report.site_text({"id": "latency-1k"}, {"ok": "1", "kept": "yes", "lat_p99_ms": "1.5"}), "1.50")
+        self.assertEqual(report.site_text(sc, {}), "–")
 
-    def test_equal_runs_and_backlog_read_as_words(self):
-        self.write([self.row("run1", 150), self.row("run2", 150)])
-        self.assertEqual(report.repeat_text({"id": "work-queue"}, self.selected()["row"]), "2 runs: both 150")
-        self.assertEqual(report.repeat_text({"id": "work-queue"}, {}), "")
+    def test_site_text_names_why_a_cell_is_unscored(self):
+        self.write([self.row("run1", 100), self.row("run2", "", ok="0", err="oom")])
+        self.assertEqual(report.site_text({"id": "work-queue"}, self.selected()["row"]), "failed")
 
     def test_units_are_spaced(self):
         self.assertEqual(report.spaced_units("454.7MiB"), "454.7 MiB")
@@ -142,7 +142,7 @@ class BacklogReportTests(unittest.TestCase):
         cells = {("php", report.S.SIZES[0][2], "backlog"): self.row}
         generated = report.site_ts({}, {}, {}, cells)
         self.assertIn('"php": null', generated)
-        self.assertIn("incomplete: sent 300000 got 76200", generated)
+        self.assertIn('"php": "incomplete"', generated)
 
     def test_completed_drain_keeps_fill_and_drain_score(self):
         self.row["kept"] = "yes"
