@@ -9,6 +9,7 @@ import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
+import { soloVoter } from "../raft/node.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
@@ -135,16 +136,21 @@ export async function declareQueue(this: Broker, opts: {
     // a copy on every member, so it has no single home. The leader locator
     // picks the member that campaigns first: this one (client-local, the
     // default) or the one leading the fewest queues (balanced).
-    const group = this.cluster?.consensus?.groupForNewQueue(opts.vhost, name) ?? null;
+    let group = this.cluster?.consensus?.groupForNewQueue(opts.vhost, name) ?? null;
     if (group) {
       if (queueType === "stream") row.home = null;
-      row.raftGroup = group;
       raftLeader = this.cfg.nodeId;
       if (locator === "balanced") {
         const led = this.cluster!.consensus.node!.queueLeaders();
         const ids = this.cfg.members.map((m) => m.id).sort();
         raftLeader = ids.reduce((best, id) => ((led.get(id) ?? 0) < (led.get(best) ?? 0) ? id : best), ids[0] ?? this.cfg.nodeId);
       }
+      // Workers of one broker: a quorum queue gets one voter, its leader.
+      if (queueType === "quorum") {
+        group = this.cluster!.consensus.groupForNewQueueOn(raftLeader, opts.vhost, name) ?? group;
+        if (soloVoter(group)) row.home = raftLeader;
+      }
+      row.raftGroup = group;
       this.startQueueGroup(group, raftLeader === this.cfg.nodeId);
     }
   }

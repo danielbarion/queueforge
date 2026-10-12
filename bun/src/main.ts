@@ -95,6 +95,13 @@ if (!adopt) {
   const secureContext = cfg.tlsCert && cfg.tlsKey
     ? createSecureContext({ cert: readFileSync(cfg.tlsCert), key: readFileSync(cfg.tlsKey), ...(cfg.tlsCa ? { ca: readFileSync(cfg.tlsCa) } : {}) })
     : null;
+  // The IPC channel closes when the supervisor goes, even on SIGKILL. A worker
+  // left running would keep its fixed cluster and metrics ports, and the next
+  // start would fail to bind them.
+  process.on("disconnect", () => {
+    console.error(`[cores] ${cfg.nodeId}: supervisor gone, exiting`);
+    process.exit(1);
+  });
   process.on("message", (message: { type?: string; tls?: boolean; state?: { user: string; vhost: string; channels: Array<{ id: number; confirm: boolean; prefetch: number }> }; bytes?: Uint8Array }, handle?: unknown) => {
     if (message?.type !== "conn" || !handle || typeof (handle as { on?: unknown }).on !== "function") return;
     const socket = handle as import("node:net").Socket;

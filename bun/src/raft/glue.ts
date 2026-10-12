@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { Broker } from "../broker/index.ts";
 import { decodeQuorumAppend } from "../wire.ts";
 import type { Entry, Msg } from "./core.ts";
-import { META, QUORUM, RaftNode, queueGroup, type Group } from "./node.ts";
+import { META, QUORUM, RaftNode, queueGroup, soloQueueGroup, type Group } from "./node.ts";
 
 export function raftSupported() {
   return process.env.QUEUEFORGE_RAFT !== "0";
@@ -49,6 +49,8 @@ export class Consensus {
   private autoPeers = new Set<string>();
   /** Peers that run one Raft group per quorum queue. */
   private qgroupPeers = new Set<string>();
+  /** The physical broker each peer advertised as a cores worker. */
+  private brokerOf = new Map<string, string>();
   /** Peers that take one `enqueue` for several queues (`queues`). */
   manyPeers = new Set<string>();
   /** Quorum messages the quorum group holds, by `vhost\0queue\0id`, as their `enq` data. */
@@ -80,6 +82,7 @@ export class Consensus {
     if (this.node || existsSync(join(this.dir(), "auto"))) out.push("raft_auto");
     if (this.node) out.push("raft_on");
     if (queueGroupsSupported()) out.push("raft_qgroups");
+    if (queueGroupsSupported() && this.broker.cfg.brokerId) out.push(`broker:${this.broker.cfg.brokerId}`);
     return out;
   }
 
@@ -93,6 +96,26 @@ export class Consensus {
     const self = this.broker.cfg.nodeId;
     if (!this.broker.cfg.members.every((m) => m.id === self || this.qgroupPeers.has(m.id))) return null;
     return queueGroup(vhost, name);
+  }
+
+  /**
+   * The group for a new quorum queue led by `owner`, when every member is a
+   * worker of this physical broker: one voter, `owner`. Elsewhere, and in a
+   * cluster with any other member, the queue keeps a majority of members.
+   */
+  groupForNewQueueOn(owner: string, vhost: string, name: string): Group | null {
+    const group = this.groupForNewQueue(vhost, name);
+    if (!group || !this.siblingsOnly()) return group;
+    return soloQueueGroup(owner, vhost, name);
+  }
+
+  /** Every member, this one included, is a worker of the same physical broker. */
+  siblingsOnly(): boolean {
+    const id = this.broker.cfg.brokerId;
+    if (!id || !queueGroupsSupported()) return false;
+    const self = this.broker.cfg.nodeId;
+    return this.broker.cfg.members.length > 1
+      && this.broker.cfg.members.every((m) => m.id === self || this.brokerOf.get(m.id) === id);
   }
 
   /** Every voter, this node included, can run Raft. */
@@ -131,6 +154,9 @@ export class Consensus {
     if (list.includes("raft_auto")) this.autoPeers.add(peer);
     if (list.includes("raft_qgroups")) this.qgroupPeers.add(peer);
     else this.qgroupPeers.delete(peer);
+    const broker = list.find((f) => typeof f === "string" && f.startsWith("broker:"));
+    if (typeof broker === "string") this.brokerOf.set(peer, broker.slice(7));
+    else this.brokerOf.delete(peer);
     // A member already runs Raft: the cluster turned the flag on.
     if (list.includes("raft_on") && !this.node) {
       writeMarker(this.dir(), "enabled");

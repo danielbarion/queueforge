@@ -475,12 +475,18 @@ pub async fn run_stream(
     for qm in boot.ready {
         s.next = s.next.max(qm.offset.0 + 1);
         s.raft_index = s.raft_index.max(raft_index_of(&qm.message));
-        let entry = Entry::new(qm.offset.0, now_ms(), qm.message, None);
+        let pos = s
+            .wal
+            .as_ref()
+            .and_then(|wal| wal.recovered_position(qm.offset));
+        let entry = Entry::new(qm.offset.0, now_ms(), qm.message, pos);
         s.bytes = s.bytes.saturating_add(entry.size);
         s.resident = s.resident.saturating_add(entry.size);
         s.log.push_back(entry);
     }
     s.synced = s.next;
+    // A recovered stream past the resident limit pages its oldest bodies now.
+    s.page_out();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         // Appends staged by the commands already queued share one fsync.

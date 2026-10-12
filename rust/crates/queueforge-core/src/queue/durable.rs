@@ -73,6 +73,14 @@ pub trait DurableQueueLog: Send {
         None
     }
 
+    /// Where recovery found the enqueue record for `offset`. Answers only
+    /// until the first append or fsync after recovery; `None` after that or
+    /// when this log cannot read records back.
+    fn recovered_position(&self, offset: QueueOffset) -> Option<LogPosition> {
+        let _ = offset;
+        None
+    }
+
     /// The message of an enqueue record this log wrote at `at`.
     fn read_at(&mut self, at: LogPosition) -> Result<Message> {
         let _ = at;

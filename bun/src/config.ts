@@ -28,6 +28,11 @@ export type Config = {
   nodeId: string;
   clusterListen: string | null;
   members: Member[];
+  /**
+   * Set on the worker processes of one cores supervisor: the id it keeps in
+   * its data directory. Workers that share it are one physical broker.
+   */
+  brokerId?: string | null;
   /** `"dns"` builds `members` from the addresses of `dnsName` (docs/raft.md, section 10). */
   discovery?: string | null;
   dnsName?: string | null;
@@ -160,6 +165,7 @@ export function parseConfig(text: string): Config {
     const parsed = JSON.parse(process.env.QUEUEFORGE_MEMBERS) as Member[];
     if (Array.isArray(parsed)) cfg.members = parsed;
   }
+  if (process.env.QUEUEFORGE_CHILD === "1" && process.env.QUEUEFORGE_BROKER_ID) cfg.brokerId = process.env.QUEUEFORGE_BROKER_ID;
   return cfg;
 }
 

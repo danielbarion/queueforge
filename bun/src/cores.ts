@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 
 /**
  * How many broker processes a container may run, and the plan for each one.
@@ -75,6 +76,30 @@ export function childPlans(cores: number, dataDir: string): ChildPlan[] {
 
 export function memberList(plans: ChildPlan[]): Array<{ id: string; addr: string }> {
   return plans.map((plan) => ({ id: plan.id, addr: plan.clusterListen }));
+}
+
+/**
+ * The id of the physical broker whose workers live under `dataDir`. Written
+ * once, so it survives restarts and only these workers ever share it.
+ */
+export function brokerIdentity(dataDir: string): string {
+  const path = `${dataDir.replace(/\/$/, "")}/broker-id`;
+  try {
+    const id = readFileSync(path, "utf8").trim();
+    if (id) return id;
+  } catch {
+    /* first start */
+  }
+  const id = crypto.randomUUID();
+  mkdirSync(dirname(path), { recursive: true });
+  const fd = openSync(path, "wx");
+  try {
+    writeSync(fd, id + "\n");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return id;
 }
 
 /** Cores this process may use. One when the host has no cgroup, as on a Mac. */

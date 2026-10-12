@@ -8,7 +8,7 @@
 import { spawn, type Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import net from "node:net";
-import { childPlans, grantedCores, memberList, type ChildPlan } from "./cores.ts";
+import { brokerIdentity, childPlans, grantedCores, memberList, type ChildPlan } from "./cores.ts";
 import { splitHost, type Config } from "./config.ts";
 import { mergeChildMetrics } from "./metrics-merge.ts";
 
@@ -16,6 +16,7 @@ export async function supervise(configPath: string, dev: boolean, cfg: Config): 
   const cores = grantedCores();
   const plans = childPlans(cores, cfg.dataDir);
   const members = JSON.stringify(memberList(plans));
+  const brokerId = brokerIdentity(cfg.dataDir);
   let stopping = false;
   let ready = 0;
   const kids = new Map<string, Subprocess>();
@@ -34,6 +35,7 @@ export async function supervise(configPath: string, dev: boolean, cfg: Config): 
         QUEUEFORGE_DATA_DIR: plan.dataDir,
         QUEUEFORGE_CLUSTER_LISTEN: plan.clusterListen,
         QUEUEFORGE_MEMBERS: members,
+        QUEUEFORGE_BROKER_ID: brokerId,
         QUEUEFORGE_ADOPT: "1",
         QUEUEFORGE_BIND_MGMT: plan.bindMgmt ? "1" : "0",
         QUEUEFORGE_METRICS_ADDR: plan.metricsListen,

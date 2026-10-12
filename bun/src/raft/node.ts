@@ -31,6 +31,24 @@ export function queueGroup(vhost: string, name: string): Group {
   return `q:v2:${Buffer.from(vhost, "utf8").toString("hex")}:${Buffer.from(name, "utf8").toString("hex")}`;
 }
 
+/**
+ * A quorum queue group with one voter, `owner`. Only the worker processes of
+ * one physical broker create these (`Consensus.groupForNewQueue`): siblings
+ * share its disk, so more voters there add fsyncs and IPC but no safety, and
+ * RabbitMQ on one node runs a quorum queue with one member too. The voter is
+ * part of the name, so it is persisted and replicated with the queue row.
+ */
+export function soloQueueGroup(owner: string, vhost: string, name: string): Group {
+  return `q:s1:${Buffer.from(owner, "utf8").toString("hex")}:${Buffer.from(vhost, "utf8").toString("hex")}:${Buffer.from(name, "utf8").toString("hex")}`;
+}
+
+/** The only voter of a `soloQueueGroup`, or null for any other group. */
+export function soloVoter(group: Group): string | null {
+  if (!group.startsWith("q:s1:")) return null;
+  const hex = group.slice(5, group.indexOf(":", 5));
+  return hex ? Buffer.from(hex, "hex").toString("utf8") : null;
+}
+
 /** Applied entries kept before a snapshot replaces them (section 7). */
 export function compactAfter(group: string) {
   return group === META ? 50_000 : 10_000;
@@ -221,7 +239,7 @@ export class RaftNode {
     const disk = new Disk(path);
     if (fresh && name !== META && name !== QUORUM) writeFileSynced(join(path, "group.json"), JSON.stringify({ group: name }));
     const seed = (Date.now() ^ hashId(name) ^ hashId(this.id)) >>> 0;
-    const core = new RaftCore(this.id, name, this.wanted, seed || 1);
+    const core = new RaftCore(this.id, name, this.votersOf(name), seed || 1);
     const { term, vote, snapshot, log } = disk.load();
     const g: GroupState = { name, core, disk, source: snapshot?.state ?? null, waiters: new Map(), lastLeader: null, sinceSnapshot: 0, leadFrom: null, announced: null };
     if (snapshot) this.enqueueApply(() => this.hooks.install(name, snapshot.state));
@@ -264,8 +282,9 @@ export class RaftNode {
   queueLeaders(): Map<string, number> {
     const counts = new Map<string, number>();
     for (const g of this.groups.values()) {
-      if (g.name === META || g.name === QUORUM || !g.announced) continue;
-      counts.set(g.announced, (counts.get(g.announced) ?? 0) + 1);
+      const leader = g.name === META || g.name === QUORUM ? null : this.leader(g.name);
+      if (!leader) continue;
+      counts.set(leader, (counts.get(leader) ?? 0) + 1);
     }
     return counts;
   }
@@ -346,7 +365,18 @@ export class RaftNode {
 
   /** The group's leader, once it has applied everything committed before its term. */
   leader(group: Group): string | null {
-    return this.groups.get(group)?.announced ?? null;
+    const g = this.groups.get(group);
+    if (!g) return null;
+    // Another process never hears from a one-voter group: its voter leads.
+    const solo = soloVoter(group);
+    if (solo && solo !== this.id) return solo;
+    return g.announced ?? null;
+  }
+
+  /** Voters a group moves toward: its own for a one-voter group, else the cluster's. */
+  private votersOf(group: Group): string[] {
+    const solo = soloVoter(group);
+    return solo ? [solo] : this.wanted;
   }
 
   setVoters(voters: string[]) {
@@ -385,7 +415,7 @@ export class RaftNode {
     const now = this.now();
     for (const g of this.groups.values()) {
       g.core.tick(now);
-      if (g.core.role === "leader") g.core.reconfigure(this.wanted, now);
+      if (g.core.role === "leader") g.core.reconfigure(this.votersOf(g.name), now);
     }
     this.forwardPending(now);
     for (const g of this.groups.values()) this.flush(g);
@@ -409,7 +439,7 @@ export class RaftNode {
         if (index !== null) g.waiters.set(index, { term: g.core.term, deadline: p.deadline, resolve: p.resolve, reject: p.reject });
         continue;
       }
-      const leader = g.core.leader;
+      const leader = g.core.leader ?? soloVoter(p.group);
       if (leader && leader !== this.id && p.sentTo !== leader) {
         this.hooks.send(leader, { t: "propose", g: p.group, rid: p.rid, kind: p.kind, data: p.data });
         p.sentTo = leader;

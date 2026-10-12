@@ -78,6 +78,8 @@ pub struct QueueWal {
     last_pos: Option<LogPosition>,
     /// Read handle for one closed segment, reused by [`DurableQueueLog::read_at`].
     reader: Option<(u64, File)>,
+    /// Where recovery found each live enqueue, until the first append or fsync.
+    recovered_at: std::collections::HashMap<u64, LogPosition>,
 }
 
 struct ActiveSegment {
@@ -354,6 +356,7 @@ impl QueueWal {
             meta_dirty: false,
             last_pos: None,
             reader: None,
+            recovered_at: std::collections::HashMap::new(),
         };
         wal.scan_segments()?;
         Ok(wal)
@@ -546,10 +549,21 @@ impl QueueWal {
             match replay_segment(&path, ack_wm) {
                 Ok(ReplayOutcome {
                     messages,
+                    positions,
                     last_valid_offset,
                     truncated_to,
                     ack_watermark,
                 }) => {
+                    for (offset, pos, len) in positions {
+                        self.recovered_at.insert(
+                            offset,
+                            LogPosition {
+                                segment: id,
+                                pos,
+                                len,
+                            },
+                        );
+                    }
                     ack_wm = ack_wm.max(ack_watermark);
                     if let Some(trunc) = truncated_to {
                         // Drop the torn tail. A preallocated segment keeps its
@@ -615,6 +629,7 @@ impl QueueWal {
         // Dedup by offset (keep first).
         ready.dedup_by_key(|(o, _)| *o);
         ready.retain(|(off, _)| *off > ack_wm);
+        self.recovered_at.retain(|off, _| *off > ack_wm);
 
         last_offset = last_offset.max(ack_wm);
         let next_offset = last_offset.saturating_add(1).max(1);
@@ -642,6 +657,8 @@ pub struct RecoveredState {
 }
 
 struct ReplayOutcome {
+    /// `(offset, position, encoded length)` of each enqueue record.
+    positions: Vec<(u64, u64, u32)>,
     messages: Vec<(u64, Message)>,
     last_valid_offset: Option<u64>,
     truncated_to: Option<u64>,
@@ -669,6 +686,7 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
     let mut reader = BufReader::new(file).take(end.saturating_sub(start));
     let mut pos = start;
     let mut messages = Vec::new();
+    let mut positions = Vec::new();
     let mut last_valid_offset = None;
     let mut truncated_to = None;
     let mut wal_ack = ack_wm;
@@ -692,6 +710,7 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
                 } else if rec.rtype == RecordType::Enqueue {
                     last_valid_offset = Some(rec.offset.max(last_valid_offset.unwrap_or(0)));
                     if let Some(msg) = rec.message {
+                        positions.push((rec.offset, rec_start, rec.encoded_len as u32));
                         messages.push((rec.offset, msg));
                     }
                 }
@@ -726,8 +745,10 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
     }
 
     messages.retain(|(off, _)| *off > wal_ack);
+    positions.retain(|(off, _, _)| *off > wal_ack);
     Ok(ReplayOutcome {
         messages,
+        positions,
         last_valid_offset,
         truncated_to,
         ack_watermark: wal_ack,
@@ -781,6 +802,7 @@ impl DurableQueueLog for QueueWal {
             .as_mut()
             .ok_or_else(|| CoreError::Store("no active WAL segment".into()))?;
         let at = active.len;
+        self.recovered_at = std::collections::HashMap::new();
         active
             .push_record(&bytes)
             .map_err(|e| CoreError::Store(e.to_string()))?;
@@ -816,6 +838,9 @@ impl DurableQueueLog for QueueWal {
     }
 
     fn fsync(&mut self) -> CoreResult<QueueOffset> {
+        if !self.recovered_at.is_empty() {
+            self.recovered_at = std::collections::HashMap::new();
+        }
         // The ack watermark rides in the segment so one sync covers bodies and acks.
         if self.meta_dirty && self.meta.ack_watermark > 0 {
             if let Some(active) = self.active.as_mut() {
@@ -910,6 +935,10 @@ impl DurableQueueLog for QueueWal {
 
     fn last_position(&self) -> Option<LogPosition> {
         self.last_pos
+    }
+
+    fn recovered_position(&self, offset: QueueOffset) -> Option<LogPosition> {
+        self.recovered_at.get(&offset.0).copied()
     }
 
     fn read_at(&mut self, at: LogPosition) -> CoreResult<Message> {
@@ -1078,6 +1107,31 @@ mod tests {
                 body.as_slice()
             );
         }
+    }
+
+    #[test]
+    fn recovery_reports_where_each_live_record_is_until_the_next_write() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = QueueWal::open(dir.path(), "/", "s", 4096).unwrap();
+        for i in 1..=20u64 {
+            let body = vec![b'a' + (i % 26) as u8; 700];
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(i), &sample(&body, true))
+                .unwrap();
+        }
+        DurableQueueLog::acknowledge(&mut wal, QueueOffset(1)).unwrap();
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        drop(wal);
+        let mut wal = QueueWal::open(dir.path(), "/", "s", 4096).unwrap();
+        let recovered = wal.recover_messages().unwrap();
+        assert_eq!(recovered.messages.len(), 19);
+        assert!(DurableQueueLog::recovered_position(&wal, QueueOffset(1)).is_none());
+        for (offset, message) in &recovered.messages {
+            let at = DurableQueueLog::recovered_position(&wal, QueueOffset(*offset)).unwrap();
+            let read = DurableQueueLog::read_at(&mut wal, at).unwrap();
+            assert_eq!(read.body, message.body, "offset {offset}");
+        }
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        assert!(DurableQueueLog::recovered_position(&wal, QueueOffset(2)).is_none());
     }
 
     #[test]
