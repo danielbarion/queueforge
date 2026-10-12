@@ -127,6 +127,9 @@ export class Store {
   private closed = false;
   private nextId = 1;
   private pending: Array<{ id: number; vhost: string; queue: string; body: Uint8Array; meta: string }> = [];
+  /** Stream appends for the end of this task: vhost, queue, offset, ts, body, meta. */
+  private streamStaged: Array<[string, string, number, number, Uint8Array, string]> = [];
+  private streamError: Error | null = null;
   /** How many times the interval path raised synchronous=FULL. */
   fullFlushCount = 0;
   confirmsBeforeFsync = 0;
@@ -457,6 +460,7 @@ export class Store {
     else write();
   }
   deleteStreamLog(vhost: string, queue: string) {
+    this.flushStreamAppends();
     this.db.query("DELETE FROM stream_messages WHERE vhost=? AND queue=?").run(vhost, queue);
     this.deleteParameter("stream-next", vhost, queue);
     this.deleteParameter("stream-raft", vhost, queue);
@@ -547,10 +551,32 @@ export class Store {
   /** Append one stream entry. */
   appendStreamEntry(vhost: string, queue: string, e: { offset: number; ts: number; body: Uint8Array; exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array; raftIndex?: number }) {
     const meta = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64"), ...(e.raftIndex ? { r: e.raftIndex } : {}) });
-    this.db.query("INSERT OR REPLACE INTO stream_messages (vhost, queue, offset, ts, body, meta) VALUES (?, ?, ?, ?, ?, ?)").run(vhost, queue, e.offset, e.ts, e.body, meta);
+    if (this.streamError) throw this.streamError;
+    // One transaction per task: an autocommit insert per append was most of a
+    // stream publisher's time. The microtask runs before any timer, so before
+    // the group fsync a confirm waits on; every read of the table flushes first.
+    if (this.streamStaged.length === 0) queueMicrotask(() => this.flushStreamAppends());
+    this.streamStaged.push([vhost, queue, e.offset, e.ts, e.body, meta]);
+  }
+  /** Write the staged stream appends in one transaction. */
+  flushStreamAppends() {
+    if (this.streamStaged.length === 0) return;
+    const rows = this.streamStaged;
+    this.streamStaged = [];
+    const insert = this.db.query("INSERT OR REPLACE INTO stream_messages (vhost, queue, offset, ts, body, meta) VALUES (?, ?, ?, ?, ?, ?)");
+    try {
+      this.db.transaction(() => {
+        for (const row of rows) insert.run(...row);
+      })();
+    } catch (err) {
+      // Later appends throw, as this one would have before it was batched.
+      console.error("queueforge-bun: stream append failed", err);
+      this.streamError = err instanceof Error ? err : new Error(String(err));
+    }
   }
   /** Every stored entry of one stream, oldest first. */
   listStreamEntries(vhost: string, queue: string) {
+    this.flushStreamAppends();
     const rows = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset").all(vhost, queue) as Array<{ offset: number; ts: number; body: Uint8Array; meta: string }>;
     return rows.map((r) => streamRow(r));
   }
@@ -559,6 +585,7 @@ export class Store {
    * the bodies; plus the Raft index of the newest entry.
    */
   listStreamIndex(vhost: string, queue: string): { rows: Array<{ offset: number; ts: number; size: number }>; raftIndex: number } {
+    this.flushStreamAppends();
     const rows = this.db
       .query("SELECT offset, ts, length(body) AS size FROM stream_messages WHERE vhost=? AND queue=? ORDER BY offset")
       .all(vhost, queue) as Array<{ offset: number; ts: number; size: number }>;
@@ -570,8 +597,15 @@ export class Store {
   }
   /** One stored stream entry with its body, or null. */
   readStreamEntry(vhost: string, queue: string, offset: number) {
+    this.flushStreamAppends();
     const r = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? AND offset=?").get(vhost, queue, offset) as { offset: number; ts: number; body: Uint8Array; meta: string } | null;
     return r ? streamRow(r) : null;
+  }
+  /** Up to `limit` stored entries from `offset` on, oldest first: one query for a reader's read-ahead. */
+  readStreamRange(vhost: string, queue: string, offset: number, limit: number) {
+    this.flushStreamAppends();
+    const rows = this.db.query("SELECT offset, ts, body, meta FROM stream_messages WHERE vhost=? AND queue=? AND offset>=? ORDER BY offset LIMIT ?").all(vhost, queue, offset, limit) as Array<{ offset: number; ts: number; body: Uint8Array; meta: string }>;
+    return rows.map((r) => streamRow(r));
   }
   /** Where an empty stream continues: one past the last offset it ever stored. */
   streamNextOffset(vhost: string, queue: string): number {
@@ -580,6 +614,7 @@ export class Store {
   }
   /** Drop entries below `offset`, remembering where the stream continues. */
   deleteStreamEntriesBefore(vhost: string, queue: string, offset: number) {
+    this.flushStreamAppends();
     this.db.query("DELETE FROM stream_messages WHERE vhost=? AND queue=? AND offset<?").run(vhost, queue, offset);
     this.putParameter("stream-next", vhost, queue, String(offset));
   }
@@ -753,6 +788,7 @@ export class Store {
   /** Test hook: stop the group-commit timer. */
   close() {
     this.closed = true;
+    this.flushStreamAppends();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.warm) clearInterval(this.warm);

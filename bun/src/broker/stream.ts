@@ -33,23 +33,82 @@ export type StreamEntry = {
   propRaw: Uint8Array;
   /** Raft index of the `sappend` that wrote it, on a replicated stream. */
   raftIndex?: number;
+  /** Delivery headers and properties with `x-stream-offset`, built on first delivery. */
+  wireHeaders?: Array<[string, Field]>;
+  wireProps?: Uint8Array;
 };
 
+/**
+ * One stream consumer. `ahead` holds entries read back from the store past the
+ * resident window, `ahead[aheadAt]` being the one at `cursor`.
+ */
+type StreamReader = { consumer: Consumer; cursor: number; ahead?: StreamEntry[]; aheadAt?: number };
+
+/**
+ * Read-ahead for a reader behind the resident window. One range query replaces
+ * a query, a JSON parse and a copy per delivery; a reader from `first` on a
+ * long stream ran at a quarter of the tail rate. Bounded in bytes and count.
+ */
+const READ_AHEAD_BYTES = 4 * 1024 * 1024;
+const READ_AHEAD_ENTRIES = 512;
+
 export type StreamState = {
+  /**
+   * Entries whose body is only in the store, oldest first: offsets `first` on.
+   * Timestamps and sizes only. A full object each held ~350 bytes for every
+   * message ever written, so a busy stream outgrew its container.
+   */
+  coldTs: number[];
+  coldSize: number[];
+  /** Index of the oldest live slot in `coldTs` / `coldSize`. */
+  coldHead: number;
+  /** Entries that hold their body, after the cold ones; `log[logHead]` is the oldest. */
   log: StreamEntry[];
-  /** Offset of log[0]. */
+  logHead: number;
+  /** Offset of the oldest entry. */
   first: number;
   /** Offset the next append takes. */
   next: number;
   bytes: number;
-  /** Body bytes still held in `log`. Older bodies are read back from the store. */
+  /** Body bytes held in `log`. */
   resident: number;
-  /** Index in `log` of the oldest entry that may still hold its body. */
-  hot: number;
-  readers: Array<{ consumer: Consumer; cursor: number }>;
+  readers: Array<StreamReader>;
   /** Highest Raft index applied, so a replay after a restart is skipped. */
   raftIndex: number;
 };
+
+function coldCount(s: StreamState): number {
+  return s.coldTs.length - s.coldHead;
+}
+
+/** The resident entry at `offset`, or undefined when it is cold or out of range. */
+function residentAt(s: StreamState, offset: number): StreamEntry | undefined {
+  const i = offset - s.first - coldCount(s);
+  return i >= 0 ? s.log[s.logHead + i] : undefined;
+}
+
+function sizeAt(s: StreamState, offset: number): number {
+  const i = offset - s.first;
+  return i < coldCount(s) ? s.coldSize[s.coldHead + i]! : residentAt(s, offset)!.size;
+}
+
+function tsAt(s: StreamState, offset: number): number {
+  const i = offset - s.first;
+  return i < coldCount(s) ? s.coldTs[s.coldHead + i]! : residentAt(s, offset)!.ts;
+}
+
+/** Drop the dead front of both arrays once it is most of them. */
+function compact(s: StreamState) {
+  if (s.coldHead > 4096 && s.coldHead * 2 > s.coldTs.length) {
+    s.coldTs = s.coldTs.slice(s.coldHead);
+    s.coldSize = s.coldSize.slice(s.coldHead);
+    s.coldHead = 0;
+  }
+  if (s.logHead > 4096 && s.logHead * 2 > s.log.length) {
+    s.log = s.log.slice(s.logHead);
+    s.logHead = 0;
+  }
+}
 
 /** `x-max-age` as RabbitMQ writes it: a number and a unit, Y M D h m s. */
 export function parseMaxAge(text: string | null): number | null {
@@ -68,51 +127,45 @@ export function parseMaxAge(text: string | null): number | null {
  * process was killed.
  */
 const STREAM_RESIDENT_BYTES = 16 * 1024 * 1024;
-const NO_HEADERS: Array<[string, Field]> = [];
-const NO_BYTES = new Uint8Array(0);
 
 /** The stream state of `q`, loading the stored index on first use. Bodies stay in the store. */
 export function streamOf(this: Broker, q: QueueLive): StreamState {
   let s = this.streams.get(this.key(q.vhost, q.name));
   if (s) return s;
   const index = this.store.listStreamIndex(q.vhost, q.name);
-  const log: StreamEntry[] = index.rows.map((r) => ({
-    offset: r.offset, ts: r.ts, size: r.size, body: null, exchange: "", routingKey: "", headers: NO_HEADERS, propRaw: NO_BYTES,
-  }));
-  const first = log[0]?.offset ?? this.store.streamNextOffset(q.vhost, q.name);
-  const next = log.length ? log[log.length - 1]!.offset + 1 : first;
+  const first = index.rows[0]?.offset ?? this.store.streamNextOffset(q.vhost, q.name);
   const applied = Number(this.store.listParameters("stream-raft").find((p) => p.vhost === q.vhost && p.name === q.name)?.value ?? 0);
   s = {
-    log, first, next, bytes: log.reduce((n, e) => n + e.size, 0), resident: 0, hot: log.length,
+    coldTs: index.rows.map((r) => r.ts), coldSize: index.rows.map((r) => r.size), coldHead: 0,
+    log: [], logHead: 0, first, next: first + index.rows.length,
+    bytes: index.rows.reduce((n, r) => n + r.size, 0), resident: 0,
     readers: [], raftIndex: Math.max(applied, index.raftIndex),
   };
   this.streams.set(this.key(q.vhost, q.name), s);
   return s;
 }
 
-/** Add an entry that holds its body, then page the oldest bodies past the budget. */
+/** Add an entry that holds its body, then move the oldest past the budget to the cold index. */
 function pushEntry(s: StreamState, entry: StreamEntry) {
   s.log.push(entry);
   s.bytes += entry.size;
-  if (entry.body) s.resident += entry.size;
-  while (s.resident > STREAM_RESIDENT_BYTES && s.hot < s.log.length - 1) {
-    const old = s.log[s.hot]!;
-    if (old.body) {
-      s.resident -= old.size;
-      old.body = null;
-      old.exchange = "";
-      old.routingKey = "";
-      old.headers = NO_HEADERS;
-      old.propRaw = NO_BYTES;
-    }
-    s.hot++;
+  s.resident += entry.size;
+  while (s.resident > STREAM_RESIDENT_BYTES && s.log.length - s.logHead > 1) {
+    const old = s.log[s.logHead]!;
+    s.log[s.logHead] = undefined as unknown as StreamEntry;
+    s.logHead++;
+    s.resident -= old.size;
+    s.coldTs.push(old.ts);
+    s.coldSize.push(old.size);
   }
+  compact(s);
 }
 
-/** The entry with its body, from memory or from the store. */
-function fullEntry(this: Broker, q: QueueLive, e: StreamEntry): StreamEntry | null {
-  if (e.body) return e;
-  const row = this.store.readStreamEntry(q.vhost, q.name, e.offset);
+/** The entry at `offset` with its body, from memory or from the store. */
+function fullEntry(this: Broker, q: QueueLive, s: StreamState, offset: number): StreamEntry | null {
+  const resident = residentAt(s, offset);
+  if (resident) return resident;
+  const row = this.store.readStreamEntry(q.vhost, q.name, offset);
   if (!row) return null;
   return { ...row, size: row.body.length };
 }
@@ -199,8 +252,7 @@ export function streamSnapshot(this: Broker, q: QueueLive) {
       first: s.first,
       next: s.next,
       raftIndex: s.raftIndex,
-      entries: s.log.flatMap((paged) => {
-        const e = fullEntry.call(this, q, paged);
+      entries: Array.from({ length: s.next - s.first }, (_, i) => fullEntry.call(this, q, s, s.first + i)).flatMap((e) => {
         if (!e) return [];
         return [{
           offset: e.offset,
@@ -222,10 +274,14 @@ export function installStreamSnapshot(this: Broker, q: QueueLive, state: unknown
   if (!snap) return;
   const s = this.streamOf(q);
   this.store.deleteStreamLog(q.vhost, q.name);
+  s.coldTs = [];
+  s.coldSize = [];
+  s.coldHead = 0;
   s.log = [];
+  s.logHead = 0;
   s.bytes = 0;
   s.resident = 0;
-  s.hot = 0;
+  let firstSeen: number | undefined;
   for (const e of snap.entries ?? []) {
     const body = new Uint8Array(Buffer.from(String(e.body_b64 ?? ""), "base64"));
     const entry: StreamEntry = {
@@ -239,10 +295,12 @@ export function installStreamSnapshot(this: Broker, q: QueueLive, state: unknown
       propRaw: new Uint8Array(Buffer.from(String(e.propRaw ?? ""), "base64")),
     };
     this.store.appendStreamEntry(q.vhost, q.name, { ...entry, body });
+    firstSeen ??= entry.offset;
     pushEntry(s, entry);
   }
-  s.first = Number(snap.first ?? s.log[0]?.offset ?? 0);
-  s.next = Number(snap.next ?? s.first);
+  // Positions in the index are offsets from `first`, so it is the first entry installed.
+  s.first = firstSeen ?? Number(snap.first ?? 0);
+  s.next = firstSeen != null ? s.first + coldCount(s) + s.log.length - s.logHead : Number(snap.next ?? s.first);
   s.raftIndex = Number(snap.raftIndex ?? 0);
   this.store.deleteStreamEntriesBefore(q.vhost, q.name, s.first);
   this.store.putParameter("stream-raft", q.vhost, q.name, String(s.raftIndex));
@@ -257,21 +315,27 @@ export function trimStream(this: Broker, q: QueueLive): void {
   const now = Date.now();
   let drop = 0;
   let bytes = s.bytes;
-  while (drop < s.log.length - 1) {
-    const e = s.log[drop]!;
+  const total = s.next - s.first;
+  while (drop < total - 1) {
+    const offset = s.first + drop;
     const tooBig = maxBytes != null && bytes > maxBytes;
-    const tooOld = maxAge != null && now - e.ts > maxAge;
+    const tooOld = maxAge != null && now - tsAt(s, offset) > maxAge;
     if (!tooBig && !tooOld) break;
-    bytes -= e.size;
-    if (e.body) s.resident -= e.size;
+    bytes -= sizeAt(s, offset);
     drop++;
   }
   if (!drop) return;
-  const until = s.log[drop]!.offset;
-  s.log.splice(0, drop);
-  s.hot = Math.max(0, s.hot - drop);
+  const fromCold = Math.min(drop, coldCount(s));
+  s.coldHead += fromCold;
+  for (let i = fromCold; i < drop; i++) {
+    s.resident -= s.log[s.logHead]!.size;
+    s.log[s.logHead] = undefined as unknown as StreamEntry;
+    s.logHead++;
+  }
+  const until = s.first + drop;
   s.bytes = bytes;
   s.first = until;
+  compact(s);
   this.store.deleteStreamEntriesBefore(q.vhost, q.name, until);
 }
 
@@ -280,7 +344,7 @@ function startOffset(s: StreamState, spec: Field | undefined): number {
   if (!spec) return s.next;
   if (spec.t === "S" || spec.t === "s") {
     if (spec.v === "first") return s.first;
-    if (spec.v === "last") return s.log.length ? s.log[s.log.length - 1]!.offset : s.next;
+    if (spec.v === "last") return s.next > s.first ? s.next - 1 : s.next;
     if (spec.v === "next") return s.next;
     const age = parseMaxAge(spec.v);
     if (age != null) return firstAtOrAfter(s, Date.now() - age);
@@ -292,7 +356,7 @@ function startOffset(s: StreamState, spec: Field | undefined): number {
 }
 
 function firstAtOrAfter(s: StreamState, ts: number): number {
-  for (const e of s.log) if (e.ts >= ts) return e.offset;
+  for (let offset = s.first; offset < s.next; offset++) if (tsAt(s, offset) >= ts) return offset;
   return s.next;
 }
 
@@ -334,6 +398,32 @@ function withOffset(propRaw: Uint8Array, headers: Array<[string, Field]>, offset
   return w.concat();
 }
 
+/** The entry at `offset` with its body: from memory, the read-ahead, or one range read. */
+function readerEntry(this: Broker, q: QueueLive, s: StreamState, reader: StreamReader, offset: number): StreamEntry | null {
+  const resident = residentAt(s, offset);
+  if (resident) return resident;
+  const ahead = reader.ahead;
+  if (ahead && reader.aheadAt! < ahead.length && ahead[reader.aheadAt!]!.offset === offset) return ahead[reader.aheadAt!++]!;
+  // Count what fits the budget from the cold index, which holds every size.
+  const cold = s.first + coldCount(s);
+  let n = 0;
+  let bytes = 0;
+  for (let at = offset; at < cold && n < READ_AHEAD_ENTRIES; at++) {
+    const size = sizeAt(s, at);
+    if (n > 0 && bytes + size > READ_AHEAD_BYTES) break;
+    bytes += size;
+    n++;
+  }
+  const rows = this.store.readStreamRange(q.vhost, q.name, offset, Math.max(1, n));
+  if (!rows.length || rows[0]!.offset !== offset) {
+    reader.ahead = undefined;
+    return null;
+  }
+  reader.ahead = rows.map((row) => ({ ...row, size: row.body.length }));
+  reader.aheadAt = 1;
+  return reader.ahead[0]!;
+}
+
 /** Deliver to every reader that has credit, from its cursor. */
 export function pumpStream(this: Broker, q: QueueLive): void {
   const s = this.streams.get(this.key(q.vhost, q.name));
@@ -341,9 +431,7 @@ export function pumpStream(this: Broker, q: QueueLive): void {
   for (const reader of s.readers) {
     if (reader.cursor < s.first) reader.cursor = s.first;
     while (reader.cursor < s.next && reader.consumer.want()) {
-      const at = s.log[reader.cursor - s.first];
-      if (!at) break;
-      const e = fullEntry.call(this, q, at);
+      const e = readerEntry.call(this, q, s, reader, reader.cursor);
       if (!e) break;
       reader.cursor++;
       const msg: LiveMsg = {
@@ -352,8 +440,9 @@ export function pumpStream(this: Broker, q: QueueLive): void {
         body: e.body!,
         exchange: e.exchange,
         routingKey: e.routingKey,
-        headers: [...e.headers, ["x-stream-offset", { t: "l", v: e.offset }]],
-        propRaw: withOffset(e.propRaw, e.headers, e.offset),
+        headers: e.wireHeaders ??= [...e.headers, ["x-stream-offset", { t: "l", v: e.offset }]],
+        // Encoded once per entry, not once per reader and delivery.
+        propRaw: e.wireProps ??= withOffset(e.propRaw, e.headers, e.offset),
         persistent: true,
         priority: 0,
         expiresAt: null,
@@ -362,6 +451,8 @@ export function pumpStream(this: Broker, q: QueueLive): void {
       this.prom.delivered++;
       reader.consumer.deliver(msg);
     }
+    // Caught up with the resident tail: the read-ahead is no longer needed.
+    if (reader.ahead && reader.aheadAt! >= reader.ahead.length) reader.ahead = undefined;
   }
 }
 

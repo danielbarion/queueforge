@@ -31,10 +31,26 @@ function memLimit(): number {
   return (limitCache = totalmem() * fraction);
 }
 
+/**
+ * Free disk, re-sampled every 5 s, or on every sweep once it is near the limit.
+ * `statfs` took ~17 ms on Docker Desktop's volume: 9% of a 1 CPU broker's time
+ * at the 200 ms sweep, all of it holding the event loop.
+ */
+const DISK_SAMPLE_MS = 5000;
+let diskCache = { at: -Infinity, path: "", bytes: 0 };
+function diskFree(path: string): number {
+  const now = performance.now();
+  const near = diskCache.bytes > 0 && diskCache.bytes < 4 * DISK_FREE_LIMIT;
+  if (path !== diskCache.path || near || now - diskCache.at >= DISK_SAMPLE_MS) {
+    diskCache = { at: now, path, bytes: availableBytes(path) };
+  }
+  return diskCache.bytes;
+}
+
 /** Sample memory and disk, and tell listeners when the blocked state changes. */
 export function checkAlarms(this: Broker): void {
   const mem = process.memoryUsage.rss();
-  const disk = availableBytes(this.cfg.dataDir || ".");
+  const disk = diskFree(this.cfg.dataDir || ".");
   this.memAlarm = mem >= memLimit();
   this.diskAlarm = disk > 0 && disk < DISK_FREE_LIMIT;
   const blocked = this.memAlarm || this.diskAlarm;
