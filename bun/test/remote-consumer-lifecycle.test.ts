@@ -32,21 +32,26 @@ for (const scenario of [
   });
 }
 
-type Consumer = { deliver: (message: LiveMsg) => void };
+type Consumer = { deliver: (message: LiveMsg) => void; want: () => boolean };
+type Flow = { full: boolean; wake: Set<() => void> };
 type Probe = {
   subs: Map<number, (message: LiveMsg) => void>;
   remoteAcks: Map<string, string>;
   remoteSessions: Map<string, number>;
-  dispatch: (peer: string, message: Record<string, unknown>, write: (value: object) => void) => void;
+  dispatch: (peer: string, message: Record<string, unknown>, write: (value: object) => void, socket?: unknown, flow?: Flow) => void;
 };
 function fixture() {
   const queue = { consumers: [] as Consumer[] };
+  const settled: string[] = [];
+  let pumps = 0;
   const broker = {
     cfg: { nodeId: "self" }, queues: new Map([["/q", queue]]),
-    key: (vhost: string, name: string) => vhost + name, pump() {},
+    key: (vhost: string, name: string) => vhost + name, pump() { pumps++; },
+    ack(_vhost: string, _queue: string, id: string) { settled.push(id); },
+    nack(_vhost: string, _queue: string, id: string) { settled.push(id); },
   } as unknown as Broker;
   const cluster = new Cluster(broker);
-  return { cluster, probe: cluster as unknown as Probe, queue };
+  return { cluster, probe: cluster as unknown as Probe, queue, settled, pumps: () => pumps };
 }
 const subscription = { vhost: "/", queue: "q", session: 42, noAck: false, exclusive: false };
 
@@ -86,3 +91,61 @@ for (const noAck of [true, false]) {
     expect(delivery.payload.delivery_id).toBe(1);
   });
 }
+
+const message = (id: string) => ({
+  id, body: Uint8Array.of(1, 2, 3), propRaw: Uint8Array.of(0x80, 0, 4, 116, 101, 120, 116),
+  exchange: "", routingKey: "q", persistent: true, priority: 0, redelivered: false,
+} as LiveMsg);
+
+test("ack_credit holds a remote consumer to its prefetch and refills on ack", async () => {
+  const { probe, queue, settled } = fixture();
+  probe.dispatch("peer", { op: "sub", id: 1, payload: { ...subscription, ack_credit: 2 } }, () => {});
+  const consumer = queue.consumers[0]!;
+  consumer.deliver(message("a"));
+  consumer.deliver(message("b"));
+  expect(consumer.want()).toBe(false);
+  probe.dispatch("peer", { op: "ack", id: 2, payload: { vhost: "/", queue: "q", delivery_id: 1 } }, () => {});
+  await Bun.sleep(0);
+  expect(settled).toEqual(["a"]);
+  expect(consumer.want()).toBe(true);
+});
+
+test("a Rust credit subscriber is not refilled by acks", async () => {
+  const { probe, queue } = fixture();
+  probe.dispatch("peer", { op: "sub", id: 1, payload: { ...subscription, credit: 1 } }, () => {});
+  const consumer = queue.consumers[0]!;
+  consumer.deliver(message("a"));
+  probe.dispatch("peer", { op: "ack", id: 2, payload: { vhost: "/", queue: "q", delivery_id: 1 } }, () => {});
+  await Bun.sleep(0);
+  expect(consumer.want()).toBe(false);
+});
+
+test("a full cluster socket stops remote deliveries until it drains", () => {
+  const { probe, queue, pumps } = fixture();
+  const flow: Flow = { full: false, wake: new Set() };
+  probe.dispatch("peer", { op: "sub", id: 1, payload: subscription }, () => {}, undefined, flow);
+  const consumer = queue.consumers[0]!;
+  expect(consumer.want()).toBe(true);
+  flow.full = true;
+  expect(consumer.want()).toBe(false);
+  const before = pumps();
+  flow.full = false;
+  for (const wake of flow.wake) wake();
+  expect(pumps()).toBe(before + 1);
+  probe.dispatch("peer", { op: "unsub", id: 2, payload: subscription }, () => {}, undefined, flow);
+  expect(flow.wake.size).toBe(0);
+});
+
+test("a remote delivery carries one body and keeps its properties", () => {
+  const { probe, queue } = fixture();
+  const sent: Array<Record<string, unknown>> = [];
+  probe.dispatch("peer", { op: "sub", id: 1, payload: subscription }, (value) => sent.push(value as Record<string, unknown>));
+  queue.consumers[0]!.deliver(message("a"));
+  const delivery = sent.at(-1)!;
+  expect(delivery.msg).toBeUndefined();
+  const received: LiveMsg[] = [];
+  probe.subs.set(42, (m) => received.push(m));
+  probe.dispatch("home", delivery, () => {});
+  expect([...received[0]!.body]).toEqual([1, 2, 3]);
+  expect([...received[0]!.propRaw]).toEqual([0x80, 0, 4, 116, 101, 120, 116]);
+});

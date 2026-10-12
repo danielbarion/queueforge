@@ -468,7 +468,9 @@ export function enqueueLocal(this: Broker,
     rowId = this.store.insertMessage(q.vhost, q.name, src.body, durableMeta(src, expiresAt));
   }
   const msg: LiveMsg = {
-    id: src.id ?? (rowId != null ? `d-${rowId}` : `t-${takeTransientSeq()}`),
+    // `||`: a forward without `message_id` decodes as "". Shared by every
+    // message in the queue, it overwrote `unacked` entries and kept their rows.
+    id: src.id || (rowId != null ? `d-${rowId}` : `t-${takeTransientSeq()}`),
     rowId,
     body: src.body,
     exchange: src.exchange,

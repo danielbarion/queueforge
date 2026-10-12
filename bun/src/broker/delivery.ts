@@ -310,7 +310,7 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
     this.remoteQuorum.set(`${vhost}\0${queue}\0${consumer.tag}`, session);
     await this.cluster!.subscribe(
       this.quorumLeader(q),
-      { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive },
+      remoteSub(vhost, queue, session, consumer),
       (msg) => consumer.deliver(msg),
     );
     return;
@@ -319,12 +319,22 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
     if (!consumer) return;
     await this.cluster!.subscribe(
       q.home!,
-      { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive },
+      remoteSub(vhost, queue, session, consumer),
       (msg) => consumer.deliver(msg),
     );
     return;
   }
   this.pump(q);
+}
+
+/**
+ * The `sub` payload for a consumer on a remote home. An acking consumer with a
+ * prefetch sends it as `ack_credit`, so the home holds no more than that in
+ * flight to this process and refills it as the acks arrive.
+ */
+function remoteSub(vhost: string, queue: string, session: number, consumer: Consumer) {
+  const prefetch = !consumer.noAck && consumer.prefetch ? consumer.prefetch : undefined;
+  return { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive, ack_credit: prefetch };
 }
 
 /**

@@ -100,6 +100,7 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     exclusive,
     streamOffset: tableGet(args, "x-stream-offset"),
     priority: Number.isFinite(priority) ? priority : 0,
+    prefetch: c.prefetch,
     want: () => {
       if (!this.creditOk(c, tag)) return false;
       if (c.prefetch !== 0 && (c.byConsumer.get(tag) ?? 0) + reserved >= c.prefetch) return false;

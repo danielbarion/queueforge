@@ -15,6 +15,23 @@ type Waiter = {
 
 type Peer = { id: string; write: (line: object) => void; pending: Map<number, Waiter>; token: object };
 
+/**
+ * Write pressure on one cluster socket. `full` is set when a write is left in
+ * the socket's buffer and cleared on `drain`, which runs `wake`. Remote
+ * consumers stop taking messages while it is set, so a slow peer holds them in
+ * the queue instead of in this process's socket buffer.
+ */
+type Flow = { full: boolean; wake: Set<() => void> };
+
+function newFlow(): Flow {
+  return { full: false, wake: new Set() };
+}
+
+function drained(flow: Flow) {
+  flow.full = false;
+  for (const wake of [...flow.wake]) wake();
+}
+
 /** Start a 3s timeout that leaves the peer map when the reply wins. */
 function armWaiter(
   peer: Peer,
@@ -73,6 +90,12 @@ export class Cluster {
   /** Same key → the remote consumer session, so `requeue` finds what a closed channel held. */
   private remoteSessions = new Map<string, number>();
   private subs = new Map<number, (msg: LiveMsg) => void>();
+  /**
+   * `${vhost}\\0${queue}\\0${session}` → a remote consumer this process homes:
+   * its waker on the socket's flow, and its credit refill when it subscribed
+   * with `ack_credit`.
+   */
+  private remoteSubs = new Map<string, { flow?: Flow; wake: () => void; refill?: () => void }>();
   private server: Server | null = null;
   private sockets: Socket[] = [];
   private dialTimer: ReturnType<typeof setInterval> | null = null;
@@ -109,14 +132,16 @@ export class Cluster {
       socket.setNoDelay(true);
       this.sockets.push(socket);
       const st: ClusterSock = { buf: "" };
+      const flow = newFlow();
+      socket.on("drain", () => drained(flow));
       const wrapped = {
         data: st,
         write: (s: string) => {
-          socket.write(s);
+          if (!socket.write(s)) flow.full = true;
           return s.length;
         },
       };
-      socket.on("data", (data) => this.onData(wrapped, data));
+      socket.on("data", (data) => this.onData(wrapped, data, flow));
       socket.on("close", () => {
         this.sockets = this.sockets.filter((open) => open !== socket);
         const id = st.peerId;
@@ -196,17 +221,17 @@ export class Cluster {
       const sock = connect({ host, port });
       sock.setNoDelay(true);
       const peerBuf = { buf: "" };
+      const flow = newFlow();
+      sock.on("drain", () => drained(flow));
+      const write = (line: object) => {
+        if (!sock.write(`${JSON.stringify(line)}\n`)) flow.full = true;
+      };
       sock.on("data", (chunk) =>
-        this.readLines(peerBuf, chunk.toString(), (line) =>
-          this.dispatch(member.id, line, (obj) => {
-            sock.write(`${JSON.stringify(obj)}\n`);
-          }),
-        ),
+        this.readLines(peerBuf, chunk.toString(), (line) => this.dispatch(member.id, line, write, undefined, flow)),
       );
       const token = {};
       sock.on("connect", () => {
         this.broker.clearQuorumStrikes(member.id);
-        const write = (line: object) => sock.write(`${JSON.stringify(line)}\n`);
         const peer: Peer = { id: member.id, write, pending: new Map(), token };
         this.peers.set(member.id, peer);
         this.broker.promoteIfLeader();
@@ -248,12 +273,12 @@ export class Cluster {
     sock.on("error", () => finish(true));
   }
 
-  private onData(socket: { data: ClusterSock; write: (s: string) => number }, data: Buffer | string) {
+  private onData(socket: { data: ClusterSock; write: (s: string) => number }, data: Buffer | string, flow?: Flow) {
     const st = socket.data;
     if (st.buf == null) st.buf = "";
     const text = typeof data === "string" ? data : data.toString();
     this.readLines(st as { buf: string }, text, (line) =>
-      this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`), socket),
+      this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`), socket, flow),
     );
   }
 
@@ -274,6 +299,7 @@ export class Cluster {
     msg: Record<string, unknown>,
     write: (obj: object) => void,
     socket?: { data?: { peerId?: string; token?: object } },
+    flow?: Flow,
   ) {
     const op = String(msg.op ?? "");
     if (op === "hello") {
@@ -356,15 +382,30 @@ export class Cluster {
         write({ op: "reply", id: msg.id, ok: false, error: "NOT_FOUND", from: this.broker.cfg.nodeId });
         return;
       }
-      let left: number | null = typeof body.credit === "number" ? body.credit : null;
+      // `credit` is topped up by the subscriber (Rust's `credit` op).
+      // `ack_credit` is Bun's: the prefetch, returned here one per ack or nack
+      // of its deliveries, so the subscriber sends nothing extra.
+      const ackCredit = typeof body.credit !== "number" && typeof body.ack_credit === "number" ? body.ack_credit : null;
+      let left: number | null = typeof body.credit === "number" ? body.credit : ackCredit;
       let reserved = 0;
       const noAck = !!(body.noAck ?? body.no_ack);
+      const subKey = `${vhost}\0${queue}\0${session}`;
+      const wake = () => this.broker.pump(q);
+      this.remoteSubs.get(subKey)?.flow?.wake.delete(this.remoteSubs.get(subKey)!.wake);
+      flow?.wake.add(wake);
+      this.remoteSubs.set(subKey, {
+        flow,
+        wake,
+        refill: ackCredit == null ? undefined : () => {
+          if (left != null) left++;
+        },
+      });
       q.consumers.push({
         tag: `remote-${session}`,
         session,
         noAck,
         exclusive: !!body.exclusive,
-        want: () => left == null || reserved < left,
+        want: () => !flow?.full && (left == null || reserved < left),
         reserve: () => {
           reserved++;
         },
@@ -382,22 +423,11 @@ export class Cluster {
             this.remoteAcks.set(`${vhost}\0${queue}\0${deliveryId}`, m.id);
             this.remoteSessions.set(`${vhost}\0${queue}\0${deliveryId}`, session);
           }
-          const bodyB64 = Buffer.from(m.body).toString("base64");
-          const propB64 = Buffer.from(m.propRaw).toString("base64");
+          // One copy of the body: Bun, Rust, and PHP all read `payload.message`.
           write({
             op: "deliver",
             id: msg.id,
             session,
-            msg: {
-              id: m.id,
-              exchange: m.exchange,
-              routingKey: m.routingKey,
-              persistent: m.persistent,
-              priority: m.priority,
-              redelivered: m.redelivered,
-              body: bodyB64,
-              propRaw: propB64,
-            },
             payload: {
               session,
               delivery_id: deliveryId,
@@ -406,8 +436,10 @@ export class Cluster {
               message: {
                 exchange: m.exchange,
                 routing_key: m.routingKey,
-                body_b64: bodyB64,
+                body_b64: Buffer.from(m.body).toString("base64"),
+                propRaw: m.propRaw.length ? Buffer.from(m.propRaw).toString("base64") : undefined,
                 persistent: m.persistent,
+                priority: m.priority,
                 redelivered: !!m.redelivered,
                 message_id: m.id,
               },
@@ -434,7 +466,7 @@ export class Cluster {
           exchange: String(rustMsg.exchange ?? ""),
           routingKey: String(rustMsg.routing_key ?? rustMsg.routingKey ?? ""),
           headers: [],
-          propRaw: new Uint8Array(),
+          propRaw: typeof rustMsg.propRaw === "string" ? new Uint8Array(Buffer.from(rustMsg.propRaw, "base64")) : new Uint8Array(),
           persistent: rustMsg.persistent !== false,
           priority: Number(rustMsg.priority ?? 0),
           expiresAt: null,
@@ -486,6 +518,10 @@ export class Cluster {
       const body = (msg.payload ?? msg) as Record<string, unknown>;
       const q = this.broker.queues.get(this.broker.key(String(body.vhost), String(body.queue)));
       if (q) q.consumers = q.consumers.filter((c) => c.session !== Number(body.session));
+      const subKey = `${String(body.vhost)}\0${String(body.queue)}\0${Number(body.session)}`;
+      const sub = this.remoteSubs.get(subKey);
+      sub?.flow?.wake.delete(sub.wake);
+      this.remoteSubs.delete(subKey);
       return true;
     }
     if (op === "declare" || op === "declare_queue" || op === "delete_queue") {
@@ -557,8 +593,11 @@ export class Cluster {
       const delivery = p.delivery_id ?? p.id;
       const mapped = this.remoteAcks.get(`${vhost}\0${queue}\0${delivery}`);
       if (mapped != null) {
+        const session = this.remoteSessions.get(`${vhost}\0${queue}\0${delivery}`);
         this.remoteAcks.delete(`${vhost}\0${queue}\0${delivery}`);
         this.remoteSessions.delete(`${vhost}\0${queue}\0${delivery}`);
+        // Before the ack, whose pump is what sends the next message.
+        this.remoteSubs.get(`${vhost}\0${queue}\0${session}`)?.refill?.();
       }
       const id = mapped ?? String(p.id ?? delivery ?? "");
       if (op === "ack") await this.broker.ack(vhost, queue, id);
@@ -680,7 +719,7 @@ export class Cluster {
     );
   }
 
-  async subscribe(home: string, payload: { vhost: string; queue: string; session: number; noAck: boolean; exclusive: boolean }, onDeliver: (msg: LiveMsg) => void) {
+  async subscribe(home: string, payload: { vhost: string; queue: string; session: number; noAck: boolean; exclusive: boolean; ack_credit?: number }, onDeliver: (msg: LiveMsg) => void) {
     this.subs.set(payload.session, onDeliver);
     await this.call(home, "sub", payload);
     return payload.session;

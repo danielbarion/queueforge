@@ -38,13 +38,17 @@ export function profileSample(broker: Broker) {
     replicas += q.replicas.size;
     consumers += q.consumers.length;
   }
+  // QUEUEFORGE_PROFILE_GC=1 collects first, so the sample counts live objects only.
+  if (process.env.QUEUEFORGE_PROFILE_GC === "1") Bun.gc(true);
   const heap = heapStats();
   return {
     time: new Date().toISOString(), pid: process.pid, node: broker.cfg.nodeId,
     uptime: process.uptime(), memory: process.memoryUsage(), cpu: process.cpuUsage(),
     heap: { heapSize: heap.heapSize, heapCapacity: heap.heapCapacity,
       extraMemorySize: heap.extraMemorySize, objectCount: heap.objectCount,
-      protectedObjectCount: heap.protectedObjectCount },
+      protectedObjectCount: heap.protectedObjectCount,
+      // The most numerous object types: what a growing heap is made of.
+      types: Object.entries(heap.objectTypeCounts).sort((a, b) => b[1] - a[1]).slice(0, 12) },
     queues: { count: broker.queues.size, ready, readyBytes, unacked, replicas, consumers },
     store: {
       flushes: broker.store.fullFlushCount,

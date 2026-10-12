@@ -225,3 +225,35 @@ test("classic enqueue uses the ready byte total for max-length-bytes", async () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a forwarded message without an id still gets its own", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-ready-noid-"));
+  const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
+  const cfg: Config = {
+    amqp: "127.0.0.1:0", management: "127.0.0.1:0", metrics: "127.0.0.1:0",
+    mqtt: null, stomp: null, stream: null, dataDir: dir,
+    fsync: "every_n_ms", fsyncIntervalMs: 50, fsyncEveryN: 1, tls: false,
+    nodeId: "bun-a", clusterListen: null, members: [], defaultQueueType: "classic",
+  };
+  const broker = new Broker(cfg, store);
+  try {
+    await broker.declareQueue({ vhost: "/", name: "q", durable: true, exclusive: false, autoDelete: false, passive: false, args: {} });
+    const q = broker.queues.get(broker.key("/", "q"))!;
+    const got: string[] = [];
+    await broker.consume("/", "q", { tag: "c", session: 1, noAck: false, exclusive: false, want: () => true, deliver: (item) => got.push(item.id) });
+    // The cluster `enqueue` op decodes a missing `message_id` as "".
+    for (let i = 0; i < 3; i++) {
+      broker.enqueueLocal(q, {
+        body: new Uint8Array([i]), exchange: "", routingKey: "q", headers: [], propRaw: new Uint8Array(),
+        persistent: true, priority: 0, expiration: "", id: "",
+      }, 0);
+    }
+    expect(new Set(got).size).toBe(3);
+    expect(q.unacked.size).toBe(3);
+    for (const id of got) await broker.ack("/", "q", id);
+    expect(q.unacked.size).toBe(0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

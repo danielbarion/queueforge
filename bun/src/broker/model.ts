@@ -197,6 +197,8 @@ export type Consumer = {
   exclusive: boolean;
   priority?: number;
   want: () => boolean;
+  /** AMQP prefetch at consume time, for a remote home's credit. Absent or zero is unlimited. */
+  prefetch?: number;
   /**
    * Count one quorum claim against prefetch before the follower drop finishes.
    * `deliver` runs only after that drop, so credit has to move here or pump
