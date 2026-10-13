@@ -6,10 +6,13 @@ Keep the repository checkout intact: the comparison view imports the website's
 capability and benchmark data from `../site/app`, using the repository as the
 Turbopack root.
 
-Set `CONSOLE_USER` and `CONSOLE_PASSWORD` before starting. The password must
-be at least 12 characters. Without them every page redirects to the operator
-login and the APIs answer 503. That login is for the console itself. Logging
-in to a broker is a second step, after this one.
+Set `DATABASE_URL`, `CONSOLE_USER`, and `CONSOLE_PASSWORD` before starting.
+The password must be at least 12 characters. The first start creates that
+operator in Postgres when the operators table is empty. Sessions, saved
+brokers, and broker logins live in that database. `CONSOLE_DATA_KEY` encrypts
+the broker credentials. Without `DATABASE_URL` every page redirects to the
+operator login and the APIs answer 503. Logging in to a broker is a second
+step, after this one.
 
 ## Explore
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { brokerPath, managementOrigin } from "@/lib/broker-http";
-import { consoleSid, credentialHeaders, crossSite, dropCredential, forbiddenHost, getCredential } from "@/lib/guard";
+import { currentSession, forgetCredential, loadCredential } from "@/lib/accounts";
+import { credentialHeaders, crossSite, forbiddenHost } from "@/lib/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -23,8 +24,9 @@ export async function POST(request: Request) {
   if (!origin || !path || !METHODS.has(method) || forbiddenHost(origin)) {
     return NextResponse.json({ error: "That call is not allowed." }, { status: 400 });
   }
-  const sid = consoleSid(request);
-  const credential = getCredential(sid, origin);
+  const session = await currentSession(request.headers.get("cookie"));
+  if (!session) return NextResponse.json({ error: "Log in." }, { status: 401 });
+  const credential = await loadCredential(session.id, origin);
   const pathname = path.split("?")[0] ?? "";
   if (!credential && !OPEN.has(pathname)) {
     return NextResponse.json({ status: 401, body: null, text: "" });
@@ -53,7 +55,7 @@ export async function POST(request: Request) {
     });
     // A session the broker no longer accepts is forgotten, so the pages show
     // the login form once instead of flipping back every poll.
-    if (response.status === 401) dropCredential(sid, origin);
+    if (response.status === 401) await forgetCredential(session.id, origin);
     const text = (await response.text()).slice(0, big ? 20_000_000 : 2_000_000);
     let parsed: unknown = null;
     if ((response.headers.get("content-type") ?? "").includes("json") && text) {

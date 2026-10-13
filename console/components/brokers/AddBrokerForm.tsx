@@ -31,7 +31,18 @@ export function AddBrokerForm() {
         setError(json.error ?? "Could not tell which broker that is.");
         return;
       }
-      add({ name: trimmedName, kind: json.kind, url: json.url });
+      const id = crypto.randomUUID();
+      const saved = await fetch("/api/brokers/targets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, name: trimmedName, kind: json.kind, url: json.url }),
+      });
+      if (!saved.ok) {
+        const failure = (await saved.json().catch(() => ({}))) as { error?: string };
+        setError(failure.error ?? "Could not save that broker.");
+        return;
+      }
+      add({ id, name: trimmedName, kind: json.kind, url: json.url });
       setName("");
       setUrl("");
     } catch {

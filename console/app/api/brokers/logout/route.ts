@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { managementOrigin } from "@/lib/broker-http";
-import { consoleSid, crossSite, dropCredential, getCredential } from "@/lib/guard";
+import { currentSession, forgetCredential, loadCredential } from "@/lib/accounts";
+import { crossSite } from "@/lib/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +16,10 @@ export async function POST(request: Request) {
   }
   const origin = managementOrigin(String(payload.url ?? ""));
   if (!origin) return NextResponse.json({ error: "That address is not allowed." }, { status: 400 });
-  const sid = consoleSid(request);
-  const credential = getCredential(sid, origin);
-  dropCredential(sid, origin);
+  const session = await currentSession(request.headers.get("cookie"));
+  if (!session) return NextResponse.json({ error: "Log in." }, { status: 401 });
+  const credential = await loadCredential(session.id, origin);
+  await forgetCredential(session.id, origin);
   // Basic auth has no server session to end.
   if (credential?.kind === "cookie") {
     const controller = new AbortController();

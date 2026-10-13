@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookiePair, managementOrigin } from "@/lib/broker-http";
-import { consoleSid, crossSite, forbiddenHost, newSid, setCredential, sidCookie, type BrokerCredential } from "@/lib/guard";
+import { currentSession, saveCredential } from "@/lib/accounts";
+import { crossSite, forbiddenHost, type BrokerCredential } from "@/lib/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -70,11 +71,10 @@ export async function POST(request: Request) {
       if (!whoami.ok) return NextResponse.json({ error: "The broker refused the login." }, { status: 422 });
       credential = { kind: "basic", value: basic };
     }
-    const sid = consoleSid(request) ?? newSid();
-    setCredential(sid, origin, credential);
-    const out = NextResponse.json({ name });
-    out.headers.append("set-cookie", sidCookie(sid, new URL(request.url).protocol === "https:"));
-    return out;
+    const session = await currentSession(request.headers.get("cookie"));
+    if (!session) return NextResponse.json({ error: "Log in." }, { status: 401 });
+    await saveCredential(session.id, origin, credential);
+    return NextResponse.json({ name });
   } catch {
     return NextResponse.json({ error: "Could not reach that address." }, { status: 422 });
   } finally {

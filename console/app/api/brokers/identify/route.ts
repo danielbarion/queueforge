@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { managementOrigin } from "@/lib/broker-http";
+import { currentSession } from "@/lib/accounts";
 import { crossSite, forbiddenHost } from "@/lib/guard";
 
 const KINDS = new Set(["rust", "bun", "php"]);
@@ -12,6 +13,9 @@ const KINDS = new Set(["rust", "bun", "php"]);
 export async function POST(request: Request) {
   const refused = crossSite(request);
   if (refused) return NextResponse.json({ error: refused }, { status: 403 });
+  if (!(await currentSession(request.headers.get("cookie")))) {
+    return NextResponse.json({ error: "Log in." }, { status: 401 });
+  }
   let body: { url?: string };
   try {
     body = (await request.json()) as { url?: string };

@@ -10,7 +10,7 @@ import { CommandPalette } from "@/components/shell/CommandPalette";
 import { DEMO_PROFILES } from "@/lib/demo";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { NAV } from "@/lib/nav";
-import { selectedBroker, useBrokerStore } from "@/stores/broker";
+import { useBrokerStore, selectedBroker } from "@/stores/broker";
 import { useLiveStore } from "@/stores/live";
 import { resolvedTheme, useThemeStore } from "@/stores/theme";
 
@@ -29,8 +29,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   const health = useLiveStore((state) => state.health);
   const stale = useLiveStore((state) => state.stale);
   const nudge = useLiveStore((state) => state.nudge);
+  const hydrate = useBrokerStore((state) => state.hydrate);
   const page = NAV.flatMap((group) => group.items).find((item) => item.href === "/" ? pathname === "/" : pathname.startsWith(item.href));
   const status = !broker ? "No broker connected" : stale ? "Data is stale" : health === null ? "Connecting" : health ? "Broker online" : "Broker offline";
+
+  useEffect(() => {
+    let stop = false;
+    void fetch("/api/brokers/targets")
+      .then(async (response) => {
+        if (!response.ok || stop) return;
+        const data = (await response.json()) as { brokers?: Parameters<typeof hydrate>[0]; selectedId?: string };
+        if (stop || useBrokerStore.getState().demo || !data.brokers) return;
+        hydrate(data.brokers, data.selectedId ?? "");
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
+  }, [hydrate]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");

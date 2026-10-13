@@ -1,39 +1,27 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { credentialsMatch, issueSession, operatorConfigured, safeNext, sessionValid } from "./operator";
+import { describe, expect, test } from "bun:test";
+import { hashPassword, verifyPassword } from "./passwords";
+import { databaseConfigured, safeNext, sessionIdShape } from "./operator";
 
 describe("operator login", () => {
-  const previous = { user: process.env.CONSOLE_USER, password: process.env.CONSOLE_PASSWORD };
-  afterEach(() => {
-    if (previous.user === undefined) delete process.env.CONSOLE_USER;
-    else process.env.CONSOLE_USER = previous.user;
-    if (previous.password === undefined) delete process.env.CONSOLE_PASSWORD;
-    else process.env.CONSOLE_PASSWORD = previous.password;
-  });
-  test("a short password is not a configuration", () => {
-    process.env.CONSOLE_USER = "operator";
-    process.env.CONSOLE_PASSWORD = "short";
-    expect(operatorConfigured()).toBe(false);
+  test("the console is closed until a database is configured", () => {
+    const previous = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    expect(databaseConfigured()).toBe(false);
+    if (previous === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previous;
   });
 
-  test("the password compare accepts only the configured pair", async () => {
-    process.env.CONSOLE_USER = "operator";
-    process.env.CONSOLE_PASSWORD = "correct-horse-12";
-    expect(await credentialsMatch("operator", "correct-horse-12")).toBe(true);
-    expect(await credentialsMatch("operator", "correct-horse-13")).toBe(false);
-    expect(await credentialsMatch("someone", "correct-horse-12")).toBe(false);
-    expect(await credentialsMatch("operator", "correct-horse-1")).toBe(false);
+  test("a password hash verifies only itself", () => {
+    const stored = hashPassword("correct-horse-12");
+    expect(verifyPassword("correct-horse-12", stored)).toBe(true);
+    expect(verifyPassword("correct-horse-13", stored)).toBe(false);
+    expect(verifyPassword("correct-horse-12", "scrypt$not-salt$not-hash")).toBe(false);
   });
 
-  test("a session lasts until its expiry and fails if the password changes", async () => {
-    process.env.CONSOLE_USER = "operator";
-    process.env.CONSOLE_PASSWORD = "correct-horse-12";
-    const now = 1_700_000_000_000;
-    const token = await issueSession(now);
-    expect(await sessionValid(token, now + 1000)).toBe(true);
-    expect(await sessionValid(token, now + 13 * 60 * 60 * 1000)).toBe(false);
-    expect(await sessionValid(`${token}x`, now + 1000)).toBe(false);
-    process.env.CONSOLE_PASSWORD = "correct-horse-99";
-    expect(await sessionValid(token, now + 1000)).toBe(false);
+  test("a session id is the opaque cookie, not a signed token", () => {
+    expect(sessionIdShape("a".repeat(32))).toBe(true);
+    expect(sessionIdShape("short")).toBe(false);
+    expect(sessionIdShape("body.signature-that-is-long-enough")).toBe(false);
   });
 
   test("the post-login path stays on this console", () => {
