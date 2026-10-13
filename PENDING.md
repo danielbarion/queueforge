@@ -253,30 +253,36 @@ file-backed), and every message, callback and promise is a GC object.
   work-queue, telemetry, heavy +5–11% rate, +30–50% memory. 4: +7–9% rate,
   about twice the memory. `MIMALLOC_PURGE_DELAY=0`: 5–10% less memory, 3–9%
   slower. `--smol`: no saving.
-- What remains, by cell: backlog ~660 bytes of JS objects per queued message
-  plus the 48 MiB shadow-body cap (freed once drained); heavy ~110k closures and
-  ~55k promises for ~7k unacked messages (the per-publish confirm chains).
+- Done (2026-10-13, see Done): the durable log is written only by a process
+  with a durable queue, the supervisor loads no broker code, a confirm makes
+  one promise instead of about eight, the live log index is one Map entry per
+  row, and the copies of a fanout publish share one log record.
+- What remains, by cell: backlog still holds a `LiveMsg`, an id string, a
+  shadow row and a `logOnly` entry per queued message, plus the 64 MiB
+  shadow-body cap per process (freed once drained); heavy keeps a closure set
+  per parked publish (`finish`, `fail`, `pressured`, `run`). At 4 CPU each of
+  the four children is ~23 MiB anonymous before any message.
 
-### B12. 200 ms stalls in the multi-connection load cells (new, 2026-10-13)
+### B12. 200 ms stalls in the multi-connection load cells (2026-10-13)
 
-Status: open, cause unknown. The load sweep's shared (16 connections, one
-queue) and spread (16 queues) cells for Bun now often show a p99 at the 200 ms
-overflow bucket, with the broker at 25–70% CPU instead of 95–370%. The median
-latency stays where it was (40 ms against 39 ms), so it is pauses, not slower
-work. Stalled cells out of 10: 0 (2026-10-11), 1 (2026-10-12, Bun load at
-09:56 −03:00), then 7, 3, 6, 6, 4 and 6 in every run since 2026-10-12b (18:35).
-Which cells stall changes from run to run: 4 CPU / 4 GiB shared was 203,604
-consume/s in 2026-10-13c and 104,191 in 2026-10-13d. RabbitMQ, Rust and PHP
-rows in those runs are copies of 2026-10-12, so they say nothing about the
-host at the time.
+Status: not a code regression; the host. The load sweep's shared (16
+connections, one queue) and spread (16 queues) cells for Bun often show a p99
+at the 200 ms overflow bucket, with the broker at 25–70% CPU instead of
+95–370% and the median latency where it was (40 ms against 39 ms): pauses,
+not slower work. Stalled cells out of 10 were 0 on 2026-10-11 and 1 on
+2026-10-12, then 3–7 in every run since 2026-10-12b, which first pointed at
+`ae6e9bf`, `e3054c9` (Bun 1.4.3) and `7b571bf`.
 
-Bun commits between the clean and the stalled runs: `ae6e9bf` (single-voter
-quorum groups for cores workers), `e3054c9` (Bun 1.4.2 → 1.4.3), `7b571bf`
-(forwarded messages get their own id). Next: on a quiet host, run the shared
-and spread cells five times each for images built at `0c41bd9`, `ae6e9bf`,
-`e3054c9` and `HEAD`, interleaved.
+An interleaved bisect (`/tmp/qf-ab/coco/bisect_load.py`, the shared and spread
+cells at 1, 2 and 4 CPU, four rounds, images built with `git archive`) ruled
+that out. The 2026-10-12 build `0c41bd9` stalled in 5 of 24 cells, `ae6e9bf`
+3, `e3054c9` 5, `7b571bf` 5 and HEAD (`4e51506`) 8. Eight more rounds of the 4
+CPU spread cell gave every image from `7b571bf` to HEAD a median of
+528k–548k consume/s, each ranging about 200k–690k. The Cortex Code renderer
+used ~300% CPU of the host throughout.
 
-Verify: no 200 ms p99 in five repeats of every shared and spread cell.
+What is left is H3: one 8 s sample per cell cannot separate builds on a busy
+host.
 
 ### B6. Peak memory and latency vary between runs
 
@@ -503,6 +509,15 @@ scenario matrix.
 
 Move finished items here: id, date, what changed, before → after. A/B numbers are
 Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/`.
+
+- **Bun resources** (2026-10-13, B11, not one item; numbers in BENCHMARK.md,
+  "Bun resource changes after the third run"). Log chunks only on processes
+  with a durable queue (idle 4 CPU 353 → 128 MiB); memory alarm against the
+  cgroup limit (floods block instead of being OOM-killed) and cleanup of
+  migrated connections; supervisor without broker modules (17 → 6 MiB); one
+  promise per confirm (1 CPU heavy 109k → 121k); staged rows by id; live index
+  in typed arrays (1 CPU backlog median 615 → 494 MiB); fanout copies in one
+  log record (1 CPU broadcast 297k → 389k). Not yet in a full run.
 
 - **B8** (2026-10-10). Synced bodies past 64 MiB stay only in the durable log and
   are read back with `pread`, instead of being copied into SQLite in 80,000-row

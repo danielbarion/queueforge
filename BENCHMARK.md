@@ -76,6 +76,36 @@ images.
 
 See PENDING.md.
 
+### Bun resource changes after the third run (2026-10-13, A/B only)
+
+Seven changes landed after the run below (`cc194a4` to `c2a6f28`). They were
+measured with interleaved A/B runs (`bench/ab.py`, three repeats unless noted,
+`/tmp/qf-ab/coco/`, not committed) and an idle-container probe. No full run
+has been made with them yet, so the tables below and the website still show
+the third run. The host was busy throughout (the Cortex Code renderer at about
+300% CPU); 4 CPU cells moved with the broker CPU each run was given, so only
+results whose ranges do not overlap are claimed.
+
+| Change | Cell | Before | After |
+| --- | --- | ---: | ---: |
+| Log chunks written only by a process with a durable queue (`cc194a4`) | idle, 4 CPU / 4 GiB, container memory | 353 MiB | 128 MiB |
+| | idle, 1 CPU / 1 GiB | 63 MiB | 31 MiB |
+| | one durable queue used, 4 CPU | 277 MiB | 178 MiB |
+| Supervisor loads no broker modules (`7a79191`) | supervisor process, anonymous | 17 MiB | 6 MiB |
+| One promise per confirm (`47b05aa`) | 1 CPU heavy | 109k (96k–123k) | 121k (120k–123k) msg/s |
+| | 1 CPU heavy, process memory | 277–291 MiB | 264–274 MiB |
+| | 4 CPU heavy, four repeats | 295k, 510–536 MiB | 296k, 478–499 MiB |
+| Live index and copies (`1e523a4`) | 1 CPU backlog, process memory median | 615 MiB | 494 MiB |
+| Fanout copies share a log record (`c2a6f28`) | 1 CPU broadcast to 20 services | 297k (282k–300k) | 389k (384k–389k) deliveries/s |
+
+The memory alarm fix (`0d118a1`) is behavior, not speed: a flood of transient
+64 KiB messages into a 512 MiB / 1 CPU container was OOM-killed after 7,907
+messages and now blocks publishers at 299 MiB sent; at 1 GiB / 4 CPU, an OOM
+kill after 11,113 messages became a block at 334 MiB. The same commit makes a
+connection migrated to its queue's process requeue its unacked deliveries when
+its socket drops (`bun/test/migrate-close.test.ts`). The staged-row index
+(`1ca6299`) did not separate from noise in heavy, work-queue or transactions.
+
 ### Bun re-measured, third run (2026-10-13)
 
 Bun's rows in the tables below are the third Bun run of 2026-10-13 (scenarios
