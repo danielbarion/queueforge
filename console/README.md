@@ -6,6 +6,11 @@ Keep the repository checkout intact: the comparison view imports the website's
 capability and benchmark data from `../site/app`, using the repository as the
 Turbopack root.
 
+Set `CONSOLE_USER` and `CONSOLE_PASSWORD` before starting. The password must
+be at least 12 characters. Without them every page redirects to the operator
+login and the APIs answer 503. That login is for the console itself. Logging
+in to a broker is a second step, after this one.
+
 ## Explore
 
 Choose **Try interactive demo** on Overview or Brokers. Demo mode uses local,

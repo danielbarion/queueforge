@@ -1,6 +1,6 @@
 "use client";
 
-import { Monitor, Moon, Sun, X } from "lucide-react";
+import { LogOut, Monitor, Moon, Sun, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -125,6 +125,22 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           >
             <CurrentIcon className="size-4 shrink-0" aria-hidden="true" />
             {current.label}
+          </button>
+          <button
+            type="button"
+            className="mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted hover:bg-base-300/60 hover:text-base-content"
+            onClick={() => {
+              void fetch("/api/operator/logout", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: "{}",
+              }).finally(() => {
+                window.location.assign("/login");
+              });
+            }}
+          >
+            <LogOut className="size-4 shrink-0" aria-hidden="true" />
+            Log out
           </button>
         </div>
       </aside>

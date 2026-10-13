@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
+import { headers } from "next/headers";
 import { AppShell } from "@/components/shell/AppShell";
 import "./globals.css";
 
@@ -20,11 +21,12 @@ export const metadata: Metadata = {
   description: "Operator console for the Rust, Bun, and PHP brokers.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const gate = (await headers()).get("x-console-gate");
   return (
     <html lang="en" data-theme="queueforge" className={`${sans.variable} ${mono.variable}`}>
       <body>
-        <AppShell>{children}</AppShell>
+        {gate === "login" ? children : <AppShell>{children}</AppShell>}
       </body>
     </html>
   );
