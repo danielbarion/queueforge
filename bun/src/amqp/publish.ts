@@ -7,6 +7,7 @@
 import { ChanError } from "../broker/index.ts";
 import { bodyFrame, contentHeaderFrame, emptyProps, encodeSettle, method, methodFrame, R, readContentHeader } from "../codec.ts";
 import { Conn, type Ch } from "./listen.ts";
+import { SENT } from "./frames.ts";
 import { headerList } from "../broker/routing.ts";
 
 /**
@@ -163,13 +164,13 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   // Outside a transaction the tag is the arrival order, before the fsync wait.
   // Inside a transaction the tag is assigned when the op runs, at commit.
   const confirm = c.confirm;
-  const tag = confirm && !c.tx ? c.nextPub++ : 0;
+  let pubTag = confirm && !c.tx ? c.nextPub++ : 0;
   // Not an async function. An async wrapper allocates a promise per publish
   // before the durable wait, and `await` on an already-resolved send yields
   // again. The durable wait is the only promise on this path.
-  const run = (): Promise<unknown> | void => {
-    const pubTag = c.tx && confirm ? c.nextPub++ : tag;
-    const pending = this.broker.publish({
+  const start = () => {
+    if (c.tx && confirm) pubTag = c.nextPub++;
+    return this.broker.publish({
       vhost: this.vhost,
       exchange: pub.exchange,
       routingKey: pub.routingKey,
@@ -182,27 +183,30 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
       confirm,
       mandatory: pub.mandatory,
     });
-    const finish = (result: "ack" | "nack" | "return"): Promise<unknown> | void => {
-      if (result === "return" && pub.mandatory) {
-        const returned = this.sendMany([
-          methodFrame(
-            channel,
-            method(60, 50, (w) => {
-              w.u16(312);
-              w.shortstr("NO_ROUTE");
-              w.shortstr(pub.exchange);
-              w.shortstr(pub.routingKey);
-            }),
-          ),
-          contentHeaderFrame(channel, body.length, propRaw),
-          bodyFrame(channel, body, this.frameMax),
-        ]);
-        if (!confirm) return returned;
-        return returned.then(() => this.send(encodeSettle(channel, pubTag, false)));
-      }
-      if (!confirm) return;
-      return this.send(encodeSettle(channel, pubTag, result === "nack"));
-    };
+  };
+  const finish = (result: "ack" | "nack" | "return"): Promise<unknown> | void => {
+    if (result === "return" && pub.mandatory) {
+      const returned = this.sendMany([
+        methodFrame(
+          channel,
+          method(60, 50, (w) => {
+            w.u16(312);
+            w.shortstr("NO_ROUTE");
+            w.shortstr(pub.exchange);
+            w.shortstr(pub.routingKey);
+          }),
+        ),
+        contentHeaderFrame(channel, body.length, propRaw),
+        bodyFrame(channel, body, this.frameMax),
+      ]);
+      if (!confirm) return returned;
+      return returned.then(() => this.send(encodeSettle(channel, pubTag, false)));
+    }
+    if (!confirm) return;
+    return this.send(encodeSettle(channel, pubTag, result === "nack"));
+  };
+  const run = (): Promise<unknown> | void => {
+    const pending = start();
     if (typeof pending === "string") return finish(pending);
     return pending.then(finish);
   };
@@ -226,7 +230,7 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   if (c.tx) {
     this.stageTransaction(c, () => {
       const pending = run();
-      this.deferredPublish.push({ channel, bytes: 0, pressured, run: () => {} });
+      this.deferredPublish.push({ channel, bytes: 0, pressured, run: () => this.publishSettled(0) });
       return pending;
     }, body.length + propRaw.length);
     return;
@@ -236,17 +240,38 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   // window can turn over inside a publish burst. `driveInbound` starts the batch.
   {
     const bytes = body.length + propRaw.length;
-    if (this.deferredPublish.length + this.inFlightPublishes.size >= 65536) throw new ChanError(506, "RESOURCE_ERROR - pending publish operation limit");
+    if (this.deferredPublish.length + this.inFlightPublishes >= 65536) throw new ChanError(506, "RESOURCE_ERROR - pending publish operation limit");
     this.publishBytes += bytes;
     if (this.publishBytes > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - pending publishes exceed 64 MiB");
-    this.deferredPublish.push({ channel, bytes, batchConfirm: confirm && persistent, pressured, run: () => {
+    // One reaction per publish on the durable wait, and the settle is a plain
+    // call: a tracked promise and a `finally` per confirm were most of the
+    // promises a deep confirm window held.
+    const failed = (err: unknown) => {
+      void fail(err);
+      this.publishSettled(bytes);
+    };
+    const done = (result: "ack" | "nack" | "return") => {
+      let sent: Promise<unknown> | void;
       try {
-        const pending = run();
-        if (!pending) return Promise.resolve();
-        return Promise.resolve(pending).catch(fail);
+        sent = finish(result);
       } catch (err) {
-        return fail(err);
+        failed(err);
+        return;
       }
+      // A staged write has nothing to wait for. A queued one still reports a failure.
+      if (sent && sent !== SENT) sent.then(undefined, fail);
+      this.publishSettled(bytes);
+    };
+    this.deferredPublish.push({ channel, bytes, batchConfirm: confirm && persistent, pressured, run: () => {
+      let pending: ReturnType<typeof start>;
+      try {
+        pending = start();
+      } catch (err) {
+        failed(err);
+        return;
+      }
+      if (typeof pending === "string") done(pending);
+      else pending.then(done, failed);
     }});
     return;
   }

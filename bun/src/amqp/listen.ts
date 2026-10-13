@@ -14,7 +14,14 @@ import { profiledConns, profiling } from "../profile.ts";
 
 /** One basic.publish waiting for its header and body. */
 export type Pub = { exchange: string; routingKey: string; mandatory: boolean; immediate: boolean };
-export type PendingPublish = { channel: number; bytes: number; batchConfirm?: boolean; pressured: () => boolean; run: () => Promise<unknown> | void };
+export type PendingPublish = {
+  channel: number;
+  bytes: number;
+  batchConfirm?: boolean;
+  pressured: () => boolean;
+  /** Calls `conn.publishSettled(bytes)` once, in this turn or when its confirm is queued. */
+  run: () => void;
+};
 
 /** State for one AMQP channel on this connection. */
 export type Ch = {
@@ -135,7 +142,10 @@ export class Conn {
   deferredPublish: PendingPublish[] = [];
   publishBytes = 0;
   inFlightBytes = 0;
-  inFlightPublishes = new Set<Promise<unknown>>();
+  /** Started publishes that have not settled. A count, not a promise per publish. */
+  inFlightPublishes = 0;
+  /** Woken when any started publish settles. */
+  publishWaiters: Array<() => void> = [];
   txOperations = 0;
   readsPaused = false;
   inboundRunning = false;
@@ -162,6 +172,19 @@ export class Conn {
     readonly socket: AmqpSocket,
     readonly broker: Broker,
   ) {}
+
+  /** A started publish finished: its bytes leave the in-flight totals, and waiters wake. */
+  publishSettled(bytes: number) {
+    this.publishBytes -= bytes;
+    this.inFlightBytes -= bytes;
+    this.inFlightPublishes--;
+    if (this.publishWaiters.length) for (const wake of this.publishWaiters.splice(0)) wake();
+  }
+
+  /** Resolves when the next started publish settles. */
+  publishSettles(): Promise<void> {
+    return new Promise((resolve) => this.publishWaiters.push(resolve));
+  }
 }
 
 export interface Conn {

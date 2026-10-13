@@ -34,6 +34,9 @@ export function send(this: Conn, frame: Uint8Array) {
 /** Bytes gathered before one write. A larger burst still flushes in order. */
 const COALESCE_LIMIT = 64 * 1024;
 
+/** What a staged write returns: nothing to wait for, so one shared promise. */
+export const SENT: Promise<void> = Promise.resolve();
+
 /**
  * One gather buffer for the whole process. A write finishes synchronously, so
  * it is free again when `flushCoalesced` returns; a partial write copies its
@@ -155,7 +158,7 @@ function flushCoalesced(this: Conn) {
  * @returns The write chain. A closed connection drops the frames.
  */
 export function sendMany(this: Conn, frames: Uint8Array[]) {
-  if (this.closed) return Promise.resolve();
+  if (this.closed) return SENT;
   // Nothing is waiting on the socket: stage the burst and write it once.
   // A promise per frame capped the fan-out consume rate.
   if (this.writesPending === 0 && this.outHead >= this.outbound.length) {
@@ -166,7 +169,7 @@ export function sendMany(this: Conn, frames: Uint8Array[]) {
     }
     if (this.stagedBytes >= COALESCE_LIMIT) flushCoalesced.call(this);
     else armCoalesce.call(this);
-    return Promise.resolve();
+    return SENT;
   }
   this.writesPending++;
   const bytes = frames.reduce((n, frame) => n + frame.length, 0);
@@ -301,24 +304,16 @@ function resumeReads(conn: Conn) {
 
 function startPublish(conn: Conn) {
   const op = conn.deferredPublish.shift()!;
-  const pending = op.run();
-  if (!pending) { conn.publishBytes -= op.bytes; return; }
   conn.inFlightBytes += op.bytes;
-  const tracked = Promise.resolve(pending).finally(() => {
-    conn.publishBytes -= op.bytes;
-    conn.inFlightBytes -= op.bytes;
-    conn.inFlightPublishes.delete(tracked);
-  });
-  conn.inFlightPublishes.add(tracked);
-  return tracked;
+  conn.inFlightPublishes++;
+  op.run();
 }
 
 /** Topology and transaction methods must observe earlier completed publishes. */
 async function publishFence(conn: Conn) {
-  const pending: unknown[] = [];
-  while (conn.deferredPublish.length) pending.push(startPublish(conn));
+  while (conn.deferredPublish.length) startPublish(conn);
   resumeReads(conn);
-  await Promise.all([...pending, ...conn.inFlightPublishes]);
+  while (conn.inFlightPublishes > 0) await conn.publishSettles();
 }
 
 /**
@@ -365,7 +360,7 @@ async function driveInbound(this: Conn): Promise<void> {
           this.readsPaused = true;
           this.socket.pause();
         }
-        await Promise.race(this.inFlightPublishes);
+        await this.publishSettles();
         continue;
       }
       let releaseHold = false;
@@ -421,7 +416,7 @@ async function driveInbound(this: Conn): Promise<void> {
       let started = 0;
       while (this.deferredPublish.length && started < PUBLISH_BATCH) {
         if ((!releaseHold && publishAheadOfAcks(this)) || this.inFlightBytes >= 32 * 1024 * 1024) break;
-        void startPublish(this);
+        startPublish(this);
         started++;
       }
       if (this.fresh.length) {
@@ -504,7 +499,7 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   // The handoff carries only pristine channel settings, not publish closures,
   // deliveries or transaction operations. Keep a connection with live work on
   // this worker and use the normal forwarding path instead.
-  if (this.deferredPublish.length || this.inFlightPublishes.size || this.stagedBytes || this.outboundBytes || this.writesPending) return false;
+  if (this.deferredPublish.length || this.inFlightPublishes || this.stagedBytes || this.outboundBytes || this.writesPending) return false;
   for (const ch of this.channels.values()) {
     if (ch.tx || ch.publish || ch.nextPub !== 1 || ch.consumers.size || ch.deliveries.size || ch.parked.length) return false;
   }

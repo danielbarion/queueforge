@@ -52,6 +52,8 @@ export class Broker {
   diskAlarm = false;
   /** True while a memory or disk alarm holds publishes. */
   blocked = false;
+  /** The shared ack of the current group commit on the publish fast path (see `localClassicFast`). */
+  durableAcks: { of: Promise<void>; confirms: number; ack: Promise<"ack"> } | null = null;
   alarmListeners = new Set<AlarmListener>();
   unblockWaiters: Array<() => void> = [];
   /** Stream queue logs, by vhost and name. Loaded on first use. */

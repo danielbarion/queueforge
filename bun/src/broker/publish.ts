@@ -94,10 +94,20 @@ function localClassicFast(
     if (input.confirm) this.prom.confirmed++;
     return "ack";
   }
-  return this.store.whenDurable().then(() => {
-    if (input.confirm) this.prom.confirmed++;
-    return "ack" as const;
-  });
+  // One ack promise per group commit: every confirm in it waits on the same
+  // store promise, so a `then` per publish only repeated the same step.
+  const durable = this.store.whenDurable();
+  let acks = this.durableAcks;
+  if (!acks || acks.of !== durable) {
+    const next = { of: durable, confirms: 0, ack: null as unknown as Promise<"ack"> };
+    next.ack = durable.then(() => {
+      this.prom.confirmed += next.confirms;
+      return "ack" as const;
+    });
+    acks = this.durableAcks = next;
+  }
+  if (input.confirm) acks.confirms++;
+  return acks.ack;
 }
 
 export function publish(this: Broker, input: {

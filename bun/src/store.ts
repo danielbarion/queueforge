@@ -180,6 +180,8 @@ export class Store {
   private fastLog: FastLog | null = null;
   /** Confirms waiting on a batch the sync worker has not covered yet, oldest first. */
   private syncing: Array<{ seq: bigint; waiters: Array<(covered: boolean) => void> }> = [];
+  /** The promise shared by the confirms in `waiters`; `of` is that array, replaced when a group is taken. */
+  private group: { of: Array<(covered: boolean) => void>; promise: Promise<void>; settle: (covered: boolean) => void } | null = null;
   /**
    * Confirm groups fsync on a worker thread, so a slow sync does not hold
    * every socket on this process. See {@link ASIDE_GROUP}.
@@ -715,26 +717,39 @@ export class Store {
     // A forwarded publish already waited on the home. An empty local staging
     // buffer must not add another group-commit interval on this node.
     if (this.pending.length === 0 && !this.stagedWithoutFlush) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      this.waiters.push((covered) => {
+    // Every confirm in one waiter group shares one promise. The group's settle
+    // goes into `waiters` once per confirm, so the counts and the per-confirm
+    // release accounting stay as they were; only the first call settles it.
+    let group = this.group;
+    if (!group || group.of !== this.waiters) {
+      let resolve!: () => void;
+      let reject!: (err: Error) => void;
+      const promise = new Promise<void>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const settle = (covered: boolean) => {
         if (!covered) {
           this.noteConfirmReleased();
           reject(new Error("confirm before fsync"));
           return;
         }
         resolve();
-      });
-      // The benchmark keeps 128 confirms in flight. Flush that window now so
-      // one fsync covers it, instead of holding it for the interval timer.
-      if (this.waiters.length >= 128) {
-        this.flushGroup();
-        return;
-      }
-      // One confirm flushes on the next turn, after the fsync. A burst already
-      // in this turn raises the waiter count first, so it stays one group.
-      if (this.waiters.length === 1) this.armLoneFlush();
-      this.arm();
-    });
+      };
+      group = this.group = { of: this.waiters, promise, settle };
+    }
+    this.waiters.push(group.settle);
+    // The benchmark keeps 128 confirms in flight. Flush that window now so
+    // one fsync covers it, instead of holding it for the interval timer.
+    if (this.waiters.length >= 128) {
+      this.flushGroup();
+      return group.promise;
+    }
+    // One confirm flushes on the next turn, after the fsync. A burst already
+    // in this turn raises the waiter count first, so it stays one group.
+    if (this.waiters.length === 1) this.armLoneFlush();
+    this.arm();
+    return group.promise;
   }
 
   /**

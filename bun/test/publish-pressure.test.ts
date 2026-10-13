@@ -214,12 +214,12 @@ test("asynchronous publish admission keeps outstanding bytes bounded", async () 
   for (let i = 0; i < 5; i++) {
     f.conn.publishBytes += 8 * 1024 * 1024;
     f.conn.deferredPublish.push({ channel: 1, bytes: 8 * 1024 * 1024, pressured: () => false,
-      run: () => new Promise<void>(resolve => {
-        setTimeout(() => { maximum = Math.max(maximum, f.conn.inFlightBytes); resolve(); }, 2);
-      }) });
+      run: () => {
+        setTimeout(() => { maximum = Math.max(maximum, f.conn.inFlightBytes); f.conn.publishSettled(8 * 1024 * 1024); }, 2);
+      } });
   }
   await f.conn.push(new Uint8Array());
-  await Promise.all(f.conn.inFlightPublishes);
+  while (f.conn.inFlightPublishes > 0) await f.conn.publishSettles();
   expect(maximum).toBeLessThanOrEqual(32 * 1024 * 1024);
   expect(f.conn.publishBytes).toBe(0);
 });
@@ -241,7 +241,7 @@ test("deferred publishes remain on their worker when a later queue has a remote 
   f.conn.handed = { pause() {}, removeAllListeners() {} } as never;
   f.conn.broker.queues.set("/remote", { home: "other", consumers: [], ready: { length: 0 } } as never);
   await f.conn.push(Buffer.concat([publish(), publish("remote")]));
-  await Promise.all(f.conn.inFlightPublishes);
+  while (f.conn.inFlightPublishes > 0) await f.conn.publishSettles();
   expect(f.conn.migrated).toBe(false);
   expect(f.published()).toBe(2);
 });

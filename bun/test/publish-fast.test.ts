@@ -159,6 +159,39 @@ test("128 local classic confirms share one fsync", async () => {
   }
 });
 
+test("the confirms of one group commit share one promise, and a new group gets its own", async () => {
+  const { dir, store, broker } = brokerWithQueue(400);
+  try {
+    await broker.declareQueue({ vhost: "/", name: "q", durable: true, exclusive: false, autoDelete: false, passive: false, args: {} });
+    const publish = (confirm: boolean) =>
+      broker.publish({
+        vhost: "/",
+        exchange: "",
+        routingKey: "q",
+        body: new Uint8Array(16),
+        headers: [],
+        propRaw: Uint8Array.of(0x10, 0x00, 0x02),
+        persistent: true,
+        priority: 0,
+        expiration: "",
+        confirm,
+      });
+    const first = [publish(true), publish(false), publish(true)];
+    expect(new Set(first).size).toBe(1);
+    await Promise.all(first);
+    expect(broker.prom.confirmed).toBe(2);
+    const second = [publish(true), publish(true)];
+    expect(new Set(second).size).toBe(1);
+    expect(second[0]).not.toBe(first[0]);
+    await Promise.all(second);
+    expect(broker.prom.confirmed).toBe(4);
+    expect(store.listMessages()).toHaveLength(5);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("basic.ack multiple settles each tag", async () => {
   const { dir, store, broker } = brokerWithQueue(400);
   try {
@@ -222,11 +255,12 @@ test("a parked publish confirm is written after the fsync", async () => {
     expect(store.fullFlushCount).toBe(0);
     expect(writes).toHaveLength(0);
     const parked = conn.deferredPublish.shift()!;
-    const pending = parked.run();
+    conn.inFlightPublishes++;
+    parked.run();
     expect(broker.prom.confirmed).toBe(0);
     expect(store.fullFlushCount).toBe(0);
     expect(writes).toHaveLength(0);
-    await pending;
+    while (conn.inFlightPublishes > 0) await conn.publishSettles();
     expect(broker.prom.confirmed).toBe(1);
     expect(store.fullFlushCount).toBe(1);
     expect(writes.length).toBeGreaterThan(0);
@@ -337,7 +371,7 @@ test("default exchange publishing remains valid after exchange-to-exchange bindi
     ch.chunks = [Uint8Array.of(1)];
     conn.finishPublish(1, ch);
     await conn.push(new Uint8Array());
-    await Promise.all(conn.inFlightPublishes);
+    while (conn.inFlightPublishes > 0) await conn.publishSettles();
     expect(broker.queues.get(broker.key("/", "q"))!.ready.length).toBe(1);
     broker.exchanges.set(broker.key("/", "private"), { internal: true } as never);
     expect(() => broker.route("/", "private", "q", [])).toThrow("cannot publish to internal exchange");

@@ -8,7 +8,7 @@ export const profiling = process.env.QUEUEFORGE_PROFILE === "1";
 export const profiledConns = new Set<{
   closed: boolean; outboundBytes: number; stagedBytes: number; writeQueuedBytes: number;
   outputBlocked: boolean; readsPaused: boolean; inboundRunning: boolean; deferredPublish: unknown[];
-  inFlightPublishes: Set<unknown>; publishBytes: number; fresh: unknown[]; wakeInbound: unknown;
+  inFlightPublishes: number; publishBytes: number; fresh: unknown[]; wakeInbound: unknown;
   outputWakers: Map<string, unknown>; channels: Map<number, { deliveries: Map<unknown, unknown>; consumers: Map<unknown, unknown> }>;
   socket: { pendingBytes?: () => number };
 }>();
@@ -22,7 +22,7 @@ function connSample() {
     rows.push({
       out: c.outboundBytes, staged: c.stagedBytes, queued: c.writeQueuedBytes, pending: c.socket.pendingBytes?.() ?? 0,
       blocked: c.outputBlocked, paused: c.readsPaused, running: c.inboundRunning, waiting: c.wakeInbound !== null,
-      deferred: c.deferredPublish.length, inFlight: c.inFlightPublishes.size, publishBytes: c.publishBytes,
+      deferred: c.deferredPublish.length, inFlight: c.inFlightPublishes, publishBytes: c.publishBytes,
       fresh: c.fresh.length, wakers: c.outputWakers.size, consumers, unacked,
     });
   }
