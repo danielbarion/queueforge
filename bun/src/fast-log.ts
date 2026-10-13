@@ -58,6 +58,9 @@ export type LogOp =
   | { kind: "insert"; id: number; vhost: string; queue: string; meta: string; body: Uint8Array }
   | { kind: "delete"; id: number };
 
+/** A type 3 record as read: the inserts of ids `first` .. `first + queues.length - 1`. */
+type GroupOp = { kind: "group"; first: number; vhost: string; meta: string; body: Uint8Array; queues: string[] };
+
 type ActiveChunk = { id: number; fd: number; len: number; size: number };
 
 /** IEEE CRC-32, the same polynomial the table version used. Native, so replay and the group commit do not loop per byte in JS. */
@@ -171,39 +174,123 @@ function writeRecord(
   return o + 4;
 }
 
+/** Magic, type, first id, vhost length, meta length, body length, member count, and crc. */
+const GROUP_FIXED = 4 + 1 + 8 + 2 + 4 + 4 + 4 + 4;
+/** Members in one group record. A fanout wider than this writes several. */
+const MAX_GROUP = 4096;
+
+/**
+ * Rows from `i` that can share one record: the same body object, meta and
+ * vhost, and consecutive ids. The copies of one fanout publish are such a run.
+ */
+function groupLength(inserts: LogInsert[], i: number): number {
+  const head = inserts[i]!;
+  let n = 1;
+  while (i + n < inserts.length && n < MAX_GROUP) {
+    const row = inserts[i + n]!;
+    if (row.body !== head.body || row.meta !== head.meta || row.vhost !== head.vhost || row.id !== head.id + n) break;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Write a type 3 record for `n` rows from `from`: the body and meta once,
+ * then one queue name per member. `lens` holds each row's vhost, queue and
+ * meta byte lengths, three per row.
+ */
+function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: number, lens: number[]): number {
+  const start = o;
+  const head = rows[from]!;
+  const vhostLen = lens[from * 3]!;
+  const metaLen = lens[from * 3 + 2]!;
+  buf.writeUInt32LE(MAGIC, o);
+  buf[o + 4] = 3;
+  buf.writeUInt32LE(head.id >>> 0, o + 5);
+  buf.writeUInt32LE(Math.floor(head.id / 0x1_0000_0000), o + 9);
+  o += 13;
+  buf.writeUInt16LE(vhostLen, o);
+  o += 2;
+  if (vhostLen) o += buf.write(head.vhost, o, vhostLen, "utf8");
+  buf.writeUInt32LE(metaLen, o);
+  o += 4;
+  if (metaLen) o += buf.write(head.meta, o, metaLen, "utf8");
+  buf.writeUInt32LE(head.body.length, o);
+  o += 4;
+  buf.set(head.body, o);
+  o += head.body.length;
+  buf.writeUInt32LE(n, o);
+  o += 4;
+  for (let k = 0; k < n; k++) {
+    const queueLen = lens[(from + k) * 3 + 1]!;
+    buf.writeUInt16LE(queueLen, o);
+    o += 2;
+    if (queueLen) o += buf.write(rows[from + k]!.queue, o, queueLen, "utf8");
+  }
+  buf.writeUInt32LE(crc32(buf.subarray(start, o)), o);
+  return o + 4;
+}
+
 const EMPTY = new Uint8Array(0);
 
 /**
  * One buffer for a whole group commit, sized first, then written in one pass.
  * Deletes come first: a replay applies them before this group's inserts.
+ * Rows that share a body (see {@link groupLength}) share one type 3 record,
+ * so a fanout to 20 queues writes its body once instead of 20 times.
+ *
+ * @param starts Filled with each insert's record offset in the buffer.
+ * @param ends Filled with each insert's record end. Members of one group share both.
  */
-function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[]): Buffer {
+function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], ends?: number[]): Buffer {
   let total = deletes.length * RECORD_FIXED;
   const lens = new Array<number>(inserts.length * 3);
-  for (let i = 0; i < inserts.length; i++) {
-    const row = inserts[i]!;
-    const v = Buffer.byteLength(row.vhost, "utf8");
-    const q = Buffer.byteLength(row.queue, "utf8");
-    const m = Buffer.byteLength(row.meta, "utf8");
+  const runs: number[] = [];
+  for (let i = 0; i < inserts.length;) {
+    const n = groupLength(inserts, i);
+    runs.push(n);
+    const head = inserts[i]!;
+    const v = Buffer.byteLength(head.vhost, "utf8");
+    const m = Buffer.byteLength(head.meta, "utf8");
     lens[i * 3] = v;
-    lens[i * 3 + 1] = q;
     lens[i * 3 + 2] = m;
-    total += RECORD_FIXED + v + q + m + row.body.length;
+    if (n === 1) {
+      const q = Buffer.byteLength(head.queue, "utf8");
+      lens[i * 3 + 1] = q;
+      total += RECORD_FIXED + v + q + m + head.body.length;
+    } else {
+      total += GROUP_FIXED + v + m + head.body.length;
+      for (let k = 0; k < n; k++) {
+        const q = Buffer.byteLength(inserts[i + k]!.queue, "utf8");
+        lens[(i + k) * 3 + 1] = q;
+        total += 2 + q;
+      }
+    }
+    i += n;
   }
   const buf = Buffer.allocUnsafe(total);
   let o = 0;
   for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY);
-  for (let i = 0; i < inserts.length; i++) {
-    const row = inserts[i]!;
-    starts?.push(o);
-    o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body);
+  let i = 0;
+  for (const n of runs) {
+    const at = o;
+    if (n === 1) {
+      const row = inserts[i]!;
+      o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body);
+    } else {
+      o = writeGroup(buf, o, inserts, i, n, lens);
+    }
+    for (let k = 0; k < n; k++) {
+      starts?.push(at);
+      ends?.push(o);
+    }
+    i += n;
   }
-  starts?.push(o);
   return buf;
 }
 
 /** `copy` false keeps the body a view of `buf`, for a buffer that holds this one record. */
-function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { next: number; op: LogOp } | null {
+function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { next: number; op: LogOp | GroupOp } | null {
   if (pos + 4 > limit) return null;
   if (buf[pos] === 0 && buf[pos + 1] === 0 && buf[pos + 2] === 0 && buf[pos + 3] === 0) return null;
   if (buf.toString("ascii", pos, pos + 4) !== "QFML") return null;
@@ -219,6 +306,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { ne
   if (vhostLen > MAX_NAME || !need(vhostLen)) return null;
   const vhost = buf.toString("utf8", o, o + vhostLen);
   o += vhostLen;
+  if (type === 3) return parseGroup(buf, pos, o, limit, id, vhost, copy);
   if (!need(2)) return null;
   const queueLen = buf.readUInt16LE(o);
   o += 2;
@@ -246,6 +334,41 @@ function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { ne
   return { next: o, op };
 }
 
+/** The rest of a type 3 record from `o`, just past its vhost. See {@link writeGroup}. */
+function parseGroup(buf: Buffer, pos: number, o: number, limit: number, first: number, vhost: string, copy: boolean): { next: number; op: GroupOp } | null {
+  const need = (n: number) => o + n <= limit;
+  if (!need(4)) return null;
+  const metaLen = buf.readUInt32LE(o);
+  o += 4;
+  if (metaLen > MAX_META || !need(metaLen)) return null;
+  const meta = buf.toString("utf8", o, o + metaLen);
+  o += metaLen;
+  if (!need(4)) return null;
+  const bodyLen = buf.readUInt32LE(o);
+  o += 4;
+  if (bodyLen > MAX_BODY || !need(bodyLen + 4)) return null;
+  const body = copy ? Buffer.from(buf.subarray(o, o + bodyLen)) : buf.subarray(o, o + bodyLen);
+  o += bodyLen;
+  const count = buf.readUInt32LE(o);
+  o += 4;
+  if (count < 1 || count > MAX_GROUP) return null;
+  const queues = new Array<string>(count);
+  for (let k = 0; k < count; k++) {
+    if (!need(2)) return null;
+    const queueLen = buf.readUInt16LE(o);
+    o += 2;
+    if (queueLen > MAX_NAME || !need(queueLen)) return null;
+    queues[k] = buf.toString("utf8", o, o + queueLen);
+    o += queueLen;
+  }
+  if (!need(4)) return null;
+  const crc = buf.readUInt32LE(o);
+  o += 4;
+  if (crc32(buf.subarray(pos, o - 4)) !== crc) return null;
+  return { next: o, op: { kind: "group", first, vhost, meta, body, queues } };
+}
+
+/** Each record from the header on, with a type 3 record expanded into its inserts. */
 function scanFile(fd: number, logical: number, apply: (op: LogOp, at: number, end: number) => void): number {
   if (logical <= HEADER) return HEADER;
   const buf = Buffer.alloc(logical);
@@ -260,7 +383,14 @@ function scanFile(fd: number, logical: number, apply: (op: LogOp, at: number, en
   while (pos + 4 <= limit) {
     const rec = parseRecord(buf, pos, limit);
     if (!rec) return pos;
-    apply(rec.op, pos, rec.next);
+    const op = rec.op;
+    if (op.kind === "group") {
+      for (let k = 0; k < op.queues.length; k++) {
+        apply({ kind: "insert", id: op.first + k, vhost: op.vhost, queue: op.queues[k]!, meta: op.meta, body: op.body }, pos, rec.next);
+      }
+    } else {
+      apply(op, pos, rec.next);
+    }
     if (rec.next <= pos) return pos;
     pos = rec.next;
   }
@@ -389,7 +519,7 @@ export class FastLog {
    * rows are tracked only once synced, so a chunk is never removed while the
    * relocated copy of one of its rows could still be lost.
    */
-  private unsynced: Array<{ seq: bigint; chunk: number; at: number; inserts: number[]; starts: number[]; deletes: number[] }> = [];
+  private unsynced: Array<{ seq: bigint; chunk: number; at: number; inserts: number[]; starts: number[]; ends: number[]; deletes: number[] }> = [];
   private writtenSeq = 0n;
   private syncedSeq = 0n;
   private syncWorker: Worker | null = null;
@@ -518,9 +648,16 @@ export class FastLog {
       got += n;
     }
     const rec = got === len ? parseRecord(buf, 0, len, false) : null;
-    if (!rec || rec.op.kind !== "insert" || rec.op.id !== id) return null;
+    if (!rec) return null;
+    const op = rec.op;
     // `body` is a view of this one-record buffer, so it pins nothing else.
-    return { id, vhost: rec.op.vhost, queue: rec.op.queue, meta: rec.op.meta, body: rec.op.body };
+    if (op.kind === "group") {
+      const member = id - op.first;
+      if (member < 0 || member >= op.queues.length) return null;
+      return { id, vhost: op.vhost, queue: op.queues[member]!, meta: op.meta, body: op.body };
+    }
+    if (op.kind !== "insert" || op.id !== id) return null;
+    return { id, vhost: op.vhost, queue: op.queue, meta: op.meta, body: op.body };
   }
 
   /** Used when migrating the current sqlite state back into this log. */
@@ -536,7 +673,8 @@ export class FastLog {
     if (inserts.length === 0 && deletes.length === 0) return;
     this.prepare();
     const starts: number[] = [];
-    const buf = encodeRows(deletes, inserts, starts);
+    const ends: number[] = [];
+    const buf = encodeRows(deletes, inserts, starts, ends);
     this.makeRoom(buf.length);
     const at = this.active.len;
     // One sequential overwrite. Rewriting the header would dirty byte 0 and
@@ -545,7 +683,7 @@ export class FastLog {
     fdatasyncSync(this.active.fd);
     this.active.len = at + buf.length;
     // This sync also covers every batch written before it.
-    this.unsynced.push({ seq: ++this.writtenSeq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, deletes: [...deletes] });
+    this.unsynced.push({ seq: ++this.writtenSeq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, ends, deletes: [...deletes] });
     this.kick();
     this.completeThrough(this.writtenSeq, true);
   }
@@ -573,13 +711,14 @@ export class FastLog {
     if (inserts.length === 0 && deletes.length === 0) return this.writtenSeq;
     this.prepare();
     const starts: number[] = [];
-    const buf = encodeRows(deletes, inserts, starts);
+    const ends: number[] = [];
+    const buf = encodeRows(deletes, inserts, starts, ends);
     this.makeRoom(buf.length, true);
     const at = this.active.len;
     writeAllAt(this.active.fd, buf, at);
     this.active.len += buf.length;
     const seq = ++this.writtenSeq;
-    this.unsynced.push({ seq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, deletes: [...deletes] });
+    this.unsynced.push({ seq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, ends, deletes: [...deletes] });
     this.kick();
     if (!this.syncWorker) {
       this.syncWorker = new Worker(new URL("./sync-worker.ts", import.meta.url));
@@ -637,7 +776,7 @@ export class FastLog {
       for (const id of batch.deletes) this.untrack(id);
       for (let i = 0; i < batch.inserts.length; i++) {
         const start = batch.starts[i]!;
-        this.track(batch.inserts[i]!, batch.chunk, batch.at + start, batch.starts[i + 1]! - start);
+        this.track(batch.inserts[i]!, batch.chunk, batch.at + start, batch.ends[i]! - start);
       }
     }
     if (ok) this.scheduleRetire();
