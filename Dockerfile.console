@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.6
+# Build context is the repository root. The console imports the site's
+# feature and benchmark data, so the site directory has to be present.
+
+FROM oven/bun:1.4.3-alpine
+RUN apk add --no-cache curl
+WORKDIR /src
+COPY site ./site
+COPY console ./console
+WORKDIR /src/console
+RUN bun install --frozen-lockfile
+RUN bun run build
+EXPOSE 3200
+# Docker sets HOSTNAME to the container id. Next.js binds that name, so the
+# proxy cannot connect. Unset it and listen on every interface.
+CMD ["sh", "-c", "unset HOSTNAME; exec bun next start --hostname 0.0.0.0 --port 3200"]
