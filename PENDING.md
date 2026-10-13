@@ -20,11 +20,11 @@ cells in `bench/results/2026-10-11/`, unless an item names an older run.
   the before/after numbers, and update `BENCHMARK.md` if the published numbers change.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-13, Cortex Code): Bun suite 206/206, Rust 437/437, PHP
+Current tree (2026-10-13, Cortex Code): Bun suite 216/216, Rust 437/437, PHP
 38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
 134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
 "Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
-2026-10-13 re-run in `bench/results/2026-10-13/` (two repeats per cell, median shown).
+2026-10-13 re-run in `bench/results/2026-10-13b/` (two repeats per cell, median shown).
 
 ### Measurement rules
 
@@ -138,17 +138,26 @@ fanout-20 cell at 4 CPU.
 
 ### B3. Quorum queues on more than one core
 
-Status: implemented, partly better (Cortex Code, 2026-10-12). Worker processes
+Status: done for the cores supervisor (Cortex Code, 2026-10-13, `0fd098e`).
+All four-CPU quorum traffic runs on the queue's home worker, the group's only
+voter (the supervisor migrates each connection there). Profiling that worker
+found three costs, now removed: `RaftCore.voters()` scanned the whole log on
+every propose (a solo group has no config entry, so up to 10,000 entries); each
+committed entry was its own apply job, so every confirm and delivery was its own
+socket write (~55k writes/s of ~550 B, now ~1.9k of ~27 KB); and the leader's
+log fsync ran on the event loop (now `fs.fsync` on the thread pool; the leader
+counts itself toward a commit when it lands). A/B, 3 interleaved runs: 17,235 →
+67,020 msg/s, p99 210 → 14 ms, process memory 228 → 250 MiB. Next, if needed:
+the Raft log is JSON lines with the body base64'd inside (`stringify`, `Buffer`,
+`toString` ~18% of that worker); a binary entry encoding would cut that.
+
+Earlier (2026-10-12): worker processes
 of one supervisor share a broker id (`data/broker-id`); a quorum queue declared
 there gets a single-voter group, `q:s1:<voter>:<vhost>:<name>`, whose voter is
 its leader, and the other workers forward to it. Multi-node clusters keep
 whole-membership groups. `bun/test/quorum-cores.test.ts` 2/2 (one voter,
 messages kept across a restart); Bun suite 196/196. Quick run (one repeat): 4 CPU
-quorum 11.4k → 16.8k msg/s. That is still far below one process (97.9k) and
-RabbitMQ (89.8k): the voter is a single worker, and every publish arriving on
-another worker is forwarded to it. Next: profile the 4 CPU cell; compare with
-routing quorum publishes to the voter's worker at connection handoff, as PHP
-does for classic queues.
+quorum 11.4k → 16.8k msg/s.
 
 Before: same image at 4 CPU, one process (`QUEUEFORGE_CORES=1`) 97.9k msg/s, two
 13.6k, four 11.8k.
@@ -202,6 +211,17 @@ into the log (`bun/src/fast-log.ts`), and on the way out (`bodyFrame` in
 Already tried: writing large staged frames without the gather copy. It measured
 slower (348 vs 404 MB/s at 64 KiB) and was reverted. Profile before trying again.
 
+2026-10-13 (Cortex Code): the 64 KiB profile shows ~30% of the CPU in the log's
+chunk turnover. At ~660 MB/s a 4 MiB chunk fills every ~6 ms, and `rotate`
+waits on the prealloc worker, `kick` posts to it, and `retire` unlinks and
+fsyncs the directory. An upper-bound variant that skipped the zero-fill
+(`ftruncate`, not crash-safe) measured −9% (64 KiB) and −2% (1 MiB) in an A/B,
+so preallocation is not the limit; the disk is. Recycling retired chunks was not
+tried: a reused file keeps old records with valid CRCs past the write point, so
+it needs a per-chunk salt in every record first. Migrated connections write
+through `node:net`; `Bun.connect({ fd })` cannot adopt that socket in 1.4.3
+("Failed to connect"), and `node:net` writes cost ~1 µs each in isolation.
+
 ### B11. Memory against Rust (2026-10-13)
 
 Status: partly done (Cortex Code, `1473d9e`). Bun 1.4 is Rust, but the broker
@@ -253,6 +273,16 @@ took ~17 ms a call in Docker Desktop and ran every 200 ms on the event loop,
 (`bun/src/sync-worker.ts`): many-queues p99 38 → 4–8 ms, latency-10k p99 9–18 → 1–4
 ms. slow-consumers is still bimodal (1 or 15 ms); an idle Bun process with a 1 ms
 timer sees stalls up to 11 ms on Docker Desktop, so part of it is the VM's timers.
+
+2026-10-13 (Cortex Code): no regression. Three images (`32051c1`, `3c4d94e`,
+`0fd098e`) run together, four repeats each, gave slow-consumers p99 0.4–15.5 ms
+in every image, p50 0.04 ms. The broker's own 1 ms lag timer shows one 7–34 ms
+stall in most seconds. GC is not it: `BUN_JSC_logGC=1` shows cycles p99 5.7 ms,
+and there is no cgroup throttling (`nr_throttled 0`). Rotation, retire and the
+log `pwrite` are below 5 ms. An idle container with only a 1 ms timer sees 6–24
+ms (Bun) and 5–9 ms (a PHP `usleep` loop) once a second, at `--cpus` 1 and 2: the
+Docker Desktop VM descheduling the vCPU. One JS thread stalls every socket at
+once; Rust's threads keep serving.
 
 Evidence: latency-1k p99 3.4–6.5 ms against Rust 1.46 ms; slow-consumers p99
 14.6–24.6 ms against Rust 0.67 ms; many-queues p99 38 ms against Rust 7.4 ms.

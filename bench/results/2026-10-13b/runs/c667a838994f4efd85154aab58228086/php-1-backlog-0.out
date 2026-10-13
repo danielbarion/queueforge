@@ -1,0 +1,17 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-121523-230, starting producer #0
+id: test-121523-230, starting producer #0, channel #0
+id: test-121523-230, starting producer #1
+id: test-121523-230, starting producer #1, channel #0
+id: test-121523-230, starting producer #2
+id: test-121523-230, starting producer #2, channel #0
+id: test-121523-230, starting producer #3
+id: test-121523-230, starting producer #3, channel #0
+id: test-121523-230, time 1.001 s, sent: 60240 msg/s, confirmed: 59440 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 2361/10549/11566/19717/29561/34979 µs
+id: test-121523-230, time 2.001 s, sent: 66686 msg/s, confirmed: 66686 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 416/10628/11455/12468/23827/32971 µs
+id: test-121523-230, time 3.000 s, sent: 71383 msg/s, confirmed: 71389 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 398/10113/10780/11940/18212/23204 µs
+id: test-121523-230, time 4.000 s, sent: 66963 msg/s, confirmed: 67010 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 253/10309/11015/13924/28742/39337 µs
+test stopped (Producer reached message limit [4])
+id: test-121523-230, sending rate avg: 63708 msg/s
+id: test-121523-230, receiving rate avg: 0 msg/s
+id: test-121523-230, confirm latency min/median/75th/95th/99th/max 346/10317/11025/12459/26697/38177 µs

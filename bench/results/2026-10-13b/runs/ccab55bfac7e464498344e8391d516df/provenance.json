@@ -1,0 +1,45 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:94d6ab708694d07fc690e6ed4b53d85e074145d886040c20b094d9712387ba37",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "4ad4840b73e946618a6ec3f881f418f7",
+  "expected_repeats": 2,
+  "harness_sha256": "efae9ed02a6407ec67faa2a664e50693982d275ec513d14a8477da4ac1356e70",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "0fd098e1356a70bf2371a057c82d3f38649b1376",
+  "invocation_source_content_sha256": "c9ade3b7763fdb3bc2bbd8542c3cecfb26eeb8b5c40e18951c6881c1a16bd45c",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M PENDING.md",
+    " M docs/ci.md",
+    " M site/app/benchmark/page.tsx",
+    "?? bench/results/2026-10-12b/",
+    "?? bench/results/2026-10-13b/"
+  ],
+  "repeat_ordinal": 2,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "ccab55bfac7e464498344e8391d516df",
+  "scenario": {
+    "args": "-x 2 -y 2 -u busy -f persistent -s 1024 -c 100 -q 100 -r 5000",
+    "id": "latency-10k",
+    "rate": 10000,
+    "real": "A busy API workload: 2 producers at 5,000 durable 1 KiB msg/s each.",
+    "title": "Latency at 10,000 msg/s"
+  },
+  "scenario_sha256": "8b640fdebad0f7e7c1e119507c4ca3e8a1454a347edc6228e5509f562d8f2736",
+  "started_utc": "2026-10-13T06:40:14Z"
+}
