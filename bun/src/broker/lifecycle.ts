@@ -101,10 +101,13 @@ export function load(this: Broker) {
  * @returns A live queue with empty ready, replica, unacked, and consumer lists. Arguments are parsed once here.
  */
 export function makeQueue(this: Broker, q: QueueRow, proxy: boolean): QueueLive {
+  const argsParsed = parseArgs(q.args);
+  // The durable log is written on this process only once a queue that can use it lives here.
+  if (!proxy && q.durable && argsParsed.queueType === "classic") this.store.prepareLog();
   return {
     ...q,
     home: proxy ? q.home : q.home,
-    argsParsed: parseArgs(q.args),
+    argsParsed,
     declaredArgs: { ...q.args },
     ready: new ReadyQueue(),
     replicas: new Map(),

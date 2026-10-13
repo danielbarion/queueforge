@@ -8,6 +8,8 @@ import { Store } from "../src/store.ts";
 test("every_n_ms lone durable wait finishes after its fsync and under 10 ms", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-flush-"));
   const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 80);
+  // A declared durable queue writes the log chunks before any confirm.
+  store.prepareLog();
   const started = performance.now();
   store.insertMessage("/", "q", new Uint8Array([1, 2, 3]), "{}");
   expect(store.fullFlushCount).toBe(0);
@@ -23,6 +25,7 @@ test("every_n_ms lone durable wait finishes after its fsync and under 10 ms", as
 test("every_n_ms batches durable writes before the interval fsync", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-store-batch-"));
   const store = new Store(join(dir, "queueforge.db"), "every_n_ms", 80);
+  store.prepareLog();
   const started = performance.now();
   for (let i = 0; i < 20; i++) {
     store.insertMessage("/", "q", new Uint8Array([i]), "{}");
@@ -41,6 +44,7 @@ test("every_n_ms batches durable writes before the interval fsync", async () => 
 test("a deep burst after the interval flush does not wait another tick", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-store-deep-"));
   const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 400);
+  store.prepareLog();
   store.insertMessage("/", "q", new Uint8Array([1]), "{}");
   const first = performance.now();
   await store.whenDurable();
@@ -102,6 +106,7 @@ test("two confirms started in one turn share one fsync without the interval", as
   // Two channels on one connection, one confirm each, parsed from one read.
   const dir = mkdtempSync(join(tmpdir(), "qf-store-pair-"));
   const store = new Store(join(dir, "t.sqlite"), "every_n_ms", 400);
+  store.prepareLog();
   for (let round = 0; round < 3; round++) {
     const started = performance.now();
     store.insertMessage("/", "q", new Uint8Array([round, 1]), "{}");

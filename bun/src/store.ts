@@ -340,6 +340,11 @@ export class Store {
     return this.canSyncAside();
   }
 
+  /** Write the durable log's first chunks now, ahead of the first confirm that needs them. */
+  prepareLog() {
+    this.fastLog?.prepare();
+  }
+
   private canSyncAside(): boolean {
     return this.syncAside && this.mode === "every_n_ms" && !this.closed && !!this.fastLog?.canAppend;
   }

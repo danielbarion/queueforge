@@ -350,17 +350,9 @@ export class FastLog {
       }
       break;
     }
-    if (ids.length === 0) {
-      let fd = 0;
-      for (let id = 1; id <= START_CHUNKS; id++) {
-        const created = createChunkFile(chunkPath(dir, id), CHUNK);
-        if (id === 1) fd = created;
-        else closeSync(created);
-      }
-      const log = new FastLog(dir, { id: 1, fd, len: HEADER, size: CHUNK }, 1);
-      log.nextReady = true;
-      return log;
-    }
+    // A fresh log writes its chunks on first use (see `prepare`). A process
+    // that never stores a message keeps 32 MiB of zeros out of its page cache.
+    if (ids.length === 0) return new FastLog(dir, { id: 1, fd: -1, len: HEADER, size: CHUNK }, 1);
     // The header length is a hint. Confirms fsync the record bytes and leave
     // the header page clean, so the real end is the last valid record.
     let chosen: { id: number; end: number; size: number } | null = null;
@@ -402,6 +394,23 @@ export class FastLog {
         if (owned) closeSync(fd);
       }
     }
+  }
+
+  /**
+   * Write the fresh log's first {@link START_CHUNKS} chunks. Called when this
+   * process gets a durable queue, so the zero-fill happens at declare time,
+   * and again before every append in case a row arrives without one.
+   */
+  prepare() {
+    if (this.active.fd >= 0 || this.closed) return;
+    let fd = -1;
+    for (let id = 1; id <= START_CHUNKS; id++) {
+      const created = createChunkFile(chunkPath(this.dir, id), CHUNK);
+      if (id === 1) fd = created;
+      else closeSync(created);
+    }
+    this.active.fd = fd;
+    this.nextReady = true;
   }
 
   /** Recovery index: sqlite is a cache once this log is authoritative. */
@@ -447,6 +456,7 @@ export class FastLog {
    */
   syncRows(inserts: LogInsert[], deletes: number[]) {
     if (inserts.length === 0 && deletes.length === 0) return;
+    this.prepare();
     const starts: number[] = [];
     const buf = encodeRows(deletes, inserts, starts);
     this.makeRoom(buf.length);
@@ -483,6 +493,7 @@ export class FastLog {
    */
   appendRows(inserts: LogInsert[], deletes: number[]): bigint {
     if (inserts.length === 0 && deletes.length === 0) return this.writtenSeq;
+    this.prepare();
     const starts: number[] = [];
     const buf = encodeRows(deletes, inserts, starts);
     this.makeRoom(buf.length, true);
@@ -660,6 +671,7 @@ export class FastLog {
       this.syncWorker.terminate();
       this.syncWorker = null;
     }
+    if (this.active.fd < 0) return;
     try {
       writeAllAt(this.active.fd, headerBuf(this.active.len), 0);
       fdatasyncSync(this.active.fd);
