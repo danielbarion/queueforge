@@ -3,7 +3,8 @@
  * docs/raft.md on `RaftCore`, with the same files as the Rust broker
  * (`raft/<group>/state.json`, `log.jsonl`, `snapshot.json`), and one
  * `q:v2:<hex-vhost>:<hex-name>` group per quorum queue when the cluster has them
- * (`raft/q-<hash>/`, with `group.json` naming the group).
+ * (`raft/q-<hash>/`, with `group.json` naming the group). A one-voter group
+ * (`soloQueueGroup`) keeps its log in `log.bin` (see `encodeRecords`).
  *
  * A round ticks both cores, writes what they report dirty, then sends. A
  * leader's own `append` and `snap` go out before its fsync; it counts
@@ -13,7 +14,8 @@
  * are applied in log order by `apply`, and a round's proposals resolve together
  * after that.
  */
-import { closeSync, existsSync, fsync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, truncateSync, writeSync } from "node:fs";
+import { quorumAppendHead, rawQuorumBody, withQuorumBody } from "../wire.ts";
 import { join } from "node:path";
 import { RaftCore, type Entry, type Msg, type Snapshot } from "./core.ts";
 
@@ -44,11 +46,19 @@ export function soloQueueGroup(owner: string, vhost: string, name: string): Grou
   return `q:s1:${Buffer.from(owner, "utf8").toString("hex")}:${Buffer.from(vhost, "utf8").toString("hex")}:${Buffer.from(name, "utf8").toString("hex")}`;
 }
 
+/** Group name to its voter. A broker has few queue groups, and they are looked up on every message. */
+const soloVoters = new Map<Group, string | null>();
+
 /** The only voter of a `soloQueueGroup`, or null for any other group. */
 export function soloVoter(group: Group): string | null {
   if (!group.startsWith("q:s1:")) return null;
+  let voter = soloVoters.get(group);
+  if (voter !== undefined) return voter;
   const hex = group.slice(5, group.indexOf(":", 5));
-  return hex ? Buffer.from(hex, "hex").toString("utf8") : null;
+  voter = hex ? Buffer.from(hex, "hex").toString("utf8") : null;
+  if (soloVoters.size >= 4096) soloVoters.clear();
+  soloVoters.set(group, voter);
+  return voter;
 }
 
 /** Applied entries kept before a snapshot replaces them (section 7). */
@@ -88,6 +98,108 @@ type Pending = {
   sentTo: string | null;
 };
 
+/** The log of a one-voter group: binary records, read only by this broker. */
+const BIN_LOG = "log.bin";
+const REC_MAGIC = 0x42524651; // "QFRB" as a little-endian u32
+const REC_FIXED = 4 + 1 + 4 + 4 + 4;
+/** The entry's data is a quorum append whose body follows the head as bytes. */
+const REC_QUORUM_BODY = 1;
+
+/**
+ * `log.bin` records: magic, flags, head length, body length, CRC-32 of head
+ * and body, the entry as JSON (a quorum append without `body_b64`), then the
+ * body. The bytes after a torn or corrupt record are not read.
+ */
+function encodeRecords(entries: readonly Entry[]): Buffer {
+  const heads: string[] = [];
+  const bodies: Array<Uint8Array | null> = [];
+  let total = 0;
+  for (const e of entries) {
+    const body = e.kind === "enq" && e.data && typeof e.data === "object" ? rawQuorumBody(e.data) : null;
+    const head = body
+      ? JSON.stringify({ i: e.i, term: e.term, kind: e.kind, data: quorumAppendHead(e.data as Record<string, unknown>) })
+      : JSON.stringify(e);
+    heads.push(head);
+    bodies.push(body);
+    total += REC_FIXED + Buffer.byteLength(head, "utf8") + (body?.length ?? 0);
+  }
+  const buf = Buffer.allocUnsafe(total);
+  let o = 0;
+  for (let k = 0; k < heads.length; k++) {
+    const body = bodies[k];
+    const start = o;
+    o += REC_FIXED;
+    const headLen = buf.write(heads[k]!, o, "utf8");
+    o += headLen;
+    if (body) {
+      buf.set(body, o);
+      o += body.length;
+    }
+    buf.writeUInt32LE(REC_MAGIC, start);
+    buf[start + 4] = body ? REC_QUORUM_BODY : 0;
+    buf.writeUInt32LE(headLen, start + 5);
+    buf.writeUInt32LE(body?.length ?? 0, start + 9);
+    buf.writeUInt32LE(Bun.hash.crc32(buf.subarray(start + REC_FIXED, o)) >>> 0, start + 13);
+  }
+  return buf;
+}
+
+/** Hand every whole record in `buf` to `keep`, in order. @returns The offset after the last one. */
+function decodeRecords(buf: Buffer, keep: (e: Entry) => void): number {
+  let o = 0;
+  while (o + REC_FIXED <= buf.length) {
+    if (buf.readUInt32LE(o) !== REC_MAGIC) break;
+    const flags = buf[o + 4]!;
+    const headLen = buf.readUInt32LE(o + 5);
+    const bodyLen = buf.readUInt32LE(o + 9);
+    const end = o + REC_FIXED + headLen + bodyLen;
+    if (end > buf.length) break;
+    if ((Bun.hash.crc32(buf.subarray(o + REC_FIXED, end)) >>> 0) !== buf.readUInt32LE(o + 13)) break;
+    let e: Entry;
+    try {
+      e = JSON.parse(buf.toString("utf8", o + REC_FIXED, o + REC_FIXED + headLen)) as Entry;
+    } catch {
+      break;
+    }
+    if (flags & REC_QUORUM_BODY) {
+      // A copy: a view would keep the whole file in memory for as long as one message is live.
+      const body = new Uint8Array(buf.subarray(o + REC_FIXED + headLen, end));
+      e = { ...e, data: withQuorumBody((e.data ?? {}) as Record<string, unknown>, body) };
+    }
+    keep(e);
+    o = end;
+  }
+  return o;
+}
+
+function writeAll(fd: number, buf: Uint8Array) {
+  let off = 0;
+  while (off < buf.length) {
+    const n = writeSync(fd, buf, off, buf.length - off);
+    if (n <= 0) throw new Error("raft log short write");
+    off += n;
+  }
+}
+
+function syncFile(path: string) {
+  const fd = openSync(path, "r+");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function syncDir(dir: string) {
+  try {
+    const d = openSync(dir, "r");
+    fsyncSync(d);
+    closeSync(d);
+  } catch {
+    /* directory fsync is best effort on some platforms */
+  }
+}
+
 export class Disk {
   private log: number | null = null;
   private unsynced = false;
@@ -96,8 +208,17 @@ export class Disk {
   /** The fd a background fsync is running on. It is closed only once that returns. */
   private syncingFd: number | null = null;
   private closeAfterSync = false;
-  constructor(private dir: string) {
+  /**
+   * @param binary Write `log.bin` records (see `encodeRecords`) instead of
+   *   `log.jsonl` lines: one-voter groups, which only this broker's workers
+   *   read. A quorum body is stored as bytes, not base64 inside JSON.
+   */
+  constructor(private dir: string, private readonly binary = false) {
     mkdirSync(dir, { recursive: true });
+  }
+
+  private get logName() {
+    return this.binary ? BIN_LOG : "log.jsonl";
   }
 
   load(): { term: number; vote: string | null; snapshot: Snapshot | null; log: Entry[] } {
@@ -117,6 +238,11 @@ export class Disk {
       /* no snapshot yet */
     }
     const log: Entry[] = [];
+    const keep = (e: Entry) => {
+      while (log.length && log[log.length - 1]!.i >= e.i) log.pop();
+      log.push(e);
+    };
+    // A group written before it used `log.bin` keeps its older entries here.
     if (existsSync(join(this.dir, "log.jsonl"))) {
       for (const line of readFileSync(join(this.dir, "log.jsonl"), "utf8").split("\n")) {
         if (!line) continue;
@@ -126,27 +252,39 @@ export class Disk {
         } catch {
           break; // a torn last line from a crash mid-write
         }
-        while (log.length && log[log.length - 1]!.i >= e.i) log.pop();
-        log.push(e);
+        keep(e);
       }
+    }
+    if (this.binary && existsSync(join(this.dir, BIN_LOG))) {
+      const path = join(this.dir, BIN_LOG);
+      const buf = readFileSync(path);
+      const end = decodeRecords(buf, keep);
+      // A torn last record: cut it, or the next append would follow bytes no load can read past.
+      if (end < buf.length) {
+        truncateSync(path, end);
+        syncFile(path);
+      }
+    }
+    // Move a group written as lines to `log.bin` now. Until the lines are
+    // removed both files hold the same entries, so a crash between the two
+    // steps loads the same log; a later rewrite never meets stale lines.
+    if (this.binary && existsSync(join(this.dir, "log.jsonl"))) {
+      this.atomic(BIN_LOG, encodeRecords(log));
+      rmSync(join(this.dir, "log.jsonl"), { force: true });
+      syncDir(this.dir);
     }
     return { term, vote, snapshot, log };
   }
 
-  private atomic(name: string, text: string) {
+  private atomic(name: string, text: string | Uint8Array) {
     const tmp = join(this.dir, `${name}.tmp`);
     const fd = openSync(tmp, "w");
-    writeSync(fd, text);
+    if (typeof text === "string") writeSync(fd, text);
+    else writeAll(fd, text);
     fsyncSync(fd);
     closeSync(fd);
     renameSync(tmp, join(this.dir, name));
-    try {
-      const d = openSync(this.dir, "r");
-      fsyncSync(d);
-      closeSync(d);
-    } catch {
-      /* directory fsync is best effort on some platforms */
-    }
+    syncDir(this.dir);
   }
 
   saveHard(term: number, vote: string | null) {
@@ -154,8 +292,15 @@ export class Disk {
   }
 
   writeEntries(entries: Entry[]) {
-    if (this.log === null) this.log = openSync(join(this.dir, "log.jsonl"), "a");
-    writeSync(this.log, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    if (this.log === null) {
+      const path = join(this.dir, this.logName);
+      const created = !existsSync(path);
+      this.log = openSync(path, "a");
+      // The new name must survive a crash as well as the bytes the fsync covers.
+      if (created) syncDir(this.dir);
+    }
+    if (this.binary) writeAll(this.log, encodeRecords(entries));
+    else writeSync(this.log, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
     this.unsynced = true;
   }
 
@@ -211,7 +356,11 @@ export class Disk {
   rewrite(entries: readonly Entry[]) {
     this.closeLog();
     this.unsynced = false;
-    this.atomic("log.jsonl", entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : ""));
+    if (!this.binary) {
+      this.atomic("log.jsonl", entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : ""));
+      return;
+    }
+    this.atomic(BIN_LOG, encodeRecords(entries));
   }
 
   saveSnapshot(s: Snapshot, entries: readonly Entry[]) {
@@ -284,7 +433,7 @@ export class RaftNode {
     if (existing) return existing;
     const path = join(this.dir, groupDir(name));
     const fresh = !existsSync(path);
-    const disk = new Disk(path);
+    const disk = new Disk(path, soloVoter(name) !== null);
     if (fresh && name !== META && name !== QUORUM) writeFileSynced(join(path, "group.json"), JSON.stringify({ group: name }));
     const seed = (Date.now() ^ hashId(name) ^ hashId(this.id)) >>> 0;
     const core = new RaftCore(this.id, name, this.votersOf(name), seed || 1);

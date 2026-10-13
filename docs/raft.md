@@ -290,7 +290,11 @@ Snapshot `state`, for `snap`: `{"queues":[{"vhost","queue","messages":[<enq data
   `votedFor`, and the log entries it accepted. The file layout is up to each
   implementation. Rust and Bun both use `raft/<group>/state.json`,
   `log.jsonl` (one entry per line; a torn last line is dropped on load) and
-  `snapshot.json` in the data directory.
+  `snapshot.json` in the data directory. Bun's one-voter queue groups
+  (`q:s1:`, only its own worker processes run them) write `log.bin` instead:
+  binary records with a CRC, each the entry as JSON with a quorum body kept
+  as bytes after it. A torn or corrupt tail ends the log; an older
+  `log.jsonl` there is read first and moved to `log.bin`.
 - **Leader writes:** a leader may send `append` and `snap` before its own
   fsync of the same entries (the Raft thesis, section 10.2.1). It counts
   itself toward a commit only up to the index its disk writer reported

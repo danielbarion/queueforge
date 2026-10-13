@@ -20,7 +20,7 @@ cells in `bench/results/2026-10-11/`, unless an item names an older run.
   the before/after numbers, and update `BENCHMARK.md` if the published numbers change.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-13, Cortex Code): Bun suite 216/216, Rust 437/437, PHP
+Current tree (2026-10-13, Cortex Code): Bun suite 225/225, Rust 437/437, PHP
 38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
 134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
 "Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
@@ -147,9 +147,22 @@ committed entry was its own apply job, so every confirm and delivery was its own
 socket write (~55k writes/s of ~550 B, now ~1.9k of ~27 KB); and the leader's
 log fsync ran on the event loop (now `fs.fsync` on the thread pool; the leader
 counts itself toward a commit when it lands). A/B, 3 interleaved runs: 17,235 →
-67,020 msg/s, p99 210 → 14 ms, process memory 228 → 250 MiB. Next, if needed:
-the Raft log is JSON lines with the body base64'd inside (`stringify`, `Buffer`,
-`toString` ~18% of that worker); a binary entry encoding would cut that.
+67,020 msg/s, p99 210 → 14 ms, process memory 228 → 250 MiB.
+
+Follow-up done (Cortex Code, 2026-10-13): the Raft entry encoding. A quorum
+append keeps its body as bytes; `body_b64` is a lazy getter, so the JSON a peer
+or a snapshot sees is unchanged, and a one-voter group never computes it. One-
+voter groups (`q:s1:`) write `log.bin`: per record magic, flags, lengths, CRC-32,
+the entry as JSON without the body, then the body. Loading reads an older
+`log.jsonl` first and moves it to `log.bin`; a torn or corrupt tail ends the log
+and is cut. `meta`, `quorum` and multi-voter groups keep `log.jsonl`, the files
+Rust also writes. The apply of an entry the leader already holds no longer
+decodes its body (`quorumAppendKey`), and `soloVoter` is memoized. Tests:
+`bun/test/raft-binary-log.test.ts` (8). A/B, two rounds of 3 interleaved runs, 4
+CPU quorum: median 57.0k (46.1k–58.7k) → 64.8k (56.1k–66.6k) msg/s, about +14%,
+p99 19–30 → 16–20 ms, memory unchanged; 1 CPU quorum and stream unchanged (+7%
+and +3%, ranges overlap). Bun 225/225, conformance 135/135. Not yet in a full
+benchmark run.
 
 Earlier (2026-10-12): worker processes
 of one supervisor share a broker id (`data/broker-id`); a quorum queue declared

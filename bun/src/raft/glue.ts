@@ -15,7 +15,7 @@
 import { existsSync, fsyncSync, mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { Broker } from "../broker/index.ts";
-import { decodeQuorumAppend } from "../wire.ts";
+import { decodeQuorumAppend, quorumAppendKey } from "../wire.ts";
 import type { Entry, Msg } from "./core.ts";
 import { META, QUORUM, RaftNode, queueGroup, soloQueueGroup, type Group } from "./node.ts";
 
@@ -263,9 +263,10 @@ export class Consensus {
 
   /** Store a committed quorum message here, once. */
   private applyEnq(data: Record<string, unknown>) {
-    const d = decodeQuorumAppend(data);
-    const key = `${d.vhost}\0${d.queue}\0${d.messageId}`;
+    // The leader that proposed it already holds it: skip decoding the body.
+    const key = quorumAppendKey(data);
     if (this.live.has(key)) return;
+    const d = decodeQuorumAppend(data);
     this.live.set(key, data);
     const q = this.broker.queues.get(this.broker.key(d.vhost, d.queue));
     if (!q) return;
