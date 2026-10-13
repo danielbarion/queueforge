@@ -353,10 +353,8 @@ def scenarios_mem_md(cells, size):
         def m(r):
             if not r:
                 return "–"
-            def metric(name):
-                value = num(r.get(name))
-                return "?" if value is None else fmt(value)
-            return f"{metric('anon_mib')} / {metric('peak_mib')}"
+            value = num(r.get("peak_mib"))
+            return "?" if value is None else fmt(value)
 
         lines.append(f"| {sc['title']} | " + " | ".join(m(r) for r in row) + " |")
     return "\n".join(lines)
@@ -413,8 +411,7 @@ def site_ts(paced_data, cells, conns, sc_cells, measured=""):
                 vals[TONE[k]] = None if v is None else round(v, 2)
             kind = "latency" if sc["id"] in LATENCY else ("bytes" if sc.get("bytes") else "rate")
             texts = {TONE[k]: site_text(sc, r) for k, r in row.items()}
-            memory = {TONE[k]: {"anonymous": num((r or {}).get("anon_mib")),
-                                "cgroup": num((r or {}).get("peak_mib"))} for k, r in row.items()}
+            memory = {TONE[k]: num((r or {}).get("peak_mib")) for k, r in row.items()}
             out.append(
                 f'  {{ size: "{size}", id: "{sc["id"]}", title: {json.dumps(sc["title"])}, real: {json.dumps(sc["real"])}, '
                 f'kind: "{kind}", values: {json.dumps(vals)}, text: {json.dumps(texts)}, memory: {json.dumps(memory)} }},'
@@ -447,7 +444,7 @@ def main():
     parts = ["### Paced\n", paced_md(p), "### Load\n", load_md(cells), ""]
     for size in [s[2] for s in S.SIZES]:
         parts += [f"### Scenarios, {size}\n", scenarios_md(sc, size), "",
-                  f"Peak memory, {size} (anonymous / cgroup total MiB):\n", scenarios_mem_md(sc, size), ""]
+                  f"Peak container memory, {size} (MiB, page cache included):\n", scenarios_mem_md(sc, size), ""]
     parts += ["### Connections\n", "| Broker | Size | Held | Memory at hold |", "| --- | --- | ---: | ---: |"]
     for (kind, cpus, mem), (held, used) in sorted(conns.items(), key=lambda kv: (ORDER.index(kv[0][0]), kv[0][1], kv[0][2])):
         parts.append(f"| {C.NAMES[kind]} | {cpus} CPU / {mem} | {held:,} | {used} |")

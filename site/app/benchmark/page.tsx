@@ -123,7 +123,10 @@ export default function BenchmarkPage() {
           <p className="section-lead">
             Unpaced message rate at each container in the load sweep. 16 connections is consume/s,
             the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
-            The numbers are the same ones in the table further down.
+            The numbers are the same ones in the table further down. Each point is one 8 s
+            measurement, not a median of repeats, so a single stall moves it: Bun&apos;s one-queue,
+            16-connection points ranged from 57k to 207k msg/s across the runs of 2026-10-11 to
+            2026-10-13. The application scenarios below repeat every cell.
           </p>
           <SizeCharts rows={loadRows} />
         </div>
@@ -181,27 +184,17 @@ export default function BenchmarkPage() {
           <h2>Memory.</h2>
           <p className="section-lead">
             The peak memory of each scenario cell above, sampled once per second. With repeats,
-            each value is the median of the runs&apos; peaks. There are two ways to count it, so
-            there are two tables.
+            each value is the median of the runs&apos; peaks. It is the total Linux charges to the
+            container: the broker&apos;s processes plus the page cache, the kernel&apos;s copy of the
+            files the broker has written (its message log).
           </p>
-          <h3 className="table-heading">Process memory</h3>
           <p className="caption">
-            What the broker itself uses: the anonymous memory of its processes, which is the
-            language heap plus buffers, queues held in memory, and the runtime. This is the number
-            to compare. Highlighted: the lowest in that row.
+            The cache grows with how much the broker has written, not with what it still holds, and
+            the kernel reclaims it as soon as anything needs the memory. A durable broker that
+            writes fast can sit at its 1 GiB limit without running short, which is why the rows are
+            not ranked.
           </p>
-          <MemoryTable rows={scenarioRows} field="anonymous" label="Process memory" />
-          <h3 className="table-heading">Container memory, page cache included</h3>
-          <p className="caption">
-            What Linux charges to the container: process memory plus the page cache, the kernel&apos;s
-            copy of the files the broker has written (its message log). The cache grows with how
-            much the broker has written, not with what it still holds, and the kernel reclaims it
-            as soon as anything needs the memory. That is how a durable broker writing fast sits
-            at its 1 GiB limit here while its own processes use far less: Rust in the 1 CPU
-            broadcast cell is 12 MiB of process memory and 1,024 MiB of container memory. It is
-            not ranked, because a high value means a lot was written, not that memory ran short.
-          </p>
-          <MemoryTable rows={scenarioRows} field="cgroup" label="Container memory, page cache included" />
+          <MemoryTable rows={scenarioRows} label="Peak container memory" />
         </div>
       </section>
 

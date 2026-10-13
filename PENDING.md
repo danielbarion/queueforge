@@ -257,6 +257,27 @@ file-backed), and every message, callback and promise is a GC object.
   plus the 48 MiB shadow-body cap (freed once drained); heavy ~110k closures and
   ~55k promises for ~7k unacked messages (the per-publish confirm chains).
 
+### B12. 200 ms stalls in the multi-connection load cells (new, 2026-10-13)
+
+Status: open, cause unknown. The load sweep's shared (16 connections, one
+queue) and spread (16 queues) cells for Bun now often show a p99 at the 200 ms
+overflow bucket, with the broker at 25–70% CPU instead of 95–370%. The median
+latency stays where it was (40 ms against 39 ms), so it is pauses, not slower
+work. Stalled cells out of 10: 0 (2026-10-11), 1 (2026-10-12, Bun load at
+09:56 −03:00), then 7, 3, 6, 6, 4 and 6 in every run since 2026-10-12b (18:35).
+Which cells stall changes from run to run: 4 CPU / 4 GiB shared was 203,604
+consume/s in 2026-10-13c and 104,191 in 2026-10-13d. RabbitMQ, Rust and PHP
+rows in those runs are copies of 2026-10-12, so they say nothing about the
+host at the time.
+
+Bun commits between the clean and the stalled runs: `ae6e9bf` (single-voter
+quorum groups for cores workers), `e3054c9` (Bun 1.4.2 → 1.4.3), `7b571bf`
+(forwarded messages get their own id). Next: on a quiet host, run the shared
+and spread cells five times each for images built at `0c41bd9`, `ae6e9bf`,
+`e3054c9` and `HEAD`, interleaved.
+
+Verify: no 200 ms p99 in five repeats of every shared and spread cell.
+
 ### B6. Peak memory and latency vary between runs
 
 Status: open, cause unknown. Five fixed-image repeats of work-queue, latency-1k
@@ -468,6 +489,13 @@ Status: done (2026-10-10); see Done.
 ### H2. Memory columns
 
 Status: done (2026-10-10); see Done.
+
+### H3. The load sweep measures each cell once
+
+Status: open. `bench/load.py` runs every container size and shape once for 8 s,
+and the site charts that single number, so one stall moves a point by 2× (B12).
+Run each cell three times and publish the median with its range, like the
+scenario matrix.
 
 ---
 

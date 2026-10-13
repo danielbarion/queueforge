@@ -57,8 +57,8 @@ export type ScenarioRow = {
   kind: "rate" | "bytes" | "latency";
   values: Record<Tone, number | null>;
   text: Record<Tone, string>;
-  /** Sampled memory peaks in MiB; cgroup includes file cache as well as process memory. */
-  memory: Record<Tone, { anonymous: number | null; cgroup: number | null }>;
+  /** Sampled container memory peak in MiB, page cache included. */
+  memory: Record<Tone, number | null>;
 };
 
 const AVERAGE_BROKERS: { tone: Tone; name: string }[] = [

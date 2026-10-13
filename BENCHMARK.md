@@ -337,26 +337,26 @@ the per-publish confirm chains).
 | Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 34,843 [34,829–34,858; n=2] | 95,672 [93,922–97,422; n=2] | 107,113 [92,322–121,903; n=2] | 59,746 [59,256–60,236; n=2] |
 | Backlog fill and drain | A consumer outage: 300,000 durable 1 KiB messages pile up, then 4 consumers drain them. | fill / drain msg/s | 74,235 / 50,007 [50,002–50,012; n=2] | 146,492 / 150,000 [150,000–150,000; n=2] | 149,960 / 149,811 [149,700–149,922; n=2] | 66,529 / 99,960 [99,931–99,989; n=2] |
 
-Peak memory, 1 CPU / 1 GiB (anonymous / cgroup total MiB):
+Peak container memory, 1 CPU / 1 GiB (MiB, page cache included):
 
 | Scenario | RabbitMQ | Rust | Bun | PHP |
 | --- | ---: | ---: | ---: | ---: |
-| Work queue | 122 / 194 | 9 / 93 | 95 / 149 | 12 / 108 |
-| Fire-and-forget telemetry | 193 / 254 | 64 / 186 | 54 / 91 | 12 / 25 |
-| Broadcast to 20 services | 144 / 186 | 12 / 1,024 | 110 / 120 | 18 / 350 |
-| 64 queues, own publisher each | 190 / 220 | 26 / 1,024 | 114 / 134 | 22 / 243 |
-| 64 KiB messages | 266 / 368 | 10 / 82 | 104 / 113 | 12 / 54 |
-| 1 MiB messages | 240 / 335 | 13 / 82 | 108 / 120 | 16 / 157 |
-| Latency at 1,000 msg/s | 120 / 152 | 6 / 42 | 48 / 78 | 10 / 27 |
-| Latency at 10,000 msg/s | 122 / 153 | 6 / 74 | 66 / 83 | 11 / 34 |
-| 500 queues, 1,000 connections | 376 / 422 | 110 / 1,024 | 82 / 118 | 44 / 66 |
-| Slow workers, prefetch 1 | 132 / 176 | 8 / 76 | 60 / 88 | 19 / 38 |
-| Quorum queue | 578 / 971 | 791 / 1,024 | 74 / 86 | 33 / 304 |
-| Stream queue | 120 / 1,024 | 230 / 1,024 | 226 / 1,024 | 261 / 758 |
-| Priority queue | 120 / 152 | 7 / 77 | 94 / 106 | 12 / 50 |
-| Transactions | 121 / 151 | 7 / 75 | 60 / 74 | 12 / 34 |
-| Heavy mixed load | 202 / 234 | 62 / 1,024 | 282 / 324 | 50 / 932 |
-| Backlog fill and drain | 162 / 534 | 465 / 813 | 630 / 818 | 646 / 1,016 |
+| Work queue | 194 | 93 | 149 | 108 |
+| Fire-and-forget telemetry | 254 | 186 | 91 | 25 |
+| Broadcast to 20 services | 186 | 1,024 | 120 | 350 |
+| 64 queues, own publisher each | 220 | 1,024 | 134 | 243 |
+| 64 KiB messages | 368 | 82 | 113 | 54 |
+| 1 MiB messages | 335 | 82 | 120 | 157 |
+| Latency at 1,000 msg/s | 152 | 42 | 78 | 27 |
+| Latency at 10,000 msg/s | 153 | 74 | 83 | 34 |
+| 500 queues, 1,000 connections | 422 | 1,024 | 118 | 66 |
+| Slow workers, prefetch 1 | 176 | 76 | 88 | 38 |
+| Quorum queue | 971 | 1,024 | 86 | 304 |
+| Stream queue | 1,024 | 1,024 | 1,024 | 758 |
+| Priority queue | 152 | 77 | 106 | 50 |
+| Transactions | 151 | 75 | 74 | 34 |
+| Heavy mixed load | 234 | 1,024 | 324 | 932 |
+| Backlog fill and drain | 534 | 813 | 818 | 1,016 |
 
 ### Scenarios, 4 CPU / 4 GiB
 
@@ -370,17 +370,17 @@ Peak memory, 1 CPU / 1 GiB (anonymous / cgroup total MiB):
 | Quorum queue | The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB. | delivered msg/s | 85,414 [85,270–85,557; n=2] | unscored (0/2 complete; 0 failed, 0 incomplete, 2 missed rate) | 56,281 [53,615–58,948; n=2] | 7,749 [7,569–7,930; n=2] |
 | Heavy mixed load | 64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each. | delivered msg/s | 122,603 [122,138–123,069; n=2] | 252,798 [249,582–256,015; n=2] | 243,555 [165,130–321,981; n=2] | 58,668 [55,476–61,860; n=2] |
 
-Peak memory, 4 CPU / 4 GiB (anonymous / cgroup total MiB):
+Peak container memory, 4 CPU / 4 GiB (MiB, page cache included):
 
 | Scenario | RabbitMQ | Rust | Bun | PHP |
 | --- | ---: | ---: | ---: | ---: |
-| Work queue | 142 / 172 | 11 / 79 | 198 / 314 | 12 / 79 |
-| Fire-and-forget telemetry | 184 / 238 | 110 / 230 | 158 / 298 | 11 / 22 |
-| Broadcast to 20 services | 178 / 214 | 14 / 1,336 | 372 / 416 | 21 / 366 |
-| 64 queues, own publisher each | 236 / 299 | 40 / 1,892 | 393 / 466 | 22 / 244 |
-| 500 queues, 1,000 connections | 432 / 480 | 136 / 2,224 | 318 / 466 | 44 / 67 |
-| Quorum queue | 313 / 770 | 3,078 / 4,096 | 226 / 344 | 33 / 288 |
-| Heavy mixed load | 300 / 410 | 108 / 1,124 | 514 / 610 | 49 / 1,106 |
+| Work queue | 172 | 79 | 314 | 79 |
+| Fire-and-forget telemetry | 238 | 230 | 298 | 22 |
+| Broadcast to 20 services | 214 | 1,336 | 416 | 366 |
+| 64 queues, own publisher each | 299 | 1,892 | 466 | 244 |
+| 500 queues, 1,000 connections | 480 | 2,224 | 466 | 67 |
+| Quorum queue | 770 | 4,096 | 344 | 288 |
+| Heavy mixed load | 410 | 1,124 | 610 | 1,106 |
 
 ### Connections
 

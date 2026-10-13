@@ -74,12 +74,10 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
 }
 
 /**
- * Peak memory per scenario and broker, grouped by container size. `field`
- * picks the broker's own processes or the whole container. The lowest
- * process memory in a row is highlighted; container totals are not ranked,
- * since page cache is the kernel's to reclaim.
+ * Peak container memory per scenario and broker, grouped by container size.
+ * Not ranked: the total includes page cache, which is the kernel's to reclaim.
  */
-export function MemoryTable({ rows, field, label }: { rows: ScenarioRow[]; field: "anonymous" | "cgroup"; label: string }) {
+export function MemoryTable({ rows, label }: { rows: ScenarioRow[]; label: string }) {
   const sizes = [...new Set(rows.map((row) => row.size))];
   const format = (value: number | null) => value == null ? "–" : `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} MiB`;
   return (
@@ -109,14 +107,12 @@ export function MemoryTable({ rows, field, label }: { rows: ScenarioRow[]; field
                 <th scope="rowgroup" colSpan={COLUMNS.length + 1}>{size}</th>
               </tr>
               {rows.filter((row) => row.size === size).map((row) => {
-                const values = COLUMNS.map((c) => row.memory[c.tone][field]);
-                const known = values.filter((v): v is number => v != null);
-                const low = field === "anonymous" && known.length ? Math.min(...known) : null;
+                const values = COLUMNS.map((c) => row.memory[c.tone]);
                 return (
                   <tr key={`${size}-${row.id}`}>
                     <th scope="row" className="memory-scenario">{row.title}</th>
                     {COLUMNS.map((c, i) => (
-                      <td key={c.tone} className={values[i] == null ? "na" : values[i] === low ? "best" : undefined}>
+                      <td key={c.tone} className={values[i] == null ? "na" : undefined}>
                         {format(values[i])}
                       </td>
                     ))}
