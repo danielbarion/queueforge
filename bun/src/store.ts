@@ -127,6 +127,13 @@ export class Store {
   private closed = false;
   private nextId = 1;
   private pending: Array<{ id: number; vhost: string; queue: string; body: Uint8Array; meta: string }> = [];
+  /**
+   * Ids of `pending` for a deep group. Every ack looked its row up with a scan
+   * of the whole group, which a heavy confirm window keeps in the thousands.
+   * Rows are only appended, and the array is replaced when a group is taken,
+   * so the index catches up from `upTo` and rebuilds when `of` changes.
+   */
+  private pendingIndex: { of: Store["pending"]; upTo: number; byId: Map<number, Store["pending"][number]> } | null = null;
   /** Stream appends for the end of this task: vhost, queue, offset, ts, body, meta. */
   private streamStaged: Array<[string, string, number, number, Uint8Array, string]> = [];
   private streamError: Error | null = null;
@@ -900,6 +907,7 @@ export class Store {
         }
         for (const id of this.pendingDeletes) this.dropShadow(id);
         this.pending = [];
+        this.pendingIndex = null;
         this.pendingDeletes = deleteNext;
         this.settledPending.clear();
         this.relocate();
@@ -969,6 +977,7 @@ export class Store {
     }
     for (const id of this.pendingDeletes) this.dropShadow(id);
     this.pending = [];
+    this.pendingIndex = null;
     this.pendingDeletes = deleteNext;
     this.settledPending.clear();
     this.dirty = false;
@@ -1188,6 +1197,7 @@ export class Store {
     const rows = this.pending;
     const deletes = this.pendingDeletes;
     this.pending = [];
+    this.pendingIndex = null;
     this.pendingDeletes = [];
     const insert = this.insertRow;
     const remove = this.deleteRow;
@@ -1205,13 +1215,24 @@ export class Store {
     return row ? row.body : null;
   }
 
+  /** The staged row with this id, if it is still in the group-commit buffer. */
+  private stagedRow(id: number): Store["pending"][number] | undefined {
+    const rows = this.pending;
+    if (rows.length <= 32) {
+      this.pendingIndex = null;
+      for (let i = rows.length - 1; i >= 0; i--) if (rows[i]!.id === id) return rows[i];
+      return undefined;
+    }
+    let index = this.pendingIndex;
+    if (!index || index.of !== rows) index = this.pendingIndex = { of: rows, upTo: 0, byId: new Map() };
+    for (; index.upTo < rows.length; index.upTo++) index.byId.set(rows[index.upTo]!.id, rows[index.upTo]!);
+    return index.byId.get(id);
+  }
+
   /** Read one stored body and its meta JSON. A missing id returns null. */
   readStored(id: number): { body: Uint8Array; meta: string } | null {
-    for (let i = this.pending.length - 1; i >= 0; i--) {
-      const staged = this.pending[i]!;
-      if (staged.id !== id) continue;
-      return { body: staged.body, meta: staged.meta };
-    }
+    const staged = this.stagedRow(id);
+    if (staged) return { body: staged.body, meta: staged.meta };
     if (this.shadow.has(id)) {
       const synced = this.shadow.get(id);
       if (synced == null) return null;
@@ -1228,8 +1249,7 @@ export class Store {
   }
 
   deleteMessage(id: number) {
-    for (let i = 0; i < this.pending.length; i++) {
-      if (this.pending[i]!.id !== id) continue;
+    if (this.stagedRow(id)) {
       // A no-ack delivery can settle the row before the confirm's fsync.
       // Keep the insert in this group. The delete is queued when the group
       // commits, so it is not in the fsync the confirm waits on.
