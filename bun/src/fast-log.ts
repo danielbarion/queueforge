@@ -202,7 +202,8 @@ function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[]):
   return buf;
 }
 
-function parseRecord(buf: Buffer, pos: number, limit: number): { next: number; op: LogOp } | null {
+/** `copy` false keeps the body a view of `buf`, for a buffer that holds this one record. */
+function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { next: number; op: LogOp } | null {
   if (pos + 4 > limit) return null;
   if (buf[pos] === 0 && buf[pos + 1] === 0 && buf[pos + 2] === 0 && buf[pos + 3] === 0) return null;
   if (buf.toString("ascii", pos, pos + 4) !== "QFML") return null;
@@ -234,7 +235,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number): { next: number; o
   const bodyLen = buf.readUInt32LE(o);
   o += 4;
   if (bodyLen > MAX_BODY || !need(bodyLen + 4)) return null;
-  const body = Buffer.from(buf.subarray(o, o + bodyLen));
+  const body = copy ? Buffer.from(buf.subarray(o, o + bodyLen)) : buf.subarray(o, o + bodyLen);
   o += bodyLen;
   const crc = buf.readUInt32LE(o);
   o += 4;
@@ -279,17 +280,92 @@ function syncDir(dir: string) {
   }
 }
 
+/**
+ * Row id to the chunk, offset and length of its latest insert record.
+ *
+ * One Map entry per row names a slot in three typed arrays. Three Maps, one
+ * per field, were about 135 bytes per queued message.
+ */
+export class LiveIndex {
+  private readonly slots = new Map<number, number>();
+  private readonly free: number[] = [];
+  private used = 0;
+  chunk = new Uint32Array(1024);
+  at = new Uint32Array(1024);
+  len = new Uint32Array(1024);
+
+  get size(): number {
+    return this.slots.size;
+  }
+
+  has(id: number): boolean {
+    return this.slots.has(id);
+  }
+
+  /** The slot of `id` in {@link chunk}, {@link at} and {@link len}. */
+  slot(id: number): number | undefined {
+    return this.slots.get(id);
+  }
+
+  set(id: number, chunk: number, at: number, len: number) {
+    let slot = this.slots.get(id);
+    if (slot === undefined) {
+      slot = this.free.pop() ?? this.used++;
+      if (slot >= this.chunk.length) this.grow();
+      this.slots.set(id, slot);
+    }
+    this.chunk[slot] = chunk;
+    this.at[slot] = at;
+    this.len[slot] = len;
+  }
+
+  /** Forget `id`. Returns the chunk it pointed at, or undefined when it was not live. */
+  delete(id: number): number | undefined {
+    const slot = this.slots.get(id);
+    if (slot === undefined) return undefined;
+    this.slots.delete(id);
+    const chunk = this.chunk[slot];
+    // A drained backlog gives its arrays back.
+    if (this.slots.size === 0) {
+      this.free.length = 0;
+      this.used = 0;
+      if (this.chunk.length > 1024) {
+        this.chunk = new Uint32Array(1024);
+        this.at = new Uint32Array(1024);
+        this.len = new Uint32Array(1024);
+      }
+    } else {
+      this.free.push(slot);
+    }
+    return chunk;
+  }
+
+  ids(): IterableIterator<number> {
+    return this.slots.keys();
+  }
+
+  entries(): IterableIterator<[number, number]> {
+    return this.slots.entries();
+  }
+
+  private grow() {
+    const size = this.chunk.length * 2;
+    for (const field of ["chunk", "at", "len"] as const) {
+      const next = new Uint32Array(size);
+      next.set(this[field]);
+      this[field] = next;
+    }
+  }
+}
+
 export class FastLog {
   private active: ActiveChunk;
   /** Lowest chunk id still on disk. */
   private oldest: number;
-  /** Row id to the chunk holding its latest insert, for rows without a synced delete. */
-  private readonly liveChunk = new Map<number, number>();
-  /** Chunk id to the number of rows in `liveChunk` that point at it. */
+  /** Row id to its latest insert record, for rows without a synced delete. */
+  private readonly live = new LiveIndex();
+  /** Chunk id to the number of rows in `live` that point at it. */
   private readonly liveCount = new Map<number, number>();
-  /** Row id to its latest insert record: offset in its chunk and length. */
-  private readonly livePos = new Map<number, number>();
-  private readonly liveLen = new Map<number, number>();
   /** Inserts ever written to each chunk, live or not. Relocation compares against it. */
   private readonly chunkInserts = new Map<number, number>();
   /** Read descriptors of rotated chunks, for rows paged out of memory. */
@@ -415,7 +491,7 @@ export class FastLog {
 
   /** Recovery index: sqlite is a cache once this log is authoritative. */
   hasLiveMessage(id: number): boolean {
-    return this.liveChunk.has(id);
+    return this.live.has(id);
   }
 
   /**
@@ -423,23 +499,25 @@ export class FastLog {
    * dropped from memory. Null when the row is not live in a synced batch.
    */
   readRow(id: number): LogInsert | null {
-    const chunk = this.liveChunk.get(id);
-    const at = this.livePos.get(id);
-    const len = this.liveLen.get(id);
-    if (chunk === undefined || at === undefined || len === undefined) return null;
+    const slot = this.live.slot(id);
+    if (slot === undefined) return null;
+    const chunk = this.live.chunk[slot]!;
+    const at = this.live.at[slot]!;
+    const len = this.live.len[slot]!;
     let fd = chunk === this.active.id ? this.active.fd : this.readFds.get(chunk);
     if (fd === undefined) {
       fd = openSync(chunkPath(this.dir, chunk), "r");
       this.readFds.set(chunk, fd);
     }
-    const buf = Buffer.allocUnsafe(len);
+    // Its own allocation, not the shared pool: the body below is a view of it.
+    const buf = Buffer.allocUnsafeSlow(len);
     let got = 0;
     while (got < len) {
       const n = readSync(fd, buf, got, len - got, at + got);
       if (n <= 0) break;
       got += n;
     }
-    const rec = got === len ? parseRecord(buf, 0, len) : null;
+    const rec = got === len ? parseRecord(buf, 0, len, false) : null;
     if (!rec || rec.op.kind !== "insert" || rec.op.id !== id) return null;
     // `body` is a view of this one-record buffer, so it pins nothing else.
     return { id, vhost: rec.op.vhost, queue: rec.op.queue, meta: rec.op.meta, body: rec.op.body };
@@ -447,7 +525,7 @@ export class FastLog {
 
   /** Used when migrating the current sqlite state back into this log. */
   liveMessageIds(): IterableIterator<number> {
-    return this.liveChunk.keys();
+    return this.live.ids();
   }
 
   /**
@@ -583,8 +661,8 @@ export class FastLog {
     if (chunk === this.oldest && this.active.id - at < COMPACT_AFTER) return [];
     this.relocating = { chunk: this.oldest, at: this.active.id };
     const ids: number[] = [];
-    for (const [id, held] of this.liveChunk) {
-      if (held === this.oldest) ids.push(id);
+    for (const [id, slot] of this.live.entries()) {
+      if (this.live.chunk[slot] === this.oldest) ids.push(id);
     }
     return ids;
   }
@@ -625,19 +703,14 @@ export class FastLog {
 
   private track(id: number, chunk: number, at: number, len: number) {
     this.untrack(id);
-    this.liveChunk.set(id, chunk);
-    this.livePos.set(id, at);
-    this.liveLen.set(id, len);
+    this.live.set(id, chunk, at, len);
     this.liveCount.set(chunk, (this.liveCount.get(chunk) ?? 0) + 1);
     this.chunkInserts.set(chunk, (this.chunkInserts.get(chunk) ?? 0) + 1);
   }
 
   private untrack(id: number) {
-    const chunk = this.liveChunk.get(id);
+    const chunk = this.live.delete(id);
     if (chunk === undefined) return;
-    this.liveChunk.delete(id);
-    this.livePos.delete(id);
-    this.liveLen.delete(id);
     const left = (this.liveCount.get(chunk) ?? 1) - 1;
     if (left > 0) this.liveCount.set(chunk, left);
     else this.liveCount.delete(chunk);

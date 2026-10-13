@@ -122,12 +122,21 @@ export function pickConsumer(q: QueueLive): Consumer | null {
     for (const c of q.consumers) if ((c.priority ?? 0) > (active.priority ?? 0)) active = c;
     return active.want() ? active : null;
   }
-  const ready = q.consumers.filter((c) => c.want());
-  if (!ready.length) return null;
-  const bestPri = Math.max(...ready.map((c) => c.priority ?? 0));
-  const n = q.consumers.length;
+  // Two plain passes: the highest priority among consumers that want a
+  // delivery, then the round-robin walk at that priority. A filter, a map and
+  // a spread per delivery were three arrays for every message. `want()` runs
+  // on the same consumers in the same order as before: it marks a connection
+  // whose output is full, and the drain wakes the queue from that mark.
+  const consumers = q.consumers;
+  const n = consumers.length;
+  let bestPri = -Infinity;
   for (let i = 0; i < n; i++) {
-    const c = q.consumers[(q.rr + i) % n]!;
+    const c = consumers[i]!;
+    if (c.want() && (c.priority ?? 0) > bestPri) bestPri = c.priority ?? 0;
+  }
+  if (bestPri === -Infinity) return null;
+  for (let i = 0; i < n; i++) {
+    const c = consumers[(q.rr + i) % n]!;
     if (c.want() && (c.priority ?? 0) === bestPri) {
       q.rr = (q.rr + i + 1) % n;
       return c;
