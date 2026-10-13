@@ -547,6 +547,7 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   const state = {
     user: this.user,
     vhost: this.vhost || "/",
+    wantsBlocked: this.wantsBlocked,
     channels: [...this.channels.entries()].map(([id, ch]) => ({
       id,
       confirm: ch.confirm,

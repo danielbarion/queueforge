@@ -384,6 +384,8 @@ export function adoptTlsSocket(broker: Broker, raw: NodeSocket, context: tls.Sec
 type MigratedState = {
   user: string;
   vhost: string;
+  /** The client advertised connection.blocked during the handshake on the previous child. */
+  wantsBlocked?: boolean;
   channels: Array<{ id: number; confirm: boolean; prefetch: number }>;
 };
 
@@ -413,11 +415,13 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
   conn.stage = "frames";
   conn.user = state.user;
   conn.vhost = state.vhost;
+  conn.wantsBlocked = state.wantsBlocked === true;
   for (const item of state.channels) {
     const ch = conn.ch(item.id);
     ch.confirm = item.confirm;
     ch.prefetch = item.prefetch;
   }
+  conn.watchAlarms();
   const fail = () => {
     conn.closed = true;
     conn.connClosed = true;
@@ -429,6 +433,13 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
   };
   socket.on("data", (buf: Buffer) => {
     void conn.push(viewOf(buf)).catch(fail);
+  });
+  // The consumers and unacked deliveries of an adopted connection live here, so this child cleans them up.
+  socket.on("close", () => {
+    conn.closed = true;
+    conn.connClosed = true;
+    conn.noteMetricsClosed();
+    void conn.dropConsumers().then(() => conn.requeueAll()).then(() => conn.dropExclusive()).finally(() => conn.unwatchAlarms()).catch(() => {});
   });
   socket.on("error", fail);
   socket.on("drain", () => conn.flush());
