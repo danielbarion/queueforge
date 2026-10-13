@@ -447,7 +447,7 @@ test("a quorum delivery reads the durable body back from the store", async () =>
 test("consumed ids stay listed and a duplicate does not grow the list", () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-qseen-"));
   const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
-  const broker = new Broker(cfg("a", []), store);
+  const broker = new Broker(cfg("a", members), store);
   try {
     for (let i = 0; i < 1000; i++) broker.noteConsumed("/", "q", `id-${i}`);
     broker.noteConsumed("vé", "q", "id-0");
@@ -457,6 +457,21 @@ test("consumed ids stay listed and a duplicate does not grow the list", () => {
     expect(rows[0]).toEqual({ vhost: "/", queue: "q", id: "id-0" });
     expect(rows[999]).toEqual({ vhost: "/", queue: "q", id: "id-999" });
     expect(rows[1000]).toEqual({ vhost: "vé", queue: "q", id: "id-0" });
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a broker with no other member keeps no consumed ids", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-qseen-solo-"));
+  const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
+  try {
+    for (const list of [[], [{ id: "a", addr: "127.0.0.1:1" }]]) {
+      const broker = new Broker(cfg("a", list), store);
+      for (let i = 0; i < 100; i++) broker.noteConsumed("/", "q", `id-${i}`);
+      expect(broker.consumed).toHaveLength(0);
+    }
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
