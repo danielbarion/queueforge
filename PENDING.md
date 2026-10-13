@@ -20,11 +20,11 @@ cells in `bench/results/2026-10-11/`, unless an item names an older run.
   the before/after numbers, and update `BENCHMARK.md` if the published numbers change.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-11, Cortex Code): Bun suite 194/194, Rust core/parity/broker
-tests pass, PHP native suite 35/35 files; conformance with LDAP/OAuth/PKI fixtures
-Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ 134/135 (no delayed-message plugin).
-Published numbers: `BENCHMARK.md` section "Session (2026-10-11)", raw cells in
-`bench/results/2026-10-11/` (two repeats per scenario cell, median shown).
+Current tree (2026-10-12, Cortex Code): Bun suite 205/205, Rust 437/437, PHP
+38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
+134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
+"Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
+evening re-run in `bench/results/2026-10-12c/` (two repeats per cell, median shown).
 
 ### Measurement rules
 
@@ -109,8 +109,11 @@ queue not growing (`kept=yes`); backlog fill not slower.
 
 ### B2. Fanout on more than one core
 
-Status: open, improved. 4 CPU fanout-20 now 147k deliveries/s at four processes
-(A/B, one repeat, 2026-10-10), 278k when forced to one process.
+Status: open, improved. 4 CPU fanout-20 171k deliveries/s at 372 MiB in the
+2026-10-12 evening run (`BENCHMARK.md`, "Bun re-measured that evening"). It had
+grown to 2 GiB: a message forwarded to one queue on another process got the
+id `""`, so every such message in that queue shared it and its rows were never
+deleted (`7b571bf`). 278k when forced to one process.
 
 With one child process per core, a fanout exchange's queues are spread across
 the children, so most copies of each publish cross processes as base64 JSON.
@@ -221,7 +224,11 @@ Verify: five repeats of work-queue and latency-1k with a tight spread.
 
 ### B7. Low-rate latency
 
-Status: partly done (Cortex Code, 2026-10-10). fdatasync moved to a worker thread
+Status: partly done. 2026-10-12 (Cortex Code): the disk alarm's `statfsSync`
+took ~17 ms a call in Docker Desktop and ran every 200 ms on the event loop,
+9% of a 1 CPU broker; it now samples every 5 s (`08d1bb5`), latency-10k p99
+2.27 → 0.91 ms in an A/B. many-queues and slow-consumers p99 still vary
+(3–8 ms and 0.3–17 ms in one A/B, both images). Earlier, 2026-10-10: fdatasync moved to a worker thread
 (`bun/src/sync-worker.ts`): many-queues p99 38 → 4–8 ms, latency-10k p99 9–18 → 1–4
 ms. slow-consumers is still bimodal (1 or 15 ms); an idle Bun process with a 1 ms
 timer sees stalls up to 11 ms on Docker Desktop, so part of it is the VM's timers.
@@ -234,6 +241,18 @@ Where: the lone-publish path. `SOCKET_WAIT_MS` and the lone mode in
 `bun/src/store.ts`. `store.beforeSync` already writes staged deliveries before a
 small fsync. Applying it to every fsync cost the paced 128-confirm run about 10%,
 so it is limited to groups of 16 or fewer.
+
+### B10. Stream throughput (done, 2026-10-12)
+
+Status: done (Cortex Code, `08d1bb5`). 1 CPU stream 26.2k → 81.9k msg/s at
+216 MiB; Rust 101k. Appends share one sqlite transaction per task, readers
+behind the resident 16 MiB read 512-entry ranges, and entries out of memory
+keep a timestamp and a size only. Next, if needed: profile again (sqlite
+inserts were 55% of the 1 CPU profile before; `bun/src/store.ts`
+`flushStreamAppends`).
+
+Verify: `test/stream-read-ahead.test.ts`, `test/stream-raft.test.ts`; the
+stream cell at 1 CPU with memory flat.
 
 ### B9. Fanout stall at 1 CPU (new, 2026-10-11)
 

@@ -1,0 +1,43 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:73058cfe8eb696eccf6dc245b929581c31896259bf0df0dd628cf3ff6c95594a",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "8a4dd618a2dd41afbb9c14ceff0e59f1",
+  "expected_repeats": 2,
+  "harness_sha256": "bee8da2969925131d284cd1e00070d64d312745445cbf6d6acc80db09942fd63",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "08d1bb5a956ee28ce4c59eebababf5b1cc9ec6ec",
+  "invocation_source_content_sha256": "bf86dfa3ab7615b191cee4ba43da74a10475cb1cdbe9773021236e5aec454cc7",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M docs/ci.md",
+    " M site/app/bench-data.ts",
+    "?? bench/results/2026-10-12b/",
+    "?? bench/results/2026-10-12c/"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "689567fcc00149da9bb34623052340f6",
+  "scenario": {
+    "args": "-x 4 -y 4 -u jobs -f persistent -s 1024 -c 100 -q 100",
+    "id": "work-queue",
+    "real": "Order processing: 4 services publish durable 1 KiB jobs with confirms, 4 workers ack each one.",
+    "title": "Work queue"
+  },
+  "scenario_sha256": "1999298daa3ad10af2942b0dfe9c86b015d31d48b00e87898be2069fd4820a21",
+  "started_utc": "2026-10-12T23:35:35Z"
+}

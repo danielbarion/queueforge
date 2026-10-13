@@ -1,0 +1,51 @@
+{
+  "broker": "rabbit",
+  "broker_image": "sha256:ddc75301edf58a8332934cf2d801be7cbf8d65c6458d747364a8046238ff1c89",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "bbea2c5a77584f47b10e1f50150ce94b",
+  "expected_repeats": 2,
+  "harness_sha256": "381b4cccff67cdc3abd8ba8b6f30ca056ffa067253d3e2b4b3e480d000429b03",
+  "image_source_revision": null,
+  "image_source_sha256": null,
+  "invocation_source_commit": "aaacc5d65837b210e0b165c1456d5ae6c3586822",
+  "invocation_source_content_sha256": "f4a044eb77e085051f664a273c7e76794d92fadc8caf4c5827870b9786371d33",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M bun/src/broker/topology.ts",
+    " M bun/src/config.ts",
+    " M bun/src/cores.ts",
+    " M bun/src/raft/glue.ts",
+    " M bun/src/raft/node.ts",
+    " M bun/src/supervise.ts",
+    " M docs/ci.md",
+    "?? bench/results/2026-10-12/",
+    "?? bun/test/quorum-cores.test.ts"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "40a1593854e04ea997f73bf0dee955b4",
+  "scenario": {
+    "args": "-qp svc-%d -qpf 1 -qpt 500 -x 500 -y 500 -f persistent -s 512 -c 10 -q 10 -r 10",
+    "id": "many-queues",
+    "rate": 5000,
+    "real": "Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer.",
+    "seconds": 50,
+    "title": "500 queues, 1,000 connections",
+    "warm": 20
+  },
+  "scenario_sha256": "ce0a241e6f0cf2209ca374ea14347f462e6a62502f7007f2a8f8e2f98c14b7d6",
+  "started_utc": "2026-10-12T11:34:02Z"
+}

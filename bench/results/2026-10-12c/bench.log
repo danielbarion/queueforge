@@ -1,0 +1,69 @@
+20:35:22 BASELINE copied from /Users/danielbarion/Desktop/projects/queueforge/bench/results/2026-10-12
+20:35:22 STEP build start
+20:35:25 STEP build done in 2s
+20:35:25 PROGRESS vm before ncpu=2 mem=8320565248
+20:35:25 PROGRESS docker quit
+20:35:30 PROGRESS docker start
+20:35:33 PROGRESS vm large ncpu=8 mem=25159827456
+20:35:33 STEP scenarios start
+20:36:04 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=123424.2 recv=123418.7 mb= p50=1.12 p99=5.24 mib=192 anon=94 cpu=92 client= kept=yes
+20:36:33 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=127960.0 recv=127961.6 mb= p50=1.06 p99=5.06 mib=102 anon=90 cpu=94 client= kept=yes
+20:37:03 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=484858.9 recv=484856.5 mb= p50=0.81 p99=2.85 mib=97 anon=61 cpu=99 client= kept=yes
+20:37:32 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=478841.3 recv=478839.4 mb= p50=0.83 p99=2.71 mib=91 anon=55 cpu=99 client= kept=yes
+20:38:02 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=13214.1 recv=264298.0 mb= p50=3.14 p99=7.81 mib=121 anon=105 cpu=95 client= kept=yes
+20:38:31 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=13257.4 recv=265240.9 mb= p50=3.16 p99=8.58 mib=120 anon=108 cpu=95 client= kept=yes
+20:39:01 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=141313.9 recv=141320.2 mb= p50=4.64 p99=12.85 mib=128 anon=112 cpu=97 client= kept=yes
+20:39:31 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=143053.6 recv=143110.4 mb= p50=4.70 p99=12.49 mib=114 anon=100 cpu=97 client= kept=yes
+20:40:01 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=7857.2 recv=7857.4 mb=514.9 p50=0.74 p99=3.63 mib=113 anon=105 cpu=87 client= kept=yes
+20:40:30 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=8105.7 recv=8106.1 mb=531.2 p50=0.72 p99=3.52 mib=118 anon=106 cpu=88 client= kept=yes
+20:41:00 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=510.1 recv=510.1 mb=534.9 p50=2.58 p99=6.38 mib=110 anon=98 cpu=85 client= kept=yes
+20:41:29 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=505.4 recv=505.4 mb=530.0 p50=3.31 p99=8.18 mib=108 anon=97 cpu=85 client= kept=yes
+20:41:59 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.5 recv=1000.5 mb= p50=0.14 p99=1.86 mib=78 anon=47 cpu=22 client= kept=yes
+20:42:28 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.4 recv=1000.4 mb= p50=0.14 p99=2.84 mib=75 anon=47 cpu=21 client= kept=yes
+20:42:58 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10005.3 mb= p50=0.04 p99=4.14 mib=77 anon=70 cpu=52 client= kept=yes
+20:43:27 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10004.7 recv=10005.0 mb= p50=0.04 p99=1.84 mib=83 anon=70 cpu=49 client= kept=yes
+20:44:23 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.2 recv=5002.2 mb= p50=0.13 p99=6.30 mib=127 anon=87 cpu=39 client= kept=yes
+20:45:19 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.3 recv=5002.3 mb= p50=0.13 p99=6.80 mib=123 anon=84 cpu=41 client= kept=yes
+20:45:49 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.4 recv=5002.4 mb= p50=0.03 p99=13.81 mib=94 anon=66 cpu=26 client= kept=yes
+20:46:18 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5004.3 recv=5004.2 mb= p50=0.04 p99=4.87 mib=86 anon=59 cpu=26 client= kept=yes
+20:46:48 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=96921.2 recv=96919.6 mb= p50=2.94 p99=15.65 mib=699 anon=686 cpu=96 client= kept=yes
+20:47:17 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=95294.8 recv=95294.8 mb= p50=2.93 p99=16.11 mib=646 anon=633 cpu=95 client= kept=yes
+20:47:47 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=68246.5 recv=85464.2 mb= p50=5864.08 p99=6037.71 mib=1024 anon=215 cpu=76 client= kept=yes
+20:48:17 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=64254.4 recv=78292.3 mb= p50=6505.11 p99=6847.05 mib=1024 anon=218 cpu=72 client= kept=yes
+20:48:46 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=130508.9 recv=130506.9 mb= p50=0.46 p99=2.45 mib=99 anon=89 cpu=92 client= kept=yes
+20:49:16 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=128392.4 recv=128394.2 mb= p50=0.47 p99=2.57 mib=101 anon=89 cpu=92 client= kept=yes
+20:49:45 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=57925.5 recv=57924.4 mb= p50=0.11 p99=1.10 mib=78 anon=62 cpu=81 client= kept=yes
+20:50:15 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=57268.7 recv=57268.4 mb= p50=0.11 p99=1.11 mib=72 anon=61 cpu=81 client= kept=yes
+20:50:45 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=122568.7 recv=122962.9 mb= p50=42.61 p99=170.19 mib=340 anon=292 cpu=98 client= kept=yes
+20:51:15 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=123042.2 recv=122910.6 mb= p50=42.84 p99=166.84 mib=341 anon=292 cpu=98 client= kept=yes
+20:52:52 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=149221.5 recv=149558.5 mb= p50= p99= mib=871 anon=618 cpu=1 client= kept=yes
+20:54:29 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=150007.0 recv=149337.5 mb= p50= p99= mib=833 anon=647 cpu=2 client= kept=yes
+20:54:59 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=152646.5 recv=152645.2 mb= p50=1.04 p99=3.79 mib=315 anon=200 cpu=129 client= kept=yes
+20:55:28 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=154214.3 recv=154216.5 mb= p50=1.04 p99=3.73 mib=307 anon=192 cpu=129 client= kept=yes
+20:55:58 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=427672.9 recv=427671.7 mb= p50=0.94 p99=2.58 mib=302 anon=162 cpu=112 client= kept=yes
+20:56:28 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=422502.6 recv=422507.2 mb= p50=0.97 p99=2.36 mib=294 anon=155 cpu=112 client= kept=yes
+20:56:57 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=8596.9 recv=171939.5 mb= p50=4.42 p99=11.72 mib=418 anon=371 cpu=312 client= kept=yes
+20:57:27 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=8510.7 recv=170234.6 mb= p50=4.46 p99=12.01 mib=414 anon=372 cpu=309 client= kept=yes
+20:57:57 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=286675.2 recv=286745.4 mb= p50=2.52 p99=18.87 mib=480 anon=385 cpu=305 client= kept=yes
+20:58:27 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=252140.8 recv=252507.5 mb= p50=3.80 p99=50.92 mib=494 anon=445 cpu=293 client= kept=yes
+20:59:25 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.8 recv=5002.8 mb= p50=0.11 p99=2.73 mib=467 anon=309 cpu=72 client= kept=yes
+21:00:22 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.09 p99=1.29 mib=454 anon=322 cpu=63 client= kept=yes
+21:00:52 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=17186.5 recv=17186.7 mb= p50=16.52 p99=220.82 mib=453 anon=332 cpu=102 client= kept=yes
+21:01:21 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=17075.2 recv=17075.3 mb= p50=16.66 p99=210.37 mib=443 anon=323 cpu=103 client= kept=yes
+21:01:51 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=298299.0 recv=298526.3 mb= p50=16.15 p99=128.69 mib=610 anon=540 cpu=298 client= kept=yes
+21:02:21 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=235351.1 recv=235384.8 mb= p50=23.21 p99=162.26 mib=595 anon=521 cpu=242 client= kept=yes
+21:02:22 DONE scenarios
+21:02:22 STEP scenarios done in 1609s
+21:02:22 STEP load start
+21:05:31 STEP load done in 189s
+21:05:31 STEP connections start
+21:36:15 STEP connections done in 1844s
+21:36:15 PROGRESS restore docker to 2 cpu 8192 MiB
+21:36:15 PROGRESS docker quit
+21:36:20 PROGRESS docker start
+21:36:23 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+21:36:23 STEP paced start
+21:38:11 STEP paced done in 107s
+21:38:11 STEP report start
+21:38:11 STEP report done in 0s
+21:38:11 RUN done: /Users/danielbarion/Desktop/projects/queueforge/bench/last-run.json
