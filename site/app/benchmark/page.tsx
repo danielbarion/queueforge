@@ -266,7 +266,7 @@ export default function BenchmarkPage() {
             unless <code>QUEUEFORGE_CORES</code> is set, so its rates do not grow with the container.
           </p>
           <p className="caption">
-            Bun at 4 CPU held 247,844 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
+            Bun at 4 CPU held 259,195 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
             GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near 65,527 sockets. PHP held
             28,000 at 1 CPU and 40,000 at 2 and 4 CPU; at 4 CPU / 8 GiB its 40,000 logins took longer
             than the login window, so it is listed at 20,000. Rust confirm/s on the shared queue,

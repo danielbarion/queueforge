@@ -1,0 +1,15 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-134709-728, starting producer #0
+id: test-134709-728, starting producer #0, channel #0
+id: test-134709-728, starting producer #1
+id: test-134709-728, starting producer #1, channel #0
+id: test-134709-728, starting producer #2
+id: test-134709-728, starting producer #2, channel #0
+id: test-134709-728, starting producer #3
+id: test-134709-728, starting producer #3, channel #0
+id: test-134709-728, time 1.000 s, sent: 139060 msg/s, confirmed: 138264 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 179/2938/5191/12651/23847/53295 µs
+id: test-134709-728, time 2.003 s, sent: 160617 msg/s, confirmed: 161413 msg/s, nacked: 0 msg/s, min/median/75th/95th/99th/max confirm latency: 518/2777/3894/7597/13265/26132 µs
+test stopped (Producer reached message limit [4])
+id: test-134709-728, sending rate avg: 148429 msg/s
+id: test-134709-728, receiving rate avg: 0 msg/s
+id: test-134709-728, confirm latency min/median/75th/95th/99th/max 313/2820/4295/10059/17798/34159 µs

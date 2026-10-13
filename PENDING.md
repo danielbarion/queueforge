@@ -24,7 +24,7 @@ Current tree (2026-10-13, Cortex Code): Bun suite 225/225, Rust 437/437, PHP
 38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
 134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
 "Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
-2026-10-13 re-run in `bench/results/2026-10-13b/` (two repeats per cell, median shown).
+2026-10-13 re-run in `bench/results/2026-10-13d/` (two repeats per cell, median shown).
 
 ### Measurement rules
 
@@ -161,8 +161,9 @@ decodes its body (`quorumAppendKey`), and `soloVoter` is memoized. Tests:
 `bun/test/raft-binary-log.test.ts` (8). A/B, two rounds of 3 interleaved runs, 4
 CPU quorum: median 57.0k (46.1k–58.7k) → 64.8k (56.1k–66.6k) msg/s, about +14%,
 p99 19–30 → 16–20 ms, memory unchanged; 1 CPU quorum and stream unchanged (+7%
-and +3%, ranges overlap). Bun 225/225, conformance 135/135. Not yet in a full
-benchmark run.
+and +3%, ranges overlap). Bun 225/225, conformance 135/135. Full run
+`bench/results/2026-10-13d`: 4 CPU quorum 56,281 msg/s (53,615 and 58,948),
+against 47,484 the run before.
 
 Earlier (2026-10-12): worker processes
 of one supervisor share a broker id (`data/broker-id`); a quorum queue declared
