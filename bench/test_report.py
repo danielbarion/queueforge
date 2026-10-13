@@ -112,6 +112,13 @@ class RepeatReportTests(unittest.TestCase):
         self.write([self.row("run1", 100), self.row("run2", "", ok="0", err="oom")])
         self.assertEqual(report.site_text({"id": "work-queue"}, self.selected()["row"]), "failed")
 
+    def test_measured_spans_the_days_of_the_published_cells(self):
+        one = {"a": {"started_utc": "2026-10-12T10:00:00Z"}, "b": {"started_utc": "2026-10-12T12:00:00Z"}}
+        self.assertEqual(report.measured_dates(one, "/x/2026-10-13"), "2026-10-12")
+        two = {**one, "c": {"started_utc": "2026-10-13T01:00:00Z"}}
+        self.assertEqual(report.measured_dates(two, "/x/2026-10-13"), "2026-10-12 to 2026-10-13")
+        self.assertEqual(report.measured_dates({"a": {}}, "/x/2026-10-09"), "2026-10-09")
+
     def test_units_are_spaced(self):
         self.assertEqual(report.spaced_units("454.7MiB"), "454.7 MiB")
         self.assertEqual(report.spaced_units("1.93GiB"), "1.93 GiB")

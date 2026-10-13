@@ -87,8 +87,8 @@ export default function BenchmarkPage() {
             QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
             batch write, or a consumer ack if that happens first, and classic does not fsync before
             the confirm. The figure below is the average across scenarios, not one of them. The
-            rows where QueueForge loses stay in the table. Bun was measured again that evening, after
-            a memory fix and a faster stream path; the other brokers are the morning run.
+            rows where QueueForge loses stay in the table. RabbitMQ, Rust and PHP are the 2026-10-12
+            run; Bun was measured again on 2026-10-13, after memory fixes and a faster stream path.
           </p>
         </div>
       </section>
@@ -265,7 +265,7 @@ export default function BenchmarkPage() {
             unless <code>QUEUEFORGE_CORES</code> is set, so its rates do not grow with the container.
           </p>
           <p className="caption">
-            Bun at 4 CPU held 249,230 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
+            Bun at 4 CPU held 258,181 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
             GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near 65,527 sockets. PHP held
             28,000 at 1 CPU and 40,000 at 2 and 4 CPU; at 4 CPU / 8 GiB its 40,000 logins took longer
             than the login window, so it is listed at 20,000. Rust confirm/s on the shared queue,

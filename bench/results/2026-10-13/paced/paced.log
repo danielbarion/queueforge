@@ -1,0 +1,8 @@
+01:40:12 START ncpu=2 mem=8320565248
+01:40:12 RUN docker compose -f docker-compose.bench.yml up -d
+01:40:13 ready bun after 0s
+01:40:13 CELL bun inflight=1
+01:40:56 DONE bun inflight=1 exit=0
+01:40:56 CELL bun inflight=128
+01:41:56 DONE bun inflight=128 exit=0
+01:41:59 END ncpu=2 mem=8320565248

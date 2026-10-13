@@ -1,0 +1,51 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:21edf8e6606646f27ce8d72d71dedaf464e4a5f0df9b44702f297077ea251f20",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "bbea2c5a77584f47b10e1f50150ce94b",
+  "expected_repeats": 2,
+  "harness_sha256": "381b4cccff67cdc3abd8ba8b6f30ca056ffa067253d3e2b4b3e480d000429b03",
+  "image_source_revision": "744846f844374847c902b5e7fd59b4342a51ef99",
+  "image_source_sha256": null,
+  "invocation_source_commit": "aaacc5d65837b210e0b165c1456d5ae6c3586822",
+  "invocation_source_content_sha256": "13f33cc04b93d5851767d033dc242f481dc54a8b2c5784cbe695270a2c7b5f8d",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M bun/src/broker/topology.ts",
+    " M bun/src/config.ts",
+    " M bun/src/cores.ts",
+    " M bun/src/raft/glue.ts",
+    " M bun/src/raft/node.ts",
+    " M bun/src/supervise.ts",
+    " M docs/ci.md",
+    " M rust/crates/queueforge-core/src/queue/durable.rs",
+    " M rust/crates/queueforge-core/src/queue/stream.rs",
+    " M rust/crates/queueforge-store/src/wal/mod.rs",
+    "?? bench/results/2026-10-12/",
+    "?? bun/test/quorum-cores.test.ts"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 4,
+    "broker_cpuset": "0-3",
+    "broker_memory": "4g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "d0851ccf1136f62c04578915a7c9ec89a1bb9e23b3e6b01b3df58bf7b6bf22d7",
+  "run_id": "2fc6515a24ce4c0b995c0fab8ea24a02",
+  "scenario": {
+    "args": "-qp tenant-%d -qpf 1 -qpt 64 -x 64 -y 64 -f persistent -s 512 -c 20 -q 50",
+    "id": "routing-64",
+    "real": "Per-tenant queues: 64 publishers and 64 consumers on a direct exchange, durable 512 B.",
+    "title": "64 queues, own publisher each"
+  },
+  "scenario_sha256": "1e8c9f22356a0eddd35956ab8316e63c7b8c0f4fab03968266a716190d3b9fd2",
+  "started_utc": "2026-10-12T12:32:43Z"
+}

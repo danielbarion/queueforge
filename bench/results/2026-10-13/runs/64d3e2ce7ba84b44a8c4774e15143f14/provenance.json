@@ -1,0 +1,53 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:4b0d4fba2903399085bb454464ee6de37c06d1069763977d1894af2156773dab",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "40604e94882645dcbeade6c6648db9b2",
+  "expected_repeats": 2,
+  "harness_sha256": "bee8da2969925131d284cd1e00070d64d312745445cbf6d6acc80db09942fd63",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "1473d9e06ea3b12930997092d856b3254012146c",
+  "invocation_source_content_sha256": "678759574710e9b49f4f1ab10bb5a60ad1fd4316ec02b0bcc4445636476067d8",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M PENDING.md",
+    " M docs/ci.md",
+    "?? bench/results/2026-10-12b/",
+    "?? bench/results/2026-10-13/"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "64d3e2ce7ba84b44a8c4774e15143f14",
+  "scenario": {
+    "id": "backlog",
+    "phases": [
+      [
+        "-x 4 -y 0 -u backlog -f persistent -s 1024 -c 200 -C 75000",
+        null
+      ],
+      [
+        "-x 0 -y 4 -u backlog -q 200",
+        90
+      ]
+    ],
+    "real": "A consumer outage: 300,000 durable 1 KiB messages pile up, then 4 consumers drain them.",
+    "seconds": 240,
+    "title": "Backlog fill and drain"
+  },
+  "scenario_sha256": "76f7507d7c57461eefcaeedcc17103dd9db462d1652bd51ddc02b2325ff44f60",
+  "started_utc": "2026-10-13T03:55:10Z"
+}

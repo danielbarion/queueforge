@@ -423,6 +423,18 @@ def site_ts(paced_data, cells, conns, sc_cells, measured=""):
     return "\n".join(out) + "\n"
 
 
+def measured_dates(sc_cells, root):
+    """`2026-10-12`, or `2026-10-12 to 2026-10-13` when the published cells span days.
+
+    A `--baseline` run keeps the other brokers' rows, so the directory name is
+    only the newest date. Rows without `started_utc` fall back to that name."""
+    days = sorted({str(r.get("started_utc") or "")[:10] for r in sc_cells.values() if r} - {""})
+    if not days:
+        named = re.match(r"\d{4}-\d{2}-\d{2}", os.path.basename(os.path.normpath(root)))
+        return named.group(0) if named else ""
+    return days[0] if days[0] == days[-1] else f"{days[0]} to {days[-1]}"
+
+
 def main():
     # `--no-site` leaves site/app/bench-data.ts alone, for quick runs.
     args = [a for a in sys.argv[1:] if a != "--no-site"]
@@ -441,8 +453,7 @@ def main():
         parts.append(f"| {C.NAMES[kind]} | {cpus} CPU / {mem} | {held:,} | {used} |")
     open(os.path.join(root, "report.md"), "w").write("\n".join(parts) + "\n")
     if write_site:
-        measured = re.match(r"\d{4}-\d{2}-\d{2}", os.path.basename(os.path.normpath(root)))
-        open(os.path.join(C.ROOT, "site", "app", "bench-data.ts"), "w").write(site_ts(p, cells, conns, sc, measured.group(0) if measured else ""))
+        open(os.path.join(C.ROOT, "site", "app", "bench-data.ts"), "w").write(site_ts(p, cells, conns, sc, measured_dates(sc, root)))
     print(os.path.join(root, "report.md"))
 
 

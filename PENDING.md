@@ -20,11 +20,11 @@ cells in `bench/results/2026-10-11/`, unless an item names an older run.
   the before/after numbers, and update `BENCHMARK.md` if the published numbers change.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-12, Cortex Code): Bun suite 205/205, Rust 437/437, PHP
+Current tree (2026-10-13, Cortex Code): Bun suite 206/206, Rust 437/437, PHP
 38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
 134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
 "Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
-evening re-run in `bench/results/2026-10-12c/` (two repeats per cell, median shown).
+2026-10-13 re-run in `bench/results/2026-10-13/` (two repeats per cell, median shown).
 
 ### Measurement rules
 
@@ -110,7 +110,7 @@ queue not growing (`kept=yes`); backlog fill not slower.
 ### B2. Fanout on more than one core
 
 Status: open, improved. 4 CPU fanout-20 171k deliveries/s at 372 MiB in the
-2026-10-12 evening run (`BENCHMARK.md`, "Bun re-measured that evening"). It had
+2026-10-12c run (`BENCHMARK.md`, "Bun re-measured (2026-10-13)"); 169k at 379 MiB on 2026-10-13. It had
 grown to 2 GiB: a message forwarded to one queue on another process got the
 id `""`, so every such message in that queue shared it and its rows were never
 deleted (`7b571bf`). 278k when forced to one process.
@@ -201,6 +201,27 @@ into the log (`bun/src/fast-log.ts`), and on the way out (`bodyFrame` in
 
 Already tried: writing large staged frames without the gather copy. It measured
 slower (348 vs 404 MB/s at 64 KiB) and was reverted. Profile before trying again.
+
+### B11. Memory against Rust (2026-10-13)
+
+Status: partly done (Cortex Code, `1473d9e`). Bun 1.4 is Rust, but the broker
+runs on JavaScriptCore: idle is ~22 MiB anonymous (plus the 41 MiB binary,
+file-backed), and every message, callback and promise is a GC object.
+
+- Done: quorum consumed ids are no longer kept without a peer that could hold
+  a copy (lone broker, or sibling workers with single-voter groups). The set
+  never shrank: 1 CPU quorum ~660 MiB after 25 s, now 79 MiB.
+- Open, clusters: with real peers the consumed-id set still grows without
+  bound (`bun/src/broker/consumed-set.ts`). Trim an id once every peer has
+  applied its drop, or after the peers' next hello.
+- Measured, not adopted: `BUN_JSC_smallHeapGrowthFactor` (default 2) trades
+  throughput for memory at 1 CPU, where cells run at 95% CPU. 3: quorum,
+  work-queue, telemetry, heavy +5–11% rate, +30–50% memory. 4: +7–9% rate,
+  about twice the memory. `MIMALLOC_PURGE_DELAY=0`: 5–10% less memory, 3–9%
+  slower. `--smol`: no saving.
+- What remains, by cell: backlog ~660 bytes of JS objects per queued message
+  plus the 48 MiB shadow-body cap (freed once drained); heavy ~110k closures and
+  ~55k promises for ~7k unacked messages (the per-publish confirm chains).
 
 ### B6. Peak memory and latency vary between runs
 
