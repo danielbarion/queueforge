@@ -7,11 +7,13 @@
  *
  * A round ticks both cores, writes what they report dirty, then sends. A
  * leader's own `append` and `snap` go out before its fsync; it counts
- * itself toward a commit only once the write is done (`setDurable`). Votes
+ * itself toward a commit only once the write is done (`setDurable`), and a
+ * round that sends nothing else runs that fsync on the thread pool. Votes
  * and append replies wait for the write they depend on. Committed entries
- * are applied in log order by `apply`, and a proposal resolves after that.
+ * are applied in log order by `apply`, and a round's proposals resolve together
+ * after that.
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { RaftCore, type Entry, type Msg, type Snapshot } from "./core.ts";
 
@@ -86,9 +88,14 @@ type Pending = {
   sentTo: string | null;
 };
 
-class Disk {
+export class Disk {
   private log: number | null = null;
   private unsynced = false;
+  /** Bumped when the log file is replaced: a sync of the old one proves nothing. */
+  private gen = 0;
+  /** The fd a background fsync is running on. It is closed only once that returns. */
+  private syncingFd: number | null = null;
+  private closeAfterSync = false;
   constructor(private dir: string) {
     mkdirSync(dir, { recursive: true });
   }
@@ -152,15 +159,57 @@ class Disk {
     this.unsynced = true;
   }
 
-  sync() {
-    if (!this.unsynced || this.log === null) return;
+  /** @returns Whether it ran an fsync. */
+  sync(): boolean {
+    // A background sync still running has not covered its entries yet.
+    if (this.log === null || (!this.unsynced && this.syncingFd === null)) return false;
     this.unsynced = false;
     fsyncSync(this.log);
+    return true;
+  }
+
+  /** Something was written since the last sync started. */
+  get dirty(): boolean {
+    return this.unsynced && this.log !== null;
+  }
+
+  get syncing(): boolean {
+    return this.syncingFd !== null;
+  }
+
+  /**
+   * fsync the log on the thread pool. `done(true)` means every entry written
+   * before this call is on disk; false, that it failed or the file was
+   * replaced since. Only one runs at a time.
+   */
+  syncAside(done: (ok: boolean) => void) {
+    const fd = this.log!;
+    const gen = this.gen;
+    this.unsynced = false;
+    this.syncingFd = fd;
+    fsync(fd, (err) => {
+      this.syncingFd = null;
+      if (this.closeAfterSync) {
+        this.closeAfterSync = false;
+        closeSync(fd);
+      }
+      const ok = !err && gen === this.gen;
+      if (err && gen === this.gen) this.unsynced = true;
+      done(ok);
+    });
+  }
+
+  private closeLog() {
+    this.gen++;
+    if (this.log === null) return;
+    // Closing under a running fsync could hand its fd number to another file.
+    if (this.log === this.syncingFd) this.closeAfterSync = true;
+    else closeSync(this.log);
+    this.log = null;
   }
 
   rewrite(entries: readonly Entry[]) {
-    if (this.log !== null) closeSync(this.log);
-    this.log = null;
+    this.closeLog();
     this.unsynced = false;
     this.atomic("log.jsonl", entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : ""));
   }
@@ -171,8 +220,7 @@ class Disk {
   }
 
   close() {
-    if (this.log !== null) closeSync(this.log);
-    this.log = null;
+    this.closeLog();
   }
 }
 
@@ -466,8 +514,13 @@ export class RaftNode {
       g.disk.writeEntries(dirty.appended);
     }
     if (dirty.hardState) g.disk.saveHard(g.core.term, g.core.votedFor);
-    g.disk.sync();
-    g.core.setDurable(g.core.lastIndex());
+    if (late.length === 0 && dirty.truncatedFrom === null && !dirty.snapshot && g.core.role === "leader") {
+      // Nothing sent here waits on this write: a leader counts itself once it lands.
+      this.syncAside(g);
+    } else {
+      g.disk.sync();
+      g.core.setDurable(g.core.lastIndex());
+    }
     for (const [to, msg] of late) this.hooks.send(to, msg);
 
     const installed = g.core.takeInstalled();
@@ -475,25 +528,39 @@ export class RaftNode {
       g.sinceSnapshot = 0;
       this.enqueueApply(() => this.hooks.install(g.name, installed.state));
     }
-    for (const e of g.core.takeCommitted()) {
-      const w = g.waiters.get(e.i);
-      g.waiters.delete(e.i);
-      const waiter = w && w.term === e.term ? w : null;
-      if (w && !waiter) this.fail(g, w, "entry replaced by a new leader");
+    const committed = g.core.takeCommitted();
+    if (committed.length) {
+      const waiters: Array<Waiter | null> = [];
+      for (const e of committed) {
+        const w = g.waiters.get(e.i);
+        g.waiters.delete(e.i);
+        const waiter = w && w.term === e.term ? w : null;
+        if (w && !waiter) this.fail(g, w, "entry replaced by a new leader");
+        waiters.push(waiter);
+      }
+      // One job per round: waiters are answered together, so the publishers
+      // they release stage their frames in the same turns and share a write.
+      // A failed apply is retried from that entry; earlier ones stay applied.
+      let next = 0;
       this.enqueueApply(async () => {
-        await this.hooks.apply(g.name, e);
-        if (waiter) {
-          if ("remote" in waiter) this.hooks.send(waiter.remote.from, { t: "propose_r", g: g.name, rid: waiter.remote.rid, ok: true, index: e.i });
-          else waiter.resolve();
-        }
-        if (++g.sinceSnapshot >= compactAfter(g.name)) {
-          g.sinceSnapshot = 0;
-          const state = this.hooks.state(g.name);
-          const snap = g.core.compactAt(e.i, state);
-          if (snap) {
-            g.source = snap.state;
-            g.disk.saveSnapshot(snap, g.core.entries());
+        const ready: Array<[Waiter, number]> = [];
+        try {
+          for (; next < committed.length; next++) {
+            const e = committed[next]!;
+            await this.hooks.apply(g.name, e);
+            if (waiters[next]) ready.push([waiters[next]!, e.i]);
+            if (++g.sinceSnapshot >= compactAfter(g.name)) {
+              g.sinceSnapshot = 0;
+              const state = this.hooks.state(g.name);
+              const snap = g.core.compactAt(e.i, state);
+              if (snap) {
+                g.source = snap.state;
+                g.disk.saveSnapshot(snap, g.core.entries());
+              }
+            }
           }
+        } finally {
+          for (const [w, index] of ready) this.confirm(g, w, index);
         }
       });
     }
@@ -519,6 +586,29 @@ export class RaftNode {
         this.hooks.leaderChanged(g.name, usable);
       });
     }
+  }
+
+  /**
+   * Make the leader's log durable without blocking the loop. Entries written
+   * while one sync runs share the next; its completion runs another round.
+   */
+  private syncAside(g: GroupState) {
+    if (g.disk.syncing) return;
+    if (!g.disk.dirty) {
+      g.core.setDurable(g.core.lastIndex());
+      return;
+    }
+    const through = g.core.lastIndex();
+    g.disk.syncAside((ok) => {
+      if (ok) g.core.setDurable(through);
+      else if (!this.stopped) console.error("raft log fsync failed; retrying");
+      this.schedule();
+    });
+  }
+
+  private confirm(g: GroupState, w: Waiter, index: number) {
+    if ("remote" in w) this.hooks.send(w.remote.from, { t: "propose_r", g: g.name, rid: w.remote.rid, ok: true, index });
+    else w.resolve();
   }
 
   private fail(g: GroupState, w: Waiter, why: string) {

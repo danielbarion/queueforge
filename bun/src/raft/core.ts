@@ -51,6 +51,12 @@ export class RaftCore {
    * as the in-memory tests do.
    */
   private durable: number | null = null;
+  /**
+   * `voters()` and the index of the config entry it came from (0: none in
+   * the log). Rebuilt after anything that adds, drops or replaces a config
+   * entry or the snapshot's voters; a plain append keeps it.
+   */
+  private voterCache: { voters: string[]; at: number } | null = null;
 
   constructor(
     readonly id: string,
@@ -72,6 +78,7 @@ export class RaftCore {
       this.snapVoters = sorted(snapshot.voters);
     }
     this.log = log.filter((e) => e.i > this.snapIndex);
+    this.voterCache = null;
     this.applied = Math.min(Math.max(applied, this.snapIndex), this.lastIndex());
     this.commit = this.applied;
   }
@@ -112,22 +119,28 @@ export class RaftCore {
   }
 
   voters(): string[] {
+    return [...this.currentVoters().voters];
+  }
+
+  /** The cached voters, shared: callers must not change the array. */
+  private currentVoters(): { voters: string[]; at: number } {
+    if (this.voterCache) return this.voterCache;
     for (let i = this.log.length - 1; i >= 0; i--) {
       const e = this.log[i]!;
       if (e.kind === "config") {
         const v = (e.data as { voters?: unknown })?.voters;
-        if (Array.isArray(v)) return sorted(v.map(String));
+        if (Array.isArray(v)) return (this.voterCache = { voters: sorted(v.map(String)), at: e.i });
       }
     }
-    return this.snapVoters.length ? [...this.snapVoters] : [...this.initialVoters];
+    return (this.voterCache = { voters: this.snapVoters.length ? [...this.snapVoters] : [...this.initialVoters], at: 0 });
   }
 
   private quorum() {
-    return Math.floor(this.voters().length / 2) + 1;
+    return Math.floor(this.currentVoters().voters.length / 2) + 1;
   }
 
   private peers() {
-    return this.voters().filter((v) => v !== this.id);
+    return this.currentVoters().voters.filter((v) => v !== this.id);
   }
 
   private send(to: string, msg: Msg) {
@@ -179,6 +192,7 @@ export class RaftCore {
     const e: Entry = { i: this.lastIndex() + 1, term: this.term, kind, data };
     this.dirty.appended.push(e);
     this.log.push(e);
+    if (kind === "config") this.voterCache = null;
     return e.i;
   }
 
@@ -210,8 +224,9 @@ export class RaftCore {
   /** Move the voters one member at a time toward `wanted`. Leader only. */
   reconfigure(wanted: string[], now: number) {
     if (this.role !== "leader") return;
-    if (this.log.some((e) => e.kind === "config" && e.i > this.commit)) return;
-    const current = this.voters();
+    // At most one membership change in flight: the newest config entry is the only one that can be uncommitted.
+    if (this.currentVoters().at > this.commit) return;
+    const current = this.currentVoters().voters;
     const want = sorted(wanted);
     if (want.length === 0 || JSON.stringify(current) === JSON.stringify(want)) return;
     let next = [...current];
@@ -244,7 +259,7 @@ export class RaftCore {
   tick(now: number) {
     if (this.role === "leader") {
       if (now >= this.heartbeatDue) this.broadcastAppend(now);
-    } else if (now >= this.electionDeadline && this.voters().includes(this.id)) {
+    } else if (now >= this.electionDeadline && this.currentVoters().voters.includes(this.id)) {
       this.startPreVote(now);
     }
   }
@@ -315,7 +330,14 @@ export class RaftCore {
 
   private maybeCommit() {
     if (this.role !== "leader") return;
-    const matched = this.voters()
+    const voters = this.currentVoters().voters;
+    if (voters.length === 1 && voters[0] === this.id) {
+      // One voter: this member's durable index is the majority.
+      const n = this.durableLast();
+      if (n > this.commit && this.termAt(n) === this.term) this.commit = n;
+      return;
+    }
+    const matched = voters
       .map((v) => (v === this.id ? this.durableLast() : (this.matchIndex.get(v) ?? 0)))
       .sort((a, b) => b - a);
     const n = matched[this.quorum() - 1];
@@ -412,12 +434,14 @@ export class RaftCore {
       if (have !== null) {
         // Conflict: drop it and everything after.
         this.log.length = e.i - this.snapIndex - 1;
+        this.voterCache = null;
         this.dirty.appended = this.dirty.appended.filter((a) => a.i < e.i);
         this.dirty.truncatedFrom = this.dirty.truncatedFrom === null ? e.i : Math.min(this.dirty.truncatedFrom, e.i);
       }
       const copy: Entry = { i: e.i, term: e.term, kind: e.kind, data: e.data ?? null };
       this.dirty.appended.push(copy);
       this.log.push(copy);
+      if (copy.kind === "config") this.voterCache = null;
     }
     if (leaderCommit > this.commit) this.commit = Math.max(this.commit, Math.min(leaderCommit, lastNew));
     this.send(from, { t: "append_r", g: this.group, term: this.term, ok: true, match: lastNew });
@@ -455,6 +479,7 @@ export class RaftCore {
       this.snapIndex = lii;
       this.snapTerm = lit;
       this.snapVoters = sorted(voters);
+      this.voterCache = null;
       this.commit = lii;
       this.applied = lii;
       this.dirty.snapshot = snap;
@@ -486,6 +511,7 @@ export class RaftCore {
     this.snapIndex = index;
     this.snapTerm = term;
     this.snapVoters = voters;
+    this.voterCache = null;
     return { index, term, voters, state };
   }
 

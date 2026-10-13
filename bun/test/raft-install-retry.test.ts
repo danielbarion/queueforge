@@ -76,3 +76,54 @@ test("permanent restored snapshot failure remains unannounced and stop cancels r
     expect(applied).toBe(0); expect(announced).toBe(0);
   } finally { f.close(); errors.mockRestore(); }
 });
+
+function freshNode(hooks: RaftHooks) {
+  const dir = mkdtempSync(join(tmpdir(), "qf-raft-batch-"));
+  const node = new RaftNode("a", dir, ["a"], hooks);
+  return { node, close: () => { node.stop(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test("a failed apply in a batch retries from that entry and confirms the ones before it", async () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  let failures = 0;
+  const events: string[] = [];
+  const f = freshNode({
+    send: () => {}, state: () => ({}), install: async () => {}, leaderChanged: () => {},
+    apply: async (group, entry) => {
+      if (group !== META || entry.kind !== "cmd") return;
+      const v = (entry.data as { v: number }).v;
+      if (v === 2 && failures < 2) { failures++; throw new Error("temporary store failure"); }
+      events.push(`apply:${v}`);
+    },
+  });
+  try {
+    f.node.expedite(META);
+    await until(() => f.node.leader(META) === "a");
+    // Proposed in one turn: they commit in one round.
+    const all = [1, 2, 3].map((v) => f.node.propose(META, "cmd", { v }).then(() => events.push(`ok:${v}`)));
+    await until(() => events.includes("ok:1"));
+    expect(events).toEqual(["apply:1", "ok:1"]);
+    await Promise.all(all);
+    expect(failures).toBe(2);
+    expect(events.filter((e) => e.startsWith("apply:"))).toEqual(["apply:1", "apply:2", "apply:3"]);
+    expect(events.filter((e) => e.startsWith("ok:"))).toEqual(["ok:1", "ok:2", "ok:3"]);
+    for (const v of [1, 2, 3]) expect(events.indexOf(`ok:${v}`)).toBeGreaterThan(events.indexOf(`apply:${v}`));
+  } finally { f.close(); errors.mockRestore(); }
+});
+
+test("the waiters of one round are answered before a microtask the first one queues", async () => {
+  const f = freshNode({ send: () => {}, state: () => ({}), install: async () => {}, leaderChanged: () => {}, apply: async () => {} });
+  try {
+    f.node.expedite(META);
+    await until(() => f.node.leader(META) === "a");
+    // A confirm stages its frame and queues the socket write as a microtask:
+    // the write must find every confirm of the round staged.
+    let answered = 0;
+    let seenByFirstWrite = -1;
+    await Promise.all([1, 2, 3, 4].map((v) => f.node.propose(META, "cmd", { v }).then(() => {
+      if (answered++ === 0) queueMicrotask(() => { seenByFirstWrite = answered; });
+    })));
+    await pause(0);
+    expect(seenByFirstWrite).toBe(4);
+  } finally { f.close(); }
+});

@@ -178,3 +178,92 @@ test("a single voter commits alone", () => {
   sim.propose(1);
   expect(sim.values("solo")).toEqual([1]);
 });
+
+/** The voters as the log says, read without the cache. */
+function scannedVoters(node: RaftCore): string[] {
+  const log = node.entries();
+  for (let i = log.length - 1; i >= 0; i--) {
+    const v = (log[i]!.data as { voters?: unknown } | null)?.voters;
+    if (log[i]!.kind === "config" && Array.isArray(v)) return [...new Set(v.map(String))].sort();
+  }
+  const snap = (node as unknown as { snapVoters: string[]; initialVoters: string[] });
+  return snap.snapVoters.length ? [...snap.snapVoters] : [...snap.initialVoters];
+}
+
+test("cached voters follow config appends, conflicts, compaction and snapshots", () => {
+  const sim = new Sim(["a", "b", "c"]);
+  for (const id of ["d", "e"]) sim.nodes.set(id, new RaftCore(id, "meta", ["a", "b", "c"], id.charCodeAt(0)));
+  const check = () => {
+    for (const node of sim.nodes.values()) expect(node.voters()).toEqual(scannedVoters(node));
+  };
+  sim.run(3000);
+  check();
+  const plans = [["a", "b", "c", "d"], ["a", "b", "c", "d", "e"], ["b", "c", "d", "e"], ["a", "b", "c"]];
+  for (const [round, wanted] of plans.entries()) {
+    for (let i = 0; i < 6; i++) {
+      const leader = sim.leader();
+      sim.nodes.get(leader)!.reconfigure(wanted, sim.now);
+      check();
+      sim.run(200);
+      check();
+    }
+    // Uncommitted entries on a cut-off leader are replaced once it rejoins.
+    const old = sim.leader();
+    for (let i = 0; i < 5; i++) sim.nodes.get(old)!.propose("x", `lost-${round}-${i}`, sim.now);
+    sim.nodes.get(old)!.reconfigure(["a"], sim.now);
+    check();
+    sim.down.add(old);
+    sim.run(3000);
+    check();
+    sim.down.clear();
+    sim.run(1000);
+    check();
+    const leader = sim.nodes.get(sim.leader())!;
+    leader.snapshotSource = () => ({ round });
+    for (let i = 0; i < 3; i++) sim.propose(`kept-${round}-${i}`);
+    sim.run(300);
+    expect(leader.compact({ round })).not.toBeNull();
+    check();
+  }
+  for (const id of ["a", "b", "c"]) expect(sim.nodes.get(id)!.voters()).toEqual(["a", "b", "c"]);
+});
+
+test("a follower that missed a membership change takes the voters from the snapshot", () => {
+  const sim = new Sim(["a", "b", "c"]);
+  sim.nodes.set("d", new RaftCore("d", "meta", ["a", "b", "c"], 99));
+  sim.run(3000);
+  const first = sim.leader();
+  for (let i = 0; i < 3; i++) {
+    sim.nodes.get(sim.leader())!.reconfigure(["a", "b", "c", "d"], sim.now);
+    sim.run(300);
+  }
+  const lag = ["a", "b", "c"].find((id) => id !== first)!;
+  expect(sim.nodes.get(lag)!.voters()).toEqual(["a", "b", "c", "d"]);
+  sim.down.add(lag);
+  for (let i = 0; i < 3; i++) {
+    sim.nodes.get(sim.leader())!.reconfigure(["a", "b", "c"], sim.now);
+    sim.run(300);
+  }
+  const leader = sim.nodes.get(sim.leader())!;
+  for (let i = 0; i < 5; i++) sim.propose(i);
+  sim.run(300);
+  leader.snapshotSource = () => ({});
+  expect(leader.compact({})).not.toBeNull();
+  sim.down.clear();
+  sim.run(1000);
+  const node = sim.nodes.get(lag)!;
+  expect(node.takeInstalled()).not.toBeNull();
+  expect(node.voters()).toEqual(leader.voters());
+  expect(node.voters()).toEqual(scannedVoters(node));
+});
+
+test("a single voter commits only what is on its disk", () => {
+  const node = new RaftCore("solo", "q", ["solo"], 3);
+  node.setDurable(0);
+  node.tick(5000);
+  expect(node.role).toBe("leader");
+  const index = node.propose("x", 1, 5000)!;
+  expect(node.commit).toBeLessThan(index);
+  node.setDurable(index);
+  expect(node.commit).toBe(index);
+});
