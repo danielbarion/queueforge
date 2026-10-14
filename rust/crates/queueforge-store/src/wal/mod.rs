@@ -80,6 +80,9 @@ pub struct QueueWal {
     reader: Option<(u64, File)>,
     /// Where recovery found each live enqueue, until the first append or fsync.
     recovered_at: std::collections::HashMap<u64, LogPosition>,
+    /// Body lengths of the enqueues recovery left on disk, as long as
+    /// `recovered_at` lasts.
+    recovered_len: std::collections::HashMap<u64, u64>,
 }
 
 struct ActiveSegment {
@@ -357,6 +360,7 @@ impl QueueWal {
             last_pos: None,
             reader: None,
             recovered_at: std::collections::HashMap::new(),
+            recovered_len: std::collections::HashMap::new(),
         };
         wal.scan_segments()?;
         Ok(wal)
@@ -530,8 +534,17 @@ impl QueueWal {
     /// On CRC mismatch mid-file: returns Corrupt error (halt that queue).
     /// Torn tail at EOF: truncate and continue.
     pub fn recover_messages(&mut self) -> Result<RecoveredState> {
+        self.recover_messages_within(None)
+    }
+
+    /// [`Self::recover_messages`], holding at most `keep_bytes` of bodies.
+    /// The oldest past it come back with an empty body; their length is in
+    /// [`DurableQueueLog::recovered_body_len`] and the record stays on disk
+    /// for [`DurableQueueLog::read_at`].
+    pub fn recover_messages_within(&mut self, keep_bytes: Option<u64>) -> Result<RecoveredState> {
         let mut ack_wm = self.meta.ack_watermark;
         let mut ready: Vec<(u64, Message)> = Vec::new();
+        let mut budget = keep_bytes.map(BodyBudget::new);
         let mut last_offset = ack_wm;
 
         // Collect segments in order.
@@ -546,9 +559,8 @@ impl QueueWal {
             if !path.exists() {
                 continue;
             }
-            match replay_segment(&path, ack_wm) {
+            match replay_segment(&path, ack_wm, &mut ready, budget.as_mut()) {
                 Ok(ReplayOutcome {
-                    messages,
                     positions,
                     last_valid_offset,
                     truncated_to,
@@ -591,12 +603,6 @@ impl QueueWal {
                             "truncated torn WAL segment tail"
                         );
                     }
-                    for (off, msg) in messages {
-                        if off > last_offset {
-                            last_offset = off;
-                        }
-                        ready.push((off, msg));
-                    }
                     if let Some(lo) = last_valid_offset {
                         if lo > last_offset {
                             last_offset = lo;
@@ -630,6 +636,8 @@ impl QueueWal {
         ready.dedup_by_key(|(o, _)| *o);
         ready.retain(|(off, _)| *off > ack_wm);
         self.recovered_at.retain(|off, _| *off > ack_wm);
+        self.recovered_len = budget.map(|b| b.dropped).unwrap_or_default();
+        self.recovered_len.retain(|off, _| *off > ack_wm);
 
         last_offset = last_offset.max(ack_wm);
         let next_offset = last_offset.saturating_add(1).max(1);
@@ -659,10 +667,49 @@ pub struct RecoveredState {
 struct ReplayOutcome {
     /// `(offset, position, encoded length)` of each enqueue record.
     positions: Vec<(u64, u64, u32)>,
-    messages: Vec<(u64, Message)>,
     last_valid_offset: Option<u64>,
     truncated_to: Option<u64>,
     ack_watermark: u64,
+}
+
+/// Recovery's limit on bodies held in memory. Past it the oldest replayed
+/// bodies are dropped as each record is read, so a long stream never sits
+/// in memory whole.
+struct BodyBudget {
+    keep: u64,
+    resident: u64,
+    /// Index in `ready` of the oldest body not yet dropped.
+    next: usize,
+    /// Offset to body length of every dropped body.
+    dropped: std::collections::HashMap<u64, u64>,
+}
+
+impl BodyBudget {
+    fn new(keep: u64) -> Self {
+        BodyBudget {
+            keep,
+            resident: 0,
+            next: 0,
+            dropped: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Count the body just pushed onto `ready`, then drop the oldest past `keep`.
+    fn admit(&mut self, ready: &mut [(u64, Message)]) {
+        if let Some((_, newest)) = ready.last() {
+            self.resident = self.resident.saturating_add(newest.body.len() as u64);
+        }
+        while self.resident > self.keep && self.next < ready.len() {
+            let (offset, msg) = &mut ready[self.next];
+            let len = msg.body.len() as u64;
+            if len > 0 {
+                msg.body = Default::default();
+                self.dropped.insert(*offset, len);
+                self.resident -= len;
+            }
+            self.next += 1;
+        }
+    }
 }
 
 /// Byte range that holds records. Preallocated padding after the preamble's
@@ -679,13 +726,19 @@ fn segment_bounds(path: &Path) -> Result<(u64, u64)> {
     }
 }
 
-fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
+/// Replay one segment, pushing its enqueues onto `ready`. Callers drop those
+/// at or below the final ack watermark.
+fn replay_segment(
+    path: &Path,
+    ack_wm: u64,
+    ready: &mut Vec<(u64, Message)>,
+    mut budget: Option<&mut BodyBudget>,
+) -> Result<ReplayOutcome> {
     let (start, end) = segment_bounds(path)?;
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file).take(end.saturating_sub(start));
     let mut pos = start;
-    let mut messages = Vec::new();
     let mut positions = Vec::new();
     let mut last_valid_offset = None;
     let mut truncated_to = None;
@@ -711,7 +764,10 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
                     last_valid_offset = Some(rec.offset.max(last_valid_offset.unwrap_or(0)));
                     if let Some(msg) = rec.message {
                         positions.push((rec.offset, rec_start, rec.encoded_len as u32));
-                        messages.push((rec.offset, msg));
+                        ready.push((rec.offset, msg));
+                        if let Some(budget) = budget.as_deref_mut() {
+                            budget.admit(ready);
+                        }
                     }
                 }
             }
@@ -744,10 +800,8 @@ fn replay_segment(path: &Path, ack_wm: u64) -> Result<ReplayOutcome> {
         }
     }
 
-    messages.retain(|(off, _)| *off > wal_ack);
     positions.retain(|(off, _, _)| *off > wal_ack);
     Ok(ReplayOutcome {
-        messages,
         positions,
         last_valid_offset,
         truncated_to,
@@ -803,6 +857,7 @@ impl DurableQueueLog for QueueWal {
             .ok_or_else(|| CoreError::Store("no active WAL segment".into()))?;
         let at = active.len;
         self.recovered_at = std::collections::HashMap::new();
+        self.recovered_len = std::collections::HashMap::new();
         active
             .push_record(&bytes)
             .map_err(|e| CoreError::Store(e.to_string()))?;
@@ -840,6 +895,7 @@ impl DurableQueueLog for QueueWal {
     fn fsync(&mut self) -> CoreResult<QueueOffset> {
         if !self.recovered_at.is_empty() {
             self.recovered_at = std::collections::HashMap::new();
+            self.recovered_len = std::collections::HashMap::new();
         }
         // The ack watermark rides in the segment so one sync covers bodies and acks.
         if self.meta_dirty && self.meta.ack_watermark > 0 {
@@ -941,6 +997,10 @@ impl DurableQueueLog for QueueWal {
         self.recovered_at.get(&offset.0).copied()
     }
 
+    fn recovered_body_len(&self, offset: QueueOffset) -> Option<u64> {
+        self.recovered_len.get(&offset.0).copied()
+    }
+
     fn read_at(&mut self, at: LogPosition) -> CoreResult<Message> {
         let mut buf = vec![0u8; at.len as usize];
         let read = match self.active.as_mut() {
@@ -997,14 +1057,17 @@ impl WalFactory {
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
-}
 
-impl DurableLogFactory for WalFactory {
-    fn open(&self, vhost: &str, queue: &str) -> CoreResult<OpenedDurableLog> {
+    fn open_within(
+        &self,
+        vhost: &str,
+        queue: &str,
+        keep_bytes: Option<u64>,
+    ) -> CoreResult<OpenedDurableLog> {
         let mut wal = QueueWal::open(&self.data_dir, vhost, queue, self.segment_max_bytes)
             .map_err(|e| CoreError::Store(e.to_string()))?;
         // Issue 3: always recover so declare never serves empty over live segments.
-        let recovered = wal.recover_messages().map_err(|e| {
+        let recovered = wal.recover_messages_within(keep_bytes).map_err(|e| {
             // Preserve corrupt classification for callers.
             match e {
                 StoreError::WalCorrupt { path, reason } => {
@@ -1027,6 +1090,16 @@ impl DurableLogFactory for WalFactory {
             ready,
             next_offset: recovered.next_offset,
         })
+    }
+}
+
+impl DurableLogFactory for WalFactory {
+    fn open(&self, vhost: &str, queue: &str) -> CoreResult<OpenedDurableLog> {
+        self.open_within(vhost, queue, None)
+    }
+
+    fn open_paged(&self, vhost: &str, queue: &str, keep_bytes: u64) -> CoreResult<OpenedDurableLog> {
+        self.open_within(vhost, queue, Some(keep_bytes))
     }
 
     fn delete(&self, vhost: &str, queue: &str) -> CoreResult<()> {
@@ -1132,6 +1205,44 @@ mod tests {
         }
         DurableQueueLog::fsync(&mut wal).unwrap();
         assert!(DurableQueueLog::recovered_position(&wal, QueueOffset(2)).is_none());
+    }
+
+    #[test]
+    fn recovery_within_a_budget_leaves_the_oldest_bodies_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = QueueWal::open(dir.path(), "/", "s", 4096).unwrap();
+        let mut bodies = std::collections::HashMap::new();
+        for i in 1..=30u64 {
+            let body = vec![b'a' + (i % 26) as u8; 700];
+            DurableQueueLog::append_enqueue(&mut wal, QueueOffset(i), &sample(&body, true))
+                .unwrap();
+            bodies.insert(i, body);
+        }
+        DurableQueueLog::acknowledge(&mut wal, QueueOffset(1)).unwrap();
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        drop(wal);
+        let mut wal = QueueWal::open(dir.path(), "/", "s", 4096).unwrap();
+        // Room for four 700-byte bodies.
+        let recovered = wal.recover_messages_within(Some(3000)).unwrap();
+        assert_eq!(recovered.messages.len(), 29);
+        let offsets: Vec<u64> = recovered.messages.iter().map(|(o, _)| *o).collect();
+        assert_eq!(offsets, (2..=30).collect::<Vec<_>>());
+        for (offset, message) in &recovered.messages {
+            let on_disk = DurableQueueLog::recovered_body_len(&wal, QueueOffset(*offset));
+            if *offset > 26 {
+                assert_eq!(message.body.as_ref(), bodies[offset].as_slice());
+                assert_eq!(on_disk, None, "offset {offset}");
+            } else {
+                assert!(message.body.is_empty(), "offset {offset}");
+                assert_eq!(on_disk, Some(700), "offset {offset}");
+            }
+            let at = DurableQueueLog::recovered_position(&wal, QueueOffset(*offset)).unwrap();
+            let read = DurableQueueLog::read_at(&mut wal, at).unwrap();
+            assert_eq!(read.body.as_ref(), bodies[offset].as_slice(), "offset {offset}");
+        }
+        assert_eq!(DurableQueueLog::recovered_body_len(&wal, QueueOffset(1)), None);
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        assert_eq!(DurableQueueLog::recovered_body_len(&wal, QueueOffset(2)), None);
     }
 
     #[test]

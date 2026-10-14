@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use queueforge_core::{
     DurabilityPolicy, Queue, QueueActorBootstrap, QueueMessage, QueueOffset, QueueRegistry,
-    QueueType,
+    QueueType, STREAM_RESIDENT_BYTES,
 };
 use tracing::{error, info, warn};
 
@@ -182,7 +182,10 @@ async fn recover_one_queue(
         cfg.wal_segment_max_bytes,
     )?;
 
-    let recovered = wal.recover_messages()?;
+    // A stream keeps only its newest bodies in memory; the rest are read
+    // back from the log on delivery.
+    let keep = (q.args.queue_type == Some(QueueType::Stream)).then_some(STREAM_RESIDENT_BYTES);
+    let recovered = wal.recover_messages_within(keep)?;
     let mut ready: VecDeque<QueueMessage> = VecDeque::with_capacity(recovered.messages.len());
     for (offset, mut msg) in recovered.messages {
         // Invariant: after crash, no live consumers → every non-acked message
@@ -352,5 +355,92 @@ mod tests {
         assert!(reg
             .get(&queueforge_core::QueueKey::new("/", "keep"))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_past_the_resident_limit_recovers_and_reads_every_entry() {
+        use queueforge_core::{ConsumerSessionId, QueueArgs, QueueCmd, StreamStart};
+
+        let dir = TempDir::new().unwrap();
+        let store = MetadataStore::open(dir.path()).unwrap();
+        let q = Queue {
+            vhost: CompactString::from("/"),
+            name: CompactString::from("events"),
+            durable: true,
+            exclusive: false,
+            auto_delete: false,
+            args: QueueArgs {
+                queue_type: Some(QueueType::Stream),
+                ..Default::default()
+            },
+            home: None,
+            raft_group: None,
+        };
+        store.create_queue(&q).unwrap();
+        let mib = 1024 * 1024;
+        let count = 72u64;
+        let segment = 8 * mib as u64;
+        {
+            let mut wal = open_queue_wal(dir.path(), "/", "events", segment).unwrap();
+            for i in 1..=count {
+                let body = vec![i as u8; mib];
+                DurableQueueLog::append_enqueue(&mut wal, QueueOffset(i), &sample(&body)).unwrap();
+            }
+            DurableQueueLog::fsync(&mut wal).unwrap();
+        }
+
+        let store = Arc::new(store);
+        let policy = DurabilityPolicy::from_parts(FsyncPolicy::Always, 100, 1);
+        let factory = Arc::new(WalFactory::new(store.data_dir(), segment));
+        let reg = QueueRegistry::shared_with_durability(
+            Arc::clone(&store) as Arc<dyn QueueMetaStore>,
+            MemoryTracker::shared(),
+            factory,
+            policy,
+        );
+        let report = recover_durable_queues(
+            store.as_ref(),
+            reg.as_ref(),
+            &RecoveryConfig {
+                wal_segment_max_bytes: segment,
+                durability_policy: policy,
+                local_node: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.messages_recovered, count);
+
+        let handle = reg.get(&queueforge_core::QueueKey::new("/", "events")).unwrap();
+        let session = ConsumerSessionId(1);
+        handle
+            .tx
+            .send(QueueCmd::StreamStart {
+                session,
+                start: StreamStart::First,
+            })
+            .await
+            .unwrap();
+        let (deliver_tx, mut deliveries) = tokio::sync::mpsc::channel(count as usize);
+        let (reply, registered) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(QueueCmd::RegisterConsumer {
+                session,
+                no_ack: true,
+                exclusive: false,
+                priority: 0,
+                initial_credit: None,
+                deliver_tx,
+                reply,
+            })
+            .await
+            .unwrap();
+        registered.await.unwrap().unwrap();
+        for i in 1..=count {
+            let d = deliveries.recv().await.unwrap();
+            assert_eq!(d.message.message.body.len(), mib, "entry {i}");
+            assert_eq!(d.message.message.body[0], i as u8, "entry {i}");
+        }
     }
 }

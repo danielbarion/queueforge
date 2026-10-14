@@ -15,6 +15,10 @@ use crate::queue::cmd::{Message, QueueMessage, QueueOffset};
 use crate::queue::dlx::DlxRouter;
 use crate::queue::QueueKey;
 
+/// Stream bodies kept in memory. Older synced entries are read back from the
+/// log, as Bun and PHP page their streams past 64 MiB. Recovery keeps no more.
+pub const STREAM_RESIDENT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Result of opening a durable log: always includes a recovery pass.
 pub struct OpenedDurableLog {
     /// Open WAL handle.
@@ -30,6 +34,15 @@ pub trait DurableLogFactory: Send + Sync {
     /// Open (or create) the durable log and **always** run recovery so ready /
     /// `next_offset` match on-disk segments. Corrupt WALs must return `Err`.
     fn open(&self, vhost: &str, queue: &str) -> Result<OpenedDurableLog>;
+
+    /// [`Self::open`], keeping only the newest `keep_bytes` of bodies in
+    /// `ready`. The rest come back with an empty body and
+    /// [`DurableQueueLog::recovered_body_len`] set, for a stream to read
+    /// from the log.
+    fn open_paged(&self, vhost: &str, queue: &str, keep_bytes: u64) -> Result<OpenedDurableLog> {
+        let _ = keep_bytes;
+        self.open(vhost, queue)
+    }
 
     /// Delete on-disk WAL segments + meta for a queue (best-effort).
     fn delete(&self, vhost: &str, queue: &str) -> Result<()>;
@@ -77,6 +90,13 @@ pub trait DurableQueueLog: Send {
     /// until the first append or fsync after recovery; `None` after that or
     /// when this log cannot read records back.
     fn recovered_position(&self, offset: QueueOffset) -> Option<LogPosition> {
+        let _ = offset;
+        None
+    }
+
+    /// The body length of a recovered enqueue whose body recovery left on
+    /// disk. Answers as long as [`Self::recovered_position`] does.
+    fn recovered_body_len(&self, offset: QueueOffset) -> Option<u64> {
         let _ = offset;
         None
     }

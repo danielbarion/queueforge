@@ -27,16 +27,15 @@ use super::cmd::{
     QueueDelivery, QueueMessage, QueueOffset, QueueStats, StreamCopy, StreamEntryCopy,
     StreamReplicator, StreamStart,
 };
-use super::durable::{DurableQueueLog, LogPosition, QueueActorBootstrap};
+use super::durable::{DurableQueueLog, LogPosition, QueueActorBootstrap, STREAM_RESIDENT_BYTES};
 use super::registry::{QueueInfo, QueueKey};
 use crate::error::Error;
 
 /// Header holding the Raft index of a replicated entry. Never delivered.
 const RAFT_HEADER: &str = "x-qf-raft";
 
-/// Bodies kept in memory. Older synced entries are read back from the log,
-/// as Bun and PHP page their streams past 64 MiB.
-const RESIDENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Bodies kept in memory.
+const RESIDENT_BYTES: u64 = STREAM_RESIDENT_BYTES;
 
 fn raft_index_of(message: &Message) -> u64 {
     message
@@ -471,17 +470,32 @@ pub async fn run_stream(
         raft_index: 0,
     };
     // Recovered entries keep their offsets. Arrival times are not stored, so
-    // they count as now for x-max-age.
+    // they count as now for x-max-age. Recovery left the oldest bodies on disk
+    // (`open_paged`); those entries start paged out.
     for qm in boot.ready {
         s.next = s.next.max(qm.offset.0 + 1);
         s.raft_index = s.raft_index.max(raft_index_of(&qm.message));
-        let pos = s
-            .wal
-            .as_ref()
-            .and_then(|wal| wal.recovered_position(qm.offset));
-        let entry = Entry::new(qm.offset.0, now_ms(), qm.message, pos);
+        let (pos, on_disk) = match s.wal.as_ref() {
+            Some(wal) => (
+                wal.recovered_position(qm.offset),
+                wal.recovered_body_len(qm.offset),
+            ),
+            None => (None, None),
+        };
+        let entry = match (pos, on_disk) {
+            (Some(_), Some(size)) => Entry {
+                offset: qm.offset.0,
+                at_ms: now_ms(),
+                size,
+                message: None,
+                pos,
+            },
+            _ => Entry::new(qm.offset.0, now_ms(), qm.message, pos),
+        };
         s.bytes = s.bytes.saturating_add(entry.size);
-        s.resident = s.resident.saturating_add(entry.size);
+        if entry.message.is_some() {
+            s.resident = s.resident.saturating_add(entry.size);
+        }
         s.log.push_back(entry);
     }
     s.synced = s.next;

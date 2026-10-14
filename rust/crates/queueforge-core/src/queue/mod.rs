@@ -26,7 +26,7 @@ pub use dlx::{
 };
 pub use durable::{
     DurabilityPolicy, DurableLogFactory, DurableQueueLog, LogPosition, OpenedDurableLog,
-    QueueActorBootstrap, SharedDurableLogFactory,
+    QueueActorBootstrap, SharedDurableLogFactory, STREAM_RESIDENT_BYTES,
 };
 pub use meta::{NoopMetaStore, QueueMetaStore};
 pub use ready::{effective_priority, Ready};

@@ -73,6 +73,7 @@ pub use queue::{
     QueueDeclareOpts, QueueDelivery, QueueHandle, QueueInfo, QueueKey, QueueMessage,
     QueueMetaStore, QueueOffset, QueueRegistry, QueueStats, QueueType, Ready,
     SharedDurableLogFactory, ShutdownReport, DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
+    STREAM_RESIDENT_BYTES,
 };
 pub use queue::{ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart};
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};

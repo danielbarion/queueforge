@@ -253,7 +253,15 @@ impl QueueRegistry {
             if let Some(factory) = &self.durable_factory {
                 // Issue 3: always recover_messages on open — never spawn an empty
                 // actor over existing segments / corrupt WAL (which must Err).
-                let opened = factory.open(key.vhost.as_str(), key.name.as_str())?;
+                let opened = if opts.args.queue_type == Some(crate::queue::QueueType::Stream) {
+                    factory.open_paged(
+                        key.vhost.as_str(),
+                        key.name.as_str(),
+                        crate::queue::STREAM_RESIDENT_BYTES,
+                    )?
+                } else {
+                    factory.open(key.vhost.as_str(), key.name.as_str())?
+                };
                 boot = boot
                     .with_recovered(opened.ready, opened.next_offset)
                     .with_log(opened.log, self.durability_policy);
