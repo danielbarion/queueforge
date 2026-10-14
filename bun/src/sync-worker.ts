@@ -21,8 +21,10 @@ const FD = 2;
 const FAILED = 3;
 const PREVIOUS = 4;
 
-self.onmessage = (event: MessageEvent<SharedArrayBuffer>) => {
-  const state = new BigInt64Array(event.data);
+self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: number }>) => {
+  const state = new BigInt64Array(event.data.state);
+  // Tests only: hold each sync this long, as a stalled disk would.
+  const delayMs = event.data.delayMs;
   /** Sync and close a handed-over chunk, then free the slot for the next one. */
   const syncPrevious = () => {
     const previous = Atomics.load(state, PREVIOUS);
@@ -39,6 +41,7 @@ self.onmessage = (event: MessageEvent<SharedArrayBuffer>) => {
     if (want < 0n) return;
     if (want === done) continue;
     try {
+      if (delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
       syncPrevious();
       fdatasyncSync(Number(Atomics.load(state, FD)));
       // A rotation after `want` was read moves the active chunk, so batches

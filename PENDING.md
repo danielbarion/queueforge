@@ -286,7 +286,8 @@ host.
 
 ### B13. Refused confirms in one load cell (2026-10-13)
 
-Status: open. In the fourth 2026-10-13 run (`bench/results/2026-10-14`) the 4
+Status: likeliest cause fixed (2026-10-14), not confirmed; watch the next runs.
+In the fourth 2026-10-13 run (`bench/results/2026-10-14`) the 4
 CPU / 8 GiB spread cell failed before its measure: the broker refused the
 confirms of 2,048 publishes (16 queues × the 128-confirm flush window) and a
 channel closed with 541 `INTERNAL_ERROR`. `queueforge_confirm_before_fsync_total`
@@ -306,6 +307,15 @@ on a stalled host: `FastLog.drainWorker` waits at most 5 s for the sync worker
 before a chunk rotates, then reports every batch up to the worker's last
 finished sequence as failed, even though those were synced, and closes the
 old fd the worker may still be syncing.
+
+Fixed: both worker waits (`drainWorker`, and `rotate` waiting on the chunk
+preallocation) now wait as long as the worker works, logging "durable log ...
+worker busy for N ms" every 5 s and counting `workerStalls`; only `close` keeps
+a 5 s limit. The preallocation wait had the worse bug: on giving up it created
+the chunk itself while the worker still zero-filled it, which can erase
+confirmed records (`bun/test/fast-log.stall.test.ts` loses one that way). The
+load harness now keeps the whole broker log of a failed cell, or one with
+refused confirms, as `cells/<cell>.broker.log`.
 
 ### B6. Peak memory and latency vary between runs
 

@@ -127,7 +127,8 @@ class RepeatReportTests(unittest.TestCase):
     def test_site_keeps_memory_when_a_cell_is_unscored(self):
         row = self.row("run1", "", ok="0", err="oom", anon_mib="999", peak_mib="1024")
         generated = report.site_ts({}, {}, {}, {("bun", row["size"], "work-queue"): row})
-        self.assertIn('"bun": {"anonymous": 999.0, "cgroup": 1024.0}', generated)
+        # The site shows container memory only (peak cgroup).
+        self.assertIn('memory: {"mq": null, "rust": null, "bun": 1024.0, "php": null}', generated)
 
     def test_legacy_cells_preserve_last_row_selection(self):
         self.write([{k: v for k, v in self.row("run1", 100).items() if k not in scenarios.COLS[19:]},

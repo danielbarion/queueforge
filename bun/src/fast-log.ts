@@ -507,6 +507,14 @@ export class FastLog {
   retiredChunks = 0;
   /** Rotations that left the old chunk's fsync to the sync worker. */
   handOffs = 0;
+  /**
+   * Waits on a worker past `stallWarnMs`. The wait goes on: giving up would
+   * fail confirms the worker did sync, or write into a chunk it still fills.
+   */
+  workerStalls = 0;
+  stallWarnMs = 5000;
+  /** Tests only: each worker holds every sync or chunk this long. */
+  workerDelayMs = 0;
   private worker: Worker | null = null;
   private preparingId = 0;
   private closed = false;
@@ -726,7 +734,7 @@ export class FastLog {
       this.syncWorker.onmessage = (event: MessageEvent<bigint>) => {
         this.completeThrough(event.data, Atomics.load(this.syncState, 3) === 0n);
       };
-      this.syncWorker.postMessage(this.syncState.buffer);
+      this.syncWorker.postMessage({ state: this.syncState.buffer, delayMs: this.workerDelayMs });
     }
     // The fd before the sequence: the worker reads them in the other order.
     Atomics.store(this.syncState, 2, BigInt(this.active.fd));
@@ -755,15 +763,33 @@ export class FastLog {
   }
 
   /** Block until the sync worker covered every request, then report it. */
-  private drainWorker() {
+  private drainWorker(deadlineMs = Infinity) {
     if (!this.syncWorker) return;
     const want = Atomics.load(this.syncState, 0);
-    const deadline = Date.now() + 5000;
-    while (Atomics.load(this.syncState, 1) < want && Date.now() < deadline) {
-      Atomics.wait(this.syncState, 1, Atomics.load(this.syncState, 1), 1000);
-    }
+    this.waitWorker(() => Atomics.load(this.syncState, 1) < want, this.syncState, 1, "sync", deadlineMs);
     const done = Atomics.load(this.syncState, 1);
     this.completeThrough(done, done >= want && Atomics.load(this.syncState, 3) === 0n);
+  }
+
+  /**
+   * Wait while `busy` holds, waking on changes to `state[slot]`. A stall past
+   * `stallWarnMs` is logged and counted; only `close` passes a deadline.
+   */
+  private waitWorker(busy: () => boolean, state: BigInt64Array, slot: number, what: string, deadlineMs: number) {
+    const started = Date.now();
+    let warnAt = started + this.stallWarnMs;
+    let stalled = false;
+    while (busy()) {
+      const now = Date.now();
+      if (now - started >= deadlineMs) return;
+      if (now >= warnAt) {
+        if (!stalled) this.workerStalls++;
+        stalled = true;
+        console.error(`queueforge-bun: durable log ${what} worker busy for ${now - started} ms`);
+        warnAt = now + Math.max(this.stallWarnMs, 1000);
+      }
+      Atomics.wait(state, slot, Atomics.load(state, slot), Math.max(1, Math.min(1000, warnAt - now)));
+    }
   }
 
   /** Track the rows of every batch through `seq`, in order, then report it once. */
@@ -867,7 +893,8 @@ export class FastLog {
   }
 
   close() {
-    this.drainWorker();
+    // A worker that never returns must not hold up the shutdown.
+    this.drainWorker(5000);
     this.closed = true;
     for (const fd of this.readFds.values()) {
       try {
@@ -907,10 +934,9 @@ export class FastLog {
     const nextId = this.active.id + 1;
     const path = chunkPath(this.dir, nextId);
     if (this.preparingId === nextId) {
-      const deadline = Date.now() + 5000;
-      while (Atomics.load(this.view, 0) === 1n && Date.now() < deadline) {
-        Atomics.wait(this.view, 0, 1n, 1000);
-      }
+      // Creating the file here while the worker still writes it would let its
+      // zeros land over records already confirmed.
+      this.waitWorker(() => Atomics.load(this.view, 0) === 1n, this.view, 0, "prealloc", Infinity);
     }
     const info = inspect(path);
     // A batch larger than one chunk (relocated rows can be) needs a file at
@@ -949,7 +975,7 @@ export class FastLog {
       this.worker = new Worker(new URL("./prealloc-worker.ts", import.meta.url));
       (this.worker as unknown as { unref?: () => void }).unref?.();
     }
-    this.worker.postMessage({ path: chunkPath(this.dir, nextId), size: CHUNK, state: this.state });
+    this.worker.postMessage({ path: chunkPath(this.dir, nextId), size: CHUNK, state: this.state, delayMs: this.workerDelayMs });
   }
 }
 

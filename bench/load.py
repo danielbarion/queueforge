@@ -380,6 +380,12 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
         log("RABBIT_QUEUES " + ((q.stdout or "") + (q.stderr or ""))[-500:].replace("\n", " | "))
         if q.returncode == 0:
             check_queues[0] = False
+    if not fields or fields.get("ok") != "1" or row["early_confirm"] not in ("", "0"):
+        # The container goes next; keep its whole log beside the cell output.
+        logs = run(["docker", "logs", "qf-load-broker"], check=False, timeout=30)
+        with open(out_path.removesuffix(".out") + ".broker.log", "w") as f:
+            f.write((logs.stdout or "") + (logs.stderr or ""))
+        dump_logs()
     run(["docker", "rm", "-f", "qf-load-broker"], check=False, timeout=40)
     if fields:
         for key in (
@@ -391,7 +397,6 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
     else:
         row["err"] = row["err"] if row["err"] not in ("", "start") else "no-result"
         log("no result tail " + text[-300:].replace("\n", " | "))
-        dump_logs()
     row["broker_cpu"] = broker_cpu
     row["client_cpu"] = client_cpu
     row["broker_mib"] = broker_mib
