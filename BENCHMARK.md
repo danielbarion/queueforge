@@ -110,7 +110,7 @@ What changed in Bun since the fourth run (`2854560` to `329e53c`):
   after the new fd is in place (`329e53c`). Without that last one, the
   worker could sync a closed fd, every batch it held then reported a failed
   sync, and their confirms were refused with 541. That fits the failed load
-  cell of the fourth run (B13 in PENDING.md); with one pinned core and
+  cell of the fourth run (B13 in PENDING.md as of `5c8fd4d`); with one pinned core and
   rotations a little more frequent than now, it stalled every 1 MiB run.
 
 Against the fourth run (msg/s, deliveries/s for broadcast; heavy and quorum
@@ -134,7 +134,7 @@ connections held at 4 CPU / 8 GiB, as before.
 
 Bun's load sweep in the tables is a second pass on the same image
 (2026-10-14 10:37Z–10:46Z), three rounds of the whole sweep, each cell the
-median of its three 8 s repeats with the range (H3 in PENDING.md):
+median of its three 8 s repeats with the range (H3 in PENDING.md as of `5c8fd4d`):
 `python3 bench/run.py --kinds bun --steps load,report --out bench/results/2026-10-14b`.
 All 45 repeats passed with no refused confirm. The ranges are why one sample
 misled: 4 CPU / 4 GiB single ran 43,152–294,384 msg/s and 4 CPU / 8 GiB
@@ -177,7 +177,7 @@ replaced by that build.
   counts those refused confirms; none was sent before its fsync. Six repeats of
   that cell on the same image passed (761k–815k consume/s), and the whole sweep
   passed in the re-measure. The harness did not keep that broker's log, so the
-  cause is not confirmed; see B13 in PENDING.md. The sweep is one sample per
+  cause is not confirmed; see B13 in PENDING.md as of `5c8fd4d`. The sweep is one sample per
   cell, so a cell can move a lot between runs (4 CPU / 4 GiB shared reads
   66,963 here at 33% broker CPU).
 
