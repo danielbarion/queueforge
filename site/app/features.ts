@@ -204,7 +204,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: ["y", "a Raft group per queue; shared with Bun"],
           bun: ["y", "a Raft group per queue; shared with Rust"],
-          php: ["p", "Raft wired; mixed majority and failover gates pending"],
+          php: ["p", "Raft; survives a leader kill among PHP nodes; mixed majority with Rust/Bun untested"],
         },
       },
       {
