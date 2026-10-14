@@ -62,6 +62,7 @@ impl QueueState {
         match result {
             Ok(synced) => {
                 self.unsynced_appends = 0;
+                self.unsynced_bytes = 0;
                 self.complete_waiters_up_to(synced, Ok(()), false);
                 Ok(())
             }
@@ -173,6 +174,25 @@ impl QueueState {
     /// Quiet publishes stay on the timer. A deep waiter list is the benchmark pipeline, and waiting out the interval caps that window at one batch per tick.
     pub(super) fn pipeline_follow_up_ready(&self) -> bool {
         self.fsync_waiters.len() >= Self::PIPELINE_FOLLOW_UP
+            || (!self.fsync_waiters.is_empty() && self.unsynced_bytes >= Self::FOLLOW_UP_BYTES)
+    }
+
+    /// Waiting body bytes that count as a pipeline for the follow-up above.
+    ///
+    /// Small bodies reach 128 waiters before this. A large-body window under
+    /// [`Self::GROUP_COMMIT_BYTES`] still has producers parked on the interval.
+    pub(super) const FOLLOW_UP_BYTES: u64 = 256 * 1024;
+
+    /// Body bytes appended since the last fsync that start the next one without the interval.
+    ///
+    /// Waiter counts stand in for batch size with small bodies. Forty 64 KiB
+    /// confirms are 2.5 MiB, far past what one tick needs to gather, and they
+    /// sat out the 10 ms interval. Small bodies reach 128 waiters long before this.
+    pub(super) const GROUP_COMMIT_BYTES: u64 = 1024 * 1024;
+
+    /// Report whether confirms wait on enough appended bytes to sync now.
+    pub(super) fn bytes_follow_up_ready(&self) -> bool {
+        !self.fsync_waiters.is_empty() && self.unsynced_bytes >= Self::GROUP_COMMIT_BYTES
     }
 
     /// Report whether the interval arm should fsync. Returns true when waiters, unsynced appends, deferred appends, deferred acks, or a dirty watermark exist.
@@ -295,6 +315,7 @@ impl QueueState {
         match result {
             Ok(synced) => {
                 self.unsynced_appends = 0;
+                self.unsynced_bytes = 0;
                 // Bodies still in `deferred_appends` were not in this fsync.
                 self.complete_waiters_up_to(synced, Ok(()), true);
             }
@@ -345,6 +366,7 @@ impl QueueState {
                 }
             }
             let mut added = 0u64;
+            let mut bytes = 0u64;
             for (offset, msg) in appends {
                 if let Err(e) = wal.append_enqueue(offset, msg.as_ref()) {
                     error!(
@@ -355,11 +377,13 @@ impl QueueState {
                     );
                 } else {
                     added = added.saturating_add(1);
+                    bytes = bytes.saturating_add(msg.body.len() as u64);
                 }
             }
-            added
+            (added, bytes)
         };
-        self.unsynced_appends = self.unsynced_appends.saturating_add(added);
+        self.unsynced_appends = self.unsynced_appends.saturating_add(added.0);
+        self.unsynced_bytes = self.unsynced_bytes.saturating_add(added.1);
     }
 
     /// Final fsync + free in-memory state. Returns fsync error if durable WAL

@@ -52,6 +52,7 @@ impl QueueState {
             durability_policy: boot.durability_policy,
             fsync_waiters: Vec::new(),
             unsynced_appends: 0,
+            unsynced_bytes: 0,
             outstanding_offsets: HashSet::new(),
             args: boot.args,
             redeliveries: HashMap::new(),

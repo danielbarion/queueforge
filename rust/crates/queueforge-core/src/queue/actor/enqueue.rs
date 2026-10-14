@@ -92,6 +92,7 @@ impl QueueState {
                     e
                 })?;
                 self.unsynced_appends = self.unsynced_appends.saturating_add(1);
+                self.unsynced_bytes = self.unsynced_bytes.saturating_add(msg.body.len() as u64);
             } else {
                 // The interval fsync holds the log. The body is written when that
                 // sync returns, and the confirm waits for a later sync that covers it.

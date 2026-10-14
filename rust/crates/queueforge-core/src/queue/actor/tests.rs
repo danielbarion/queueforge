@@ -391,9 +391,56 @@ async fn one_hundred_twenty_eight_waiters_share_one_fsync() {
     }
     assert_eq!(appends.load(std::sync::atomic::Ordering::SeqCst), 128);
     assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    shutdown(tx, actor).await;
+}
+
+/// Forty 64 KiB confirms are 2.5 MiB: the large-64k window. They used to wait
+/// out the interval, because only the waiter count started an early sync.
+#[tokio::test(flavor = "current_thread")]
+async fn a_megabyte_of_waiting_bodies_does_not_wait_out_the_interval() {
+    let syncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let appends = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let key = QueueKey::new("/", "large-64k");
+    let memory = MemoryTracker::shared();
+    let info = Arc::new(QueueInfo::new(
+        key.clone(),
+        &crate::queue::QueueDeclareOpts {
+            durable: true,
+            ..crate::queue::QueueDeclareOpts::default()
+        },
+    ));
+    let mut boot = QueueActorBootstrap::new_empty(true).with_log(
+        Box::new(CountLog {
+            syncs: Arc::clone(&syncs),
+            appends: Arc::clone(&appends),
+        }),
+        DurabilityPolicy {
+            policy: FsyncPolicy::EveryNMs,
+            interval: Duration::from_millis(400),
+            every_n_messages: 1,
+        },
+    );
+    boot.durable = true;
+    let (tx, rx) = mpsc::channel(64);
+    let actor = tokio::spawn(run(key, rx, memory, None, info, boot));
+
+    let body = vec![7u8; 64 * 1024];
+    let started = std::time::Instant::now();
+    let mut waiting = Vec::new();
+    for _ in 0..40 {
+        let mut msg = (*sample_msg(&body)).clone();
+        msg.persistent = true;
+        waiting.push(enqueue(&tx, Arc::new(msg)).await);
+    }
+    for done in waiting {
+        done.durable_done.await.unwrap().unwrap();
+    }
+    assert_eq!(appends.load(std::sync::atomic::Ordering::SeqCst), 40);
+    // Never one sync per body: 16 bodies make the first megabyte.
+    assert!(syncs.load(std::sync::atomic::Ordering::SeqCst) <= 3);
     assert!(
-        started.elapsed() < Duration::from_millis(50),
-        "128 confirms waited out the interval: {:?}",
+        started.elapsed() < Duration::from_millis(100),
+        "2.5 MiB of confirms waited out the interval: {:?}",
         started.elapsed()
     );
     shutdown(tx, actor).await;

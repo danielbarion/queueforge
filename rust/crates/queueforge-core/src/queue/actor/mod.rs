@@ -106,6 +106,8 @@ struct QueueState {
     fsync_waiters: Vec<FsyncWaiter>,
     /// Appends since last fsync (for EveryNMessages).
     unsynced_appends: u64,
+    /// Body bytes of those appends. See [`QueueState::GROUP_COMMIT_BYTES`].
+    unsynced_bytes: u64,
     /// Offsets enqueued to WAL that are not yet acked (for watermark continuity).
     outstanding_offsets: HashSet<u64>,
     /// Declared queue arguments (TTL / DLX / max-length).
@@ -273,7 +275,7 @@ pub async fn run(
             state.args.expires_ms = None;
         }
 
-        // 128 waiters share one fsync. The interval still fires while the mailbox
+        // 128 waiters, or 1 MiB of appended bodies, share one fsync. The interval still fires while the mailbox
         // stays full, so a deferred append is not stuck behind a command flood.
         // A lone publish and a paused burst wait for the coalesce arm: that arm
         // runs only when the mailbox was empty. Pulling commands aside livelocks
@@ -281,7 +283,7 @@ pub async fn run(
         if use_timer && interval_fsync.is_none() && state.needs_group_commit_flush() {
             let due = last_group_commit.elapsed() >= policy.interval;
             let waiting = state.fsync_waiters.len();
-            if due || waiting >= 128 || flush_remainder {
+            if due || waiting >= 128 || flush_remainder || state.bytes_follow_up_ready() {
                 flush_remainder = false;
                 if let Some(handle) = state.begin_interval_fsync() {
                     last_group_commit = tokio::time::Instant::now();

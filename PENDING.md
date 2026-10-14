@@ -483,6 +483,22 @@ RabbitMQ 2,273, Bun 3,678. With 128 confirms in flight Rust is fine (24.0k).
 Lead: two producers on one queue, each waiting for its confirm. That looks like a
 timer wait rather than CPU. Compare with durable-256 at one confirm (2,087, fine).
 
+### R4. Large messages
+
+Status: improved 2026-10-14 (Cortex Code), see "R4 byte group commit" in Done;
+not in a published run yet.
+
+Evidence (2026-10-12 run): 64 KiB 252 MB/s and 1 MiB 574 MB/s against RabbitMQ
+778 and 1,346, with the broker at 29–32% and 51–53% CPU. Rust waited, it did
+not work: forty 64 KiB confirms (2.5 MiB) sat out the 10 ms group-commit tick,
+because only the waiter count (128, 96 after a sync, or 2..4) started an early
+sync. 40 × 64 KiB per 10 ms is the 252 MB/s measured.
+
+Left: RabbitMQ classic confirms without an fsync, so part of the gap stays. At
+64 KiB the broker still idles at ~60% CPU: one fsync at a time per queue, and
+the log zero-fills each 4 MiB chunk before overwriting it (the cost Bun's B5
+reuse removed).
+
 ### R3. Stream throughput
 
 Status: done (Cortex Code, 2026-10-12); see Done.
@@ -591,6 +607,19 @@ next full run.
 Move finished items here: id, date, what changed, before → after. A/B numbers are
 Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/`.
 
+- **R4 byte group commit** (2026-10-14). A classic queue's group commit also
+  starts once 1 MiB of persistent bodies has been appended since the last
+  fsync and a confirm waits on it, and the after-sync follow-up fires on
+  256 KiB of waiting bodies as well as 96 waiters
+  (`QueueState::GROUP_COMMIT_BYTES`, `FOLLOW_UP_BYTES` in
+  `queueforge-core/src/queue/actor/fsync.rs`). Small bodies reach 128 waiters
+  first, so their batching is unchanged. A/B at 1 CPU, three interleaved
+  repeats, the same tree with and without the change
+  (`/tmp/qf-ab/coco/ab-rust-bytes/ab.md`): large-64k 254.6 (253–256) → 553.4
+  (520–709) MB/s, large-1m 524.9 (339–546) → 700.8 (450–730) MB/s,
+  work-queue 118,533 → 117,317 msg/s (−1%, ranges overlap). Test
+  `a_megabyte_of_waiting_bodies_does_not_wait_out_the_interval` fails without
+  the change (401 ms, the interval). Rust 441/441, conformance 135/135.
 - **B5 chunk reuse** (2026-10-14). A retired durable-log chunk is renamed ahead
   of the active one (up to two spares) instead of unlinked, so steady traffic
   stops zero-filling and fsyncing a new 4 MiB file every few milliseconds.
