@@ -494,10 +494,9 @@ not work: forty 64 KiB confirms (2.5 MiB) sat out the 10 ms group-commit tick,
 because only the waiter count (128, 96 after a sync, or 2..4) started an early
 sync. 40 × 64 KiB per 10 ms is the 252 MB/s measured.
 
-Left: RabbitMQ classic confirms without an fsync, so part of the gap stays. At
-64 KiB the broker still idles at ~60% CPU: one fsync at a time per queue, and
-the log zero-fills each 4 MiB chunk before overwriting it (the cost Bun's B5
-reuse removed).
+Left: RabbitMQ classic confirms without an fsync, and at 64 KiB its consumers
+keep up, so it writes almost nothing (0.4 MB/s). The zero-fill before each
+overwrite is gone (see "R4 segment reuse" in Done).
 
 ### R3. Stream throughput
 
@@ -571,7 +570,7 @@ scenario cells were better in single-process mode (see P1).
 
 ### P7. 1 MiB messages on a quorum queue
 
-Status: open (found 2026-10-14, Cortex Code).
+Status: done (Cortex Code, 2026-10-14); see Done.
 
 Evidence: the new `large-1m-quorum` cell (1 producer, 1 MiB durable bodies on a
 quorum queue, 4 confirms in flight) delivered nothing at 1 CPU / 1 GiB. The
@@ -637,6 +636,32 @@ next full run.
 Move finished items here: id, date, what changed, before → after. A/B numbers are
 Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/`.
 
+- **R4 segment reuse** (2026-10-14). A compacted WAL segment is renamed to
+  `spare-segment.log` instead of unlinked (one per queue), and the next new
+  segment takes it: an empty header with version 2 is synced before the
+  rename, so a crash leaves the spare or an empty segment. Records in a
+  version 2 segment XOR their CRC with `salt_of(id)` (one to one on ids), so
+  the previous file's records, still past the write point, do not check. In
+  the newest segment of a reused file a record that does not check is the
+  logical end, since a crash can leave the header ahead of the data; closed
+  segments stay strict. `read_record_with` bounds a record's length by the
+  bytes left before allocating. Fresh segments stay version 1. A/B at 1 CPU,
+  three interleaved repeats (`/tmp/qf-ab/coco/ab-rust-reuse/ab.md`):
+  large-64k 562.8 (385–615) → 848.8 (624–1,045) MB/s, large-1m 427.2
+  (396–692) → 762.0 (728–1,285) MB/s, after ahead in all six pairs, disk
+  writes from about twice the delivered bytes to about the same; work-queue
+  118,824 → 116,162 msg/s (−2%, ranges overlap). Tests in
+  `queueforge-store` wal: reuse and a restart replay only live rows; a
+  reused segment whose header ran ahead ends at its last good record (it
+  halts on "bad magic" without the change); salts. Rust 444/444, conformance
+  135/135.
+- **P7 Raft compaction by bytes** (2026-10-14). A PHP Raft group also
+  compacts once 64 MiB of bodies (`body_b64`) were applied since the last
+  snapshot (`RaftNode::COMPACT_BYTES`), not only after 10,000 entries, which
+  at 1 MiB was about 13 GiB of base64 in the in-memory log. large-1m-quorum
+  at 1 CPU: no delivery, memory alarm at 1,021 MiB → 172 MB/s at 348 MiB
+  (`/tmp/qf-ab/coco/p7-check`). `php/test/raft-compact.test.php` fails
+  without the change. PHP 40/40 files, conformance 135/135.
 - **R4 byte group commit** (2026-10-14). A classic queue's group commit also
   starts once 1 MiB of persistent bodies has been appended since the last
   fsync and a confirm waits on it, and the after-sync follow-up fires on

@@ -48,6 +48,41 @@ const WAL_WRITE_BATCH: usize = 32 * 1024;
 const PREAMBLE_LEN: u64 = 16;
 const PREAMBLE_MAGIC: &[u8; 4] = b"VLHP";
 
+/// Header version of a segment renamed from a compacted one. Its record CRCs
+/// are XORed with [`salt_of`] its id: the previous file's records are still
+/// past the write point, and under the new id they never read back.
+const REUSED_VERSION: u32 = 2;
+
+/// A compacted segment kept for the next one, so a busy queue stops
+/// zero-filling and syncing every 4 MiB it writes twice (B5 in Bun).
+const SPARE_NAME: &str = "spare-segment.log";
+
+/// The CRC salt of segment `id`. A multiply by an odd constant is one to one
+/// on 32 bits, so two ids that share a file never share a salt; zero only for
+/// id 0, which is never a reuse target.
+fn salt_of(id: u64) -> u32 {
+    ((id as u32) ^ ((id >> 32) as u32)).wrapping_mul(0x9e37_79b1)
+}
+
+/// The salt records of segment `id` carry under header `version`.
+fn salt_for(id: u64, version: u32) -> u32 {
+    if version >= REUSED_VERSION {
+        salt_of(id)
+    } else {
+        0
+    }
+}
+
+/// XOR an encoded record's trailing CRC with `salt`.
+fn salt_record(bytes: &mut [u8], salt: u32) {
+    if salt == 0 || bytes.len() < 4 {
+        return;
+    }
+    let at = bytes.len() - 4;
+    let crc = u32::from_le_bytes(bytes[at..].try_into().unwrap()) ^ salt;
+    bytes[at..].copy_from_slice(&crc.to_le_bytes());
+}
+
 /// How far ahead of the logical end the file is materialized. Overwriting
 /// those blocks keeps `fdatasync` off the allocating path.
 const ALLOC_CHUNK: u64 = 4 * 1024 * 1024;
@@ -83,6 +118,8 @@ pub struct QueueWal {
     /// Body lengths of the enqueues recovery left on disk, as long as
     /// `recovered_at` lasts.
     recovered_len: std::collections::HashMap<u64, u64>,
+    /// A compacted segment waiting to become the next one ([`SPARE_NAME`]).
+    spare: Option<PathBuf>,
 }
 
 struct ActiveSegment {
@@ -98,6 +135,10 @@ struct ActiveSegment {
     buf: Vec<u8>,
     segment_max: u64,
     preamble: bool,
+    /// Header version, kept on every header rewrite.
+    version: u32,
+    /// CRC salt of this segment's records; 0 unless it was reused.
+    salt: u32,
 }
 
 fn write_all_at(file: &File, mut buf: &[u8], mut at: u64) -> io::Result<()> {
@@ -136,16 +177,21 @@ fn materialize_range(file: &File, from: u64, to: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn write_preamble(file: &File, logical_len: u64) -> io::Result<()> {
+fn write_preamble(file: &File, logical_len: u64, version: u32) -> io::Result<()> {
     let mut hdr = [0u8; PREAMBLE_LEN as usize];
     hdr[0..4].copy_from_slice(PREAMBLE_MAGIC);
-    hdr[4..8].copy_from_slice(&1u32.to_le_bytes());
+    hdr[4..8].copy_from_slice(&version.to_le_bytes());
     hdr[8..16].copy_from_slice(&logical_len.to_le_bytes());
     write_all_at(file, &hdr, 0)
 }
 
 /// Logical end recorded in a preallocated segment, when the file has that header.
 fn read_preamble_len(file: &File) -> io::Result<Option<u64>> {
+    Ok(read_preamble(file)?.map(|(len, _)| len))
+}
+
+/// Logical end and header version of a preallocated segment.
+fn read_preamble(file: &File) -> io::Result<Option<(u64, u32)>> {
     let mut hdr = [0u8; PREAMBLE_LEN as usize];
     let mut filled = 0;
     while filled < hdr.len() {
@@ -159,8 +205,9 @@ fn read_preamble_len(file: &File) -> io::Result<Option<u64>> {
     if &hdr[0..4] != PREAMBLE_MAGIC {
         return Ok(None);
     }
+    let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
     let logical = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
-    Ok(Some(logical.max(PREAMBLE_LEN)))
+    Ok(Some((logical.max(PREAMBLE_LEN), version)))
 }
 
 #[cfg(target_os = "linux")]
@@ -326,6 +373,7 @@ struct ClosedSegment {
     path: PathBuf,
     max_offset: u64,
     len: u64,
+    salt: u32,
 }
 
 impl QueueWal {
@@ -361,7 +409,12 @@ impl QueueWal {
             reader: None,
             recovered_at: std::collections::HashMap::new(),
             recovered_len: std::collections::HashMap::new(),
+            spare: None,
         };
+        let spare = wal.dir.join(SPARE_NAME);
+        if spare.exists() {
+            wal.spare = Some(spare);
+        }
         wal.scan_segments()?;
         Ok(wal)
     }
@@ -413,10 +466,12 @@ impl QueueWal {
         for (id, path) in entries {
             let phys = fs::metadata(&path)?.len();
             let file = OpenOptions::new().read(true).write(true).open(&path)?;
-            let preamble_len = read_preamble_len(&file)?;
-            let preamble = preamble_len.is_some();
-            let logical = preamble_len.unwrap_or(phys).min(phys);
-            let max_offset = scan_max_offset(&path)?;
+            let header = read_preamble(&file)?;
+            let preamble = header.is_some();
+            let logical = header.map(|(len, _)| len).unwrap_or(phys).min(phys);
+            let version = header.map(|(_, v)| v).unwrap_or(1);
+            let salt = salt_for(id, version);
+            let max_offset = scan_max_offset(&path, salt)?;
             if id == max_id {
                 // Re-open the latest segment for append. Logical end is the
                 // preamble length, not the preallocated file size.
@@ -430,6 +485,8 @@ impl QueueWal {
                     buf: Vec::with_capacity(WAL_WRITE_BATCH),
                     segment_max: self.segment_max_bytes,
                     preamble,
+                    version,
+                    salt,
                 });
             } else {
                 self.closed.insert(
@@ -438,6 +495,7 @@ impl QueueWal {
                         path,
                         max_offset,
                         len: logical,
+                        salt,
                     },
                 );
             }
@@ -456,27 +514,37 @@ impl QueueWal {
         let id = self.meta.next_segment_id;
         let path = segment_path(&self.dir, id);
         let created_new = !path.exists();
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        let file = file;
-        // Issue 8: parent-dir fsync after creating a new segment file.
-        let (len, allocated, preamble) = if created_new {
-            write_preamble(&file, PREAMBLE_LEN)?;
-            // Materialize the first chunk before any confirm so the fsync
-            // overwrites blocks that already have extents.
-            let target = extend_target(PREAMBLE_LEN, PREAMBLE_LEN + 1, self.segment_max_bytes);
-            materialize_range(&file, PREAMBLE_LEN, target)?;
-            sync_dir(&self.dir)?;
-            (PREAMBLE_LEN, target, true)
+        let reused = if created_new && salt_of(id) != 0 {
+            self.take_spare(&path)?
         } else {
-            let phys = file.metadata()?.len();
-            let preamble = read_preamble_len(&file)?.is_some();
-            let logical = read_preamble_len(&file)?.unwrap_or(phys).min(phys);
-            (logical, phys, preamble)
+            None
+        };
+        let (file, len, allocated, preamble, version) = if let Some((file, phys)) = reused {
+            // Already written and synced end to end: appends overwrite it.
+            (file, PREAMBLE_LEN, phys, true, REUSED_VERSION)
+        } else {
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)?;
+            if created_new {
+                write_preamble(&file, PREAMBLE_LEN, 1)?;
+                // Materialize the first chunk before any confirm so the fsync
+                // overwrites blocks that already have extents.
+                let target = extend_target(PREAMBLE_LEN, PREAMBLE_LEN + 1, self.segment_max_bytes);
+                materialize_range(&file, PREAMBLE_LEN, target)?;
+                // Issue 8: parent-dir fsync after creating a new segment file.
+                sync_dir(&self.dir)?;
+                (file, PREAMBLE_LEN, target, true, 1)
+            } else {
+                let phys = file.metadata()?.len();
+                let header = read_preamble(&file)?;
+                let logical = header.map(|(len, _)| len).unwrap_or(phys).min(phys);
+                let version = header.map(|(_, v)| v).unwrap_or(1);
+                (file, logical, phys, header.is_some(), version)
+            }
         };
         self.active = Some(ActiveSegment {
             id,
@@ -488,10 +556,33 @@ impl QueueWal {
             buf: Vec::with_capacity(WAL_WRITE_BATCH),
             segment_max: self.segment_max_bytes,
             preamble,
+            version,
+            salt: salt_for(id, version),
         });
         self.meta.next_segment_id = id.saturating_add(1);
         self.meta_dirty = true;
         Ok(())
+    }
+
+    /// Turn the spare into segment `path`: an empty, salted header is synced
+    /// before the rename, so a crash leaves either the spare or an empty
+    /// segment. Returns the file and its size.
+    fn take_spare(&mut self, path: &Path) -> Result<Option<(File, u64)>> {
+        let Some(spare) = self.spare.take() else {
+            return Ok(None);
+        };
+        let file = match OpenOptions::new().read(true).write(true).open(&spare) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        write_preamble(&file, PREAMBLE_LEN, REUSED_VERSION)?;
+        file.sync_data()?;
+        fs::rename(&spare, path)?;
+        sync_dir(&self.dir)?;
+        let phys = file.metadata()?.len();
+        metrics::counter!("queueforge_wal_segments_reused_total").increment(1);
+        Ok(Some((file, phys)))
     }
 
     fn rotate_if_needed(&mut self, upcoming_len: u64) -> Result<()> {
@@ -513,7 +604,7 @@ impl QueueWal {
             // A later confirm can cover these offsets. The header has to
             // include them or recovery would drop bytes the client was acked.
             if a.preamble {
-                write_preamble(&a.file, a.len)?;
+                write_preamble(&a.file, a.len, a.version)?;
             }
             a.file.sync_all()?;
             self.closed.insert(
@@ -522,6 +613,7 @@ impl QueueWal {
                     path,
                     max_offset: a.max_offset,
                     len: a.len,
+                    salt: a.salt,
                 },
             );
         }
@@ -554,12 +646,20 @@ impl QueueWal {
         }
         seg_ids.sort_unstable();
 
+        let last_id = seg_ids.last().copied();
         for id in seg_ids {
             let path = segment_path(&self.dir, id);
             if !path.exists() {
                 continue;
             }
-            match replay_segment(&path, ack_wm, &mut ready, budget.as_mut()) {
+            let salt = self
+                .active
+                .as_ref()
+                .filter(|a| a.id == id)
+                .map(|a| a.salt)
+                .or_else(|| self.closed.get(&id).map(|c| c.salt))
+                .unwrap_or(0);
+            match replay_segment(&path, ack_wm, &mut ready, budget.as_mut(), salt, Some(id) == last_id) {
                 Ok(ReplayOutcome {
                     positions,
                     last_valid_offset,
@@ -581,8 +681,8 @@ impl QueueWal {
                         // Drop the torn tail. A preallocated segment keeps its
                         // blocks and rewinds the header instead of shrinking.
                         let f = OpenOptions::new().write(true).read(true).open(&path)?;
-                        if read_preamble_len(&f)?.is_some() {
-                            write_preamble(&f, trunc)?;
+                        if let Some((_, version)) = read_preamble(&f)? {
+                            write_preamble(&f, trunc, version)?;
                             f.sync_data()?;
                         } else {
                             f.set_len(trunc)?;
@@ -728,11 +828,17 @@ fn segment_bounds(path: &Path) -> Result<(u64, u64)> {
 
 /// Replay one segment, pushing its enqueues onto `ready`. Callers drop those
 /// at or below the final ack watermark.
+///
+/// `salt` is the segment's CRC salt. In the newest segment of a reused file,
+/// a record that does not check is the logical end: a crash can leave the
+/// header ahead of the data, and the bytes there are the previous file's.
 fn replay_segment(
     path: &Path,
     ack_wm: u64,
     ready: &mut Vec<(u64, Message)>,
     mut budget: Option<&mut BodyBudget>,
+    salt: u32,
+    newest: bool,
 ) -> Result<ReplayOutcome> {
     let (start, end) = segment_bounds(path)?;
     let mut file = File::open(path)?;
@@ -744,13 +850,14 @@ fn replay_segment(
     let mut truncated_to = None;
     let mut wal_ack = ack_wm;
     let preamble = start == PREAMBLE_LEN;
+    let reused_tail = newest && salt != 0;
 
     loop {
         if pos >= end {
             break;
         }
         let rec_start = pos;
-        match codec::read_record(&mut reader) {
+        match codec::read_record_with(&mut reader, salt, end - rec_start) {
             Ok(Some(rec)) => {
                 let next = rec_start.saturating_add(rec.encoded_len as u64);
                 if next > end {
@@ -784,6 +891,10 @@ fn replay_segment(
                 truncated_to = Some(rec_start);
                 break;
             }
+            Err(StoreError::WalCorrupt { .. }) if reused_tail => {
+                truncated_to = Some(rec_start);
+                break;
+            }
             Err(e @ StoreError::WalCorrupt { .. }) => {
                 // A complete record with a bad CRC, magic, or version halts
                 // the queue. Do not demote that to a torn truncate.
@@ -809,15 +920,17 @@ fn replay_segment(
     })
 }
 
-fn scan_max_offset(path: &Path) -> Result<u64> {
+fn scan_max_offset(path: &Path, salt: u32) -> Result<u64> {
     let (start, end) = segment_bounds(path)?;
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file).take(end.saturating_sub(start));
     let mut max = 0u64;
+    let mut pos = start;
     loop {
-        match codec::read_record(&mut reader) {
+        match codec::read_record_with(&mut reader, salt, end.saturating_sub(pos)) {
             Ok(Some(rec)) => {
+                pos = pos.saturating_add(rec.encoded_len as u64);
                 max = max.max(rec.offset);
             }
             Ok(None) => break,
@@ -827,6 +940,14 @@ fn scan_max_offset(path: &Path) -> Result<u64> {
         }
     }
     Ok(max)
+}
+
+/// The file starts with the preallocated-segment header, so it can be reused.
+fn is_preallocated(path: &Path) -> bool {
+    File::open(path)
+        .and_then(|f| read_preamble_len(&f))
+        .map(|len| len.is_some())
+        .unwrap_or(false)
 }
 
 fn parse_segment_name(name: &str) -> Option<u64> {
@@ -844,7 +965,7 @@ fn sync_dir(dir: &Path) -> Result<()> {
 
 impl DurableQueueLog for QueueWal {
     fn append_enqueue(&mut self, offset: QueueOffset, msg: &Message) -> CoreResult<()> {
-        let bytes =
+        let mut bytes =
             encode_enqueue_record(offset.0, msg).map_err(|e| CoreError::Store(e.to_string()))?;
         self.rotate_if_needed(bytes.len() as u64)
             .map_err(|e| CoreError::Store(e.to_string()))?;
@@ -855,6 +976,7 @@ impl DurableQueueLog for QueueWal {
             .active
             .as_mut()
             .ok_or_else(|| CoreError::Store("no active WAL segment".into()))?;
+        salt_record(&mut bytes, active.salt);
         let at = active.len;
         self.recovered_at = std::collections::HashMap::new();
         self.recovered_len = std::collections::HashMap::new();
@@ -900,7 +1022,8 @@ impl DurableQueueLog for QueueWal {
         // The ack watermark rides in the segment so one sync covers bodies and acks.
         if self.meta_dirty && self.meta.ack_watermark > 0 {
             if let Some(active) = self.active.as_mut() {
-                let bytes = encode_ack_record(self.meta.ack_watermark);
+                let mut bytes = encode_ack_record(self.meta.ack_watermark);
+                salt_record(&mut bytes, active.salt);
                 active
                     .push_record(&bytes)
                     .map_err(|e| CoreError::Store(e.to_string()))?;
@@ -911,7 +1034,7 @@ impl DurableQueueLog for QueueWal {
                 .flush_buf()
                 .map_err(|e| CoreError::Store(format!("segment flush: {e}")))?;
             if active.preamble {
-                write_preamble(&active.file, active.len)
+                write_preamble(&active.file, active.len, active.version)
                     .map_err(|e| CoreError::Store(format!("segment header: {e}")))?;
             }
             // The segment is preallocated. Sync the logical prefix while a
@@ -964,6 +1087,23 @@ impl DurableQueueLog for QueueWal {
         let mut removed_any = false;
         for id in doomed {
             if let Some(seg) = self.closed.remove(&id) {
+                if self.reader.as_ref().map(|(rid, _)| *rid) == Some(id) {
+                    self.reader = None;
+                }
+                if self.spare.is_none() && is_preallocated(&seg.path) {
+                    let spare = self.dir.join(SPARE_NAME);
+                    match fs::rename(&seg.path, &spare) {
+                        Ok(()) => {
+                            self.spare = Some(spare);
+                            removed_any = true;
+                            metrics::counter!("queueforge_wal_segments_compacted_total").increment(1);
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(path = %seg.path.display(), error = %e, "failed to keep compacted segment as spare");
+                        }
+                    }
+                }
                 match fs::remove_file(&seg.path) {
                     Ok(()) => {
                         removed_any = true;
@@ -1003,8 +1143,10 @@ impl DurableQueueLog for QueueWal {
 
     fn read_at(&mut self, at: LogPosition) -> CoreResult<Message> {
         let mut buf = vec![0u8; at.len as usize];
+        let mut salt = 0;
         let read = match self.active.as_mut() {
             Some(active) if active.id == at.segment => {
+                salt = active.salt;
                 // A record still in the write buffer is not on disk yet.
                 if at.pos + at.len as u64 > active.len - active.buf.len() as u64 {
                     active
@@ -1018,16 +1160,21 @@ impl DurableQueueLog for QueueWal {
                     let seg = self.closed.get(&at.segment).ok_or_else(|| {
                         CoreError::Store(format!("WAL segment {} is gone", at.segment))
                     })?;
+                    salt = seg.salt;
                     let file = File::open(&seg.path)
                         .map_err(|e| CoreError::Store(format!("WAL open: {e}")))?;
                     self.reader = Some((at.segment, file));
+                }
+                if let Some(seg) = self.closed.get(&at.segment) {
+                    salt = seg.salt;
                 }
                 let (_, file) = self.reader.as_ref().expect("opened above");
                 file.read_exact_at(&mut buf, at.pos)
             }
         };
         read.map_err(|e| CoreError::Store(format!("WAL read: {e}")))?;
-        match codec::read_record(&mut buf.as_slice()) {
+        let max = buf.len() as u64;
+        match codec::read_record_with(&mut buf.as_slice(), salt, max) {
             Ok(Some(rec)) => rec
                 .message
                 .ok_or_else(|| CoreError::Store("WAL record is not an enqueue".into())),
@@ -1266,6 +1413,102 @@ mod tests {
         assert_eq!(recovered.next_offset, 3);
     }
 
+    /// Write `bodies` from offset `first` and sync each one.
+    fn write_synced(wal: &mut QueueWal, first: u64, bodies: &[Vec<u8>]) {
+        for (i, body) in bodies.iter().enumerate() {
+            DurableQueueLog::append_enqueue(wal, QueueOffset(first + i as u64), &sample(body, true)).unwrap();
+            DurableQueueLog::fsync(wal).unwrap();
+        }
+    }
+
+    /// Segments of a queue that has written and acked a few segments' worth:
+    /// the last compaction kept one as the spare.
+    fn churned(dir: &Path) -> (QueueWal, u64) {
+        let mut wal = QueueWal::open(dir, "/", "reuse", 16 * 1024).unwrap();
+        let bodies: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i; 1500]).collect();
+        write_synced(&mut wal, 1, &bodies);
+        for i in 1..=40u64 {
+            DurableQueueLog::acknowledge(&mut wal, QueueOffset(i)).unwrap();
+        }
+        DurableQueueLog::fsync(&mut wal).unwrap();
+        DurableQueueLog::compact(&mut wal).unwrap();
+        (wal, 41)
+    }
+
+    #[test]
+    fn a_compacted_segment_is_reused_and_a_restart_replays_only_live_rows() {
+        let dir = TempDir::new().unwrap();
+        let (mut wal, next) = churned(dir.path());
+        let queue = wal.dir().to_path_buf();
+        assert!(queue.join(SPARE_NAME).exists(), "compaction kept a spare");
+        let live: Vec<Vec<u8>> = (0..20u8).map(|i| vec![100 + i; 1500]).collect();
+        write_synced(&mut wal, next, &live);
+        assert!(!queue.join(SPARE_NAME).exists(), "the next segment took the spare");
+        let reused = wal.closed.values().map(|c| c.salt).chain(wal.active.as_ref().map(|a| a.salt));
+        assert!(reused.into_iter().any(|salt| salt != 0), "one segment is a reused, salted file");
+        drop(wal);
+
+        let mut again = QueueWal::open(dir.path(), "/", "reuse", 16 * 1024).unwrap();
+        let state = again.recover_messages().unwrap();
+        let bodies: Vec<Vec<u8>> = state.messages.iter().map(|(_, m)| m.body.to_vec()).collect();
+        assert_eq!(bodies, live);
+        assert_eq!(state.messages.first().map(|(o, _)| *o), Some(next));
+    }
+
+    #[test]
+    fn a_reused_segment_whose_header_ran_ahead_ends_at_its_last_good_record() {
+        let dir = TempDir::new().unwrap();
+        let (mut wal, next) = churned(dir.path());
+        // Write until the reused file is the active segment, then two more.
+        let mut live = Vec::new();
+        let mut extra = 2;
+        while extra > 0 {
+            let body = vec![(live.len() % 250) as u8; 1500];
+            write_synced(&mut wal, next + live.len() as u64, std::slice::from_ref(&body));
+            live.push(body);
+            if wal.active.as_ref().is_some_and(|a| a.salt != 0) {
+                extra -= 1;
+            }
+            assert!(live.len() < 200, "never rotated into the spare");
+        }
+        let active = wal.active.as_ref().unwrap();
+        assert_ne!(active.salt, 0, "the active segment is the reused file");
+        let path = segment_path(wal.dir(), active.id);
+        drop(wal);
+
+        // A crash after the header reached the disk but not the data: the
+        // header claims the whole file, and past the live records are the
+        // previous segment's, mid-record and with its own salt.
+        let f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let phys = f.metadata().unwrap().len();
+        write_preamble(&f, phys, REUSED_VERSION).unwrap();
+        drop(f);
+
+        let mut again = QueueWal::open(dir.path(), "/", "reuse", 16 * 1024).unwrap();
+        let state = again.recover_messages().unwrap();
+        let bodies: Vec<Vec<u8>> = state.messages.iter().map(|(_, m)| m.body.to_vec()).collect();
+        assert_eq!(bodies, live);
+        // The header was pulled back to the last good record.
+        let f = File::open(&path).unwrap();
+        assert!(read_preamble_len(&f).unwrap().unwrap() < phys);
+    }
+
+    #[test]
+    fn salts_differ_per_segment_and_salted_records_need_their_own_salt() {
+        assert_ne!(salt_of(1), salt_of(2));
+        assert_ne!(salt_of(1), 0);
+        let mut bytes = encode_enqueue_record(5, &sample(b"x", true)).unwrap();
+        salt_record(&mut bytes, salt_of(3));
+        assert!(codec::read_record_with(&mut bytes.as_slice(), salt_of(3), u64::MAX).unwrap().is_some());
+        assert!(codec::read_record_with(&mut bytes.as_slice(), salt_of(4), u64::MAX).is_err());
+        assert!(codec::read_record(&mut bytes.as_slice()).is_err());
+        // A length past the bytes left is torn, not an allocation of that size.
+        assert!(matches!(
+            codec::read_record_with(&mut bytes.as_slice(), salt_of(3), 10),
+            Err(StoreError::WalTornTail { .. })
+        ));
+    }
+
     #[test]
     fn ack_watermark_and_compact() {
         let dir = TempDir::new().unwrap();
@@ -1337,7 +1580,7 @@ mod tests {
                 .open(&seg_path)
                 .unwrap();
             f.write_at(b"VLRA\x01\x01", logical).unwrap();
-            super::write_preamble(&f, logical + 6).unwrap();
+            super::write_preamble(&f, logical + 6, 1).unwrap();
             f.sync_all().unwrap();
         }
         assert_eq!(std::fs::metadata(&seg_path).unwrap().len(), phys);

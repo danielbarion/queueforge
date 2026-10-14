@@ -308,6 +308,14 @@ pub fn encode_enqueue_record(offset: u64, msg: &Message) -> Result<Vec<u8>> {
 
 /// Read one record from `reader`. Returns `Ok(None)` on clean EOF at a record boundary.
 pub fn read_record<R: Read>(reader: &mut R) -> Result<Option<DecodedRecord>> {
+    read_record_with(reader, 0, u64::MAX)
+}
+
+/// [`read_record`] for a segment whose record CRCs are XORed with `salt`.
+///
+/// A record longer than `max_len` bytes is reported torn before its body is
+/// allocated: past the logical end, stale bytes can hold any length.
+pub fn read_record_with<R: Read>(reader: &mut R, salt: u32, max_len: u64) -> Result<Option<DecodedRecord>> {
     // Two-phase header read for torn-tail reporting.
     let mut magic_buf = [0u8; 4];
     match read_exact_or_eof(reader, &mut magic_buf)? {
@@ -347,6 +355,9 @@ pub fn read_record<R: Read>(reader: &mut R) -> Result<Option<DecodedRecord>> {
     let offset = u64::from_le_bytes(rest_hdr[2..10].try_into().unwrap());
     let flags = rest_hdr[10];
     let props_len = u32::from_le_bytes(rest_hdr[11..15].try_into().unwrap()) as usize;
+    if 4 + rest_hdr.len() as u64 + props_len as u64 + 8 > max_len {
+        return Err(StoreError::WalTornTail { at: 19 });
+    }
 
     let mut props_bytes = vec![0u8; props_len];
     if props_len > 0 {
@@ -368,6 +379,11 @@ pub fn read_record<R: Read>(reader: &mut R) -> Result<Option<DecodedRecord>> {
         }
     }
     let body_len = u32::from_le_bytes(body_len_buf) as usize;
+    if 4 + rest_hdr.len() as u64 + props_len as u64 + 4 + body_len as u64 + 4 > max_len {
+        return Err(StoreError::WalTornTail {
+            at: 23 + props_len as u64,
+        });
+    }
     let mut body = vec![0u8; body_len];
     if body_len > 0 {
         match read_exact_or_eof(reader, &mut body)? {
@@ -400,7 +416,7 @@ pub fn read_record<R: Read>(reader: &mut R) -> Result<Option<DecodedRecord>> {
     crc_input.extend_from_slice(&body);
     let mut hasher = Hasher::new();
     hasher.update(&crc_input);
-    let crc_calc = hasher.finalize();
+    let crc_calc = hasher.finalize() ^ salt;
     if crc_calc != crc_read {
         return Err(StoreError::WalCorrupt {
             path: String::new(),
