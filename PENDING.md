@@ -122,7 +122,12 @@ Status: open. Chunk reuse and the off-loop directory sync are in the tree
 (see above). What the 1 CPU 64 KiB profile shows now, main thread: socket
 `write` of deliveries 16%, `crc32` of log records 9%, the body copy in
 `concat` (`finishPublish`) 9.5%, three more copies of ~3% each (`absorbFresh`,
-`writeRecord`, `encodeDeliver`).
+`writeRecord`, `encodeDeliver`). Tried 2026-10-14: keeping a single-chunk body
+as a view of the inbound buffer instead of `slice()` (no copy when the body is
+at least half the buffer). A/B at 1 CPU, three repeats: large-64k 623.5 →
+427.5 MB/s, work-queue 138,309 → 117,094 msg/s, large-1m −1%, ranges
+overlapping; reverted. Fewer copies did not mean more throughput, as with
+the gather copy before.
 
 Evidence: 1 CPU large-64k 526.3 and large-1m 547.5 MB/s against RabbitMQ 778.0
 and 1,345.8, with Bun at 85–93% CPU. Part of the gap is durability: RabbitMQ
