@@ -89,3 +89,28 @@ test("a chunk with an unsynced batch is not retired when its synced rows are gon
   expect(ids).toContain(2);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("rotations that hand chunks to the worker never fail its syncs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-stall-handoff-"));
+  const path = join(dir, "t.sqlite");
+  const log = FastLog.open(path)!;
+  let failed = 0;
+  log.onSynced = (_seq, ok) => {
+    if (!ok) failed++;
+  };
+  // 1 MiB rows: a rotation every fourth append, each handing the old chunk
+  // over while the worker may be between its two syncs.
+  const body = new Uint8Array(1024 * 1024).fill(5);
+  // No waits: the worker is always mid-loop when a rotation hands over.
+  let previous: number[] = [];
+  for (let id = 1; id <= 400; id++) {
+    log.appendRows([{ id, vhost: "/", queue: "q", body, meta: "{}" }], previous);
+    previous = [id];
+  }
+  while (!log.settled) await Bun.sleep(1);
+  expect(log.handOffs).toBeGreaterThan(50);
+  expect(failed).toBe(0);
+  expect(log.canAppend).toBe(true);
+  log.close();
+  rmSync(dir, { recursive: true, force: true });
+});

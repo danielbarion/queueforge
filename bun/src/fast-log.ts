@@ -953,7 +953,12 @@ export class FastLog {
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
     // The sync worker still owes this chunk an fsync. It syncs and closes it.
+    // The new fd goes into FD first: a worker that takes the old one from
+    // PREVIOUS and closes it then reads FD next. With the old fd still there
+    // (appendRows stored the new one only after its write), its fdatasync
+    // hit EBADF, FAILED latched, and every waiting confirm was refused.
     if (handOff) {
+      Atomics.store(this.syncState, 2, BigInt(fd));
       Atomics.store(this.syncState, 4, BigInt(this.active.fd));
       this.handOffs++;
     }
