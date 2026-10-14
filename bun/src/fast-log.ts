@@ -832,10 +832,18 @@ export class FastLog {
     return ids;
   }
 
-  /** Remove rotated chunks from the front while none of their rows are live. */
+  /**
+   * Remove rotated chunks from the front while none of their rows are live.
+   *
+   * Rows count as live only once their batch is synced, so a chunk that still
+   * holds an unsynced batch stays: after a hand-off the worker can cover an
+   * earlier delete batch first, and unlinking then lost the insert written
+   * after it, whose confirm was still to come.
+   */
   retire() {
     let removed = 0;
-    while (this.oldest < this.active.id && (this.liveCount.get(this.oldest) ?? 0) === 0) {
+    const firstUnsynced = this.unsynced[0]?.chunk ?? Infinity;
+    while (this.oldest < this.active.id && this.oldest < firstUnsynced && (this.liveCount.get(this.oldest) ?? 0) === 0) {
       try {
         unlinkSync(chunkPath(this.dir, this.oldest));
       } catch (err) {
