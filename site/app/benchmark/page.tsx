@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import { Bars } from "../bars";
 import {
   BENCH_MD,
+  formatMemory,
   formatRate,
   formatTimes,
   loadRows,
   MEASURED,
   paced,
+  parseMemory,
   scale,
   scenarioAverages,
   scenarioRows,
@@ -19,6 +21,12 @@ import { SizeCharts } from "../size-chart";
 
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
 const RATES = ["one", "shared", "spread"] as const;
+
+/** A harness size string with a consistent unit, or the text as it was ("n/a"). */
+function memoryText(text: string) {
+  const mib = parseMemory(text);
+  return mib == null ? text : formatMemory(mib);
+}
 
 /** A rate that can be compared with the others in its column. */
 function comparable(row: LoadRow, key: (typeof RATES)[number]) {
@@ -53,12 +61,12 @@ function RateCell({ row, field, best }: { row: LoadRow; field: (typeof RATES)[nu
   if (caveat === "split") {
     return (
       <td className="caveat">
-        {formatRate(rate)}
+        {formatRate(rate)} msg/s
         <sup>b</sup>
       </td>
     );
   }
-  return <td className={rate === best ? "best" : undefined}>{formatRate(rate)}</td>;
+  return <td className={rate === best ? "best" : undefined}>{formatRate(rate)} msg/s</td>;
 }
 
 export const metadata: Metadata = {
@@ -206,7 +214,9 @@ export default function BenchmarkPage() {
             One row per broker and container. 1 conn and 16 queues are confirm/s. 16 conn is
             consume/s on one shared queue, the rate that does not grow it. Connections are a
             separate login sweep: the last hold that stayed up and passed the probe. Message rates
-            and that hold were not measured together. There is no 1 CPU / 1 GiB login cell.
+            and that hold were not measured together. Memory is the container&apos;s, page cache
+            included, at the end of the 16-queue measure; login memory is <code>docker stats</code>{" "}
+            usage at that hold. There is no 1 CPU / 1 GiB login cell.
           </p>
           <div className="panel table-panel bench-table">
             <div className="scroll" tabIndex={0} role="region" aria-label="Benchmark results">
@@ -214,11 +224,11 @@ export default function BenchmarkPage() {
                 <thead>
                   <tr>
                     <th scope="col">App</th>
-                    <th scope="col">1 conn msg/s</th>
-                    <th scope="col">16 conn msg/s</th>
-                    <th scope="col">16 queues msg/s</th>
+                    <th scope="col">1 conn</th>
+                    <th scope="col">16 conn</th>
+                    <th scope="col">16 queues</th>
                     <th scope="col">Connections</th>
-                    <th scope="col">MiB</th>
+                    <th scope="col">Memory</th>
                     <th scope="col">Login memory</th>
                   </tr>
                 </thead>
@@ -243,8 +253,8 @@ export default function BenchmarkPage() {
                         <td className={row.connections === "n/a" ? "na" : undefined}>
                           {row.connections}
                         </td>
-                        <td>{row.mib}</td>
-                        <td className={row.login === "n/a" ? "na" : undefined}>{row.login}</td>
+                        <td>{memoryText(row.mib)}</td>
+                        <td className={row.login === "n/a" ? "na" : undefined}>{memoryText(row.login)}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -26,6 +26,30 @@ export function formatTimes(rate: number, base: number) {
   });
 }
 
+function fixed(value: number, digits: number) {
+  return value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+/** A size in MiB, in GiB from 1 GiB up: "298.6 MiB", "5.55 GiB". */
+export function formatMemory(mib: number) {
+  return mib >= 1024 ? `${fixed(mib / 1024, 2)} GiB` : `${fixed(mib, 1)} MiB`;
+}
+
+/** A size as the harness writes it ("454.7 MiB", "3.579 GiB", or bare MiB), in MiB. Null when it is not one. */
+export function parseMemory(text: string): number | null {
+  const m = /^([\d.,]+)\s*(MiB|GiB)?$/.exec(text.trim());
+  if (!m) return null;
+  const value = Number(m[1]!.replace(/,/g, ""));
+  if (!Number.isFinite(value)) return null;
+  return m[2] === "GiB" ? value * 1024 : value;
+}
+
+/** A scenario score with its unit: "43,341 msg/s", "778.0 MB/s", "p99 1.73 ms". */
+export function formatScore(kind: "rate" | "bytes" | "latency", text: string) {
+  if (kind === "latency") return `p99 ${text} ms`;
+  return `${text} ${kind === "bytes" ? "MB/s" : "msg/s"}`;
+}
+
 export type RateKey = "one" | "shared" | "spread";
 
 /**

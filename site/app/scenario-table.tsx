@@ -1,4 +1,4 @@
-import { type ScenarioRow, type Tone } from "./bench";
+import { formatMemory, formatScore, type ScenarioRow, type Tone } from "./bench";
 
 const COLUMNS: Array<{ tone: Tone; name: string }> = [
   { tone: "mq", name: "RabbitMQ" },
@@ -6,12 +6,6 @@ const COLUMNS: Array<{ tone: Tone; name: string }> = [
   { tone: "bun", name: "Bun" },
   { tone: "php", name: "PHP" },
 ];
-
-const UNIT: Record<ScenarioRow["kind"], string> = {
-  rate: "msg/s",
-  bytes: "MB/s",
-  latency: "p99 ms",
-};
 
 /** The best value in a row: highest rate, or lowest p99 latency. */
 function best(row: ScenarioRow): number | null {
@@ -28,13 +22,11 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
         <table>
           <colgroup>
             <col className="scenario-column" />
-            <col className="score-column" />
             {COLUMNS.map((c) => <col className="broker-column" key={c.tone} />)}
           </colgroup>
           <thead>
             <tr>
               <th scope="col">Scenario</th>
-              <th scope="col">Unit</th>
               {COLUMNS.map((c) => (
                 <th scope="col" key={c.tone}>
                   <span className={`app tone-${c.tone}`}>
@@ -54,12 +46,11 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
                     <span className="scenario-title">{row.title}</span>
                     <span className="scenario-real">{row.real}</span>
                   </th>
-                  <td className="unit">{row.id === "backlog" ? "fill / drain msg/s" : UNIT[row.kind]}</td>
                   {COLUMNS.map((c) => {
                     const v = row.values[c.tone];
                     return (
                       <td key={c.tone} className={v == null ? "na" : v === top ? "best" : undefined}>
-                        {row.text[c.tone]}
+                        {v == null ? row.text[c.tone] : formatScore(row.kind, row.text[c.tone])}
                       </td>
                     );
                   })}
@@ -79,7 +70,7 @@ export function ScenarioTable({ rows }: { rows: ScenarioRow[] }) {
  */
 export function MemoryTable({ rows, label }: { rows: ScenarioRow[]; label: string }) {
   const sizes = [...new Set(rows.map((row) => row.size))];
-  const format = (value: number | null) => value == null ? "–" : `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} MiB`;
+  const format = (value: number | null) => value == null ? "–" : formatMemory(value);
   return (
     <div className="panel table-panel bench-table memory-table">
       <div className="scroll" tabIndex={0} role="region" aria-label={label}>
