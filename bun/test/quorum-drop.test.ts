@@ -381,7 +381,7 @@ test("an ack does not drop a quorum message the claim already dropped", async ()
   }
 });
 
-test("a quorum delivery reads the durable body back from the store", async () => {
+test("a quorum leader keeps a shallow queue whole and pages a deep one", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-qbody-"));
   const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 40);
   const broker = new Broker(cfg("a", []), store);
@@ -396,31 +396,38 @@ test("a quorum delivery reads the durable body back from the store", async () =>
       passive: false,
       args: { "x-queue-type": "quorum" },
     });
-    const payload = new Uint8Array([9, 8, 7]);
     const props = new Uint8Array([4, 5, 6]);
-    expect(
-      await broker.publish({
-        vhost: "/",
-        exchange: "",
-        routingKey: "q",
-        body: payload,
-        headers: [],
-        propRaw: props,
-        persistent: true,
-        priority: 0,
-        expiration: "",
-        confirm: true,
-      }),
-    ).toBe("ack");
+    // PAGE_AFTER_READY is 2048: the message after that many is paged.
+    const n = 2049;
+    const results = await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        broker.publish({
+          vhost: "/",
+          exchange: "",
+          routingKey: "q",
+          body: new Uint8Array([i & 0xff, 8, 7]),
+          headers: [],
+          propRaw: props,
+          persistent: true,
+          priority: 0,
+          expiration: "",
+          confirm: true,
+        }),
+      ),
+    );
+    expect(results.every((r) => r === "ack")).toBe(true);
     const q = broker.queues.get(broker.key("/", "q"));
     if (!q) throw new Error("queue missing");
-    expect(q.ready.at(0)?.body.byteLength).toBe(0);
-    expect(q.ready.at(0)?.propRaw.byteLength).toBe(0);
-    expect(q.ready.at(0)?.routingKey).toBe("");
-    expect(q.ready.bytes).toBe(payload.byteLength);
-    let got: Uint8Array = new Uint8Array();
-    let gotProps: Uint8Array = new Uint8Array();
-    let gotKey = "";
+    // The head of a shallow queue keeps its body, properties and key.
+    expect(q.ready.at(0)?.body.byteLength).toBe(3);
+    expect(q.ready.at(0)?.routingKey).toBe("q");
+    // Past the threshold the row owns them.
+    const last = q.ready.at(n - 1)!;
+    expect(last.body.byteLength).toBe(0);
+    expect(last.propRaw.byteLength).toBe(0);
+    expect(last.routingKey).toBe("");
+    expect(q.ready.bytes).toBe(3 * n);
+    const got: Array<{ body: number[]; props: number[]; key: string }> = [];
     await broker.consume("/", "q", {
       tag: "c",
       session: 1,
@@ -428,16 +435,16 @@ test("a quorum delivery reads the durable body back from the store", async () =>
       exclusive: false,
       want: () => true,
       deliver: (item) => {
-        got = item.body;
-        gotProps = item.propRaw;
-        gotKey = item.routingKey;
+        got.push({ body: [...item.body], props: [...item.propRaw], key: item.routingKey });
       },
     });
     broker.pump(q);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect([...got]).toEqual([9, 8, 7]);
-    expect([...gotProps]).toEqual([4, 5, 6]);
-    expect(gotKey).toBe("q");
+    const deadline = Date.now() + 5000;
+    while (got.length < n && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(got).toHaveLength(n);
+    expect(got[0]).toEqual({ body: [0, 8, 7], props: [4, 5, 6], key: "q" });
+    // The paged one reads its body and properties back from the store.
+    expect(got[n - 1]).toEqual({ body: [(n - 1) & 0xff, 8, 7], props: [4, 5, 6], key: "q" });
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

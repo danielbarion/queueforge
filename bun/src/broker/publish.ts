@@ -490,12 +490,16 @@ export function enqueueLocal(this: Broker,
     confirmGate: src.confirmGate,
   };
   // The row owns the bytes and the property block. A backlog of full records
-  // made a later confirm pause under the memory cap. A classic durable message
-  // behind a deep backlog is paged the same way: delivery reloads it from the
-  // store, as RabbitMQ classic queues page bodies to disk. 300,000 queued 1 KiB
-  // bodies otherwise outgrew a 1 GiB container.
+  // made a later confirm pause under the memory cap. A durable message behind
+  // a deep backlog is paged: delivery reloads it from the store, as RabbitMQ
+  // classic queues page bodies to disk. 300,000 queued 1 KiB bodies otherwise
+  // outgrew a 1 GiB container. A follower's quorum copy is only read after a
+  // failover, so it is paged at once. A leader's shallow queue keeps its
+  // messages whole: reloading each one cost the 4-CPU quorum cell a store
+  // read, a JSON parse and a base64 decode per delivery.
   const deep = q.ready.length >= PAGE_AFTER_READY || q.ready.bytes >= PAGE_AFTER_BYTES;
-  if (rowId != null && (q.argsParsed.queueType === "quorum" || deep)) {
+  const replica = q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q);
+  if (rowId != null && (replica || deep)) {
     msg.bodyBytes = src.body.length;
     msg.body = EMPTY_BODY;
     msg.propRaw = EMPTY_BODY;
@@ -504,7 +508,7 @@ export function enqueueLocal(this: Broker,
     msg.routingKey = "";
     msg.slim = true;
   }
-  if (q.argsParsed.queueType === "quorum" && !this.isQuorumLeader(q)) {
+  if (replica) {
     q.replicas.set(msg.id, msg);
     return true;
   }
