@@ -284,6 +284,29 @@ used ~300% CPU of the host throughout.
 What is left is H3: one 8 s sample per cell cannot separate builds on a busy
 host.
 
+### B13. Refused confirms in one load cell (2026-10-13)
+
+Status: open. In the fourth 2026-10-13 run (`bench/results/2026-10-14`) the 4
+CPU / 8 GiB spread cell failed before its measure: the broker refused the
+confirms of 2,048 publishes (16 queues × the 128-confirm flush window) and a
+channel closed with 541 `INTERNAL_ERROR`. `queueforge_confirm_before_fsync_total`
+read 2,048; it counts confirms released without a covering fsync, and every
+such confirm is refused (`Store.whenDurable`), so none was acked early. Every
+other load cell of every run reads 0. Six repeats of the cell on the same image
+passed, and so did the re-measure.
+
+The harness keeps a broker's log only when it fails to boot or returns no
+result (`dump_logs` in `bench/load.py`), so this one was lost.
+
+Where a confirm is refused, in `bun/src/store.ts` and `bun/src/fast-log.ts`:
+the sync worker reports a failed fsync; `syncRows` or `appendRows` throws
+(both log "durable log write failed"); `flushGroup` with nothing staged while
+`stagedWithoutFlush` is set and nothing is syncing (silent). The likeliest one
+on a stalled host: `FastLog.drainWorker` waits at most 5 s for the sync worker
+before a chunk rotates, then reports every batch up to the worker's last
+finished sequence as failed, even though those were synced, and closes the
+old fd the worker may still be syncing.
+
 ### B6. Peak memory and latency vary between runs
 
 Status: open, cause unknown. Five fixed-image repeats of work-queue, latency-1k
@@ -517,7 +540,9 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
   migrated connections; supervisor without broker modules (17 → 6 MiB); one
   promise per confirm (1 CPU heavy 109k → 121k); staged rows by id; live index
   in typed arrays (1 CPU backlog median 615 → 494 MiB); fanout copies in one
-  log record (1 CPU broadcast 297k → 389k). Not yet in a full run.
+  log record (1 CPU broadcast 297k → 389k). In the fourth 2026-10-13 run
+  (`bench/results/2026-10-14`): 1 CPU broadcast 249k → 412k, heavy 107k →
+  145k, 4 CPU quorum 56k → 76k, heavy 244k → 331k msg/s.
 
 - **B8** (2026-10-10). Synced bodies past 64 MiB stay only in the durable log and
   are read back with `pread`, instead of being copied into SQLite in 80,000-row

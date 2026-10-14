@@ -1,0 +1,41 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:8e4e2e0c953d29cce0fad2d0daf7e8d341a1fed534049e6b03abe10d3aac7fee",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "5821641968a14ed8b8b8357969f96d30",
+  "expected_repeats": 2,
+  "harness_sha256": "5680c0f8b2d5eee6fe3bb934a9585c69ba14902915db58f7cebc3dc6b25a6538",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "2ebf65943375701f951e23cffed40adf58b5fccc",
+  "invocation_source_content_sha256": "5060165f55ee483d7807c02c7f8c561f8ab2f592e1d7c15f80c43efc6dad66eb",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-14/"
+  ],
+  "repeat_ordinal": 2,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "b4ac65ab9de6481891c2368e99657881",
+  "scenario": {
+    "args": "-x 1 -y 20 -u tasks -f persistent -s 512 -c 100 -q 1 -L 2000 -r 5000",
+    "id": "slow-consumers",
+    "rate": 5000,
+    "real": "20 workers that each spend 2 ms per job with prefetch 1, fed 5,000 msg/s.",
+    "title": "Slow workers, prefetch 1"
+  },
+  "scenario_sha256": "924e3f424ff33bfa34764693a74ec5b052cac5fae7357aea1484e28ac1bd121e",
+  "started_utc": "2026-10-13T21:16:39Z"
+}
