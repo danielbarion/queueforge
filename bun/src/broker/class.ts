@@ -87,6 +87,10 @@ export class Broker {
   /** Member ids whose hello or hello-reply has been applied during `quorumHold`. */
   heardPeers = new Set<string>();
 
+  /** The running pass of `retryConsumedDrops`, and whether another must follow it. */
+  dropRetry: Promise<void> | null = null;
+  dropRetryAgain = false;
+
   /** Member ids that refused five dials during `quorumHold`. */
   downPeers = new Set<string>();
 

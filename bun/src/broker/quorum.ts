@@ -119,7 +119,10 @@ export async function enqueueQuorum(this: Broker,
   copies.push(ok ? "durable" : "memory");
   if (!ok || !durableMajority(members, copies)) {
     await Promise.all(acked.map((id) => this.cluster!.call(id, "quorum_drop", { vhost: q.vhost, queue: q.name, id: qid }).catch(() => null)));
-    if (ok) this.dropLocal(q.vhost, q.name, qid);
+    if (ok) {
+      this.dropLocal(q.vhost, q.name, qid);
+      void this.quorumDrop(q, qid).catch(() => false);
+    }
     this.pump(q);
     return false;
   }
@@ -336,17 +339,63 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
       () => false,
     );
   }
-  const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId) ?? [];
-  if (peers.length === 0) return true;
+  return (await this.dropOnPeers(q.vhost, q.name, id)).ok;
+}
+
+/**
+ * Send `quorum_drop` to every connected peer (without Raft).
+ *
+ * @param except Members that already dropped it (a leader that handed out a get).
+ * @returns `ok` when every connected peer accepted; `complete` when, besides,
+ * every configured member was among them. A complete drop also forgets the id:
+ * no member is left to hand it on to.
+ */
+export async function dropOnPeers(this: Broker, vhost: string, queue: string, id: string, except: readonly string[] = []): Promise<{ ok: boolean; complete: boolean }> {
+  const self = this.cfg.nodeId;
+  const peers = this.cluster?.peerIds().filter((peer) => peer !== self && !except.includes(peer)) ?? [];
+  const reached = new Set(peers);
+  const everyone = this.cfg.members.every((m) => m.id === self || except.includes(m.id) || reached.has(m.id));
+  // With a member away, the receivers keep the id too, so any of them can hand
+  // it on if this broker is gone by the time that member is back.
+  const keep = !everyone;
   const results = await Promise.all(
     peers.map((peer) =>
-      this.cluster!.call(peer, "quorum_drop", { vhost: q.vhost, queue: q.name, id }).then(
+      this.cluster!.call(peer, "quorum_drop", { vhost, queue, id, keep }).then(
         () => true,
         () => false,
       ),
     ),
   );
-  return results.every(Boolean);
+  const ok = results.every(Boolean);
+  const complete = ok && everyone;
+  if (complete) this.consumedIds.delete(vhost, queue, id);
+  return { ok, complete };
+}
+
+/**
+ * Retry the drops of every id still listed (without Raft), after a peer
+ * connected. Ids every member then accepted are forgotten; the rest stay for
+ * the next one. One pass at a time; a call during a pass runs another after it.
+ */
+export function retryConsumedDrops(this: Broker) {
+  if (this.cluster?.consensus?.node || this.consumedIds.size === 0) return;
+  if (this.dropRetry) {
+    this.dropRetryAgain = true;
+    return;
+  }
+  this.dropRetry = (async () => {
+    try {
+      do {
+        this.dropRetryAgain = false;
+        const pending = this.consumedIds.list();
+        for (let i = 0; i < pending.length; i += 64) {
+          await Promise.all(pending.slice(i, i + 64).map((it) => this.dropOnPeers(it.vhost, it.queue, it.id)));
+        }
+      } while (this.dropRetryAgain);
+    } finally {
+      this.dropRetry = null;
+    }
+  })();
 }
 
 /**
@@ -355,10 +404,13 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
  * @param vhost Vhost of the queue.
  * @param queue Queue name. A missing queue still records the id as consumed.
  * @param id Message id removed from ready, replicas, and unacked.
+ * @param note Keep the id to hand on to members that missed it. A member
+ * answering a peer's `quorum_drop` does so only when the sender saw a member
+ * away (`keep`); otherwise every member already has the drop.
  * @returns Nothing. A stored row for that id is deleted.
  */
-export function dropLocal(this: Broker, vhost: string, queue: string, id: string) {
-  this.noteConsumed(vhost, queue, id);
+export function dropLocal(this: Broker, vhost: string, queue: string, id: string, note = true) {
+  if (note) this.noteConsumed(vhost, queue, id);
   const q = this.queues.get(this.key(vhost, queue));
   if (!q) return;
   // Follower copies live in `replicas`. An empty ready set has nothing to scan.
@@ -379,7 +431,8 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
  * @param vhost Vhost of the queue.
  * @param queue Queue name.
  * @param id Message id. An empty id is ignored. A duplicate triple is ignored.
- * @returns Nothing. The list is what a later snapshot asks peers to drop.
+ * @returns Nothing. The list is what a later snapshot asks peers to drop; an
+ * id leaves it once every member accepted its drop (`dropOnPeers`).
  */
 export function noteConsumed(this: Broker, vhost: string, queue: string, id: string) {
   if (!id) return;
@@ -425,6 +478,8 @@ Broker.prototype.releaseQuorumHold = releaseQuorumHold;
 Broker.prototype.noteQuorumDown = noteQuorumDown;
 Broker.prototype.clearQuorumStrikes = clearQuorumStrikes;
 Broker.prototype.quorumDrop = quorumDrop;
+Broker.prototype.dropOnPeers = dropOnPeers;
+Broker.prototype.retryConsumedDrops = retryConsumedDrops;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
 Broker.prototype.applyConsumed = applyConsumed;
@@ -443,6 +498,8 @@ declare module "./class.ts" {
     noteQuorumDown: typeof noteQuorumDown;
     clearQuorumStrikes: typeof clearQuorumStrikes;
     quorumDrop: typeof quorumDrop;
+    dropOnPeers: typeof dropOnPeers;
+    retryConsumedDrops: typeof retryConsumedDrops;
     dropLocal: typeof dropLocal;
     noteConsumed: typeof noteConsumed;
     applyConsumed: typeof applyConsumed;

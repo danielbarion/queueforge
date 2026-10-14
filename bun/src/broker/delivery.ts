@@ -237,7 +237,12 @@ export function noteDeliver(this: Broker, autoAck: boolean, redelivered: boolean
  * @returns Nothing. The next pump runs only after the peer drop finishes.
  */
 export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consumer, msg: LiveMsg) {
-  msg.quorumDropped = await this.quorumDrop(q, msg.id);
+  if (this.cluster?.consensus?.node) msg.quorumDropped = await this.quorumDrop(q, msg.id);
+  else {
+    const drop = await this.dropOnPeers(q.vhost, q.name, msg.id);
+    msg.quorumDropped = drop.ok;
+    msg.quorumDropComplete = drop.complete;
+  }
   this.materialize(msg);
   this.noteDeliver(chosen.noAck, msg.redelivered);
   chosen.deliver(msg);
@@ -397,11 +402,13 @@ export function ack(this: Broker, vhost: string, queue: string, id: string): Pro
   q.unacked.delete(id);
   if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
   this.prom.acknowledged++;
-  if (q.argsParsed.queueType === "quorum") {
+  // Every member dropped it at the claim: there is nobody to hand it on to.
+  if (q.argsParsed.queueType === "quorum" && !msg.quorumDropComplete) {
     this.noteConsumed(q.vhost, q.name, id);
     // The claim drop already ran before basic.deliver. Retry only when a peer
     // missed it. A second drop on the success path holds the event loop behind
-    // another pair of cluster calls for every ack.
+    // another pair of cluster calls for every ack. A member that was away gets
+    // it from `retryConsumedDrops` once it connects.
     if (!msg.quorumDropped) void this.quorumDrop(q, id).catch(() => {});
   }
   this.pump(q);
@@ -494,9 +501,9 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
         // committing it; commit the settle here so every member forgets it.
         if (noAck && id) await this.quorumDrop(q, id).catch(() => false);
       } else {
+        // The leader handed it out and dropped its copy.
         const leader = this.quorumLeader(q);
-        const peers = this.cluster?.peerIds().filter((peer) => peer !== this.cfg.nodeId && peer !== leader) ?? [];
-        await Promise.all(peers.map((peer) => this.cluster!.call(peer, "quorum_drop", { vhost, queue, id }).catch(() => null)));
+        await this.dropOnPeers(vhost, queue, id, leader ? [leader] : []);
       }
       const propRawB64 = bunMsg?.propRaw ?? rustMsg?.propRaw ?? "";
       return {

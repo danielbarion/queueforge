@@ -23,6 +23,8 @@ export type LiveMsg = {
   confirmGate?: { hold: boolean };
   /** True after a claim drop reached every peer. The ack then skips a second drop. */
   quorumDropped?: boolean;
+  /** The claim drop reached every configured member (see `dropOnPeers`). */
+  quorumDropComplete?: boolean;
   /** Durable quorum fields live in the row until deliver reloads them. */
   slim?: boolean;
 };

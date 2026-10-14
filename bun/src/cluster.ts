@@ -489,6 +489,7 @@ export class Cluster {
       }
       this.broker.applyConsumed(payload.consumed as Array<{ vhost?: string; queue?: string; id?: string }>);
       this.broker.noteQuorumPeer(id);
+      this.broker.retryConsumedDrops();
       write({
         v: 1,
         op: "reply",
@@ -526,6 +527,7 @@ export class Cluster {
         /* a peer of the other implementation keeps its own files */
       }
       this.broker.applyConsumed(payload.consumed);
+      if (Array.isArray(payload.consumed)) this.broker.retryConsumedDrops();
       this.consensus.noteFeatures(String(msg.from ?? msg.nodeId ?? id ?? ""), payload as Record<string, unknown>, Number(msg.id) === 0);
       if (Array.isArray(payload.consumed) || Number(msg.id) === 0) {
         this.broker.noteQuorumPeer(String(msg.from ?? msg.nodeId ?? ""));
@@ -721,7 +723,8 @@ export class Cluster {
     }
     if (op === "quorum_drop") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
-      this.broker.dropLocal(String(p.vhost), String(p.queue), String(p.id ?? p.message_id ?? p.qid ?? ""));
+      // Kept only while a member is away; see `dropOnPeers`.
+      this.broker.dropLocal(String(p.vhost), String(p.queue), String(p.id ?? p.message_id ?? p.qid ?? ""), p.keep === true);
       return true;
     }
     if (op === "quorum_append" || op === "enqueue") {

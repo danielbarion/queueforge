@@ -25,7 +25,7 @@ best broker in that row.
   once a published run carries it.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-14): Bun suite 267/267, Rust 444/444, PHP 40/40 files;
+Current tree (2026-10-14): Bun suite 274/274, Rust 444/444, PHP 40/40 files;
 conformance Bun, Rust and PHP 135/135, RabbitMQ 134/135 (no delayed-message
 plugin).
 
@@ -88,7 +88,10 @@ Measured in A/Bs, not yet in the published tables:
   566.4 → 590.4 MB/s, large-1m 620.3 → 680.7, work-queue 135,485 →
   144,419 msg/s; latency-1k p99 1.68 → 1.82 ms and latency-10k 1.97 → 0.76
   ms over five repeats, ranges overlapping. Raft groups also compact by
-  applied bytes, as PHP's.
+  applied bytes, as PHP's. Without Raft, a quorum consumed id is forgotten once
+  every configured member accepted its drop (it had grown forever); a drop sent
+  while a member is away is kept by every receiver and retried when a peer
+  connects.
 - Rust: the group commit also starts on 1 MiB of waiting bodies (`a0fc4ed`),
   then compacted WAL segments are reused instead of zero-filled (`5c8fd4d`).
   1 CPU: large-64k 254.6 → 553.4 → 848.8 MB/s, large-1m 524.9 → 700.8 →
@@ -169,14 +172,6 @@ Status: watch. Not reproduced since 2026-10-12 (22 repeats passed). Once, one
 fanout-20 repeat stopped about 2 s in at 2% CPU. If it stalls again, rerun with
 `QF_BENCH_PROFILE=1` and read the per-connection state in the broker log before
 changing code.
-
-### B11. Consumed-id list in clusters without Raft
-
-Status: needs a choice. With Raft off (`QUEUEFORGE_RAFT=0`), the quorum
-consumed-id list still grows (`bun/src/broker/consumed-set.ts`). Options: forget
-an id once every member answered its `quorum_drop` (smallest change; a member
-that was away no longer learns drops whose originator died), track per absent
-member what it missed (exact, more state), or treat no-Raft clusters as legacy.
 
 ---
 

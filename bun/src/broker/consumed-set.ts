@@ -1,5 +1,5 @@
 /**
- * Quorum ids this node has already delivered.
+ * Quorum ids this node has already delivered, until every member dropped them.
  *
  * Membership is a flat hash table. The id bytes sit in one buffer. A Set of
  * one string per delivery made a later confirm pause once a few hundred
@@ -36,16 +36,22 @@ function hashKey(vhost: string, queue: string, id: string): [number, number] {
 
 export class ConsumedSet {
   private cap = 1024;
-  /** Empty slots are 0,0. A live hash is never 0,0. */
-  private hash = new Uint32Array(this.cap * 2);
+  /** Record index + 1 per slot; 0 is an empty slot. Linear probing. */
+  private slots = new Uint32Array(this.cap);
   private live = 0;
   private rec = 0;
   private off = new Uint32Array(256);
   private len = new Uint32Array(256);
+  /** A record's hash; 0,0 marks a deleted record (a live hash is never 0,0). */
   private ha = new Uint32Array(256);
   private hb = new Uint32Array(256);
   private bytes = new Uint8Array(4096);
   private byteLen = 0;
+
+  /** Ids held. */
+  get size(): number {
+    return this.live;
+  }
 
   add(vhost: string, queue: string, id: string): boolean {
     const [a, b] = hashKey(vhost, queue, id);
@@ -57,15 +63,31 @@ export class ConsumedSet {
     this.len[this.rec] = placed.len;
     this.ha[this.rec] = a;
     this.hb[this.rec] = b;
+    this.insert(this.rec);
     this.rec++;
-    this.insert(a, b);
     this.live++;
     return true;
   }
 
+  /** Forget an id. The space is reclaimed once deleted records outnumber live ones. */
+  delete(vhost: string, queue: string, id: string): boolean {
+    const [a, b] = hashKey(vhost, queue, id);
+    const slot = this.locate(a, b);
+    if (slot < 0) return false;
+    const r = this.slots[slot]! - 1;
+    this.ha[r] = 0;
+    this.hb[r] = 0;
+    this.removeSlot(slot);
+    this.live--;
+    const dead = this.rec - this.live;
+    if (dead >= 1024 && dead > this.live) this.compact();
+    return true;
+  }
+
   list(): Array<{ vhost: string; queue: string; id: string }> {
-    const out: Array<{ vhost: string; queue: string; id: string }> = new Array(this.rec);
+    const out: Array<{ vhost: string; queue: string; id: string }> = [];
     for (let r = 0; r < this.rec; r++) {
+      if (this.ha[r] === 0 && this.hb[r] === 0) continue;
       let o = this.off[r]!;
       const vhostLen = readU32(this.bytes, o);
       o += 4;
@@ -78,43 +100,93 @@ export class ConsumedSet {
       const idLen = readU32(this.bytes, o);
       o += 4;
       const id = decoder.decode(this.bytes.subarray(o, o + idLen));
-      out[r] = { vhost, queue, id };
+      out.push({ vhost, queue, id });
     }
     return out;
   }
 
+  private home(a: number, b: number): number {
+    return ((a ^ b) >>> 0) % this.cap;
+  }
+
   private locate(a: number, b: number): number {
-    let i = ((a ^ b) >>> 0) % this.cap;
+    let i = this.home(a, b);
     for (let n = 0; n < this.cap; n++) {
-      const o = i * 2;
-      const ha = this.hash[o]!;
-      const hb = this.hash[o + 1]!;
-      if (ha === 0 && hb === 0) return -1;
-      if (ha === a && hb === b) return i;
+      const s = this.slots[i]!;
+      if (s === 0) return -1;
+      if (this.ha[s - 1] === a && this.hb[s - 1] === b) return i;
       i++;
       if (i === this.cap) i = 0;
     }
     return -1;
   }
 
-  private insert(a: number, b: number) {
-    let i = ((a ^ b) >>> 0) % this.cap;
-    for (;;) {
-      const o = i * 2;
-      if (this.hash[o] === 0 && this.hash[o + 1] === 0) {
-        this.hash[o] = a;
-        this.hash[o + 1] = b;
-        return;
-      }
+  private insert(r: number) {
+    let i = this.home(this.ha[r]!, this.hb[r]!);
+    while (this.slots[i] !== 0) {
       i++;
       if (i === this.cap) i = 0;
+    }
+    this.slots[i] = r + 1;
+  }
+
+  /** Empty slot `i`, moving later entries of the same probe run back into the gap. */
+  private removeSlot(i: number) {
+    this.slots[i] = 0;
+    let j = i;
+    for (;;) {
+      j++;
+      if (j === this.cap) j = 0;
+      const s = this.slots[j]!;
+      if (s === 0) return;
+      const k = this.home(this.ha[s - 1]!, this.hb[s - 1]!);
+      // An entry whose home lies cyclically in (i, j] is still reachable.
+      if (i <= j ? i < k && k <= j : i < k || k <= j) continue;
+      this.slots[i] = s;
+      this.slots[j] = 0;
+      i = j;
     }
   }
 
   private rehash(cap: number) {
     this.cap = cap;
-    this.hash = new Uint32Array(cap * 2);
-    for (let r = 0; r < this.rec; r++) this.insert(this.ha[r]!, this.hb[r]!);
+    this.slots = new Uint32Array(cap);
+    for (let r = 0; r < this.rec; r++) if (this.ha[r] !== 0 || this.hb[r] !== 0) this.insert(r);
+  }
+
+  /** Rewrite the records and their bytes without the deleted ones. */
+  private compact() {
+    const n = Math.max(256, this.live);
+    const off = new Uint32Array(n);
+    const len = new Uint32Array(n);
+    const ha = new Uint32Array(n);
+    const hb = new Uint32Array(n);
+    let bytesLen = 0;
+    for (let r = 0; r < this.rec; r++) if (this.ha[r] !== 0 || this.hb[r] !== 0) bytesLen += this.len[r]!;
+    const bytes = new Uint8Array(Math.max(4096, bytesLen));
+    let w = 0;
+    let at = 0;
+    for (let r = 0; r < this.rec; r++) {
+      if (this.ha[r] === 0 && this.hb[r] === 0) continue;
+      const l = this.len[r]!;
+      bytes.set(this.bytes.subarray(this.off[r]!, this.off[r]! + l), at);
+      off[w] = at;
+      len[w] = l;
+      ha[w] = this.ha[r]!;
+      hb[w] = this.hb[r]!;
+      at += l;
+      w++;
+    }
+    this.off = off;
+    this.len = len;
+    this.ha = ha;
+    this.hb = hb;
+    this.bytes = bytes;
+    this.byteLen = at;
+    this.rec = w;
+    let cap = 1024;
+    while (cap < this.live * 4) cap *= 2;
+    this.rehash(cap);
   }
 
   private growRecs() {
