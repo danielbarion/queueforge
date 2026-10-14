@@ -15,6 +15,12 @@ pub const HEARTBEAT_MS: u64 = 150;
 /// Election timeout bounds; each member picks a random value in between.
 pub const ELECTION_MIN_MS: u64 = 1000;
 pub const ELECTION_MAX_MS: u64 = 2000;
+/// An expedited campaign resends its pre-vote this often while unanswered,
+/// [`EXPEDITE_TRIES`] times: the other members open a new queue's group only
+/// when its declare reaches them, and drop a vote for a group they do not
+/// have yet. Pre-votes change no term. As Bun's and PHP's cores.
+pub const EXPEDITE_RETRY_MS: u64 = 100;
+pub const EXPEDITE_TRIES: u32 = 10;
 /// Most entries in one `append`.
 const MAX_BATCH: usize = 256;
 
@@ -92,6 +98,8 @@ pub struct Core {
     /// Last time each peer answered this leader, for pre-vote checks.
     heard_leader_at: u64,
     election_deadline: u64,
+    /// Pre-vote resends left for the campaign [`Core::expedite`] started.
+    expedited: u32,
     heartbeat_due: u64,
     rng: u64,
     outbox: Vec<(String, Value)>,
@@ -128,6 +136,7 @@ impl Core {
             match_index: BTreeMap::new(),
             heard_leader_at: 0,
             election_deadline: 0,
+            expedited: 0,
             heartbeat_due: 0,
             rng: seed | 1,
             outbox: Vec::new(),
@@ -176,6 +185,7 @@ impl Core {
     pub fn expedite(&mut self) {
         if self.role != Role::Leader && self.leader.is_none() {
             self.election_deadline = 0;
+            self.expedited = EXPEDITE_TRIES;
         }
     }
 
@@ -276,6 +286,7 @@ impl Core {
         self.role = Role::Follower;
         self.leader = leader;
         self.votes.clear();
+        self.expedited = 0;
         self.reset_election(now);
     }
 
@@ -343,6 +354,10 @@ impl Core {
             _ => {
                 if now >= self.election_deadline && self.voters().contains(&self.id) {
                     self.start_pre_vote(now);
+                    if self.role == Role::PreCandidate && self.expedited > 0 {
+                        self.expedited -= 1;
+                        self.election_deadline = now + EXPEDITE_RETRY_MS;
+                    }
                 }
             }
         }
@@ -813,6 +828,27 @@ mod tests {
         fn values(&self, id: &str) -> Vec<Value> {
             self.applied.get(id).map(|v| v.iter().map(|e| e.data.clone()).collect()).unwrap_or_default()
         }
+    }
+
+    #[test]
+    fn an_expedited_campaign_is_retried_until_the_other_members_open_the_group() {
+        let mut s = Sim::new(&["a", "b", "c"]);
+        for n in s.nodes.values_mut() {
+            n.start_timer(0);
+        }
+        // b and c drop a's first pre-votes: the declare has not reached them yet.
+        s.down.insert("b".into());
+        s.down.insert("c".into());
+        s.nodes.get_mut("a").unwrap().expedite();
+        s.run(300);
+        assert!(s.leaders().is_empty());
+        s.down.clear();
+        let now = s.now;
+        s.nodes.get_mut("b").unwrap().start_timer(now);
+        s.nodes.get_mut("c").unwrap().start_timer(now);
+        // Well inside b's and c's own election timeouts (1-2 s).
+        s.run(300);
+        assert_eq!(s.leader(), "a");
     }
 
     #[test]

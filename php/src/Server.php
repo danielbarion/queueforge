@@ -1174,23 +1174,26 @@ final class Server
         }
         $sock = $this->conns[$id];
         $ch = $sock->channels[$channel];
-        // A classic queue homed elsewhere is asked over the cluster link. The
-        // reply comes back through the select loop, so the client's answer is
-        // written from the callback rather than blocking here.
-        $home = $this->remoteHome($queue, $broker);
+        // A classic queue homed elsewhere is asked over the cluster link, and
+        // so is a quorum queue another member leads: a follower's copies are
+        // replicas, ready only once it leads. The reply comes back through
+        // the select loop, so the client's answer is written from the
+        // callback rather than blocking here.
+        $home = $this->remoteHome($queue, $broker) ?? $this->quorumLeaderElsewhere($queue, $broker);
         if ($home !== null && $this->extras !== null) {
             $this->extras->cluster->request(
                 $home,
                 'get',
                 ['vhost' => $broker->vhost, 'queue' => $queue, 'noAck' => $noAck],
                 '',
-                function (?array $reply) use ($id, $channel, $queue, $noAck, $broker): void {
+                function (?array $reply) use ($id, $channel, $queue, $noAck, $broker, $home): void {
                     $sock = $this->conns[$id] ?? null;
                     $ch = $sock?->channels[$channel] ?? null;
                     if ($sock === null || $ch === null) {
                         return;
                     }
-                    $msg = is_array($reply['msg'] ?? null) ? $reply['msg'] : null;
+                    // Bun and PHP answer `msg`, Rust `message`.
+                    $msg = is_array($reply['msg'] ?? null) ? $reply['msg'] : (is_array($reply['message'] ?? null) ? $reply['message'] : null);
                     if ($reply === null || $msg === null) {
                         // A timeout and an empty queue are both reported as
                         // empty; the alternative is leaving the client hanging.
@@ -1201,16 +1204,22 @@ final class Server
                     }
                     $body = base64_decode((string) ($msg['body_b64'] ?? $msg['body'] ?? ''), true);
                     $dtag = $ch->nextDel++;
+                    // The home holds the message until this client settles it.
+                    $delivery = (int) ($reply['delivery_id'] ?? 0);
+                    if (!$noAck && $delivery > 0) {
+                        $ch->unacked[$dtag] = $broker->holdRemote(['peer' => $home, 'queue' => $queue, 'delivery' => $delivery]);
+                    }
+                    $propRaw = base64_decode((string) ($msg['propRaw'] ?? ''), true);
                     $sock->send(Codec::getOk(
                         $channel,
                         $dtag,
-                        false,
+                        (bool) ($msg['redelivered'] ?? false),
                         (string) ($msg['exchange'] ?? ''),
                         (string) ($msg['routing_key'] ?? $msg['routingKey'] ?? $queue),
                         0,
-                        ($msg['durable'] ?? false) ? 2 : 1,
+                        ($msg['persistent'] ?? $msg['durable'] ?? false) ? 2 : 1,
                         $body === false ? '' : $body,
-                        null,
+                        $propRaw === false || $propRaw === '' ? null : $propRaw,
                         frameMax: $sock->frameMax,
                     ));
                     $sock->flush();
@@ -1970,6 +1979,16 @@ final class Server
     private function remoteHome(string $queue, ?Broker $scope = null): ?string
     {
         return $this->extras === null ? null : ($scope ?? $this->broker)->remoteHomeOf($queue);
+    }
+
+    /** The member leading a quorum queue, when Raft knows it and it is not this node. */
+    private function quorumLeaderElsewhere(string $queue, Broker $broker): ?string
+    {
+        if ($this->extras === null || ($broker->queues[$queue]['args']['queueType'] ?? '') !== 'quorum') return null;
+        $cluster = $this->extras->cluster;
+        if ($cluster->raft === null) return null;
+        $leader = $cluster->raft->leader($cluster->quorumGroup($broker->vhost, $queue));
+        return $leader !== null && $leader !== $cluster->nodeId ? $leader : null;
     }
 
     /** @var array<string, array{conn:int,ch:int,tag:string,noAck:bool}> remote sessions by vhost and session */

@@ -25,6 +25,13 @@ final class Http
     public $onTopology = null;
     public $onConnections = null;
     public $onChannels = null;
+    /**
+     * The Raft view of a replicated queue for its management row: group,
+     * leader and members, as Bun and Rust report them. Null off Raft.
+     *
+     * @var ?callable(string):?array{raft_group:string,leader:?string,members:list<string>}
+     */
+    public $queueRaft = null;
 
     public function __construct(public Broker $broker, public string $uiRoot, public int $port, public bool $secure)
     {
@@ -55,9 +62,13 @@ final class Http
         // HTTP Basic, as RabbitMQ's management API and its CLI tools use it,
         // or the console's session cookie.
         $user = $basic ?? $this->userFromCookie($cookie);
-        if ($method === 'GET' && ($path === '/healthz' || $path === '/readyz')) {
-            $ok = $path === '/healthz' || $this->broker->ready;
-            return $this->status($ok ? 200 : 503, $ok ? "ok\n" : "not ready\n", 'text/plain');
+        if ($method === 'GET' && $path === '/healthz') {
+            return $this->status(200, "ok\n", 'text/plain');
+        }
+        // The same bodies as Bun's and Rust's, which cluster tests read.
+        if ($method === 'GET' && $path === '/readyz') {
+            $ok = $this->broker->ready;
+            return $this->status($ok ? 200 : 503, $ok ? "ready\n" : "not ready\n", 'text/plain');
         }
         if ($method === 'GET' && $path === '/api/identity') {
             return $this->json(200, ['product_name' => 'QueueForge', 'kind' => 'php']);
@@ -90,6 +101,18 @@ final class Http
                     $json = $body === '' ? [] : json_decode($body, true, 512, JSON_THROW_ON_ERROR);
                     if (!is_array($json)) throw new RuntimeException('Invalid JSON request', 400);
                     $stagePath = $path;
+                    // With Raft on, a membership change commits through the meta log,
+                    // as on Bun and Rust; a member without a majority is refused.
+                    if (($this->broker->cluster?->raftEnabled() ?? false)
+                        && (($method === 'POST' && $path === '/api/nodes') || ($method === 'DELETE' && preg_match('#^/api/nodes/[^/]+$#', $path) === 1))) {
+                        $members = $this->nextMembers($this->broker->root(), $method, $path, $json);
+                        if (is_string($members)) return $members;
+                        $this->broker->cluster->proposeMeta('members', $members, function (bool $ok, ?string $error) use ($onReply, $method, $members): void {
+                            if (!$ok) { $onReply($this->json(503, ['error' => 'metadata_commit_failed', 'reason' => $error])); return; }
+                            $onReply($method === 'POST' ? $this->json(201, $members) : $this->status(204, '', 'application/json'));
+                        });
+                        return '';
+                    }
                     if (preg_match('#^/api/(permissions|topic-permissions)/([^/]+)/([^/]+)(.*)$#', $path, $match)) {
                         [$host, $name] = $this->permissionPath($match[2], $match[3]);
                         $stagePath = '/api/' . $match[1] . '/' . rawurlencode($host) . '/' . rawurlencode($name) . $match[4];
@@ -276,7 +299,12 @@ final class Http
         }
         foreach ($root->permissions as $name=>$vhosts) foreach ($vhosts as $vhost=>$row) $data['permissions'][]=['user'=>$name,'vhost'=>$vhost]+$row;
         foreach (['policies'=>'policies','operator_policies'=>'operatorPolicies'] as $key=>$field) foreach ($root->$field as $vhost=>$rows) foreach ($rows as $name=>$row) $data[$key][]=['name'=>$name,'vhost'=>$vhost]+$row;
-        foreach ($root->parameters as $component=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $name=>$value) $data['parameters'][]=compact('component','vhost','name','value');
+        // Global parameters are their own field, as in RabbitMQ's export.
+        $data['global_parameters'] = [];
+        foreach ($root->parameters as $component=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $name=>$value) {
+            if ($component === 'global') $data['global_parameters'][] = ['name'=>$name,'value'=>$value];
+            else $data['parameters'][] = compact('component','vhost','name','value');
+        }
         return $data;
     }
 
@@ -713,6 +741,26 @@ final class Http
             return $this->json(200, [[$m[1] => $name, 'value' => $broker->{$field}[$name] ?? new stdClass()]]);
         }
 
+        // Runtime and global parameters, as RabbitMQ, Bun and Rust list them.
+        if ($method === 'GET' && preg_match('#^/api/parameters(?:/([^/]+)(?:/([^/]+))?)?$#', $path, $m) === 1) {
+            $component = isset($m[1]) ? rawurldecode($m[1]) : null;
+            $only = isset($m[2]) ? rawurldecode($m[2]) : null;
+            $items = [];
+            foreach ($this->broker->root()->parameters as $comp => $hosts) {
+                if ($comp === 'global' || ($component !== null && $comp !== $component) || !is_array($hosts)) continue;
+                foreach ($hosts as $vhost => $rows) {
+                    if (($only !== null && $vhost !== $only) || !is_array($rows)) continue;
+                    foreach ($rows as $name => $value) $items[] = ['component' => $comp, 'vhost' => $vhost, 'name' => $name, 'value' => $value];
+                }
+            }
+            return $this->json(200, $items);
+        }
+        if ($method === 'GET' && $path === '/api/global-parameters') {
+            $items = [];
+            foreach ($this->broker->root()->parameters['global']['/'] ?? [] as $name => $value) $items[] = ['name' => $name, 'value' => $value];
+            return $this->json(200, $items);
+        }
+
         // Topic permissions.
         if ($method === 'GET' && $path === '/api/topic-permissions') {
             $items = [];
@@ -782,44 +830,13 @@ final class Http
         if ($method === 'GET' && $path === '/api/cluster-name') {
             return $this->json(200, ['name' => $broker->nodeId]);
         }
-        if ($method === 'POST' && $path === '/api/nodes') {
-            $id = (string) ($json['id'] ?? '');
-            $addr = (string) ($json['addr'] ?? '');
-            if ($id === '' || $addr === '') {
-                return $this->json(400, ['error' => 'a node needs an id and an addr']);
-            }
-            $members = array_values(array_filter(
-                $broker->members,
-                static fn (array $row): bool => $row['id'] !== $id,
-            ));
-            $members[] = ['id' => $id, 'addr' => $addr];
+        if (($method === 'POST' && $path === '/api/nodes') || ($method === 'DELETE' && preg_match('#^/api/nodes/[^/]+$#', $path) === 1)) {
+            $members = $this->nextMembers($broker, $method, $path, is_array($json) ? $json : []);
+            if (is_string($members)) return $members;
             $broker->members = $members;
             $broker->refreshRole();
             $this->onMembersChanged();
-            return $this->json(201, $members);
-        }
-        if ($method === 'DELETE' && preg_match('#^/api/nodes/([^/]+)$#', $path, $m) === 1) {
-            $id = rawurldecode($m[1]);
-            if ($id === $broker->nodeId) {
-                return $this->json(400, ['error' => 'a node cannot remove itself']);
-            }
-            // A node that is the stored home of a classic queue stays.
-            foreach ($broker->queues as $name => $queue) {
-                if ($broker->home($name) === $id) {
-                    return $this->json(400, ['error' => "node $id is the home of queue $name"]);
-                }
-            }
-            $members = array_values(array_filter(
-                $broker->members,
-                static fn (array $row): bool => $row['id'] !== $id,
-            ));
-            if ($members === []) {
-                return $this->json(400, ['error' => 'the member list cannot become empty']);
-            }
-            $broker->members = $members;
-            $broker->refreshRole();
-            $this->onMembersChanged();
-            return $this->status(204, '', 'application/json');
+            return $method === 'POST' ? $this->json(201, $members) : $this->status(204, '', 'application/json');
         }
 
         // Definitions import.
@@ -920,6 +937,44 @@ final class Http
         }
     }
 
+    /**
+     * The member list a POST or DELETE on /api/nodes asks for, or the error
+     * response that refuses it.
+     *
+     * @param array<string, mixed> $json
+     * @return list<array{id:string,addr:string}>|string
+     */
+    private function nextMembers(Broker $broker, string $method, string $path, array $json): array|string
+    {
+        if ($method === 'POST') {
+            $id = (string) ($json['id'] ?? '');
+            $addr = (string) ($json['addr'] ?? '');
+            if ($id === '' || $addr === '') {
+                return $this->json(400, ['error' => 'a node needs an id and an addr']);
+            }
+            $members = array_values(array_filter($broker->members, static fn (array $row): bool => $row['id'] !== $id));
+            $members[] = ['id' => $id, 'addr' => $addr];
+            return $members;
+        }
+        preg_match('#^/api/nodes/([^/]+)$#', $path, $m);
+        $id = rawurldecode($m[1] ?? '');
+        if ($id === $broker->nodeId) {
+            return $this->json(400, ['error' => 'a node cannot remove itself']);
+        }
+        // A node that is the stored home of a classic queue stays. Quorum
+        // queues and replicated streams have a copy on every member.
+        foreach ($broker->queues as $name => $queue) {
+            if (($queue['args']['queueType'] ?? 'classic') === 'classic' && $broker->home($name) === $id) {
+                return $this->json(400, ['error' => "node $id is the home of queue $name"]);
+            }
+        }
+        $members = array_values(array_filter($broker->members, static fn (array $row): bool => $row['id'] !== $id));
+        if ($members === []) {
+            return $this->json(400, ['error' => 'the member list cannot become empty']);
+        }
+        return $members;
+    }
+
     /** Replicates a change to users, permissions or topology. */
     private function onTopologyChanged(): void
     {
@@ -935,7 +990,8 @@ final class Http
         $items = [];
         foreach ($broker->queues as $name => $queue) {
             $ready = count($queue['ready']);
-            $items[] = [
+            $type = $queue['args']['queueType'] ?? 'classic';
+            $row = [
                 'name' => $name,
                 'vhost' => $broker->vhost,
                 'durable' => $queue['durable'] ?? true,
@@ -946,9 +1002,15 @@ final class Http
                 'messages_ready' => $ready,
                 'messages_unacknowledged' => 0,
                 'consumers' => count($queue['consumers']),
-                'type' => $queue['args']['queueType'] ?? 'classic',
+                'type' => $type,
                 'arguments' => (object) ($queue['declaredArgs'] ?? []),
             ];
+            $raft = $type !== 'classic' && $this->queueRaft !== null ? ($this->queueRaft)($name) : null;
+            if ($raft !== null) {
+                // A replicated queue's node is its leader, as in RabbitMQ.
+                $row += $raft + ['node' => $raft['leader']];
+            }
+            $items[] = $row;
         }
         return $items;
     }

@@ -27,6 +27,8 @@ final class Cluster
     private array $pending = [];
     private int $seq = 1;
     public ?RaftNode $raft = null;
+    /** @var ?callable():void Runs after a committed membership change is applied. */
+    public $onMembersApplied = null;
     private array $peerFeatures = [];
     private bool $startingRaft = false;
 
@@ -85,7 +87,10 @@ final class Cluster
                 fn (string $peer, array $msg) => $this->send($peer, ['v' => 1, 'op' => 'raft', 'id' => 0, 'from' => $this->nodeId, 'nodeId' => $this->nodeId, 'payload' => $msg]),
                 function (string $group, array $entry): void {
                     $this->broker->applyRaft($group, $entry['kind'], $entry['data'], $entry['i']);
-                    if ($group === 'meta' && $entry['kind'] === 'members') $this->reconfigureMembers($this->broker->members);
+                    if ($group === 'meta' && $entry['kind'] === 'members') {
+                        $this->reconfigureMembers($this->broker->members);
+                        if ($this->onMembersApplied !== null) ($this->onMembersApplied)();
+                    }
                 },
                 fn (string $group, mixed $state) => $this->broker->installRaftState($group, $state),
                 fn (string $group) => $this->broker->raftState($group),
@@ -178,6 +183,13 @@ final class Cluster
      * @var array<string, int>
      */
     private array $remoteDeliveries = [];
+    /**
+     * "vhost\0queue\0peer\0localId" of a remote get to its `remoteDeliveries`
+     * key, so a settle by message id also forgets the delivery.
+     *
+     * @var array<string, string>
+     */
+    private array $remoteGets = [];
     private int $nextDelivery = 1;
     /** @var list<string> correlation ids whose request timed out */
     public array $timedOut = [];
@@ -596,7 +608,16 @@ final class Cluster
             $local = $this->remoteDeliveries[$key] ?? null;
             unset($this->remoteDeliveries[$key]);
             if ($local === null) {
+                // Bun settles a quorum get by the message id it was handed.
+                $qid = is_string($payload['id'] ?? null) ? $payload['id'] : '';
+                $local = $qid !== '' ? $broker->idOfQid($queue, $qid) : null;
+            }
+            if ($local === null) {
                 return true;
+            }
+            $got = $vhost . "\0" . $queue . "\0" . $from . "\0" . $local;
+            if (isset($this->remoteGets[$got])) {
+                unset($this->remoteDeliveries[$this->remoteGets[$got]], $this->remoteGets[$got]);
             }
             $requeue = $op === 'nack' && ($payload['requeue'] ?? true) !== false;
             if ($requeue) {
@@ -615,11 +636,21 @@ final class Cluster
                 return ['empty' => true];
             }
             $msg = $broker->msgs[$id];
+            // Rust settles by `delivery_id`, as for a pushed delivery; Bun by
+            // `msg.id`, the quorum message id every replica knows.
+            $delivery = 0;
             if ($noAck) {
                 $broker->ack($id);
+            } else {
+                $delivery = $this->nextDelivery++;
+                $key = $vhost . "\0" . $queue . "\0" . $from . "\0" . $delivery;
+                $this->remoteDeliveries[$key] = $id;
+                $this->remoteGets[$vhost . "\0" . $queue . "\0" . $from . "\0" . $id] = $key;
             }
-            return ['msg' => [
-                'id' => (string) $id,
+            $qid = (string) ($msg['qid'] ?? '');
+            $quorum = ($broker->queues[$queue]['args']['queueType'] ?? '') === 'quorum';
+            return ['delivery_id' => $delivery, 'msg' => [
+                'id' => $quorum && $qid !== '' ? $qid : (string) $id,
                 'exchange' => (string) ($msg['exchange'] ?? ''),
                 'routing_key' => (string) ($msg['key'] ?? $queue),
                 'body_b64' => base64_encode($msg['body']),

@@ -6,15 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import amqp from "amqplib";
 
-// Bun and Rust in one Raft cluster: per-queue groups, a delivery waiting
+// Bun, Rust and PHP in one Raft cluster: per-queue groups, a delivery waiting
 // for its ack surviving a leader loss, and a replicated stream with the
-// same offsets on both implementations.
+// same offsets on every implementation.
 
 const root = join(import.meta.dir, "..");
 const RUST = join(root, "..", "rust", "target", "debug", "queueforge");
+const PHP = join(root, "..", "php", "bin", "queueforge");
 const AUTH = { authorization: `Basic ${btoa("admin:devpassword12")}` };
 const URL = (port: number) => `amqp://admin:devpassword12@127.0.0.1:${port}/%2f`;
-type Kind = "bun" | "rust";
+type Kind = "bun" | "rust" | "php";
 type Ports = { amqp: number; mgmt: number; metrics: number; cluster: number };
 
 async function waitReady(mgmt: number) {
@@ -50,7 +51,9 @@ type Row = { name: string; leader?: string | null; members?: string[]; raft_grou
 
 async function queueRow(mgmt: number, name: string): Promise<Row | undefined> {
   const res = await fetch(`http://127.0.0.1:${mgmt}/api/queues/%2F`, { headers: AUTH });
-  return ((await res.json()) as Row[]).find((r) => r.name === name);
+  // PHP answers the paged shape even without `page`.
+  const body = (await res.json()) as Row[] | { items: Row[] };
+  return (Array.isArray(body) ? body : body.items).find((r) => r.name === name);
 }
 
 async function publish(port: number, queue: string, bodies: string[]) {
@@ -128,14 +131,21 @@ members = [${members}]
   const start = (i: number) =>
     kinds[i] === "rust"
       ? spawn(RUST, ["--config", cfgs[i]!, "--dev-bootstrap"], { stdio: "ignore" })
-      : spawn("bun", ["src/main.ts", "--config", cfgs[i]!, "--dev-bootstrap"], { cwd: root, stdio: "ignore" });
+      : kinds[i] === "php"
+        ? spawn("php", [PHP, "--config", cfgs[i]!, "--dev-bootstrap"], { stdio: "ignore" })
+        : spawn("bun", ["src/main.ts", "--config", cfgs[i]!, "--dev-bootstrap"], { cwd: root, stdio: "ignore" });
   const kids = [0, 1, 2].map(start);
-  for (const p of ports) await waitReady(p.mgmt);
-  for (const p of ports) {
-    expect(await eventually(async () => {
-      const res = await fetch(`http://127.0.0.1:${p.mgmt}/api/feature-flags`, { headers: AUTH });
-      return ((await res.json()) as Array<{ name: string; state: string }>).some((f) => f.name === "raft" && f.state === "enabled");
-    }, 15_000)).toBe(true);
+  try {
+    for (const p of ports) await waitReady(p.mgmt);
+    for (const p of ports) {
+      expect(await eventually(async () => {
+        const res = await fetch(`http://127.0.0.1:${p.mgmt}/api/feature-flags`, { headers: AUTH });
+        return ((await res.json()) as Array<{ name: string; state: string }>).some((f) => f.name === "raft" && f.state === "enabled");
+      }, 15_000)).toBe(true);
+    }
+  } catch (err) {
+    for (const kid of kids) await kill(kid);
+    throw err;
   }
   return { ids, ports, dirs, kids, start };
 }
@@ -338,3 +348,12 @@ test.skipIf(!haveRust)("membership and settings: Bun a, Rust b, Bun c", () => me
 test.skipIf(!haveRust)("queue groups: Rust only", () => queueGroups(["rust", "rust", "rust"], 47610), 120_000);
 test.skipIf(!haveRust)("replicated stream: Rust only", () => replicatedStream(["rust", "rust", "rust"], 47910), 150_000);
 test.skipIf(!haveRust)("membership and settings: Rust only", () => membersAndSettings(["rust", "rust", "rust"], 48010), 120_000);
+// PHP with Bun and Rust: each shape with PHP as the first member (the
+// declarer and stream writer) and as a follower.
+const havePhp = haveRust && Bun.spawnSync(["php", "-v"]).exitCode === 0;
+test.skipIf(!havePhp)("queue groups: PHP a, Bun b, Rust c", () => queueGroups(["php", "bun", "rust"], 48110), 120_000);
+test.skipIf(!havePhp)("queue groups: Bun a, PHP b, Rust c", () => queueGroups(["bun", "php", "rust"], 48210), 120_000);
+test.skipIf(!havePhp)("replicated stream: PHP writer, Bun and Rust readers", () => replicatedStream(["php", "bun", "rust"], 48310), 150_000);
+test.skipIf(!havePhp)("replicated stream: Rust writer, PHP and Bun readers", () => replicatedStream(["rust", "php", "bun"], 48410), 150_000);
+test.skipIf(!havePhp)("membership and settings: PHP a, Bun b, Rust c", () => membersAndSettings(["php", "bun", "rust"], 48510), 120_000);
+test.skipIf(!havePhp)("membership and settings: Bun a, Rust b, PHP c", () => membersAndSettings(["bun", "rust", "php"], 48610), 120_000);

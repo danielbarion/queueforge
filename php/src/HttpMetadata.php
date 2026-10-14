@@ -88,7 +88,9 @@ final class HttpMetadata
             $field=$m[1]==='user'?'userLimits':'vhostLimits';if($m[1]==='user')self::exists(isset($b->users[$name]),'user');else$b->forVhost($name);$value=$b->{$field}[$name]??[];
             if($method==='PUT'){if(!isset($j['value'])||!is_int($j['value'])||$j['value']< -1)self::fail('limit must be an integer >= -1');$value[$limit]=$j['value'];}
             elseif($method==='DELETE'){unset($value[$limit]);}else return false;
-            self::emit($b,$m[1].'_limits',[$m[1]=>$name,'value'=>$value],$commands);$code=204;return true;
+            // The flat row Bun and Rust replicate, every limit named, null when unset.
+            $row=[$m[1]=>$name];foreach($allowed as $key)$row[$key]=$value[$key]??null;
+            self::emit($b,$m[1].'_limits',$row,$commands);$code=204;return true;
         }
         if(preg_match('~^/api/parameters/([^/]+)/([^/]+)/([^/]+)$~',$path,$m)){
             $component=rawurldecode($m[1]);$vhost=rawurldecode($m[2]);$name=rawurldecode($m[3]);$b->forVhost($vhost);self::name($component);self::name($name);$data=compact('component','vhost','name');

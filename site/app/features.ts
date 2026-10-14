@@ -14,6 +14,10 @@
 // classic backlog paging (classic-page.test), TLS clients without a
 // certificate beside a client CA (tls.test), and one child per core with TLS
 // or an amqps port (tls-cores.test, fanout-cores.test).
+// PHP on 2026-10-14: in one Raft cluster with Bun and Rust
+// (bun/test/mixed-raft.test.ts, six shapes, PHP leading and following):
+// queue groups through a leader kill, replicated streams through a writer
+// kill and catch-up, settings and membership through the meta log.
 
 export type Level = "y" | "p" | "n";
 export type Cell = Level | readonly [Level, string];
@@ -202,16 +206,16 @@ export const featureGroups: FeatureGroup[] = [
         code: ["x-queue-type=quorum"],
         cells: {
           mq: "y",
-          rust: ["y", "a Raft group per queue; shared with Bun"],
-          bun: ["y", "a Raft group per queue; shared with Rust"],
-          php: ["p", "Raft; survives a leader kill among PHP nodes; mixed majority with Rust/Bun untested"],
+          rust: ["y", "a Raft group per queue; shared with Bun and PHP"],
+          bun: ["y", "a Raft group per queue; shared with Rust and PHP"],
+          php: ["y", "a Raft group per queue; shared with Rust and Bun"],
         },
       },
       {
         name: "Stream queues",
         detail: "Append-only log, consume from an offset",
         code: ["x-queue-type=stream"],
-        cells: { mq: "y", rust: ["y", "Raft-replicated; shared with Bun"], bun: ["y", "Raft-replicated; shared with Rust"], php: ["p", "durable offsets; advanced Raft replication gates pending"] },
+        cells: { mq: "y", rust: ["y", "Raft-replicated; shared with Bun and PHP"], bun: ["y", "Raft-replicated; shared with Rust and PHP"], php: ["y", "Raft-replicated; shared with Rust and Bun"] },
       },
       {
         name: "Super streams",
@@ -600,13 +604,13 @@ export const featureGroups: FeatureGroup[] = [
           mq: ["n", "one implementation"],
           rust: "y",
           bun: "y",
-          php: ["p", "legacy links checked; mixed Raft gates pending"],
+          php: "y",
         },
       },
       {
         name: "Raft consensus",
         detail: "Elections and terms for replicated state",
-        cells: { mq: "y", rust: ["y", "meta, and a group per queue"], bun: ["y", "meta, and a group per queue"], php: ["p", "metadata and queue groups wired; mixed gates pending"] },
+        cells: { mq: "y", rust: ["y", "meta, and a group per queue"], bun: ["y", "meta, and a group per queue"], php: ["y", "meta, and a group per queue"] },
       },
       {
         name: "Replicated metadata store",
@@ -615,7 +619,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: ["y", "Raft log, membership included"],
           bun: ["y", "Raft log, membership included"],
-          php: ["p", "committed metadata commands; mixed Raft gates pending"],
+          php: ["y", "Raft log, membership included"],
         },
       },
       {

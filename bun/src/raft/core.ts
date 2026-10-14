@@ -10,6 +10,14 @@
 export const HEARTBEAT_MS = 150;
 export const ELECTION_MIN_MS = 1000;
 export const ELECTION_MAX_MS = 2000;
+/**
+ * An expedited campaign resends its pre-vote this often while unanswered,
+ * this many times: the other members open a new queue's group only when its
+ * declare reaches them, and drop a vote for a group they do not have yet.
+ * Pre-votes change no term, so resending one disturbs nobody.
+ */
+export const EXPEDITE_RETRY_MS = 100;
+export const EXPEDITE_TRIES = 10;
 const MAX_BATCH = 256;
 
 export type Entry = { i: number; term: number; kind: string; data: unknown };
@@ -38,6 +46,8 @@ export class RaftCore {
   private matchIndex = new Map<string, number>();
   private heardLeaderAt = 0;
   private electionDeadline = 0;
+  /** Pre-vote resends left for the campaign `expedite` started. */
+  private expedited = 0;
   private heartbeatDue = 0;
   private rng: bigint;
   private outbox: Array<[string, Msg]> = [];
@@ -185,6 +195,7 @@ export class RaftCore {
     this.role = "follower";
     this.leader = leader;
     this.votes.clear();
+    this.expedited = 0;
     this.resetElection(now);
   }
 
@@ -253,7 +264,10 @@ export class RaftCore {
 
   /** Campaign at the next tick, when there is no leader: the member a new queue should be led by. */
   expedite() {
-    if (this.role !== "leader" && this.leader === null) this.electionDeadline = 0;
+    if (this.role !== "leader" && this.leader === null) {
+      this.electionDeadline = 0;
+      this.expedited = EXPEDITE_TRIES;
+    }
   }
 
   tick(now: number) {
@@ -261,6 +275,10 @@ export class RaftCore {
       if (now >= this.heartbeatDue) this.broadcastAppend(now);
     } else if (now >= this.electionDeadline && this.currentVoters().voters.includes(this.id)) {
       this.startPreVote(now);
+      if (this.role === "precandidate" && this.expedited > 0) {
+        this.expedited--;
+        this.electionDeadline = now + EXPEDITE_RETRY_MS;
+      }
     }
   }
 

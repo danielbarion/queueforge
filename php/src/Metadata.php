@@ -30,7 +30,8 @@ final class Metadata
             if(in_array($type,['quorum','stream'],true)&&!$durable)self::fail(406,'quorum and stream queues must be durable');
             if(!$durable&&!$broker->transientNonexcl)self::fail(541,'transient non-exclusive queues are disabled');
             $group=in_array($type,['quorum','stream'],true)?$broker->cluster?->queueGroup($vhost,$name):null;
-            $home=$type==='classic'?(count($broker->members)<2?$broker->nodeId:Features::home($broker->members,$vhost,$name)):$broker->nodeId;
+            // A replicated stream has a copy on every member and no single home, as on Bun and Rust.
+            $home=$type==='classic'?(count($broker->members)<2?$broker->nodeId:Features::home($broker->members,$vhost,$name)):($type==='stream'&&$group!==null?null:$broker->nodeId);
             $data=['vhost'=>$vhost,'name'=>$name,'durable'=>$durable,'exclusive'=>false,'autoDelete'=>$autoDelete,'auto_delete'=>$autoDelete,'args'=>$args,'home'=>$home,'raftGroup'=>$group];
             if($group!==null)$data['raftLeader']=self::leader($broker,$args['x-queue-leader-locator']??null);
             return self::staged('queue',$data,$nowait?'':Codec::queueDeclareOk($channel,$name,0,0),$name);

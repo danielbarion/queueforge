@@ -261,6 +261,8 @@ export class Cluster {
   private remoteAcks = new Map<string, string>();
   /** Same key → the remote consumer session, so `requeue` finds what a closed channel held. */
   private remoteSessions = new Map<string, number>();
+  /** `${vhost}\0${queue}\0${id}` → the `remoteAcks` key of a remote get, for a settle by `id`. */
+  private remoteGets = new Map<string, string>();
   private subs = new Map<number, (msg: LiveMsg) => void>();
   /**
    * `${vhost}\\0${queue}\\0${session}` → a remote consumer this process homes:
@@ -761,8 +763,15 @@ export class Cluster {
         const session = this.remoteSessions.get(`${vhost}\0${queue}\0${delivery}`);
         this.remoteAcks.delete(`${vhost}\0${queue}\0${delivery}`);
         this.remoteSessions.delete(`${vhost}\0${queue}\0${delivery}`);
+        this.remoteGets.delete(`${vhost}\0${queue}\0${mapped}`);
         // Before the ack, whose pump is what sends the next message.
         this.remoteSubs.get(`${vhost}\0${queue}\0${session}`)?.refill?.();
+      } else {
+        const got = this.remoteGets.get(`${vhost}\0${queue}\0${delivery}`);
+        if (got != null) {
+          this.remoteGets.delete(`${vhost}\0${queue}\0${delivery}`);
+          this.remoteAcks.delete(got);
+        }
       }
       const id = mapped ?? String(p.id ?? delivery ?? "");
       if (op === "ack") await this.broker.ack(vhost, queue, id);
@@ -830,9 +839,21 @@ export class Cluster {
     }
     if (op === "get") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
-      const m = await this.broker.get(String(p.vhost), String(p.queue), !!(p.noAck ?? p.no_ack));
+      const vhost = String(p.vhost);
+      const queue = String(p.queue);
+      const noAck = !!(p.noAck ?? p.no_ack);
+      const m = await this.broker.get(vhost, queue, noAck);
       if (!m) return { empty: true };
+      // Rust settles a get by `delivery_id`, as a pushed delivery; Bun and
+      // PHP by `msg.id`.
+      let deliveryId = 0;
+      if (!noAck) {
+        deliveryId = this.nextDelivery++;
+        this.remoteAcks.set(`${vhost}\0${queue}\0${deliveryId}`, m.id);
+        this.remoteGets.set(`${vhost}\0${queue}\0${m.id}`, `${vhost}\0${queue}\0${deliveryId}`);
+      }
       return {
+        delivery_id: deliveryId,
         msg: { ...m, body: Buffer.from(m.body).toString("base64"), propRaw: Buffer.from(m.propRaw).toString("base64") },
       };
     }

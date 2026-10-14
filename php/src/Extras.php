@@ -144,6 +144,16 @@ final class Extras
                 ]);
             }
         };
+        $this->http->queueRaft = function (string $name): ?array {
+            $raft = $this->cluster->raft;
+            if ($raft === null) return null;
+            $group = RaftNode::queueGroup($this->broker->vhost, $name);
+            $members = $raft->members($group);
+            if ($members === null) return null;
+            return ['raft_group' => $group, 'leader' => $raft->leader($group), 'members' => $members];
+        };
+        // A membership change committed through the meta log is kept for a restart.
+        $this->cluster->onMembersApplied = function (): void { $this->saveMembers(); };
         $this->protocols = new Protocols($broker);
         $this->protocols->onWrite = function($fp,string $bytes):void { $this->send($fp,$bytes); };
         $this->protocols->onClose = function($fp):void { $this->close((int)$fp); };

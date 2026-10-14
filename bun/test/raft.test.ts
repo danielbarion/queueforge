@@ -267,3 +267,20 @@ test("a single voter commits only what is on its disk", () => {
   node.setDurable(index);
   expect(node.commit).toBe(index);
 });
+
+test("an expedited campaign is retried until the other members open the group", () => {
+  const sim = new Sim(["a", "b", "c"]);
+  for (const node of sim.nodes.values()) node.startTimer(0);
+  // b and c drop a's first pre-votes: the declare has not reached them yet.
+  sim.down.add("b");
+  sim.down.add("c");
+  sim.nodes.get("a")!.expedite();
+  sim.run(300);
+  expect(sim.leaders()).toEqual([]);
+  sim.down.clear();
+  sim.nodes.get("b")!.startTimer(sim.now);
+  sim.nodes.get("c")!.startTimer(sim.now);
+  // Well inside b's and c's own election timeouts (1-2 s).
+  sim.run(300);
+  expect(sim.leader()).toBe("a");
+});

@@ -14,6 +14,14 @@ final class Raft
     public const HEARTBEAT_MS = 150;
     public const ELECTION_MIN_MS = 1000;
     public const ELECTION_MAX_MS = 2000;
+    /**
+     * An expedited campaign resends its pre-vote this often while unanswered,
+     * this many times: the other members open a new queue's group only when
+     * its declare reaches them, and drop a vote for a group they do not have
+     * yet. Pre-votes change no term. As Bun's and Rust's cores.
+     */
+    public const EXPEDITE_RETRY_MS = 100;
+    public const EXPEDITE_TRIES = 10;
     private const MAX_BATCH = 256;
 
     public int $term = 0;
@@ -38,6 +46,8 @@ final class Raft
     private array $matchIndex = [];
     private int $heardLeaderAt = 0;
     private int $electionDeadline = 0;
+    /** Pre-vote resends left for the campaign `expedite` started. */
+    private int $expedited = 0;
     private int $heartbeatDue = 0;
     private int $rng;
     /** @var list<array{0:string,1:array<string,mixed>}> */
@@ -90,6 +100,15 @@ final class Raft
     {
         $this->heardLeaderAt = $now; $this->resetElection($now);
         $this->heartbeatDue = $now + self::HEARTBEAT_MS;
+    }
+
+    /** Campaign at the next tick, when there is no leader: the member a new queue should be led by. */
+    public function expedite(): void
+    {
+        if ($this->role !== 'leader' && $this->leader === null) {
+            $this->electionDeadline = 0;
+            $this->expedited = self::EXPEDITE_TRIES;
+        }
     }
 
     private function rand(): int
@@ -237,6 +256,7 @@ final class Raft
         $this->role = 'follower';
         $this->leader = $leader;
         $this->votes = [];
+        $this->expedited = 0;
         $this->resetElection($now);
     }
 
@@ -311,6 +331,10 @@ final class Raft
             }
         } elseif ($now >= $this->electionDeadline && in_array($this->id, $this->voters(), true)) {
             $this->startPreVote($now);
+            if ($this->role === 'precandidate' && $this->expedited > 0) {
+                $this->expedited--;
+                $this->electionDeadline = $now + self::EXPEDITE_RETRY_MS;
+            }
         }
     }
 

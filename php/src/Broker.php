@@ -1721,6 +1721,10 @@ final class Broker
         if ($this->cluster === null || ($this->queues[$queue]['args']['queueType'] ?? 'classic') === 'quorum') {
             return null;
         }
+        // A replicated stream is on every member; appends go through its group.
+        if (($this->queues[$queue]['args']['queueType'] ?? '') === 'stream' && is_string($this->queues[$queue]['raftGroup'] ?? null)) {
+            return null;
+        }
         if (getenv('QUEUEFORGE_LOCAL') === '1') {
             return null;
         }
@@ -2570,7 +2574,10 @@ final class Broker
         }
         $this->prom['consumers'] -= count($this->queues[$name]['consumers']);
         $this->prom['queuesDeleted']++;
+        // Its own Raft group stops and its files go, as on Bun and Rust.
+        $group = $this->queues[$name]['raftGroup'] ?? $this->queues[$name]['args']['raftGroup'] ?? null;
         unset($this->queues[$name]);
+        if (is_string($group) && str_starts_with($group, 'q:')) $this->root()->cluster?->dropQueueGroup($group);
         $this->bindings = array_values(array_filter(
             $this->bindings,
             static fn (array $row): bool => $row['queue'] !== $name,

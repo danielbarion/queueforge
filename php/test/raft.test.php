@@ -215,6 +215,22 @@ Harness::guard('membership changes one voter at a time', static function (): voi
     Harness::eq('d applied the entry', ['four'], $sim->values('d'));
 });
 
+Harness::guard('an expedited campaign is retried until the other members open the group', static function (): void {
+    $sim = new RaftSim(['a', 'b', 'c']);
+    foreach ($sim->nodes as $node) $node->startTimer(0);
+    // b and c drop a's first pre-votes: the declare has not reached them yet.
+    $sim->down = ['b' => true, 'c' => true];
+    $sim->nodes['a']->expedite();
+    $sim->run(300);
+    Harness::eq('no leader while b and c are away', [], $sim->leaders());
+    $sim->down = [];
+    $sim->nodes['b']->startTimer($sim->now);
+    $sim->nodes['c']->startTimer($sim->now);
+    // Well inside b's and c's own election timeouts (1-2 s).
+    $sim->run(300);
+    Harness::eq('a leads', 'a', $sim->leader());
+});
+
 Harness::guard('a single voter commits alone', static function (): void {
     $sim = new RaftSim(['solo']);
     $sim->run(2500);

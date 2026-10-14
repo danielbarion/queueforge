@@ -16,6 +16,7 @@
  * another.
  */
 import { W, writeTable, type Field } from "../codec.ts";
+import { readProps } from "../amqp10/map.ts";
 import { ChanError } from "../errors.ts";
 import { Broker } from "./class.ts";
 import type { Consumer, LiveMsg, QueueLive } from "./model.ts";
@@ -225,6 +226,7 @@ export function applyStreamAppend(this: Broker, q: QueueLive, index: number, dat
   if (index <= s.raftIndex) return;
   s.raftIndex = index;
   const body = new Uint8Array(Buffer.from(String(data.body_b64 ?? ""), "base64"));
+  const propRaw = new Uint8Array(Buffer.from(String(data.propRaw ?? ""), "base64"));
   const entry: StreamEntry = {
     offset: s.next++,
     ts: Number(data.ts ?? Date.now()),
@@ -232,8 +234,8 @@ export function applyStreamAppend(this: Broker, q: QueueLive, index: number, dat
     body,
     exchange: String(data.exchange ?? ""),
     routingKey: String(data.routing_key ?? ""),
-    headers: (data.headers as StreamEntry["headers"]) ?? [],
-    propRaw: new Uint8Array(Buffer.from(String(data.propRaw ?? ""), "base64")),
+    headers: streamHeaders(data.headers, propRaw),
+    propRaw,
     raftIndex: index,
   };
   this.store.appendStreamEntry(q.vhost, q.name, { ...entry, body });
@@ -373,6 +375,17 @@ export function removeStreamReader(this: Broker, q: QueueLive, tag: string): boo
   const before = s.readers.length;
   s.readers = s.readers.filter((r) => r.consumer.tag !== tag);
   return s.readers.length !== before;
+}
+
+/**
+ * An `sappend`'s header table. Bun and Rust send it typed (`[name, {t, v}]`);
+ * PHP sends untyped pairs, so that table is read from the properties instead.
+ */
+function streamHeaders(headers: unknown, propRaw: Uint8Array): Array<[string, Field]> {
+  if (!Array.isArray(headers) || headers.length === 0) return [];
+  const typed = headers.every((h) => Array.isArray(h) && typeof h[1] === "object" && h[1] !== null && "t" in h[1]);
+  if (typed) return headers as Array<[string, Field]>;
+  return propRaw.length >= 2 ? readProps(propRaw).headers : [];
 }
 
 /** Copy properties with `x-stream-offset` added to the headers table. */
