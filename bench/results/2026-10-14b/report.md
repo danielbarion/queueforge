@@ -46,6 +46,19 @@ its range; a cell without a range was measured once.
 | 4 CPU / 8 GiB | Bun | 262,524.0 [103,676–290,252; n=3] | 216,304.0 [149,982–228,872; n=3] | 475,899.0 [286,873–777,752; n=3] | 386 |
 | 4 CPU / 8 GiB | PHP | 11,920.0 | 81,813.9 | 77,807.4 | 196 |
 
+### Disk ceiling
+
+dd write+fdatasync in a 1 CPU / 1 GiB container on an anonymous volume.
+
+| Written per sync | MB/s (median) | Range |
+| --- | ---: | ---: |
+| 4 KiB | 18.6 | 17.5–18.8 |
+| 64 KiB | 275.8 | 228.3–291.6 |
+| 256 KiB | 746.7 | 654.6–829.8 |
+| 1 MiB | 1,742.8 | 1,422.5–1,836.6 |
+| 4 MiB | 2,272.5 | 1,814.7–2,311.9 |
+| 2 GiB, one sync | 2,397.8 | 2,062.4–3,101.1 |
+
 ### Scenarios, 1 CPU / 1 GiB
 
 | Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
@@ -88,6 +101,27 @@ Peak container memory, 1 CPU / 1 GiB (MiB, page cache included):
 | Heavy mixed load | 234 | 1,024 | 286 | 932 |
 | Backlog fill and drain | 534 | 813 | 789 | 1,016 |
 
+Disk writes and fsyncs over the measured window, 1 CPU / 1 GiB:
+
+| Scenario | RabbitMQ | Rust | Bun | PHP |
+| --- | ---: | ---: | ---: | ---: |
+| Work queue | – | – | – | – |
+| Fire-and-forget telemetry | – | – | – | – |
+| Broadcast to 20 services | – | – | – | – |
+| 64 queues, own publisher each | – | – | – | – |
+| 64 KiB messages | – | – | – | – |
+| 1 MiB messages | – | – | – | – |
+| Latency at 1,000 msg/s | – | – | – | – |
+| Latency at 10,000 msg/s | – | – | – | – |
+| 500 queues, 1,000 connections | – | – | – | – |
+| Slow workers, prefetch 1 | – | – | – | – |
+| Quorum queue | – | – | – | – |
+| Stream queue | – | – | – | – |
+| Priority queue | – | – | – | – |
+| Transactions | – | – | – | – |
+| Heavy mixed load | – | – | – | – |
+| Backlog fill and drain | – | – | – | – |
+
 ### Scenarios, 4 CPU / 4 GiB
 
 | Scenario | What it stands for | Score | RabbitMQ | Rust | Bun | PHP |
@@ -111,6 +145,18 @@ Peak container memory, 4 CPU / 4 GiB (MiB, page cache included):
 | 500 queues, 1,000 connections | 480 | 2,224 | 451 | 67 |
 | Quorum queue | 770 | 4,096 | 248 | 288 |
 | Heavy mixed load | 410 | 1,124 | 592 | 1,106 |
+
+Disk writes and fsyncs over the measured window, 4 CPU / 4 GiB:
+
+| Scenario | RabbitMQ | Rust | Bun | PHP |
+| --- | ---: | ---: | ---: | ---: |
+| Work queue | – | – | – | – |
+| Fire-and-forget telemetry | – | – | – | – |
+| Broadcast to 20 services | – | – | – | – |
+| 64 queues, own publisher each | – | – | – | – |
+| 500 queues, 1,000 connections | – | – | – | – |
+| Quorum queue | – | – | – | – |
+| Heavy mixed load | – | – | – | – |
 
 ### Connections
 

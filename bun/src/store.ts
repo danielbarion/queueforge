@@ -140,6 +140,11 @@ export class Store {
   /** How many times the interval path raised synchronous=FULL. */
   fullFlushCount = 0;
   confirmsBeforeFsync = 0;
+
+  /** Commit fsyncs of the durable log and their seconds. Without that log, full flushes and no time. */
+  fsyncStats(): { count: number; seconds: number } {
+    return this.fastLog?.syncStats() ?? { count: this.fullFlushCount, seconds: 0 };
+  }
   stagedWithoutFlush = false;
   /** Flushes that finished before the caller returned, for always and every_n_messages. */
   syncFlushCount = 0;

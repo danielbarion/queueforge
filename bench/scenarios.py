@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +35,10 @@ NET = "qf-sc"
 BROKER = "qf-sc-broker"
 CLIENT = "qf-sc-client"
 HOST_PORT = 35700
+# Each broker's Prometheus page, published here so the harness reads fsync
+# counters from the host and runs nothing inside the measured container.
+METRICS_HOST_PORT = 35792
+METRICS_PORT = {"rabbit": 15692, "rust": 15692, "bun": 15692, "php": 15672}
 KINDS = ["rabbit", "rust", "bun", "php"]
 CPU_PROFILE_DIR = "/var/lib/queueforge/profiles"
 CPU_PROFILE_FLAGS = "--cpu-prof --cpu-prof-dir=/var/lib/queueforge/profiles --preload=/var/lib/queueforge/profiles/exit.ts"
@@ -104,6 +109,14 @@ SCENARIOS = [
     dict(id="large-1m", title="1 MiB messages",
          real="Large payloads: 1 producer of durable 1 MiB bodies, 4 confirms in flight, scored in MB/s.",
          args="-x 1 -y 1 -u big -f persistent -s 1048576 -c 4 -q 4", bytes=1048576),
+    # RabbitMQ classic confirms before its fsync. A quorum queue, here on one
+    # node, confirms after it, as every QueueForge queue does.
+    dict(id="large-64k-quorum", title="64 KiB messages, quorum queue",
+         real="The 64 KiB cell on a quorum queue, which RabbitMQ also fsyncs before the confirm.",
+         args="-x 2 -y 2 -u blobs-qq -qq -f persistent -s 65536 -c 20 -q 20", bytes=65536),
+    dict(id="large-1m-quorum", title="1 MiB messages, quorum queue",
+         real="The 1 MiB cell on a quorum queue, which RabbitMQ also fsyncs before the confirm.",
+         args="-x 1 -y 1 -u big-qq -qq -f persistent -s 1048576 -c 4 -q 4", bytes=1048576),
     dict(id="latency-1k", title="Latency at 1,000 msg/s",
          real="A steady API workload: 1,000 durable 1 KiB msg/s with confirms. Scored on end-to-end latency.",
          args="-x 1 -y 1 -u steady -f persistent -s 1024 -c 100 -q 100 -r 1000", rate=1000),
@@ -151,6 +164,9 @@ COLS = [
     "client_cpu", "kept", "seconds",
 ]
 COLS += ["run_id", "cohort_id", "broker_image", "client_image", "harness_sha256", "scenario_sha256", "resources_sha256", "started_utc", "output_dir", "expected_repeats", "repeat_ordinal"]
+# Over the measured window: block-device writes of the broker container, and
+# the fsyncs its metrics page counted (rate and mean duration).
+COLS += ["disk_mb_s", "fsyncs_s", "fsync_ms"]
 
 
 def utc_now():
@@ -291,7 +307,8 @@ def start_broker(kind, cpus, mem, image=None):
         "--memory", mem, "--memory-swap", mem,
         "--ulimit", "nofile=1048576:1048576", "--sysctl", "net.core.somaxconn=4096",
         "-p", f"127.0.0.1:{HOST_PORT}:5672",
-    ] + C.broker_env(kind) + (["-e", "QUEUEFORGE_PROFILE=1"] if kind == "bun" and os.environ.get("QF_BENCH_PROFILE") == "1" else []) + [image or image_digest(C.IMAGES[kind])]
+        "-p", f"127.0.0.1:{METRICS_HOST_PORT}:{METRICS_PORT[kind]}",
+    ] + C.broker_env(kind) + (["-e", "QUEUEFORGE_METRICS_ADDR=0.0.0.0:15692"] if kind == "bun" else []) + (["-e", "QUEUEFORGE_PROFILE=1"] if kind == "bun" and os.environ.get("QF_BENCH_PROFILE") == "1" else []) + [image or image_digest(C.IMAGES[kind])]
     if kind == "bun" and os.environ.get("QF_BENCH_CPU_PROFILE") == "1":
         # Environment flags also reach supervised workers, whose CLI drops flags.
         cmd[-1:-1] = ["-e", "BUN_OPTIONS=" + CPU_PROFILE_FLAGS]
@@ -307,16 +324,98 @@ def start_broker(kind, cpus, mem, image=None):
     return True
 
 
-class Sampler(threading.Thread):
-    """Peak broker memory once a second, and CPU over the measured window."""
+# Prometheus counters of completed fsyncs. QueueForge counts its durable-log
+# commits and times them. RabbitMQ counts classic file syncs with their time,
+# and its quorum WAL batches, one fdatasync each, without a time.
+QUEUEFORGE_FSYNC = ("queueforge_wal_fsync_seconds_count", "queueforge_wal_fsync_seconds_sum")
+RABBIT_SYNC = ("rabbitmq_io_sync_ops_total", "rabbitmq_io_sync_time_seconds_total")
+RABBIT_WAL_BATCHES = "rabbitmq_detailed_raft_batches"
+RABBIT_DETAILED = "/metrics/detailed?family=ra_metrics"
 
-    def __init__(self, warm):
+
+def metric_sums(text, names, label=None):
+    """Each name's value summed over its series, or None when it is absent.
+
+    `label` keeps only series whose labels contain that text."""
+    totals = {name: None for name in names}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        head, _, value = line.rpartition(" ")
+        base, brace, labels = head.partition("{")
+        if base not in totals or (label and label not in labels):
+            continue
+        try:
+            totals[base] = (totals[base] or 0.0) + float(value)
+        except ValueError:
+            pass
+    return totals
+
+
+def fsync_totals(kind, text):
+    """(syncs, seconds, timed syncs) from a metrics page, or None when the counters are absent."""
+    if kind == "rabbit":
+        sync = metric_sums(text, RABBIT_SYNC)
+        wal = metric_sums(text, [RABBIT_WAL_BATCHES], label='module="ra_log_wal"')[RABBIT_WAL_BATCHES]
+        ops, seconds = sync[RABBIT_SYNC[0]], sync[RABBIT_SYNC[1]]
+        if ops is None or seconds is None:
+            return None
+        return ops + (wal or 0.0), seconds, ops
+    totals = metric_sums(text, QUEUEFORGE_FSYNC)
+    count, seconds = totals[QUEUEFORGE_FSYNC[0]], totals[QUEUEFORGE_FSYNC[1]]
+    if count is None or seconds is None:
+        return None
+    return count, seconds, count
+
+
+def scrape_fsync(kind):
+    """The broker's fsync counters from its published metrics page, or None."""
+    paths = ["/metrics"] + ([RABBIT_DETAILED] if kind == "rabbit" else [])
+    pages = []
+    try:
+        for path in paths:
+            with urllib.request.urlopen(f"http://127.0.0.1:{METRICS_HOST_PORT}{path}", timeout=5) as response:
+                pages.append(response.read().decode(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return fsync_totals(kind, "\n".join(pages))
+
+
+def io_rates(a, b):
+    """Disk MB/s, fsyncs/s and mean fsync ms between two marks of (time, disk bytes, fsync totals).
+
+    The mean is left out unless every sync in the window was timed."""
+    out = {"disk_mb_s": None, "fsyncs_s": None, "fsync_ms": None}
+    if not a or not b or b[0] <= a[0]:
+        return out
+    dt = b[0] - a[0]
+    if a[1] is not None and b[1] is not None and b[1] >= a[1]:
+        out["disk_mb_s"] = (b[1] - a[1]) / dt / 1e6
+    if a[2] and b[2] and b[2][0] >= a[2][0]:
+        syncs = b[2][0] - a[2][0]
+        timed = b[2][2] - a[2][2]
+        out["fsyncs_s"] = syncs / dt
+        if syncs > 0 and timed == syncs:
+            out["fsync_ms"] = (b[2][1] - a[2][1]) / syncs * 1000
+    return out
+
+
+class Sampler(threading.Thread):
+    """Peak broker memory once a second; CPU, disk writes and fsyncs over the measured window.
+
+    The metrics page is read before the first CPU mark and after the last, so
+    rendering it is not counted as broker CPU.
+    """
+
+    def __init__(self, warm, kind=None):
         super().__init__(daemon=True)
         self.warm = warm
+        self.kind = kind
         self.peak = 0
         self.peak_anon = 0
         self.stop_flag = threading.Event()
         self.cpu_marks = {}
+        self.io_marks = {}
         self.samples = []
         self.error = None
 
@@ -337,10 +436,14 @@ class Sampler(threading.Thread):
             if anon:
                 self.peak_anon = max(self.peak_anon, anon)
             if not marked and time.monotonic() - started >= self.warm:
+                fsync = scrape_fsync(self.kind) if self.kind else None
                 self.cpu_marks["a"] = (time.monotonic(), C.cpu_usec(BROKER), C.cpu_usec(CLIENT))
+                self.io_marks["a"] = (time.monotonic(), C.container_usage(BROKER)["disk_write"], fsync)
                 marked = True
             self.stop_flag.wait(1.0)
         self.cpu_marks["b"] = (time.monotonic(), C.cpu_usec(BROKER), C.cpu_usec(CLIENT))
+        disk = C.container_usage(BROKER)["disk_write"]
+        self.io_marks["b"] = (time.monotonic(), disk, scrape_fsync(self.kind) if self.kind else None)
 
     def cpu(self):
         a, b = self.cpu_marks.get("a"), self.cpu_marks.get("b")
@@ -352,6 +455,9 @@ class Sampler(threading.Thread):
             return f"{(y - x) / (dt * 1e6) * 100:.0f}" if x is not None and y is not None else ""
 
         return pct(a[1], b[1]), pct(a[2], b[2])
+
+    def io(self):
+        return io_rates(self.io_marks.get("a"), self.io_marks.get("b"))
 
 
 def perf_test(args, seconds, out_path, limited, image=None):
@@ -477,7 +583,7 @@ def run_cell(kind, cpus, mem, size, sc, run_id=None, cohort_id=None, broker_imag
             return row
         warm = sc.get("warm", 5)
         seconds = sc.get("seconds", 25)
-        sampler = Sampler(warm)
+        sampler = Sampler(warm, kind)
         sampler.start()
         tag = f"{kind}-{cpus}-{sc['id']}"
         phases = sc.get("phases")
@@ -526,6 +632,10 @@ def run_cell(kind, cpus, mem, size, sc, run_id=None, cohort_id=None, broker_imag
         row["peak_mib"] = f"{sampler.peak / 1048576:.0f}" if sampler.peak else ""
         row["anon_mib"] = f"{sampler.peak_anon / 1048576:.0f}" if sampler.peak_anon else ""
         row["broker_cpu"], row["client_cpu"] = bcpu, ccpu
+        io = sampler.io()
+        row["disk_mb_s"] = fmt(io["disk_mb_s"], 1)
+        row["fsyncs_s"] = fmt(io["fsyncs_s"], 1)
+        row["fsync_ms"] = fmt(io["fsync_ms"], 2)
         if oom == "true":
             row["err"] = "oom"
         elif not running:
@@ -546,7 +656,8 @@ def run_cell(kind, cpus, mem, size, sc, run_id=None, cohort_id=None, broker_imag
         C.log(
             f"CELL {kind} {size} {sc['id']} ok={row['ok']} err={row['err']} sent={row.get('sent_s')} "
             f"recv={row.get('received_s')} mb={row.get('mb_s', '')} p50={row.get('lat_p50_ms')} "
-            f"p99={row.get('lat_p99_ms')} mib={row['peak_mib']} anon={row['anon_mib']} cpu={bcpu} client={ccpu} kept={row.get('kept')}"
+            f"p99={row.get('lat_p99_ms')} mib={row['peak_mib']} anon={row['anon_mib']} cpu={bcpu} client={ccpu} kept={row.get('kept')} "
+            f"disk={row['disk_mb_s']} fsyncs={row['fsyncs_s']} fsync_ms={row['fsync_ms']}"
         )
         return row
     except Exception as exc:

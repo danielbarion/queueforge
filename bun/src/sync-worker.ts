@@ -20,6 +20,9 @@ const DONE = 1;
 const FD = 2;
 const FAILED = 3;
 const PREVIOUS = 4;
+/** Completed syncs, and their total nanoseconds, for the metrics page. */
+const SYNCS = 5;
+const SYNC_NS = 6;
 
 self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: number }>) => {
   const state = new BigInt64Array(event.data.state);
@@ -42,12 +45,15 @@ self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: numbe
     if (want === done) continue;
     try {
       if (delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+      const started = performance.now();
       syncPrevious();
       fdatasyncSync(Number(Atomics.load(state, FD)));
       // A rotation after `want` was read moves the active chunk, so batches
       // up to `want` may be in the chunk it handed over. Sync that one too
       // before reporting them.
       syncPrevious();
+      Atomics.add(state, SYNCS, 1n);
+      Atomics.add(state, SYNC_NS, BigInt(Math.round((performance.now() - started) * 1e6)));
     } catch {
       Atomics.store(state, FAILED, 1n);
     }

@@ -167,3 +167,16 @@ function unsaltRecords(buf: Buffer, salt: number) {
     o += 4;
   }
 }
+
+test("commit fsyncs are counted and timed for the metrics page", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-sync-stats-"));
+  const path = join(dir, "t.sqlite");
+  const store = new Store(path, "every_n_messages", 10, 100_000);
+  const before = store.fsyncStats();
+  await churn(store, 2);
+  const after = store.fsyncStats();
+  expect(after.count).toBeGreaterThan(before.count);
+  expect(after.seconds).toBeGreaterThan(before.seconds);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});

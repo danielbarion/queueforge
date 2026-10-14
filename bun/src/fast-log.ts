@@ -581,7 +581,11 @@ export class FastLog {
   private syncedSeq = 0n;
   private syncWorker: Worker | null = null;
   /** requested, done, fd, failed, previous chunk fd. See `sync-worker.ts`. */
-  private readonly syncState = new BigInt64Array(new SharedArrayBuffer(40));
+  /** Shared with `sync-worker.ts`; slots 5 and 6 count its syncs and their nanoseconds. */
+  private readonly syncState = new BigInt64Array(new SharedArrayBuffer(56));
+  /** Commit syncs run on this thread, and their seconds. */
+  private inlineSyncs = 0;
+  private inlineSyncSeconds = 0;
   /** Called once per completed sync with the highest batch it covered. */
   onSynced: ((seq: bigint, ok: boolean) => void) | null = null;
 
@@ -749,7 +753,10 @@ export class FastLog {
     // One sequential overwrite. Rewriting the header would dirty byte 0 and
     // make this fdatasync flush a second region.
     writeAllAt(this.active.fd, buf, at);
+    const started = performance.now();
     fdatasyncSync(this.active.fd);
+    this.inlineSyncs++;
+    this.inlineSyncSeconds += (performance.now() - started) / 1000;
     this.active.len = at + buf.length;
     // This sync also covers every batch written before it.
     this.unsynced.push({ seq: ++this.writtenSeq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, ends, deletes: [...deletes] });
@@ -760,6 +767,14 @@ export class FastLog {
   /** False once a background sync failed. The caller then syncs inline. */
   get canAppend(): boolean {
     return !this.closed && Atomics.load(this.syncState, 3) === 0n;
+  }
+
+  /** Commit syncs so far, inline and on the sync worker, and the seconds they took. */
+  syncStats(): { count: number; seconds: number } {
+    return {
+      count: this.inlineSyncs + Number(Atomics.load(this.syncState, 5)),
+      seconds: this.inlineSyncSeconds + Number(Atomics.load(this.syncState, 6)) / 1e9,
+    };
   }
 
   /** Every batch is covered by a completed sync. */

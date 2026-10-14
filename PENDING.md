@@ -569,6 +569,16 @@ the load sweep's spread shape at 4 CPU fell from 288,669 to 88,558 msg/s.
 `QUEUEFORGE_CORES=cgroup` restores the per-core mode for those shapes; the
 scenario cells were better in single-process mode (see P1).
 
+### P7. 1 MiB messages on a quorum queue
+
+Status: open (found 2026-10-14, Cortex Code).
+
+Evidence: the new `large-1m-quorum` cell (1 producer, 1 MiB durable bodies on a
+quorum queue, 4 confirms in flight) delivered nothing at 1 CPU / 1 GiB. The
+broker logged `alarm set: low on memory` and the container sat at 1,021 MiB, so
+the alarm blocked the publisher. The classic 1 MiB cell runs (P2). Validation
+run: `/tmp/qf-ab/coco/io-check`.
+
 ### P6. Conformance 61/135
 
 Status: done (Cortex Code, 2026-10-11); see Done.
@@ -589,6 +599,26 @@ Status: done (2026-10-10); see Done.
 ### H2. Memory columns
 
 Status: done (2026-10-10); see Done.
+
+### H4. Disk and fsync observability (done 2026-10-14)
+
+`bench/disk.py` (run step `disk`) measures the disk's write+fdatasync ceiling
+per amount written between syncs, in a 1 CPU / 1 GiB container on an anonymous
+volume. Scenario rows gain `disk_mb_s` (block-device writes from the Engine
+stats API), `fsyncs_s` and `fsync_ms` (from each broker's metrics page, read
+before and after the measured window; Bun now times its syncs). RabbitMQ's
+count adds its quorum WAL batches, which carry no time, so its mean is shown
+only when every sync was timed. New cells `large-64k-quorum` and
+`large-1m-quorum` repeat the large-message cells on the queue type RabbitMQ
+also fsyncs before the confirm.
+
+First readings (one repeat, 1 CPU / 1 GiB, `/tmp/qf-ab/coco/io-check`):
+RabbitMQ classic at 64 KiB wrote 0.4 MB/s while it delivered 664 MB/s: the
+consumers kept up, so bodies were delivered before they were written. On the
+quorum cell RabbitMQ wrote 589 MB/s and delivered 481 MB/s; Rust 616 and Bun
+664 MB/s. Rust writes about twice what it delivers (1,064 MB/s for 536 at
+64 KiB), the zero-fill before each overwrite (see R4). The ceiling moves with
+the host: 1 MiB per sync measured 610 to 1,743 MB/s across the day.
 
 ### H3. The load sweep measures each cell once
 

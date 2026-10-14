@@ -894,3 +894,5 @@ footer { background: #080d14; }
   .feature-panel .scroll { max-height: none; }
 }
 @media (prefers-reduced-motion: reduce) { .btn, nav a, button.copy { transition: none; } }
+.io-syncs { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.disk-table table { table-layout: fixed; min-width: 0; max-width: 640px; }

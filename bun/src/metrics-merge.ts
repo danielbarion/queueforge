@@ -1,14 +1,26 @@
-/** Join child Prometheus pages. Only the confirm-before-fsync counter is summed. */
+/** Counters each child keeps for itself, summed across children. */
+const SUMMED = [
+  "queueforge_confirm_before_fsync_total",
+  "queueforge_wal_fsync_seconds_count",
+  "queueforge_wal_fsync_seconds_sum",
+];
+
+/** Join child Prometheus pages. Only the per-process fsync counters are summed. */
 export function mergeChildMetrics(bodies: string[]): string {
-  let sum = 0;
-  for (const body of bodies) {
-    const line = body.split("\n").find((row) => row.startsWith("queueforge_confirm_before_fsync_total "));
-    if (line) sum += Number(line.split(" ")[1]) || 0;
+  let merged = bodies[0] ?? "";
+  for (const name of SUMMED) {
+    let sum = 0;
+    let seen = false;
+    for (const body of bodies) {
+      const line = body.split("\n").find((row) => row.startsWith(name + " "));
+      if (!line) continue;
+      seen = true;
+      sum += Number(line.split(" ")[1]) || 0;
+    }
+    if (!seen && name !== SUMMED[0]) continue;
+    const pattern = new RegExp(`^${name} .*`, "m");
+    if (pattern.test(merged)) merged = merged.replace(pattern, `${name} ${sum}`);
+    else merged += `${merged && !merged.endsWith("\n") ? "\n" : ""}${name} ${sum}\n`;
   }
-  const base = bodies[0] ?? "";
-  const replaced = base.replace(
-    /^queueforge_confirm_before_fsync_total .*/m,
-    `queueforge_confirm_before_fsync_total ${sum}`,
-  );
-  return replaced || `queueforge_confirm_before_fsync_total ${sum}\n`;
+  return merged;
 }

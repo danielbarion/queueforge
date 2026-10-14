@@ -115,8 +115,9 @@ and then, for example after a Docker Desktop or macOS update. Cells run one at
 a time on purpose: they share the VM's disk, memory bandwidth and the Mac's
 mixed performance/efficiency cores, so parallel cells would skew each other.
 
-Steps, in order: `build`, `scenarios`, `load`, `connections`, `paced`, `report`.
-A failing step is recorded and the others still run.
+Steps, in order: `build`, `disk`, `scenarios`, `load`, `connections`, `paced`,
+`report`. `disk` measures the disk's own write+fdatasync ceiling
+(`bench/disk.py`). A failing step is recorded and the others still run.
 
 What it writes:
 

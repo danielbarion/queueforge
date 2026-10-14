@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Bars } from "../bars";
 import {
   BENCH_MD,
+  diskCeiling,
   formatMemory,
   formatRate,
   formatTimes,
@@ -16,7 +17,7 @@ import {
   type LoadRow,
   type Tone,
 } from "../bench";
-import { MemoryTable, ScenarioTable } from "../scenario-table";
+import { DiskCeilingTable, IoTable, MemoryTable, ScenarioTable } from "../scenario-table";
 import { SizeCharts } from "../size-chart";
 
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
@@ -78,6 +79,7 @@ export const metadata: Metadata = {
 export default function BenchmarkPage() {
   const rabbit = paced[0].rate;
   const averages = scenarioAverages(scenarioRows);
+  const ioMeasured = scenarioRows.some((row) => row.io && Object.values(row.io).some((io) => io.disk != null));
   const score = Object.fromEntries(averages.map((row) => [row.tone, row])) as Record<Tone, (typeof averages)[number]>;
   const averageBars: Bar[] = averages.map((row) => ({
     name: row.name,
@@ -179,7 +181,9 @@ export default function BenchmarkPage() {
           <p className="caption">
             RabbitMQ classic confirms after the batch write, or after a consumer ack if that
             happens first, and does not fsync before the confirm. QueueForge confirms after the
-            fsync. Large bodies are where that costs QueueForge the most. Backlog is the fill and
+            fsync. Large bodies are where that costs QueueForge the most. The two quorum-queue rows
+            repeat the large-message cells on the queue type that RabbitMQ also fsyncs before the
+            confirm, which is the like-for-like durable comparison. Backlog is the fill and
             drain rate for 300,000 durable 1 KiB messages. Each score is the median of its runs;
             the range across runs is in BENCHMARK.md. Memory for the same cells is below. Every
             caveat and raw result is in{" "}
@@ -206,6 +210,34 @@ export default function BenchmarkPage() {
           <MemoryTable rows={scenarioRows} label="Peak container memory" />
         </div>
       </section>
+
+      {(diskCeiling.length > 0 || ioMeasured) && (
+        <section className="rule">
+          <div className="wrap">
+            <h2>Disk.</h2>
+            <p className="section-lead">
+              What the disk under the brokers can do, measured on its own: <code>dd</code> writes
+              with an <code>fdatasync</code> after every block, in a 1 CPU / 1 GiB container on an
+              anonymous volume, as the broker containers write. A durable confirm waits on such a
+              sync, so the rate depends on how much each sync covers. The last row is one sync at
+              the end, about what a broker that does not sync before the confirm can reach.
+            </p>
+            <DiskCeilingTable rows={diskCeiling} />
+            <p className="caption">
+              Docker Desktop&apos;s disk is a file on the host&apos;s SSD, so these rates move with
+              the host; each row is the median of three runs, with their range.
+            </p>
+            <IoTable rows={scenarioRows} label="Disk writes and fsyncs" />
+            {ioMeasured && (
+              <p className="caption">
+                Per scenario cell, over its measured window: what the broker container wrote to the
+                disk, and the fsyncs its metrics page counted with their mean duration. RabbitMQ
+                counts every file sync of the node; QueueForge counts its durable-log commits.
+              </p>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="band">
         <div className="wrap">

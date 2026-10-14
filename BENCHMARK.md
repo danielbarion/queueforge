@@ -561,6 +561,31 @@ Peak container memory, 4 CPU / 4 GiB (MiB, page cache included):
 | PHP | 4 CPU / 4g | 40,000 | 298.6 MiB |
 | PHP | 4 CPU / 8g | 20,000 | 159.5 MiB |
 
+### Disk (2026-10-14)
+
+Measured on 2026-10-14 with `bench/disk.py` into `bench/results/2026-10-14b/disk.tsv`:
+`dd` writes with an `fdatasync` after every block, in a 1 CPU / 1 GiB
+container on an anonymous volume, three runs per row. A durable confirm waits
+on such a sync, so the rate depends on how much each sync covers. The last row
+is one sync after 2 GiB, about what a broker that does not sync before the
+confirm can reach. Docker Desktop's disk is a file on the Mac's SSD: the same
+1 MiB row measured 610 MB/s earlier that day.
+
+| Written per sync | MB/s (median) | Range |
+| --- | ---: | ---: |
+| 4 KiB | 18.6 | 17.5–18.8 |
+| 64 KiB | 275.8 | 228.3–291.6 |
+| 256 KiB | 746.7 | 654.6–829.8 |
+| 1 MiB | 1,742.8 | 1,422.5–1,836.6 |
+| 4 MiB | 2,272.5 | 1,814.7–2,311.9 |
+| 2 GiB, one sync | 2,397.8 | 2,062.4–3,101.1 |
+
+Scenario rows from the next full run also record, per cell, the broker
+container's disk writes (MB/s) and the fsyncs its metrics page counted with
+their mean time, and two more cells, `large-64k-quorum` and
+`large-1m-quorum`, run the large-message cells on quorum queues, which RabbitMQ
+also fsyncs before the confirm.
+
 ## Session (2026-10-11)
 
 Everything in this section was measured on 2026-10-11 (03:15Z–07:24Z) in one pass, from images built from the tree of that day, with the harness in [`bench/`](bench/). The scenario matrix ran first with two repeats per cell (`bench/scenarios.py matrix --repeat 2`, Docker Desktop at 8 CPUs and 25159827456 bytes); a cell shows the median and the `[min–max; n]` range, and a cell with a failed or missed repeat is shown but not scored. `bench/run-all.py --skip scenarios` then ran the load sweep, the connection hold, and the paced ladder (back at 2 CPUs and 8320565248 bytes). `bench/report.py` turned `bench/results/2026-10-11/` into the tables below and into `site/app/bench-data.ts`. The text uses UTC; `bench.log` records local UTC−03:00 times.

@@ -25,6 +25,7 @@ function promLabel(value: string): string {
  * track are emitted as 0 so the dashboard's metric names still resolve.
  */
 export function metricsText(broker: Broker): string {
+  const fsync = broker.store.fsyncStats();
   const p = broker.prom;
   const node = promLabel(broker.cfg.nodeId || "queueforge");
   const lines = [
@@ -118,8 +119,8 @@ export function metricsText(broker: Broker): string {
       ];
     }),
     "# TYPE queueforge_wal_fsync_seconds histogram",
-    `queueforge_wal_fsync_seconds_count ${broker.store.fullFlushCount}`,
-    `queueforge_wal_fsync_seconds_sum 0`,
+    `queueforge_wal_fsync_seconds_count ${fsync.count}`,
+    `queueforge_wal_fsync_seconds_sum ${fsync.seconds}`,
     "# TYPE queueforge_confirm_before_fsync_total counter",
     `queueforge_confirm_before_fsync_total ${broker.store.confirmsBeforeFsync}`,
     "# TYPE queueforge_full_flush_total counter",

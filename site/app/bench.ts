@@ -10,7 +10,7 @@ export type Bar = {
   note?: string;
 };
 
-export { MEASURED, paced, scale, loadRows, scenarioRows } from "./bench-data";
+export { MEASURED, paced, scale, loadRows, scenarioRows, diskCeiling } from "./bench-data";
 
 export function formatRate(rate: number) {
   return rate.toLocaleString("en-US", {
@@ -83,6 +83,18 @@ export type ScenarioRow = {
   text: Record<Tone, string>;
   /** Sampled container memory peak in MiB, page cache included. */
   memory: Record<Tone, number | null>;
+  /** Over the measured window: block-device MB/s written, fsyncs/s and mean fsync ms. Null when not measured. */
+  io?: Record<Tone, { disk: number | null; syncs: number | null; syncMs: number | null }>;
+};
+
+/** The disk's write+fdatasync rate when each sync covers `blockBytes`, or one sync at the end. */
+export type DiskCeiling = {
+  label: string;
+  blockBytes: number;
+  syncedEach: boolean;
+  mbS: number;
+  min: number;
+  max: number;
 };
 
 const AVERAGE_BROKERS: { tone: Tone; name: string }[] = [

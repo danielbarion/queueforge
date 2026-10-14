@@ -20,13 +20,19 @@ class EngineStatsTests(unittest.TestCase):
     def test_total_includes_cache_and_anonymous_remains_separate(self):
         self.assertEqual(self.usage({"memory_stats": {"usage": 1000, "stats": {"anon": 200, "inactive_file": 500}},
                                      "cpu_stats": {"cpu_usage": {"total_usage": 9000}}}),
-                         {"memory": 1000, "anonymous": 200, "cpu_usec": 9})
+                         {"memory": 1000, "anonymous": 200, "cpu_usec": 9, "disk_write": None})
+
+    def test_disk_write_sums_block_device_writes(self):
+        blkio = {"io_service_bytes_recursive": [{"major": 254, "minor": 0, "op": "read", "value": 7},
+                                                {"major": 254, "minor": 0, "op": "write", "value": 4096},
+                                                {"major": 254, "minor": 16, "op": "Write", "value": 100}]}
+        self.assertEqual(self.usage({"blkio_stats": blkio})["disk_write"], 4196)
 
     def test_cgroup_v1_rss_is_supported(self):
         self.assertEqual(self.usage({"memory_stats": {"usage": 1000, "stats": {"total_rss": 300}}})["anonymous"], 300)
 
     def test_removed_container_has_missing_counters(self):
-        self.assertEqual(self.usage({}, 404), {"memory": None, "anonymous": None, "cpu_usec": None})
+        self.assertEqual(self.usage({}, 404), {"memory": None, "anonymous": None, "cpu_usec": None, "disk_write": None})
 
     def test_failed_stats_request_does_not_become_zero_memory(self):
         with self.assertRaisesRegex(RuntimeError, "HTTP 500"):

@@ -32,7 +32,8 @@ starts the new results directory as a copy of DIR, so brokers that are not
 re-run (usually RabbitMQ) keep their rows there: scenario cells, load rows,
 paced files and connection rows of the brokers being re-run are replaced.
 
-Steps, in order: build, scenarios, load, connections, paced, report.
+Steps, in order: build, disk, scenarios, load, connections, paced, report.
+`disk` measures the disk's write+fdatasync ceiling by block size (bench/disk.py).
 Kinds: rabbit, rust, bun, php.
 
 Progress goes to the terminal and `<results>/bench.log`. `bench/last-run.json`
@@ -55,7 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 STATUS = os.path.join(HERE, "last-run.json")
 LOCK = "/tmp/queueforge-benchmark.lock"
-STEPS = ["build", "scenarios", "load", "connections", "paced", "report"]
+STEPS = ["build", "disk", "scenarios", "load", "connections", "paced", "report"]
 KINDS = ["rabbit", "rust", "bun", "php"]
 
 
@@ -256,9 +257,10 @@ def main():
                 opts.steps = [s for s in opts.steps if s in ("build", "report")]
         status.write()
 
-        big = [s for s in ("scenarios", "load", "connections") if s in opts.steps]
+        big = [s for s in ("disk", "scenarios", "load", "connections") if s in opts.steps]
         if big:
             import connections
+            import disk
             import load
             import scenarios
 
@@ -291,6 +293,7 @@ def main():
                     finally:
                         connections.stop()
 
+                run_step("disk", disk.measure)
                 run_step("scenarios", run_scenarios)
                 run_step("load", run_load)
                 run_step("connections", run_connections)

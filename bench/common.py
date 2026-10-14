@@ -246,6 +246,7 @@ def container_usage(name):
 
     Engine memory_stats.usage includes file cache; stats.anon is anonymous
     memory on cgroup v2 (total_rss on v1). CPU is cumulative nanoseconds.
+    `disk_write` is the bytes the container wrote to block devices (blkio).
     https://docs.docker.com/reference/api/engine/version/v1.51/
     """
     global _stats_endpoint
@@ -260,15 +261,18 @@ def container_usage(name):
         conn.request("GET", "/containers/" + quote(name, safe="") + "/stats?stream=false&one-shot=true")
         response = conn.getresponse()
         if response.status == 404:
-            return {"memory": None, "anonymous": None, "cpu_usec": None}
+            return {"memory": None, "anonymous": None, "cpu_usec": None, "disk_write": None}
         if response.status != 200:
             raise RuntimeError(f"Docker stats HTTP {response.status}")
         data = json.load(response)
         memory = data.get("memory_stats", {})
         detail = memory.get("stats", {})
         cpu = data.get("cpu_stats", {}).get("cpu_usage", {}).get("total_usage")
+        blkio = (data.get("blkio_stats") or {}).get("io_service_bytes_recursive") or []
+        writes = [entry.get("value", 0) for entry in blkio if str(entry.get("op", "")).lower() == "write"]
         return {"memory": memory.get("usage"), "anonymous": detail.get("anon", detail.get("total_rss", detail.get("rss"))),
-                "cpu_usec": cpu // 1000 if cpu is not None else None}
+                "cpu_usec": cpu // 1000 if cpu is not None else None,
+                "disk_write": sum(writes) if writes else None}
     finally:
         conn.close()
 

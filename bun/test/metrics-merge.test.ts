@@ -21,4 +21,12 @@ describe("child metrics", () => {
   test("reports zero when no child answered", () => {
     expect(mergeChildMetrics(["", ""])).toBe("queueforge_confirm_before_fsync_total 0\n");
   });
+
+  test("adds each child's fsync count and seconds", () => {
+    const first = "queueforge_wal_fsync_seconds_count 10\nqueueforge_wal_fsync_seconds_sum 0.25\n";
+    const second = "queueforge_wal_fsync_seconds_count 30\nqueueforge_wal_fsync_seconds_sum 0.5\n";
+    const merged = mergeChildMetrics([first, second]);
+    expect(merged).toContain("queueforge_wal_fsync_seconds_count 40\n");
+    expect(merged).toContain("queueforge_wal_fsync_seconds_sum 0.75\n");
+  });
 });
