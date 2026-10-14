@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Disk, META, RaftNode, soloQueueGroup, type RaftHooks } from "../src/raft/node.ts";
+import { COMPACT_BYTES, Disk, entryBodyBytes, META, RaftNode, soloQueueGroup, type RaftHooks } from "../src/raft/node.ts";
 import type { Entry } from "../src/raft/core.ts";
 import { decodeQuorumAppend, encodeQuorumAppend, rawQuorumBody } from "../src/wire.ts";
 
@@ -224,4 +224,43 @@ test("a one-voter queue group writes log.bin and replays it after a restart; met
   } finally {
     s.done();
   }
+});
+
+test("a group of large bodies compacts by bytes, long before 10,000 entries", async () => {
+  const s = scratch();
+  const group = soloQueueGroup("a", "/", "big");
+  const hooks: RaftHooks = {
+    send: () => {}, state: () => ({ messages: [] }), install: async () => {}, leaderChanged: () => {},
+    apply: async () => {},
+  };
+  const big = new Uint8Array(4 * 1024 * 1024).fill(7);
+  try {
+    const node = new RaftNode("a", s.dir, ["a"], hooks);
+    node.addGroup(group);
+    node.expedite(group);
+    const deadline = Date.now() + 3000;
+    while (node.leader(group) !== "a" && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    const count = COMPACT_BYTES / big.length + 2;
+    for (let i = 1; i <= count; i++) {
+      const data = encodeQuorumAppend({
+        vhost: "/", queue: "big", messageId: `m${i}`, body: big, exchange: "", routingKey: "big",
+        persistent: true, propRaw: new Uint8Array(), headers: [], priority: 0,
+      });
+      await node.propose(group, "enq", data);
+    }
+    const dir = readdirSync(s.dir).find((d) => d.startsWith("q-"))!;
+    expect(existsSync(join(s.dir, dir, "snapshot.json"))).toBe(true);
+    // The log was rewritten from the snapshot on: well under the bodies written.
+    expect(statSync(join(s.dir, dir, "log.bin")).size).toBeLessThan(COMPACT_BYTES);
+    node.stop();
+  } finally {
+    s.done();
+  }
+});
+
+test("entry body bytes count raw and base64 bodies", () => {
+  expect(entryBodyBytes(enq(1))).toBe(1024);
+  expect(entryBodyBytes({ i: 1, term: 1, kind: "enq", data: { body_b64: "AAAA" } })).toBe(4);
+  expect(entryBodyBytes({ i: 1, term: 1, kind: "enq", data: { message: { body_b64: "AAAAAAAA" } } })).toBe(8);
+  expect(entryBodyBytes(other(2))).toBe(0);
 });

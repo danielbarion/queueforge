@@ -66,6 +66,24 @@ export function compactAfter(group: string) {
   return group === META ? 50_000 : 10_000;
 }
 
+/**
+ * Applied body bytes that also compact a group. The entry count alone keeps
+ * up to 10,000 large bodies in the log; PHP's memory alarm tripped on that
+ * at 1 MiB.
+ */
+export const COMPACT_BYTES = 64 * 1024 * 1024;
+
+/** Body bytes an entry carries, raw or base64, without encoding a raw one. */
+export function entryBodyBytes(e: Entry): number {
+  const data = e.data;
+  if (!data || typeof data !== "object") return 0;
+  const raw = rawQuorumBody(data);
+  if (raw) return raw.length;
+  const source = ((data as { message?: unknown }).message ?? data) as Record<string, unknown>;
+  const body = source.body_b64 ?? source.body;
+  return typeof body === "string" ? body.length : 0;
+}
+
 /** Directory of a group under `raft/`. A queue group's name is hashed, as names may hold any byte. */
 function groupDir(group: Group): string {
   if (group === META || group === QUORUM) return group;
@@ -388,6 +406,8 @@ type GroupState = {
   waiters: Map<number, Waiter>;
   lastLeader: string | null;
   sinceSnapshot: number;
+  /** Body bytes applied since the last snapshot; see {@link COMPACT_BYTES}. */
+  sinceBytes: number;
   /** While leader: the index of the term's first entry. Announced only once it commits. */
   leadFrom: number | null;
   /** The leader as the applier last announced it, after every apply before it. */
@@ -438,7 +458,7 @@ export class RaftNode {
     const seed = (Date.now() ^ hashId(name) ^ hashId(this.id)) >>> 0;
     const core = new RaftCore(this.id, name, this.votersOf(name), seed || 1);
     const { term, vote, snapshot, log } = disk.load();
-    const g: GroupState = { name, core, disk, source: snapshot?.state ?? null, waiters: new Map(), lastLeader: null, sinceSnapshot: 0, leadFrom: null, announced: null };
+    const g: GroupState = { name, core, disk, source: snapshot?.state ?? null, waiters: new Map(), lastLeader: null, sinceSnapshot: 0, sinceBytes: 0, leadFrom: null, announced: null };
     if (snapshot) this.enqueueApply(() => this.hooks.install(name, snapshot.state));
     core.restore(term, vote, snapshot, log, snapshot?.index ?? 0);
     core.setDurable(core.lastIndex());
@@ -675,6 +695,7 @@ export class RaftNode {
     const installed = g.core.takeInstalled();
     if (installed) {
       g.sinceSnapshot = 0;
+      g.sinceBytes = 0;
       this.enqueueApply(() => this.hooks.install(g.name, installed.state));
     }
     const committed = g.core.takeCommitted();
@@ -698,8 +719,10 @@ export class RaftNode {
             const e = committed[next]!;
             await this.hooks.apply(g.name, e);
             if (waiters[next]) ready.push([waiters[next]!, e.i]);
-            if (++g.sinceSnapshot >= compactAfter(g.name)) {
+            g.sinceBytes += entryBodyBytes(e);
+            if (++g.sinceSnapshot >= compactAfter(g.name) || g.sinceBytes >= COMPACT_BYTES) {
               g.sinceSnapshot = 0;
+              g.sinceBytes = 0;
               const state = this.hooks.state(g.name);
               const snap = g.core.compactAt(e.i, state);
               if (snap) {
