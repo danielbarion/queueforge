@@ -580,9 +580,13 @@ export class FastLog {
   private writtenSeq = 0n;
   private syncedSeq = 0n;
   private syncWorker: Worker | null = null;
-  /** requested, done, fd, failed, previous chunk fd. See `sync-worker.ts`. */
-  /** Shared with `sync-worker.ts`; slots 5 and 6 count its syncs and their nanoseconds. */
-  private readonly syncState = new BigInt64Array(new SharedArrayBuffer(56));
+  /**
+   * Shared with `sync-worker.ts`: requested, done, fd, failed, previous chunk
+   * fd, its sync count and nanoseconds, directory changes, and whether it waits.
+   */
+  private readonly syncState = new BigInt64Array(new SharedArrayBuffer(72));
+  /** The directory changed since the last inline sync synced it. */
+  private dirChanged = true;
   /** Commit syncs run on this thread, and their seconds. */
   private inlineSyncs = 0;
   private inlineSyncSeconds = 0;
@@ -594,6 +598,20 @@ export class FastLog {
     this.oldest = Math.min(oldest, active.id);
     this.ahead = Math.max(ahead, active.id);
     Atomics.store(this.view, 0, 0n);
+    // The chunks open found or created: the first sync makes their names durable.
+    Atomics.store(this.syncState, 7, 1n);
+  }
+
+  /**
+   * Note a chunk created, renamed into place or removed. The next commit sync
+   * syncs the directory first (the worker, or `syncRows` inline), so a batch
+   * in a new or reused chunk is not confirmed before its name is on disk. A
+   * removal needs no sync of its own: a lost unlink only replays a chunk whose
+   * rows are all deleted later.
+   */
+  private markDirChanged() {
+    Atomics.add(this.syncState, 7, 1n);
+    this.dirChanged = true;
   }
 
   /** The header version chunk `id` was written with. A version 1 chunk is never reused. */
@@ -754,6 +772,10 @@ export class FastLog {
     // make this fdatasync flush a second region.
     writeAllAt(this.active.fd, buf, at);
     const started = performance.now();
+    if (this.dirChanged) {
+      syncDir(this.dir);
+      this.dirChanged = false;
+    }
     fdatasyncSync(this.active.fd);
     this.inlineSyncs++;
     this.inlineSyncSeconds += (performance.now() - started) / 1000;
@@ -814,12 +836,14 @@ export class FastLog {
       this.syncWorker.onmessage = (event: MessageEvent<bigint>) => {
         this.completeThrough(event.data, Atomics.load(this.syncState, 3) === 0n);
       };
-      this.syncWorker.postMessage({ state: this.syncState.buffer, delayMs: this.workerDelayMs });
+      this.syncWorker.postMessage({ state: this.syncState.buffer, delayMs: this.workerDelayMs, dir: this.dir });
     }
     // The fd before the sequence: the worker reads them in the other order.
     Atomics.store(this.syncState, 2, BigInt(this.active.fd));
     Atomics.store(this.syncState, 0, seq);
-    Atomics.notify(this.syncState, 0);
+    // A busy worker reads the new sequence when its sync ends; waking it is a
+    // syscall per batch for nothing. See `WAITING` in `sync-worker.ts`.
+    if (Atomics.load(this.syncState, 8) === 1n) Atomics.notify(this.syncState, 0);
     return seq;
   }
 
@@ -952,7 +976,7 @@ export class FastLog {
     }
     if (removed === 0) return;
     this.retiredChunks += removed;
-    syncDir(this.dir);
+    this.markDirChanged();
   }
 
   /**
@@ -1090,6 +1114,7 @@ export class FastLog {
     else closeSync(this.active.fd);
     this.unsalted.delete(nextId);
     this.active = { id: nextId, fd, len: HEADER, size: fileSize, salt: saltOf(nextId) };
+    this.markDirChanged();
     this.ahead = Math.max(this.ahead, nextId);
     this.preparingId = 0;
     this.nextReady = false;

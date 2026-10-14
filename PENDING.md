@@ -81,7 +81,14 @@ tool shell. Write scripts to a file and run the file.
 Measured in A/Bs, not yet in the published tables:
 
 - Bun: retired durable-log chunks are reused (`a8e3962`). 1 CPU: large-64k
-  403.8 → 468.3 MB/s, large-1m 387.5 → 618.6.
+  403.8 → 468.3 MB/s, large-1m 387.5 → 618.6. Then the directory fsync left
+  the event loop for the sync worker, which runs it before the next commit
+  that covers a new or reused chunk (a fifth of the 64 KiB profile was that
+  call), and the worker is woken only when it waits. 1 CPU: large-64k
+  566.4 → 590.4 MB/s, large-1m 620.3 → 680.7, work-queue 135,485 →
+  144,419 msg/s; latency-1k p99 1.68 → 1.82 ms and latency-10k 1.97 → 0.76
+  ms over five repeats, ranges overlapping. Raft groups also compact by
+  applied bytes, as PHP's.
 - Rust: the group commit also starts on 1 MiB of waiting bodies (`a0fc4ed`),
   then compacted WAL segments are reused instead of zero-filled (`5c8fd4d`).
   1 CPU: large-64k 254.6 → 553.4 → 848.8 MB/s, large-1m 524.9 → 700.8 →
@@ -111,7 +118,11 @@ Where: the cores supervisor (`bun/src/main.ts`, `bun/src/supervise.ts`) and
 
 ### B5. Large messages: CPU per byte
 
-Status: open. Chunk reuse is in the tree (see above); the copies remain.
+Status: open. Chunk reuse and the off-loop directory sync are in the tree
+(see above). What the 1 CPU 64 KiB profile shows now, main thread: socket
+`write` of deliveries 16%, `crc32` of log records 9%, the body copy in
+`concat` (`finishPublish`) 9.5%, three more copies of ~3% each (`absorbFresh`,
+`writeRecord`, `encodeDeliver`).
 
 Evidence: 1 CPU large-64k 526.3 and large-1m 547.5 MB/s against RabbitMQ 778.0
 and 1,345.8, with Bun at 85–93% CPU. Part of the gap is durability: RabbitMQ
@@ -162,13 +173,6 @@ an id once every member answered its `quorum_drop` (smallest change; a member
 that was away no longer learns drops whose originator died), track per absent
 member what it missed (exact, more state), or treat no-Raft clusters as legacy.
 
-### B14. Raft compaction by entry count only
-
-Status: open. Bun compacts a group every 10,000 entries (`compactAfter` in
-`bun/src/raft/node.ts`), whatever their size. PHP hit its memory alarm this way
-at 1 MiB (fixed there with a 64 MiB byte budget, `2b4c899`); Bun passes
-large-1m-quorum today, but a group of large bodies holds up to 10,000 of them.
-
 ---
 
 ## Rust
@@ -214,8 +218,9 @@ waiting rather than working.
 
 ### R9. Raft compaction by entry count only
 
-Status: open. As B14: `compact_after` in
-`queueforge-broker/src/cluster/raft_apply.rs` counts entries only.
+Status: open. `compact_after` in `queueforge-broker/src/cluster/raft_apply.rs`
+counts entries only, so a group of large bodies holds up to 10,000 of them. PHP
+(`2b4c899`) and Bun now also compact after 64 MiB of applied bodies.
 
 ---
 

@@ -9,8 +9,14 @@
  * A rotation hands over the previous chunk in `state[4]`. This thread syncs
  * that file first, closes it and clears the slot, so the main thread never
  * waits on the old chunk's fsync.
+ *
+ * The main thread raises `state[7]` when the log directory changed (a chunk
+ * created, renamed into place or removed). Before the next fsync this thread
+ * syncs the directory, so a batch in a new or reused chunk is not reported
+ * before its file name is durable. `state[8]` is 1 while this thread waits, so
+ * the main thread wakes it only then.
  */
-import { closeSync, fdatasyncSync } from "node:fs";
+import { closeSync, fdatasyncSync, fsyncSync, openSync } from "node:fs";
 
 declare const self: Worker;
 
@@ -23,11 +29,27 @@ const PREVIOUS = 4;
 /** Completed syncs, and their total nanoseconds, for the metrics page. */
 const SYNCS = 5;
 const SYNC_NS = 6;
+const DIR_CHANGES = 7;
+const WAITING = 8;
 
-self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: number }>) => {
+self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: number; dir: string }>) => {
   const state = new BigInt64Array(event.data.state);
+  const dir = event.data.dir;
   // Tests only: hold each sync this long, as a stalled disk would.
   const delayMs = event.data.delayMs;
+  let dirSynced = 0n;
+  /** Make the directory's entries durable once it changed since the last time. */
+  const syncDir = () => {
+    const changes = Atomics.load(state, DIR_CHANGES);
+    if (changes === dirSynced) return;
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    dirSynced = changes;
+  };
   /** Sync and close a handed-over chunk, then free the slot for the next one. */
   const syncPrevious = () => {
     const previous = Atomics.load(state, PREVIOUS);
@@ -38,7 +60,11 @@ self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: numbe
   };
   let done = Atomics.load(state, DONE);
   for (;;) {
+    // Raised before the wait: a request stored after it sees the flag and
+    // wakes this thread; one stored before it fails the wait's value check.
+    Atomics.store(state, WAITING, 1n);
     Atomics.wait(state, REQUESTED, done);
+    Atomics.store(state, WAITING, 0n);
     const want = Atomics.load(state, REQUESTED);
     // A negative request is close.
     if (want < 0n) return;
@@ -46,6 +72,7 @@ self.onmessage = (event: MessageEvent<{ state: SharedArrayBuffer; delayMs: numbe
     try {
       if (delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
       const started = performance.now();
+      syncDir();
       syncPrevious();
       fdatasyncSync(Number(Atomics.load(state, FD)));
       // A rotation after `want` was read moves the active chunk, so batches
