@@ -87,6 +87,11 @@ export class Broker {
   /** Member ids whose hello or hello-reply has been applied during `quorumHold`. */
   heardPeers = new Set<string>();
 
+  /** Drops every member accepted, waiting for the next forget round (`queueForget`). */
+  forgetQueue: Array<{ vhost: string; queue: string; id: string }> = [];
+  forgetTimer: ReturnType<typeof setTimeout> | null = null;
+  forgetRound: Promise<void> | null = null;
+
   /** The running pass of `retryConsumedDrops`, and whether another must follow it. */
   dropRetry: Promise<void> | null = null;
   dropRetryAgain = false;

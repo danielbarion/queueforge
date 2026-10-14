@@ -239,7 +239,8 @@ export function noteDeliver(this: Broker, autoAck: boolean, redelivered: boolean
 export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consumer, msg: LiveMsg) {
   if (this.cluster?.consensus?.node) msg.quorumDropped = await this.quorumDrop(q, msg.id);
   else {
-    const drop = await this.dropOnPeers(q.vhost, q.name, msg.id);
+    // An acked claim is forgotten after its ack (see `ack`), a no-ack one now.
+    const drop = await this.dropOnPeers(q.vhost, q.name, msg.id, [], chosen.noAck);
     msg.quorumDropped = drop.ok;
     msg.quorumDropComplete = drop.complete;
   }
@@ -402,14 +403,14 @@ export function ack(this: Broker, vhost: string, queue: string, id: string): Pro
   q.unacked.delete(id);
   if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
   this.prom.acknowledged++;
-  // Every member dropped it at the claim: there is nobody to hand it on to.
-  if (q.argsParsed.queueType === "quorum" && !msg.quorumDropComplete) {
+  if (q.argsParsed.queueType === "quorum") {
     this.noteConsumed(q.vhost, q.name, id);
     // The claim drop already ran before basic.deliver. Retry only when a peer
     // missed it. A second drop on the success path holds the event loop behind
     // another pair of cluster calls for every ack. A member that was away gets
     // it from `retryConsumedDrops` once it connects.
-    if (!msg.quorumDropped) void this.quorumDrop(q, id).catch(() => {});
+    if (msg.quorumDropComplete) this.queueForget(q.vhost, q.name, id);
+    else if (!msg.quorumDropped) void this.quorumDrop(q, id).catch(() => {});
   }
   this.pump(q);
 }

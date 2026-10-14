@@ -534,7 +534,7 @@ export class Cluster {
       }
       return;
     }
-    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats" || op === "delete" || op === "settle" || op === "requeue" || op === "set-args" || op === "join" || op === "forget") {
+    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "quorum_forget" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats" || op === "delete" || op === "settle" || op === "requeue" || op === "set-args" || op === "join" || op === "forget") {
       void this.handle(op, msg).then(
         (payload) => write({ op: "reply", id: msg.id, ok: true, payload, from: this.broker.cfg.nodeId }),
         (err) => write({ op: "reply", id: msg.id, ok: false, error: String(err), from: this.broker.cfg.nodeId }),
@@ -723,8 +723,12 @@ export class Cluster {
     }
     if (op === "quorum_drop") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
-      // Kept only while a member is away; see `dropOnPeers`.
-      this.broker.dropLocal(String(p.vhost), String(p.queue), String(p.id ?? p.message_id ?? p.qid ?? ""), p.keep === true);
+      this.broker.dropLocal(String(p.vhost), String(p.queue), String(p.id ?? p.message_id ?? p.qid ?? ""));
+      return true;
+    }
+    if (op === "quorum_forget") {
+      const p = (msg.payload ?? msg) as { items?: Array<{ vhost?: string; queue?: string; id?: string }> };
+      this.broker.applyForget(p.items);
       return true;
     }
     if (op === "quorum_append" || op === "enqueue") {

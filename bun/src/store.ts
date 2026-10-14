@@ -817,6 +817,20 @@ export class Store {
     });
   }
 
+  /**
+   * Make every delete queued so far durable before returning.
+   *
+   * A delete of a row staged in the same group waits for the next one (see
+   * `flushGroup`), so this can take two inline commits; a delete already
+   * handed to the sync worker is waited for. Used before a broker forgets a
+   * consumed quorum id (`runForgetRound`), which a crash must not undo.
+   */
+  syncDeletes() {
+    if (this.mode !== "every_n_ms" && this.mode !== "every_n_messages") return;
+    for (let i = 0; i < 2 && (this.pendingDeletes.length > 0 || this.settledPending.size > 0); i++) this.flushGroup(true);
+    this.fastLog?.settle();
+  }
+
   /** Test hook: stop the group-commit timer. */
   close() {
     this.closed = true;

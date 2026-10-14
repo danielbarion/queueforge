@@ -56,37 +56,63 @@ function fixture() {
   const broker = new Broker(cfg("a", members, dir), store);
   const connected = new Set(["b", "c"]);
   const fail = new Set<string>();
-  const calls: Array<{ peer: string; payload: Record<string, unknown> }> = [];
+  const forgetPeers = new Set(["b", "c"]);
+  const calls: Array<{ peer: string; op: string; payload: Record<string, unknown> }> = [];
+  let deleteSyncs = 0;
+  const syncDeletes = store.syncDeletes.bind(store);
+  store.syncDeletes = () => {
+    deleteSyncs++;
+    syncDeletes();
+  };
   broker.cluster = {
     peerIds: () => [...connected],
     replicate: async () => {},
+    consensus: { node: null, siblingsOnly: () => false, groupForNewQueue: () => null, forgetPeers },
     call: async (peer: string, op: string, payload: Record<string, unknown>) => {
-      expect(op).toBe("quorum_drop");
-      calls.push({ peer, payload });
+      calls.push({ peer, op, payload });
       if (fail.has(peer)) throw new Error("down");
       return true;
     },
   } as unknown as Cluster;
   const ids = () => broker.consumed.map((e) => e.id);
-  return { broker, connected, fail, calls, ids, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+  const forget = async () => {
+    if (broker.forgetTimer) clearTimeout(broker.forgetTimer);
+    broker.forgetTimer = null;
+    await broker.runForgetRound();
+    if (broker.forgetTimer) clearTimeout(broker.forgetTimer);
+    broker.forgetTimer = null;
+  };
+  return {
+    broker, connected, fail, calls, ids, forget, forgetPeers,
+    deleteSyncs: () => deleteSyncs,
+    close: () => {
+      if (broker.forgetTimer) clearTimeout(broker.forgetTimer);
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
-test("a drop every member accepted is forgotten; one with a member away is kept until it connects", async () => {
+test("an id is forgotten only after every member accepted its drop and a forget round made the deletes durable", async () => {
   const f = fixture();
   try {
     f.broker.noteConsumed("/", "q", "all");
     expect(await f.broker.dropOnPeers("/", "q", "all")).toEqual({ ok: true, complete: true });
+    // Every member answered, but their deletes may not be on disk yet.
+    expect(f.ids()).toEqual(["all"]);
+    await f.forget();
     expect(f.ids()).toEqual([]);
-    // Every member reached: receivers are not asked to keep it.
-    expect(f.calls.every((c) => c.payload.keep === false)).toBe(true);
+    expect(f.deleteSyncs()).toBe(1);
+    expect(f.calls.filter((c) => c.op === "quorum_forget").map((c) => c.peer).sort()).toEqual(["b", "c"]);
+    expect(f.calls.find((c) => c.op === "quorum_forget")!.payload).toEqual({ items: [{ vhost: "/", queue: "q", id: "all" }] });
 
     f.connected.delete("c");
     f.calls.length = 0;
     f.broker.noteConsumed("/", "q", "away");
     expect(await f.broker.dropOnPeers("/", "q", "away")).toEqual({ ok: true, complete: false });
+    await f.forget();
     expect(f.ids()).toEqual(["away"]);
-    // `b` keeps it too, so it can hand it on if `a` is gone when `c` is back.
-    expect(f.calls).toEqual([{ peer: "b", payload: { vhost: "/", queue: "q", id: "away", keep: true } }]);
+    expect(f.calls).toEqual([{ peer: "b", op: "quorum_drop", payload: { vhost: "/", queue: "q", id: "away" } }]);
 
     f.fail.add("b");
     f.connected.add("c");
@@ -94,43 +120,67 @@ test("a drop every member accepted is forgotten; one with a member away is kept 
     expect(await f.broker.dropOnPeers("/", "q", "refused")).toEqual({ ok: false, complete: false });
     expect(f.ids()).toEqual(["away", "refused"]);
 
-    // A peer connects: the retry pass forgets what every member now accepts.
+    // A peer connects: the retry pass completes both drops, the forget round removes them.
     f.fail.clear();
     f.broker.retryConsumedDrops();
     await f.broker.dropRetry;
+    expect(f.ids()).toEqual(["away", "refused"]);
+    await f.forget();
     expect(f.ids()).toEqual([]);
   } finally {
     f.close();
   }
 });
 
-test("a member answering quorum_drop keeps the id only when the sender saw a member away", () => {
+test("a forget round that a member misses keeps the ids for the next one", async () => {
   const f = fixture();
   try {
-    f.broker.dropLocal("/", "q", "plain", false);
+    f.broker.noteConsumed("/", "q", "x");
+    await f.broker.dropOnPeers("/", "q", "x");
+    // A member of another build does not answer quorum_forget: nothing is sent.
+    f.forgetPeers.delete("c");
+    await f.forget();
+    expect(f.ids()).toEqual(["x"]);
+    expect(f.calls.some((c) => c.op === "quorum_forget")).toBe(false);
+    f.forgetPeers.add("c");
+    f.fail.add("c");
+    await f.forget();
+    expect(f.ids()).toEqual(["x"]);
+    f.fail.clear();
+    await f.forget();
     expect(f.ids()).toEqual([]);
-    f.broker.dropLocal("/", "q", "kept");
-    expect(f.ids()).toEqual(["kept"]);
   } finally {
     f.close();
   }
 });
 
-test("a get handed out by the leader skips the leader when it counts every member", async () => {
+test("a member answering quorum_drop keeps the id until a forget arrives", () => {
+  const f = fixture();
+  try {
+    f.broker.dropLocal("/", "q", "theirs");
+    expect(f.ids()).toEqual(["theirs"]);
+    f.broker.applyForget([{ vhost: "/", queue: "q", id: "theirs" }, { vhost: "/", queue: "q" }]);
+    expect(f.ids()).toEqual([]);
+    expect(f.deleteSyncs()).toBe(1);
+  } finally {
+    f.close();
+  }
+});
+
+test("a get handed out by the leader counts the leader as answered", async () => {
   const f = fixture();
   try {
     f.connected.delete("b");
     f.broker.noteConsumed("/", "q", "got");
-    // `b` led and dropped its copy; `c` is the only other member to ask.
+    // `b` led and handed it out; `c` is the only other member asked here.
     expect(await f.broker.dropOnPeers("/", "q", "got", ["b"])).toEqual({ ok: true, complete: true });
     expect(f.calls.map((c) => c.peer)).toEqual(["c"]);
-    expect(f.ids()).toEqual([]);
   } finally {
     f.close();
   }
 });
 
-test("an acked quorum delivery leaves no id when every member dropped it at the claim", async () => {
+test("an acked quorum delivery is forgotten once every member dropped it at the claim", async () => {
   const f = fixture();
   try {
     expect(f.broker.isQuorumLeader()).toBe(true);
@@ -148,12 +198,15 @@ test("an acked quorum delivery leaves no id when every member dropped it at the 
     put("everyone");
     await delivered(1);
     await f.broker.ack("/", "q", "everyone");
+    expect(f.ids()).toEqual(["everyone"]);
+    await f.forget();
     expect(f.ids()).toEqual([]);
 
     f.connected.delete("c");
     put("c-away");
     await delivered(2);
     await f.broker.ack("/", "q", "c-away");
+    await f.forget();
     expect(f.ids()).toEqual(["c-away"]);
   } finally {
     f.close();

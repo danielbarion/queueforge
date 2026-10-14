@@ -55,6 +55,8 @@ export class Consensus {
   manyPeers = new Set<string>();
   /** Peers that read binary frames (`encodeFrame` in cluster.ts). */
   binPeers = new Set<string>();
+  /** Peers that answer `quorum_forget` (see `runForgetRound`). */
+  forgetPeers = new Set<string>();
   /** Quorum messages the quorum group holds, by `vhost\0queue\0id`, as their `enq` data. */
   live = new Map<string, Record<string, unknown>>();
 
@@ -79,8 +81,8 @@ export class Consensus {
 
   /** The `features` list for a hello payload. */
   features(): string[] {
-    if (!raftSupported()) return ["enqueue_many", "bin_frames"];
-    const out = ["raft", "enqueue_many", "bin_frames"];
+    if (!raftSupported()) return ["enqueue_many", "bin_frames", "quorum_forget"];
+    const out = ["raft", "enqueue_many", "bin_frames", "quorum_forget"];
     if (this.node || existsSync(join(this.dir(), "auto"))) out.push("raft_auto");
     if (this.node) out.push("raft_on");
     if (queueGroupsSupported()) out.push("raft_qgroups");
@@ -158,6 +160,8 @@ export class Consensus {
     else this.manyPeers.delete(peer);
     if (list.includes("bin_frames")) this.binPeers.add(peer);
     else this.binPeers.delete(peer);
+    if (list.includes("quorum_forget")) this.forgetPeers.add(peer);
+    else this.forgetPeers.delete(peer);
     if (!raftSupported()) return;
     if (!list.includes("raft")) return;
     this.advertised.add(peer);

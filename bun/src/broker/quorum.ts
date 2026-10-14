@@ -346,21 +346,19 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
  * Send `quorum_drop` to every connected peer (without Raft).
  *
  * @param except Members that already dropped it (a leader that handed out a get).
+ * @param forget Queue a complete drop for the next forget round. False when
+ * this broker still holds the message (an unacked claim): the ack does it.
  * @returns `ok` when every connected peer accepted; `complete` when, besides,
- * every configured member was among them. A complete drop also forgets the id:
- * no member is left to hand it on to.
+ * every configured member was among them.
  */
-export async function dropOnPeers(this: Broker, vhost: string, queue: string, id: string, except: readonly string[] = []): Promise<{ ok: boolean; complete: boolean }> {
+export async function dropOnPeers(this: Broker, vhost: string, queue: string, id: string, except: readonly string[] = [], forget = true): Promise<{ ok: boolean; complete: boolean }> {
   const self = this.cfg.nodeId;
   const peers = this.cluster?.peerIds().filter((peer) => peer !== self && !except.includes(peer)) ?? [];
   const reached = new Set(peers);
   const everyone = this.cfg.members.every((m) => m.id === self || except.includes(m.id) || reached.has(m.id));
-  // With a member away, the receivers keep the id too, so any of them can hand
-  // it on if this broker is gone by the time that member is back.
-  const keep = !everyone;
   const results = await Promise.all(
     peers.map((peer) =>
-      this.cluster!.call(peer, "quorum_drop", { vhost, queue, id, keep }).then(
+      this.cluster!.call(peer, "quorum_drop", { vhost, queue, id }).then(
         () => true,
         () => false,
       ),
@@ -368,8 +366,89 @@ export async function dropOnPeers(this: Broker, vhost: string, queue: string, id
   );
   const ok = results.every(Boolean);
   const complete = ok && everyone;
-  if (complete) this.consumedIds.delete(vhost, queue, id);
+  if (complete && forget) this.queueForget(vhost, queue, id);
   return { ok, complete };
+}
+
+/** Ids per `quorum_forget` call. */
+const FORGET_BATCH = 8192;
+/** How often completed drops are forgotten across the cluster. */
+const FORGET_EVERY_MS = 1000;
+
+/**
+ * Note a drop every member accepted, for the next forget round.
+ *
+ * A member's answer does not mean its delete is on disk: it is group
+ * committed, and a member that crashes first replays the copy. Until every
+ * member's delete is durable, the ids in the other members' lists are what
+ * drop that copy at its hello, so nothing forgets the id before then.
+ */
+export function queueForget(this: Broker, vhost: string, queue: string, id: string) {
+  this.forgetQueue.push({ vhost, queue, id });
+  this.armForgetRound();
+}
+
+/** Run a forget round in {@link FORGET_EVERY_MS}, unless one is armed or running. */
+export function armForgetRound(this: Broker) {
+  if (this.forgetTimer || this.forgetRound || this.forgetQueue.length === 0) return;
+  this.forgetTimer = setTimeout(() => {
+    this.forgetTimer = null;
+    void this.runForgetRound();
+  }, FORGET_EVERY_MS);
+  (this.forgetTimer as { unref?: () => void }).unref?.();
+}
+
+/**
+ * One forget round: make this broker's deletes durable, then ask every member
+ * to do the same and forget the ids. The ids leave this list only when every
+ * configured member answered; otherwise they wait for the next round.
+ */
+export async function runForgetRound(this: Broker): Promise<void> {
+  if (this.forgetRound || this.forgetQueue.length === 0) return;
+  const batch = this.forgetQueue.splice(0, FORGET_BATCH);
+  this.forgetRound = (async () => {
+    const self = this.cfg.nodeId;
+    const others = this.cfg.members.filter((m) => m.id !== self).map((m) => m.id);
+    const connected = new Set(this.cluster?.peerIds() ?? []);
+    // A member of another build would not know the op: its ids stay listed.
+    const forgetPeers = this.cluster?.consensus?.forgetPeers;
+    if (!others.every((id) => connected.has(id) && forgetPeers?.has(id))) return false;
+    this.store.syncDeletes();
+    const results = await Promise.all(
+      others.map((peer) =>
+        this.cluster!.call(peer, "quorum_forget", { items: batch }).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    );
+    return results.every(Boolean);
+  })().then(
+    (ok) => {
+      if (ok) for (const it of batch) this.consumedIds.delete(it.vhost, it.queue, it.id);
+      else this.forgetQueue.unshift(...batch);
+    },
+    () => {
+      this.forgetQueue.unshift(...batch);
+    },
+  );
+  try {
+    await this.forgetRound;
+  } finally {
+    this.forgetRound = null;
+  }
+  this.armForgetRound();
+}
+
+/**
+ * Answer a peer's `quorum_forget`: make this broker's queued deletes durable,
+ * then drop those ids from its list.
+ */
+export function applyForget(this: Broker, items: Array<{ vhost?: string; queue?: string; id?: string }> | undefined) {
+  this.store.syncDeletes();
+  for (const it of items ?? []) {
+    if (it.vhost && it.queue && it.id) this.consumedIds.delete(String(it.vhost), String(it.queue), String(it.id));
+  }
 }
 
 /**
@@ -404,9 +483,7 @@ export function retryConsumedDrops(this: Broker) {
  * @param vhost Vhost of the queue.
  * @param queue Queue name. A missing queue still records the id as consumed.
  * @param id Message id removed from ready, replicas, and unacked.
- * @param note Keep the id to hand on to members that missed it. A member
- * answering a peer's `quorum_drop` does so only when the sender saw a member
- * away (`keep`); otherwise every member already has the drop.
+ * @param note Keep the id to hand on to members that missed it.
  * @returns Nothing. A stored row for that id is deleted.
  */
 export function dropLocal(this: Broker, vhost: string, queue: string, id: string, note = true) {
@@ -432,7 +509,8 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
  * @param queue Queue name.
  * @param id Message id. An empty id is ignored. A duplicate triple is ignored.
  * @returns Nothing. The list is what a later snapshot asks peers to drop; an
- * id leaves it once every member accepted its drop (`dropOnPeers`).
+ * id leaves it once every member accepted its drop and made its delete durable
+ * (`queueForget`).
  */
 export function noteConsumed(this: Broker, vhost: string, queue: string, id: string) {
   if (!id) return;
@@ -480,6 +558,10 @@ Broker.prototype.clearQuorumStrikes = clearQuorumStrikes;
 Broker.prototype.quorumDrop = quorumDrop;
 Broker.prototype.dropOnPeers = dropOnPeers;
 Broker.prototype.retryConsumedDrops = retryConsumedDrops;
+Broker.prototype.queueForget = queueForget;
+Broker.prototype.armForgetRound = armForgetRound;
+Broker.prototype.runForgetRound = runForgetRound;
+Broker.prototype.applyForget = applyForget;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
 Broker.prototype.applyConsumed = applyConsumed;
@@ -500,6 +582,10 @@ declare module "./class.ts" {
     quorumDrop: typeof quorumDrop;
     dropOnPeers: typeof dropOnPeers;
     retryConsumedDrops: typeof retryConsumedDrops;
+    queueForget: typeof queueForget;
+    armForgetRound: typeof armForgetRound;
+    runForgetRound: typeof runForgetRound;
+    applyForget: typeof applyForget;
     dropLocal: typeof dropLocal;
     noteConsumed: typeof noteConsumed;
     applyConsumed: typeof applyConsumed;

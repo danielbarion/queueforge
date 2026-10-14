@@ -866,6 +866,11 @@ export class FastLog {
     }
   }
 
+  /** Block until every batch handed to the sync worker is synced, and report it. */
+  settle() {
+    this.drainWorker();
+  }
+
   /** Block until the sync worker covered every request, then report it. */
   private drainWorker(deadlineMs = Infinity) {
     if (!this.syncWorker) return;
