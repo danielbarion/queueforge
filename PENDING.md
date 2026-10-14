@@ -20,11 +20,11 @@ cells in `bench/results/2026-10-11/`, unless an item names an older run.
   the before/after numbers, and update `BENCHMARK.md` if the published numbers change.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-13, Cortex Code): Bun suite 225/225, Rust 437/437, PHP
-38/38 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
+Current tree (2026-10-14, Cortex Code): Bun suite 265/265, Rust 440/440, PHP
+39/39 files; conformance Bun 135/135, Rust 135/135, PHP 135/135, RabbitMQ
 134/135 (no delayed-message plugin). Published numbers: `BENCHMARK.md` section
 "Session (2026-10-12)"; raw cells in `bench/results/2026-10-12/`, Bun's from the
-2026-10-13 re-run in `bench/results/2026-10-13d/` (two repeats per cell, median shown).
+2026-10-14b re-run in `bench/results/2026-10-14b/`.
 
 ### Measurement rules
 
@@ -223,8 +223,9 @@ Where: the cores supervisor (`bun/src/main.ts`, `bun/src/supervise.ts`) and
 
 ### B5. Large messages
 
-Status: open, improved. The inbound single-chunk body no longer copies
-(2026-10-10); no further measured change.
+Status: improved again 2026-10-14 (Cortex Code), see "B5 chunk reuse" in Done;
+not in a published run yet. The inbound single-chunk body no longer copies
+(2026-10-10).
 
 Evidence (2026-10-09 run): 64 KiB messages 312–376 MB/s and 1 MiB messages 363–407 MB/s, against
 RabbitMQ 634 and 1,240 MB/s. Part of the gap is that RabbitMQ confirms before
@@ -264,7 +265,13 @@ file-backed), and every message, callback and promise is a GC object.
   snapshot (snapshots carry no bodies), so the list, which only a hello reads,
   served clusters without Raft. Those (`QUEUEFORGE_RAFT=0`, or before Raft is
   switched on) still keep it, and it still grows there
-  (`bun/src/broker/consumed-set.ts`).
+  (`bun/src/broker/consumed-set.ts`). 2026-10-14, not changed, needs a choice:
+  the list exists for a member that missed a `quorum_drop`, and any member's
+  hello hands it on, so a member that was away also learns drops whose
+  originator died since. Bounding it means either forgetting an id once every
+  member answered its `quorum_drop` (smallest change; loses that hand-on when
+  the originator is gone), or tracking per absent member what it missed (exact,
+  more state), or treating no-Raft clusters as legacy and leaving it.
 - Measured, not adopted: `BUN_JSC_smallHeapGrowthFactor` (default 2) trades
   throughput for memory at 1 CPU, where cells run at 95% CPU. 3: quorum,
   work-queue, telemetry, heavy +5–11% rate, +30–50% memory. 4: +7–9% rate,
@@ -531,7 +538,8 @@ included, passes 38/38 with metadata answered after every worker applied it
 quorum publishes, kill -9 of the queue's leader (read from the persisted
 votes), then the two left confirm 50 more and deliver all 100 first-round
 bodies once; 6/6 runs, about 11 s each. Throughput during a failover is not
-measured.
+measured; no harness in `bench/` measures any engine through a failover yet. 2026-10-14: PHP also passes the mixed Bun/Rust/PHP Raft shapes
+(see "PHP in a mixed Raft cluster" in Done).
 
 Evidence: quorum 589 msg/s, stream 791 msg/s at 1 CPU (RabbitMQ 26.7k for both).
 
@@ -582,6 +590,63 @@ next full run.
 
 Move finished items here: id, date, what changed, before → after. A/B numbers are
 Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/`.
+
+- **B5 chunk reuse** (2026-10-14). A retired durable-log chunk is renamed ahead
+  of the active one (up to two spares) instead of unlinked, so steady traffic
+  stops zero-filling and fsyncing a new 4 MiB file every few milliseconds.
+  Every record's crc is XORed with a salt of its chunk file's id (`saltOf`,
+  one to one on ids; header version 2), so a reused file's old records do not
+  read back under the new id; readers also take an unsalted crc, which only
+  version 1 chunks have, and those are never reused. A/B at 1 CPU, three
+  interleaved repeats, the same tree with and without the change
+  (`/tmp/qf-ab/coco/ab-b5/ab.md`): large-64k 403.8 (363–468) → 468.3
+  (459–609) MB/s, large-1m 387.5 (385–475) → 618.6 (567–652) MB/s, the
+  reuse image ahead in all six pairs; anonymous memory unchanged (~100 MiB).
+  `test/fast-log.recycle.test.ts`: reuse keeps chunk ids contiguous and a
+  restart replays only live rows; inserts copied under a later id (what a
+  reuse leaves) stay dead after their deletes (fails without the salt); a
+  version 1 log is read and then retired by unlink. Measured on a busy host;
+  the next full run is the published number.
+- **PHP in a mixed Raft cluster** (2026-10-14, not an item). `bun/test/mixed-raft.test.ts`
+  runs each of its three shapes with PHP as first member (declarer, stream
+  writer) and as a follower beside Bun and Rust: 15/15 twice, PHP shapes 0/6
+  before. What it took:
+  - PHP: `/readyz` answers `ready`; quorum and stream rows carry `leader`,
+    `members`, `raft_group` and `node`; a remote `get` registers a
+    `delivery_id` (Rust settles by it) and hands Bun the quorum id, and a
+    PHP client of a remote `get` now settles it at the home (it never did);
+    a follower's quorum `get` goes to the leader (it read its own replicas,
+    which are empty until it leads); a deleted queue's Raft group stops and
+    its files go; a replicated stream has no home (PHP forwarded appends to
+    a hashed home, so Rust built a proxy and dropped every append); limits
+    replicate in the flat row Bun and Rust apply; `GET /api/parameters...`
+    and `/api/global-parameters` exist and the export has
+    `global_parameters`; `/api/nodes` changes commit through the meta log
+    with Raft on (503 without a majority).
+  - Bun: a remote `get` returns a `delivery_id`, so a Rust follower's ack
+    of a Bun-led quorum message lands (it acked delivery 0 and the message
+    came back after a failover); an `sappend` with untyped headers (PHP's)
+    takes its header table from `propRaw`.
+  - All three Raft cores: an expedited campaign resends its pre-vote every
+    100 ms, ten times, while unanswered. The other members open a new
+    queue's group only when its declare reaches them and drop earlier votes,
+    so the declarer then waited a random 1–2 s like everyone else: with a
+    PHP member the declarer lost the group in about 1 of 3 declares
+    (0 of 6 after). Unit test in each core.
+  - Open: PHP list endpoints (`/api/queues/{vhost}`, exchanges, bindings,
+    vhosts) answer the paged `{items, total_count}` shape without `page`,
+    where RabbitMQ answers an array; the console and `mgmt.test.php` read
+    that shape, so it was left.
+- **Rust stream recovery** (2026-10-14, R3 follow-up). Replay dropped bodies only
+  after the whole WAL was in memory (`recover_messages` collected every body,
+  then the stream paged). Streams now recover through
+  `QueueWal::recover_messages_within(STREAM_RESIDENT_BYTES)`: past 64 MiB the
+  oldest bodies are dropped as each record is read, with their lengths kept
+  for retention; the stream reads them back by position. Startup and declare
+  (`DurableLogFactory::open_paged`) both use it. Tests:
+  `recovery_within_a_budget_leaves_the_oldest_bodies_on_disk`,
+  `stream_past_the_resident_limit_recovers_and_reads_every_entry` (72 × 1 MiB
+  over 8 MiB segments, all read back). Not measured in a benchmark cell.
 
 - **B2, B13 and Bun quorum** (2026-10-14; numbers in BENCHMARK.md, "Bun
   re-measured, fifth run"). Cluster forwards (4 CPU broadcast 176k → 490k
@@ -657,9 +722,9 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
   nacks the batch and reuses its offsets. Synced bodies past 64 MiB are dropped
   from memory and read back from the WAL (`DurableQueueLog::read_at`). Stream
   cell 11.5k → 110k msg/s received, 247 MiB anonymous (without paging it was
-  OOM-killed at 1 GiB). Rust suite 436/436 with RabbitMQ. Not done: after a
-  restart, recovery still loads the whole stream into memory, since recovered
-  entries have no log position yet.
+  OOM-killed at 1 GiB). Rust suite 436/436 with RabbitMQ. After a restart,
+  recovery loaded the whole stream into memory; done 2026-10-14, see "Rust
+  stream recovery".
 - **PHP parity** (2026-10-12, not an item). Brings PHP to Bun's behaviour in
   five places. Each has a focused test; the full PHP suite and the benchmark
   cells have not been rerun yet.

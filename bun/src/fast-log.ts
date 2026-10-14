@@ -11,10 +11,18 @@
  * A rotated chunk is removed once every insert in it has a synced delete,
  * oldest first. A delete record is always in the same or a later chunk than
  * its insert, so dropping a prefix never brings an acked body back.
+ *
+ * A removed chunk is reused as a spare next chunk instead of unlinked, so
+ * steady traffic does not zero-fill a new 4 MiB file every few milliseconds.
+ * The old records stay in it, so every record's crc is salted with the id
+ * of the chunk file it was written to (header version 2): renamed to a new
+ * id, none of them reads back. Version 1 chunks carry unsalted crcs and are
+ * never reused.
  */
 import {
   closeSync,
   constants,
+  existsSync,
   fdatasyncSync,
   fstatSync,
   fsyncSync,
@@ -22,6 +30,7 @@ import {
   openSync,
   readSync,
   readdirSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -42,6 +51,8 @@ const START_CHUNKS = 8;
  * pin every later chunk.
  */
 const COMPACT_AFTER = 16;
+/** Retired chunks kept ahead of the active one for reuse. */
+const SPARES = 2;
 const MAX_NAME = 64 * 1024;
 const MAX_META = 1024 * 1024;
 const MAX_BODY = 64 * 1024 * 1024;
@@ -61,7 +72,19 @@ export type LogOp =
 /** A type 3 record as read: the inserts of ids `first` .. `first + queues.length - 1`. */
 type GroupOp = { kind: "group"; first: number; vhost: string; meta: string; body: Uint8Array; queues: string[] };
 
-type ActiveChunk = { id: number; fd: number; len: number; size: number };
+type ActiveChunk = { id: number; fd: number; len: number; size: number; salt: number };
+
+/** Header version of chunks with salted record crcs. */
+const SALTED = 2;
+
+/**
+ * The crc salt of records in chunk file `id`. A multiply by an odd constant
+ * is one to one on 32 bits, so no two chunk ids share a salt, and only id 0
+ * (never used) has none.
+ */
+function saltOf(id: number): number {
+  return Math.imul(id, 0x9e3779b1) >>> 0;
+}
 
 /** IEEE CRC-32, the same polynomial the table version used. Native, so replay and the group commit do not loop per byte in JS. */
 function crc32(buf: Uint8Array): number {
@@ -72,10 +95,10 @@ function chunkPath(dir: string, id: number): string {
   return `${dir}/${String(id).padStart(8, "0")}`;
 }
 
-function headerBuf(logical: number): Buffer {
+function headerBuf(logical: number, version = SALTED): Buffer {
   const buf = Buffer.alloc(HEADER);
   buf.write("QFHD", 0, 4, "ascii");
-  buf.writeUInt32LE(1, 4);
+  buf.writeUInt32LE(version, 4);
   buf.writeBigUInt64LE(BigInt(logical), 8);
   return buf;
 }
@@ -89,14 +112,14 @@ function writeAllAt(fd: number, buf: Uint8Array, at: number) {
   }
 }
 
-function readHeader(fd: number): number | null {
+function readHeader(fd: number): { logical: number; version: number } | null {
   const buf = Buffer.alloc(HEADER);
   const n = readSync(fd, buf, 0, HEADER, 0);
   if (n < HEADER) return null;
   if (buf.toString("ascii", 0, 4) !== "QFHD") return null;
   const logical = Number(buf.readBigUInt64LE(8));
   if (!Number.isFinite(logical) || logical < HEADER) return null;
-  return logical;
+  return { logical, version: buf.readUInt32LE(4) };
 }
 
 /** Create a fully written chunk and fsync it before any confirm uses it. */
@@ -115,7 +138,7 @@ export function createChunkFile(path: string, size: number): number {
   return fd;
 }
 
-function inspect(path: string): { logical: number; size: number } | null {
+function inspect(path: string): { logical: number; size: number; version: number } | null {
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -124,9 +147,9 @@ function inspect(path: string): { logical: number; size: number } | null {
   }
   try {
     const size = fstatSync(fd).size;
-    const logical = readHeader(fd);
-    if (logical == null) return null;
-    return { logical: Math.min(logical, size), size };
+    const header = readHeader(fd);
+    if (header == null) return null;
+    return { logical: Math.min(header.logical, size), size, version: header.version };
   } finally {
     closeSync(fd);
   }
@@ -149,6 +172,8 @@ function writeRecord(
   meta: string,
   metaLen: number,
   body: Uint8Array,
+  salt: number,
+  crcs?: number[],
 ): number {
   const start = o;
   buf.writeUInt32LE(MAGIC, o);
@@ -170,7 +195,8 @@ function writeRecord(
   o += 4;
   buf.set(body, o);
   o += body.length;
-  buf.writeUInt32LE(crc32(buf.subarray(start, o)), o);
+  buf.writeUInt32LE((crc32(buf.subarray(start, o)) ^ salt) >>> 0, o);
+  crcs?.push(o);
   return o + 4;
 }
 
@@ -199,7 +225,7 @@ function groupLength(inserts: LogInsert[], i: number): number {
  * then one queue name per member. `lens` holds each row's vhost, queue and
  * meta byte lengths, three per row.
  */
-function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: number, lens: number[]): number {
+function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: number, lens: number[], salt: number, crcs?: number[]): number {
   const start = o;
   const head = rows[from]!;
   const vhostLen = lens[from * 3]!;
@@ -227,7 +253,8 @@ function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: 
     o += 2;
     if (queueLen) o += buf.write(rows[from + k]!.queue, o, queueLen, "utf8");
   }
-  buf.writeUInt32LE(crc32(buf.subarray(start, o)), o);
+  buf.writeUInt32LE((crc32(buf.subarray(start, o)) ^ salt) >>> 0, o);
+  crcs?.push(o);
   return o + 4;
 }
 
@@ -241,8 +268,10 @@ const EMPTY = new Uint8Array(0);
  *
  * @param starts Filled with each insert's record offset in the buffer.
  * @param ends Filled with each insert's record end. Members of one group share both.
+ * @param salt The crc salt of the chunk the buffer is written to.
+ * @param crcs Filled with each record's crc offset, for {@link resalt}.
  */
-function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], ends?: number[]): Buffer {
+function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], ends?: number[], salt = 0, crcs?: number[]): Buffer {
   let total = deletes.length * RECORD_FIXED;
   const lens = new Array<number>(inserts.length * 3);
   const runs: number[] = [];
@@ -270,15 +299,15 @@ function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], 
   }
   const buf = Buffer.allocUnsafe(total);
   let o = 0;
-  for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY);
+  for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY, salt, crcs);
   let i = 0;
   for (const n of runs) {
     const at = o;
     if (n === 1) {
       const row = inserts[i]!;
-      o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body);
+      o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body, salt, crcs);
     } else {
-      o = writeGroup(buf, o, inserts, i, n, lens);
+      o = writeGroup(buf, o, inserts, i, n, lens, salt, crcs);
     }
     for (let k = 0; k < n; k++) {
       starts?.push(at);
@@ -289,8 +318,19 @@ function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], 
   return buf;
 }
 
-/** `copy` false keeps the body a view of `buf`, for a buffer that holds this one record. */
-function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { next: number; op: LogOp | GroupOp } | null {
+/** Move the records of an encoded batch from one chunk's salt to another's. */
+function resalt(buf: Buffer, crcs: number[], from: number, to: number) {
+  const delta = (from ^ to) >>> 0;
+  if (delta === 0) return;
+  for (const at of crcs) buf.writeUInt32LE((buf.readUInt32LE(at) ^ delta) >>> 0, at);
+}
+
+/**
+ * `copy` false keeps the body a view of `buf`, for a buffer that holds this one record.
+ * A record reads with the chunk's `salt` or with none: a version 1 chunk's
+ * records have none, and a reused file's old records carry another chunk's.
+ */
+function parseRecord(buf: Buffer, pos: number, limit: number, salt: number, copy = true): { next: number; op: LogOp | GroupOp } | null {
   if (pos + 4 > limit) return null;
   if (buf[pos] === 0 && buf[pos + 1] === 0 && buf[pos + 2] === 0 && buf[pos + 3] === 0) return null;
   if (buf.toString("ascii", pos, pos + 4) !== "QFML") return null;
@@ -306,7 +346,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { ne
   if (vhostLen > MAX_NAME || !need(vhostLen)) return null;
   const vhost = buf.toString("utf8", o, o + vhostLen);
   o += vhostLen;
-  if (type === 3) return parseGroup(buf, pos, o, limit, id, vhost, copy);
+  if (type === 3) return parseGroup(buf, pos, o, limit, id, vhost, salt, copy);
   if (!need(2)) return null;
   const queueLen = buf.readUInt16LE(o);
   o += 2;
@@ -327,7 +367,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { ne
   o += bodyLen;
   const crc = buf.readUInt32LE(o);
   o += 4;
-  if (crc32(buf.subarray(pos, o - 4)) !== crc) return null;
+  if (!crcMatches(buf.subarray(pos, o - 4), crc, salt)) return null;
   if (type !== 1 && type !== 2) return null;
   const op: LogOp =
     type === 2 ? { kind: "delete", id } : { kind: "insert", id, vhost, queue, meta, body };
@@ -335,7 +375,7 @@ function parseRecord(buf: Buffer, pos: number, limit: number, copy = true): { ne
 }
 
 /** The rest of a type 3 record from `o`, just past its vhost. See {@link writeGroup}. */
-function parseGroup(buf: Buffer, pos: number, o: number, limit: number, first: number, vhost: string, copy: boolean): { next: number; op: GroupOp } | null {
+function parseGroup(buf: Buffer, pos: number, o: number, limit: number, first: number, vhost: string, salt: number, copy: boolean): { next: number; op: GroupOp } | null {
   const need = (n: number) => o + n <= limit;
   if (!need(4)) return null;
   const metaLen = buf.readUInt32LE(o);
@@ -364,12 +404,17 @@ function parseGroup(buf: Buffer, pos: number, o: number, limit: number, first: n
   if (!need(4)) return null;
   const crc = buf.readUInt32LE(o);
   o += 4;
-  if (crc32(buf.subarray(pos, o - 4)) !== crc) return null;
+  if (!crcMatches(buf.subarray(pos, o - 4), crc, salt)) return null;
   return { next: o, op: { kind: "group", first, vhost, meta, body, queues } };
 }
 
+function crcMatches(record: Uint8Array, crc: number, salt: number): boolean {
+  const sum = crc32(record);
+  return sum === crc || ((sum ^ salt) >>> 0) === crc;
+}
+
 /** Each record from the header on, with a type 3 record expanded into its inserts. */
-function scanFile(fd: number, logical: number, apply: (op: LogOp, at: number, end: number) => void): number {
+function scanFile(fd: number, logical: number, salt: number, apply: (op: LogOp, at: number, end: number) => void): number {
   if (logical <= HEADER) return HEADER;
   const buf = Buffer.alloc(logical);
   let got = 0;
@@ -381,7 +426,7 @@ function scanFile(fd: number, logical: number, apply: (op: LogOp, at: number, en
   const limit = Math.min(logical, got);
   let pos = HEADER;
   while (pos + 4 <= limit) {
-    const rec = parseRecord(buf, pos, limit);
+    const rec = parseRecord(buf, pos, limit, salt);
     if (!rec) return pos;
     const op = rec.op;
     if (op.kind === "group") {
@@ -505,6 +550,10 @@ export class FastLog {
   private relocating = { chunk: 0, at: 0 };
   /** Chunks removed since open. */
   retiredChunks = 0;
+  /** Of those, chunks renamed ahead of the active one for reuse. */
+  recycledChunks = 0;
+  /** Highest chunk id on disk, spares included. */
+  private ahead = 0;
   /** Rotations that left the old chunk's fsync to the sync worker. */
   handOffs = 0;
   /**
@@ -536,10 +585,16 @@ export class FastLog {
   /** Called once per completed sync with the highest batch it covered. */
   onSynced: ((seq: bigint, ok: boolean) => void) | null = null;
 
-  private constructor(private readonly dir: string, active: ActiveChunk, oldest: number) {
+  private constructor(private readonly dir: string, active: ActiveChunk, oldest: number, private readonly unsalted = new Set<number>(), ahead = active.id) {
     this.active = active;
     this.oldest = Math.min(oldest, active.id);
+    this.ahead = Math.max(ahead, active.id);
     Atomics.store(this.view, 0, 0n);
+  }
+
+  /** The header version chunk `id` was written with. A version 1 chunk is never reused. */
+  private versionOf(id: number): number {
+    return this.unsalted.has(id) ? 1 : SALTED;
   }
 
   /** Open the log beside `sqlitePath`, or null when durability stays in sqlite. */
@@ -566,16 +621,18 @@ export class FastLog {
     }
     // A fresh log writes its chunks on first use (see `prepare`). A process
     // that never stores a message keeps 32 MiB of zeros out of its page cache.
-    if (ids.length === 0) return new FastLog(dir, { id: 1, fd: -1, len: HEADER, size: CHUNK }, 1);
+    if (ids.length === 0) return new FastLog(dir, { id: 1, fd: -1, len: HEADER, size: CHUNK, salt: saltOf(1) }, 1);
     // The header length is a hint. Confirms fsync the record bytes and leave
     // the header page clean, so the real end is the last valid record.
+    const unsalted = new Set<number>();
     let chosen: { id: number; end: number; size: number } | null = null;
     for (const id of ids) {
       const path = chunkPath(dir, id);
       const fd = openSync(path, constants.O_RDWR);
       try {
         const size = fstatSync(fd).size;
-        const end = scanFile(fd, size, () => {});
+        if ((readHeader(fd)?.version ?? SALTED) < SALTED) unsalted.add(id);
+        const end = scanFile(fd, size, saltOf(id), () => {});
         if (!chosen || end > HEADER) chosen = { id, end, size };
       } finally {
         closeSync(fd);
@@ -583,7 +640,7 @@ export class FastLog {
     }
     const pick = chosen ?? { id: ids[0]!, end: HEADER, size: CHUNK };
     const fd = openSync(chunkPath(dir, pick.id), constants.O_RDWR);
-    return new FastLog(dir, { id: pick.id, fd, len: pick.end, size: pick.size }, ids[0]!);
+    return new FastLog(dir, { id: pick.id, fd, len: pick.end, size: pick.size, salt: saltOf(pick.id) }, ids[0]!, unsalted, ids[ids.length - 1]!);
   }
 
   /** Apply every complete record. A torn tail rewinds the active chunk. */
@@ -594,13 +651,13 @@ export class FastLog {
       const fd = owned ? openSync(path, "r") : this.active.fd;
       try {
         const size = fstatSync(fd).size;
-        const good = scanFile(fd, size, (op, at, end) => {
+        const good = scanFile(fd, size, saltOf(id), (op, at, end) => {
           if (op.kind === "insert") this.track(op.id, id, at, end - at);
           else this.untrack(op.id);
           apply(op);
         });
         if (id === this.active.id && good < this.active.len) {
-          writeAllAt(fd, headerBuf(good), 0);
+          writeAllAt(fd, headerBuf(good, this.versionOf(id)), 0);
           fdatasyncSync(fd);
           this.active.len = good;
         }
@@ -624,6 +681,7 @@ export class FastLog {
       else closeSync(created);
     }
     this.active.fd = fd;
+    this.ahead = Math.max(this.ahead, START_CHUNKS);
     this.nextReady = true;
   }
 
@@ -655,7 +713,7 @@ export class FastLog {
       if (n <= 0) break;
       got += n;
     }
-    const rec = got === len ? parseRecord(buf, 0, len, false) : null;
+    const rec = got === len ? parseRecord(buf, 0, len, saltOf(chunk), false) : null;
     if (!rec) return null;
     const op = rec.op;
     // `body` is a view of this one-record buffer, so it pins nothing else.
@@ -682,8 +740,11 @@ export class FastLog {
     this.prepare();
     const starts: number[] = [];
     const ends: number[] = [];
-    const buf = encodeRows(deletes, inserts, starts, ends);
+    const crcs: number[] = [];
+    const salt = this.active.salt;
+    const buf = encodeRows(deletes, inserts, starts, ends, salt, crcs);
     this.makeRoom(buf.length);
+    resalt(buf, crcs, salt, this.active.salt);
     const at = this.active.len;
     // One sequential overwrite. Rewriting the header would dirty byte 0 and
     // make this fdatasync flush a second region.
@@ -720,8 +781,12 @@ export class FastLog {
     this.prepare();
     const starts: number[] = [];
     const ends: number[] = [];
-    const buf = encodeRows(deletes, inserts, starts, ends);
+    const crcs: number[] = [];
+    const salt = this.active.salt;
+    const buf = encodeRows(deletes, inserts, starts, ends, salt, crcs);
     this.makeRoom(buf.length, true);
+    // A rotation moved the batch to a chunk with another salt.
+    resalt(buf, crcs, salt, this.active.salt);
     const at = this.active.len;
     writeAllAt(this.active.fd, buf, at);
     this.active.len += buf.length;
@@ -839,19 +904,14 @@ export class FastLog {
    * holds an unsynced batch stays: after a hand-off the worker can cover an
    * earlier delete batch first, and unlinking then lost the insert written
    * after it, whose confirm was still to come.
+   *
+   * A removed version 2 chunk is renamed ahead of the active one while fewer
+   * than {@link SPARES} wait there, instead of unlinked.
    */
   retire() {
     let removed = 0;
     const firstUnsynced = this.unsynced[0]?.chunk ?? Infinity;
     while (this.oldest < this.active.id && this.oldest < firstUnsynced && (this.liveCount.get(this.oldest) ?? 0) === 0) {
-      try {
-        unlinkSync(chunkPath(this.dir, this.oldest));
-      } catch (err) {
-        // A chunk left behind must keep every later delete, so stop here.
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
-      }
-      this.liveCount.delete(this.oldest);
-      this.chunkInserts.delete(this.oldest);
       const fd = this.readFds.get(this.oldest);
       if (fd !== undefined) {
         try {
@@ -861,12 +921,61 @@ export class FastLog {
         }
         this.readFds.delete(this.oldest);
       }
+      if (!this.recycle(this.oldest)) {
+        try {
+          unlinkSync(chunkPath(this.dir, this.oldest));
+        } catch (err) {
+          // A chunk left behind must keep every later delete, so stop here.
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
+        }
+      }
+      this.liveCount.delete(this.oldest);
+      this.chunkInserts.delete(this.oldest);
+      this.unsalted.delete(this.oldest);
       this.oldest++;
       removed++;
     }
     if (removed === 0) return;
     this.retiredChunks += removed;
     syncDir(this.dir);
+  }
+
+  /**
+   * Rename removable chunk `id` to the next free id ahead of the active one.
+   *
+   * Its records stay in the file, salted with `id`, so none of them reads
+   * back under the new name. A crash before the rename leaves it where it
+   * was: rows whose deletes are all in later chunks, as an unlink that did
+   * not reach the disk does. The header goes back to an empty chunk so
+   * `rotate` takes the file as ready; if that write is lost, `rotate` writes
+   * the file again.
+   */
+  private recycle(id: number): boolean {
+    if (this.unsalted.has(id)) return false;
+    const top = Math.max(this.ahead, this.preparingId, this.active.id);
+    if (top - this.active.id >= SPARES) return false;
+    const to = top + 1;
+    const from = chunkPath(this.dir, id);
+    const dest = chunkPath(this.dir, to);
+    if (existsSync(dest)) return false;
+    let fd = -1;
+    try {
+      fd = openSync(from, constants.O_RDWR);
+      if (fstatSync(fd).size < CHUNK) return false;
+      writeAllAt(fd, headerBuf(HEADER), 0);
+    } catch {
+      return false;
+    } finally {
+      if (fd >= 0) closeSync(fd);
+    }
+    try {
+      renameSync(from, dest);
+    } catch {
+      return false;
+    }
+    this.ahead = to;
+    this.recycledChunks++;
+    return true;
   }
 
   /** Chunk files on disk from the oldest kept through the active one. */
@@ -920,7 +1029,7 @@ export class FastLog {
     }
     if (this.active.fd < 0) return;
     try {
-      writeAllAt(this.active.fd, headerBuf(this.active.len), 0);
+      writeAllAt(this.active.fd, headerBuf(this.active.len, this.versionOf(this.active.id)), 0);
       fdatasyncSync(this.active.fd);
     } catch {
       /* the record scan is the source of truth */
@@ -948,8 +1057,9 @@ export class FastLog {
     }
     const info = inspect(path);
     // A batch larger than one chunk (relocated rows can be) needs a file at
-    // least that big. The preallocated next chunk is only CHUNK bytes.
-    const ready = !!info && info.logical === HEADER && info.size >= size;
+    // least that big. The preallocated next chunk is only CHUNK bytes. A
+    // version 1 file is written again: its records carry no salt.
+    const ready = !!info && info.logical === HEADER && info.size >= size && info.version >= SALTED;
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
     // The sync worker still owes this chunk an fsync. It syncs and closes it.
@@ -963,7 +1073,9 @@ export class FastLog {
       this.handOffs++;
     }
     else closeSync(this.active.fd);
-    this.active = { id: nextId, fd, len: HEADER, size: fileSize };
+    this.unsalted.delete(nextId);
+    this.active = { id: nextId, fd, len: HEADER, size: fileSize, salt: saltOf(nextId) };
+    this.ahead = Math.max(this.ahead, nextId);
     this.preparingId = 0;
     this.nextReady = false;
     Atomics.store(this.view, 0, 0n);
@@ -978,7 +1090,7 @@ export class FastLog {
     if (state === 1n || state === 2n) return;
     const nextId = this.active.id + 1;
     const ready = inspect(chunkPath(this.dir, nextId));
-    if (ready && ready.logical === HEADER && ready.size >= CHUNK) {
+    if (ready && ready.logical === HEADER && ready.size >= CHUNK && ready.version >= SALTED) {
       this.nextReady = true;
       return;
     }
