@@ -49,6 +49,7 @@ final class Cluster
         if ($this->raft !== null || is_file($this->raftDir() . '/auto')) $out[] = 'raft_auto';
         if ($this->raft !== null || is_file($this->raftDir() . '/enabled')) $out[] = 'raft_on';
         if (getenv('QUEUEFORGE_RAFT_QGROUPS') !== '0') $out[] = 'raft_qgroups';
+        $out[] = 'meta_barrier';
         return $out;
     }
     public function markFreshRaft(): void
@@ -120,7 +121,40 @@ final class Cluster
         if ($this->raft === null) { $done(false, 'Raft is not enabled'); return false; }
         return $this->raft->propose($group, $kind, $data, $done);
     }
-    public function proposeMeta(string $kind, mixed $data, callable $done): bool { return $this->propose('meta', $kind, $data, $done); }
+    /**
+     * Commits a metadata change, then waits until the other PHP workers
+     * applied it too before `$done` runs. A follower applies a commit only
+     * when the next append tells it, up to a heartbeat (150 ms) later, so a
+     * declare or bind answered on the commit alone could miss a publish on
+     * another worker: a fanout skipped its newest queue. Bun answers after
+     * every peer applied as well (`replicate`).
+     */
+    public function proposeMeta(string $kind, mixed $data, callable $done): bool
+    {
+        return $this->propose('meta', $kind, $data, function (bool $ok, ?string $error) use ($done): void {
+            if (!$ok) { $done(false, $error); return; }
+            $this->metaBarrier(static function () use ($done): void { $done(true, null); });
+        });
+    }
+
+    /**
+     * Calls `$done` once every peer that offers `meta_barrier` has applied
+     * this node's meta log as far as now. Rust and Bun peers do not offer it
+     * and are not asked. A peer that is behind past its wait, or a request
+     * that times out, still releases `$done`: the change is committed.
+     */
+    public function metaBarrier(callable $done): void
+    {
+        $index = $this->raft?->applied('meta') ?? 0;
+        $peers = array_values(array_filter($this->peerIds(), fn (string $p): bool => $p !== $this->nodeId && in_array('meta_barrier', $this->peerFeatures[$p] ?? [], true)));
+        if ($index === 0 || $peers === []) { $done(); return; }
+        $left = count($peers);
+        foreach ($peers as $peer) {
+            $this->request($peer, 'meta_applied', ['index' => $index], '', static function () use (&$left, $done): void {
+                if (--$left === 0) $done();
+            });
+        }
+    }
     public function queueGroup(string $vhost, string $name): ?string
     {
         return $this->raft !== null && getenv('QUEUEFORGE_RAFT_QGROUPS') !== '0' && $this->allHave('raft_qgroups') ? RaftNode::queueGroup($vhost, $name) : null;
@@ -244,6 +278,7 @@ final class Cluster
     {
         $this->maybeEnable();
         $this->raft?->tick();
+        $this->releaseBarriers();
         $this->retryDeferred();
         $now = microtime(true);
         foreach ($this->pending as $correlation => $row) {
@@ -493,6 +528,12 @@ final class Cluster
             if (($payload['name'] ?? '') === 'raft' && ($payload['enabled'] ?? true) === true && in_array($from, $this->voters(), true)) $this->activateRaft();
             return null;
         }
+        if ($op === 'meta_applied') {
+            $index = (int) ($payload['index'] ?? 0);
+            if ($this->raft === null || $this->raft->applied('meta') >= $index) return $this->reply((int) ($msg['id'] ?? 0), true, true);
+            $this->barriers[] = ['id' => (int) ($msg['id'] ?? 0), 'from' => $from, 'index' => $index, 'until' => microtime(true) + self::BARRIER_SECONDS];
+            return null;
+        }
         try {
             if ($op === 'enqueue' && $this->deferEnqueue($msg, $payload, $from)) return null;
             $body = $this->handle($op, $payload, $from);
@@ -736,6 +777,30 @@ final class Cluster
      */
     private array $deferred = [];
     private const DEFER_SECONDS = 1.0;
+
+    /**
+     * Peers waiting for this node to apply the meta log up to `index`
+     * (`metaBarrier`), oldest first.
+     *
+     * @var list<array{id:int,from:string,index:int,until:float}>
+     */
+    private array $barriers = [];
+    private const BARRIER_SECONDS = 1.0;
+
+    /** Answers barriers this node has caught up with, and those past their wait. */
+    private function releaseBarriers(): void
+    {
+        if ($this->barriers === []) return;
+        $applied = $this->raft?->applied('meta') ?? PHP_INT_MAX;
+        $now = microtime(true);
+        $left = [];
+        foreach ($this->barriers as $row) {
+            if ($applied < $row['index'] && $row['until'] > $now) { $left[] = $row; continue; }
+            $caught = $applied >= $row['index'];
+            $this->sendLine($row['from'], $this->reply($row['id'], $caught, true, $caught ? '' : 'META_BEHIND'));
+        }
+        $this->barriers = $left;
+    }
 
     /** @param array<string, mixed> $msg @param array<string, mixed> $payload */
     private function deferEnqueue(array $msg, array $payload, string $from): bool

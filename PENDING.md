@@ -262,8 +262,9 @@ file-backed), and every message, callback and promise is a GC object.
 - Done, clusters (2026-10-14): with Raft on, no consumed id is kept. Every
   drop is a committed log entry that an absent member gets from the log or a
   snapshot (snapshots carry no bodies), so the list, which only a hello reads,
-  served clusters without Raft. Those (a PHP member turns Raft off) still keep
-  it, and it still grows there (`bun/src/broker/consumed-set.ts`).
+  served clusters without Raft. Those (`QUEUEFORGE_RAFT=0`, or before Raft is
+  switched on) still keep it, and it still grows there
+  (`bun/src/broker/consumed-set.ts`).
 - Measured, not adopted: `BUN_JSC_smallHeapGrowthFactor` (default 2) trades
   throughput for memory at 1 CPU, where cells run at 95% CPU. 3: quorum,
   work-queue, telemetry, heavy +5–11% rate, +30–50% memory. 4: +7–9% rate,
@@ -523,7 +524,9 @@ The fill is 60k. Only 76,200 of 300,000 messages were received in the recorded
 ### P4. Quorum and stream throughput
 
 Status: done for single node (Cortex Code, 2026-10-11); see Done. Multi-node
-failure behaviour was not re-measured.
+failure behaviour was not re-measured. 2026-10-14: the PHP suite, cores mode
+included, passes 38/38 with metadata answered after every worker applied it
+(see "PHP parity" in Done); no multi-node failure run yet.
 
 Evidence: quorum 589 msg/s, stream 791 msg/s at 1 CPU (RabbitMQ 26.7k for both).
 
@@ -687,6 +690,17 @@ Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/
       up from 10/12.
   - `fanout-cores.test.php` matches `bun/test/fanout-cores.test.ts`: 9
     queues × 200 messages in order, across 3 children.
+  - 2026-10-14: the full PHP suite was rerun: 37/38 files, and
+    `fanout-cores.test.php` failed about 1 run in 7. The last queue bound got
+    none of the 200 confirmed publishes, while a later publish reached it: the
+    publisher's worker had not applied the binding, since a follower applies
+    a commit only from the next append (150 ms heartbeat). A declare or bind
+    is now answered after every PHP worker has applied it
+    (`Cluster::proposeMeta`, `meta_barrier`; at most 1 s per peer, Rust and
+    Bun peers are not asked), as Bun answers after its peers applied. 0/20
+    fanout-cores runs failed, full suite 38/38. Sending the commit to
+    followers straight away instead made it worse (5/15): the proposer
+    answered sooner, while a busy worker still applied late.
 - **Orphaned cores workers** (2026-10-12, not an item). A supervisor killed with
   SIGKILL left its workers running on the fixed cluster and metrics ports
   (25672+, 25680+), so the next cores-mode start failed with EADDRINUSE. A

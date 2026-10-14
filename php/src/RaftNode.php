@@ -59,6 +59,8 @@ final class RaftNode
     private function sorted(array $ids): array { $ids = array_values(array_unique(array_map('strval', $ids))); sort($ids, SORT_STRING); return $ids; }
     public function groupNames(): array { return array_keys($this->groups); }
     public function leader(string $group): ?string { return $this->groups[$group]['announced'] ?? null; }
+    /** The last entry of `$group` applied to the broker; 0 for an unknown group. */
+    public function applied(string $group): int { return (int) ($this->groups[$group]['applied'] ?? 0); }
     public function setVoters(array $voters): void { if ($voters !== []) $this->wanted = $this->sorted($voters); }
 
     public function addGroup(string $name, bool $lead = false): void
