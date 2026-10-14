@@ -123,10 +123,11 @@ export default function BenchmarkPage() {
           <p className="section-lead">
             Unpaced message rate at each container in the load sweep. 16 connections is consume/s,
             the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
-            The numbers are the same ones in the table further down. Each point is one 8 s
-            measurement, not a median of repeats, so a single stall moves it: Bun&apos;s one-queue,
-            16-connection points ranged from 57k to 207k msg/s across the runs of 2026-10-11 to
-            2026-10-13. The application scenarios below repeat every cell.
+            The numbers are the same ones in the table further down. Bun&apos;s points are the median of
+            three 8 s measurements, run in rounds over the whole sweep; across those three, its 4 CPU
+            one-connection point ranged from 43k to 294k msg/s, so one sample could be off by 2× or
+            more. RabbitMQ, Rust and PHP are still one 8 s measurement from 2026-10-12. The
+            application scenarios below repeat every cell.
           </p>
           <SizeCharts rows={loadRows} />
         </div>

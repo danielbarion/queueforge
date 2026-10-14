@@ -14,30 +14,30 @@ export const paced: Bar[] = [
 export const scale: Bar[] = [
   { name: "RabbitMQ", rate: 159492.4, tone: "mq" },
   { name: "Rust", rate: 384290.6, tone: "rust" },
-  { name: "Bun", rate: 593860.0, tone: "bun" },
+  { name: "Bun", rate: 522317.8, tone: "bun" },
   { name: "PHP", rate: 82386.8, tone: "php" },
 ];
 
 export const loadRows: LoadRow[] = [
   { app: "RabbitMQ", size: "1 CPU / 512 MiB", one: 55632.2, shared: 40959.9, spread: 41172.8, connections: "3,500", mib: "180", login: "454.7 MiB" },
   { app: "Rust", size: "1 CPU / 512 MiB", one: 151312.0, shared: 62989.5, spread: 151524.4, connections: "8,980", mib: "365", login: "503.4 MiB" },
-  { app: "Bun", size: "1 CPU / 512 MiB", one: 191964.0, shared: 75417.1, spread: 236912.0, connections: "42,187", mib: "161", login: "372.7 MiB" },
+  { app: "Bun", size: "1 CPU / 512 MiB", one: 197904.0, shared: 177544.0, spread: 237708.0, connections: "42,187", mib: "160", login: "372.7 MiB" },
   { app: "PHP", size: "1 CPU / 512 MiB", one: 11840.0, shared: 81814.0, spread: 75295.9, connections: "28,000", mib: "184", login: "210.9 MiB" },
   { app: "RabbitMQ", size: "1 CPU / 1 GiB", one: 53795.9, shared: 38629.5, spread: 40813.8, connections: "n/a", mib: "181", login: "n/a" },
   { app: "Rust", size: "1 CPU / 1 GiB", one: 163130.8, shared: 61090.6, spread: 143230.4, connections: "n/a", mib: "362", login: "n/a" },
-  { app: "Bun", size: "1 CPU / 1 GiB", one: 189354.9, shared: 201104.0, spread: 208493.8, connections: "n/a", mib: "159", login: "n/a" },
+  { app: "Bun", size: "1 CPU / 1 GiB", one: 218460.0, shared: 150736.4, spread: 239680.0, connections: "n/a", mib: "164", login: "n/a" },
   { app: "PHP", size: "1 CPU / 1 GiB", one: 11808.0, shared: 76244.0, spread: 72301.5, connections: "n/a", mib: "177", login: "n/a" },
   { app: "RabbitMQ", size: "2 CPU / 2 GiB", one: 67769.0, shared: 65547.4, spread: 81053.1, connections: "18,750", mib: "199", login: "1.93 GiB" },
   { app: "Rust", size: "2 CPU / 2 GiB", one: 197997.5, shared: 85598.5, spread: 250649.5, connections: "34,600", mib: "538", login: "1.876 GiB" },
-  { app: "Bun", size: "2 CPU / 2 GiB", one: 249304.0, shared: 154384.1, spread: 162394.4, connections: "120,402", mib: "249", login: "1.39 GiB" },
+  { app: "Bun", size: "2 CPU / 2 GiB", one: 275196.0, shared: 217460.0, spread: 381604.0, connections: "120,402", mib: "248", login: "1.39 GiB" },
   { app: "PHP", size: "2 CPU / 2 GiB", one: 11888.0, shared: 76672.0, spread: 78134.2, connections: "40,000", mib: "190", login: "296.4 MiB" },
   { app: "RabbitMQ", size: "4 CPU / 4 GiB", one: 76623.0, shared: 67918.0, spread: 159492.4, connections: "41,622", mib: "245", login: "3.579 GiB" },
   { app: "Rust", size: "4 CPU / 4 GiB", one: 203649.4, shared: 124121.1, spread: 384290.6, connections: "67,086", mib: "701", login: "3.634 GiB" },
-  { app: "Bun", size: "4 CPU / 4 GiB", one: 208588.0, shared: 182979.5, spread: 593860.0, connections: "247,534", mib: "449", login: "2.851 GiB" },
+  { app: "Bun", size: "4 CPU / 4 GiB", one: 180100.0, shared: 210415.6, spread: 522317.8, connections: "247,534", mib: "371", login: "2.851 GiB" },
   { app: "PHP", size: "4 CPU / 4 GiB", one: 11751.1, shared: 76254.0, spread: 82386.8, connections: "40,000", mib: "205", login: "298.6 MiB" },
   { app: "RabbitMQ", size: "4 CPU / 8 GiB", one: 77596.2, shared: 65965.4, spread: 156266.4, connections: "62,065", mib: "228", login: "5.55 GiB" },
   { app: "Rust", size: "4 CPU / 8 GiB", one: 199296.0, shared: 109002.2, spread: 361130.1, connections: "95,000", mib: "722", login: "5.126 GiB" },
-  { app: "Bun", size: "4 CPU / 8 GiB", one: 104876.0, shared: 228160.0, spread: 410066.6, connections: "260,000", mib: "403", login: "3.072 GiB" },
+  { app: "Bun", size: "4 CPU / 8 GiB", one: 262524.0, shared: 216304.0, spread: 475899.0, connections: "260,000", mib: "386", login: "3.072 GiB" },
   { app: "PHP", size: "4 CPU / 8 GiB", one: 11920.0, shared: 81813.9, spread: 77807.4, connections: "20,000", mib: "196", login: "159.5 MiB" },
 ];
 

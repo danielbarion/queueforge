@@ -36,7 +36,11 @@ COLS = [
     "kind", "cpus", "mem_mb", "shape", "ok", "confirm_s", "consume_s", "sent_s", "p50_us", "p99_us",
     "confirmed", "consumed", "sent", "samples", "inflight", "blocked", "nacks", "missed", "returns",
     "elapsed_s", "broker_cpu", "client_cpu", "broker_mib", "oom", "early_confirm", "boot_s", "err",
+    "repeat",
 ]
+# Rounds of the whole matrix. One 8 s sample let a single host stall move a
+# point by 2x (PENDING B12, H3); the report publishes the median.
+REPEATS = int(os.environ.get("QF_LOAD_REPEATS", "3"))
 KINDS = ["rabbit", "rust", "bun", "php"]
 need_restore = False
 vm_ncpu = 2
@@ -302,9 +306,9 @@ def dump_logs():
         log("broker-log " + text)
 
 
-def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, check_queues):
+def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, check_queues, repeat=0):
     row = {c: "" for c in COLS}
-    row.update({"kind": kind, "cpus": cpus, "mem_mb": mem_mb, "shape": shape, "ok": "0", "err": "start"})
+    row.update({"kind": kind, "cpus": cpus, "mem_mb": mem_mb, "shape": shape, "ok": "0", "err": "start", "repeat": repeat})
     ensure_client()
     t_boot = time.time()
     ip = start_broker(kind, cpus, mem)
@@ -325,7 +329,7 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
         run(["docker", "rm", "-f", "qf-load-broker"], check=False)
         return row
     boot_s = ready_at - t_boot
-    out_path = os.path.join(HERE, "cells", f"{kind}-{cpus}-{mem_mb}-{shape}.out")
+    out_path = os.path.join(HERE, "cells", f"{kind}-{cpus}-{mem_mb}-{shape}-{repeat}.out")
     os.makedirs(os.path.join(HERE, "cells"), exist_ok=True)
     cmd = ["docker", "exec"]
     merged = dict(env)
@@ -405,7 +409,7 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
     write_row(tsv, row)
     level = "FAILED" if not fields or float(fields.get("confirmed", "0") or 0) <= 0 else "PROGRESS"
     log(
-        f"{level} kind={kind} cpus={cpus} mem={mem_mb} shape={shape} ok={row['ok']} "
+        f"{level} kind={kind} cpus={cpus} mem={mem_mb} shape={shape} repeat={repeat} ok={row['ok']} "
         f"confirm_s={row['confirm_s']} consume_s={row['consume_s']} p50_us={row['p50_us']} "
         f"p99_us={row['p99_us']} broker_cpu={broker_cpu} client_cpu={client_cpu} "
         f"broker_mib={broker_mib} oom={oom} early={row['early_confirm']} boot_s={row['boot_s']} err={row['err']}"
@@ -470,11 +474,12 @@ def run_matrix():
     rows = []
     check_queues = [True]
     try:
-        for kind in KINDS:
-            for cpus, mem, mem_mb in STEPS:
-                for shape, env in SHAPES:
-                    row = run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, 2000, 8000, check_queues)
-                    rows.append(row)
+        for repeat in range(REPEATS):
+            for kind in KINDS:
+                for cpus, mem, mem_mb in STEPS:
+                    for shape, env in SHAPES:
+                        row = run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, 2000, 8000, check_queues, repeat)
+                        rows.append(row)
     finally:
         tsv.close()
     summarize(rows)

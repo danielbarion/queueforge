@@ -98,15 +98,16 @@ SIZE = {(1, 512): "1 CPU / 512 MiB", (1, 1024): "1 CPU / 1 GiB", (2, 2048): "2 C
 
 
 def load(root):
-    cells = {}
+    """Each load cell's repeats summarized, by (kind, cpus, mem_mb, shape); see `load_summary`."""
+    repeats = {}
     for r in tsv(os.path.join(root, "load.tsv")):
         key = (r["kind"], int(r["cpus"]), int(r["mem_mb"]), r["shape"])
-        cells[key] = r
-    return cells
+        repeats.setdefault(key, []).append(r)
+    return {key: load_summary(rows) for key, rows in repeats.items()}
 
 
-def load_rate(r, shape):
-    """The rate the site shows: the lower of confirm/s and consume/s, so a growing queue does not score."""
+def cell_rate(r):
+    """One repeat's rate: the lower of confirm/s and consume/s, so a growing queue does not score."""
     if not r or r.get("ok") != "1":
         return None
     a, b = num(r.get("confirm_s")), num(r.get("consume_s"))
@@ -115,19 +116,55 @@ def load_rate(r, shape):
     return min(a, b)
 
 
+def load_summary(rows):
+    """Medians over the passing repeats of one cell.
+
+    A cell scores when at least half of its repeats passed. `n` passed of `of`;
+    `lo` and `hi` bound the published rate. Files from before repeats have one
+    row per cell, so they read as n=1.
+    """
+    ok = [r for r in rows if cell_rate(r) is not None]
+    out = {"ok": "0", "n": len(ok), "of": len(rows), "err": next((r.get("err") for r in reversed(rows) if r.get("err") not in ("", "none")), "") or "failed"}
+    if not ok or 2 * len(ok) < len(rows):
+        return out
+    rates = [cell_rate(r) for r in ok]
+    mib = [num(r.get("broker_mib")) for r in ok]
+    mib = [m for m in mib if m is not None]
+    out.update({
+        "ok": "1",
+        "rate": statistics.median(rates),
+        "lo": min(rates),
+        "hi": max(rates),
+        "confirm_s": statistics.median(num(r["confirm_s"]) for r in ok),
+        "consume_s": statistics.median(num(r["consume_s"]) for r in ok),
+        "broker_mib": f"{statistics.median(mib):.0f}" if mib else "",
+    })
+    return out
+
+
+def load_rate(r, shape):
+    """The rate the site shows: the median over a cell's passing repeats."""
+    return r["rate"] if r and r.get("ok") == "1" else None
+
+
+def load_text(r):
+    """`median [lo–hi; n=k]`, or the median alone for one sample."""
+    if not r or r.get("ok") != "1":
+        return (r or {}).get("err") or "–"
+    if r["of"] <= 1:
+        return fmt(r["rate"], 1)
+    return f"{fmt(r['rate'], 1)} [{fmt(r['lo'], 0)}–{fmt(r['hi'], 0)}; n={r['n']}]"
+
+
 def load_md(cells):
-    lines = ["| Container | Broker | single confirm/s | single consume/s | shared confirm/s | shared consume/s | spread confirm/s | spread consume/s | spread MiB |",
-             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines = ["Each cell is the lower of confirm/s and consume/s, the median over repeats with",
+             "its range; a cell without a range was measured once.",
+             "",
+             "| Container | Broker | single msg/s | shared msg/s | spread msg/s | spread MiB |",
+             "| --- | --- | ---: | ---: | ---: | ---: |"]
     for (cpus, mem), size in SIZE.items():
         for kind in ORDER:
-            cols = []
-            for shape in ("single", "shared", "spread"):
-                r = cells.get((kind, cpus, mem, shape))
-                if not r or r.get("ok") != "1":
-                    err = (r or {}).get("err") or "–"
-                    cols += [err, ""]
-                else:
-                    cols += [fmt(num(r["confirm_s"]), 1), fmt(num(r["consume_s"]), 1)]
+            cols = [load_text(cells.get((kind, cpus, mem, shape))) for shape in ("single", "shared", "spread")]
             spread = cells.get((kind, cpus, mem, "spread")) or {}
             lines.append(f"| {size} | {C.NAMES[kind]} | " + " | ".join(cols) + f" | {spread.get('broker_mib', '')} |")
     return "\n".join(lines)

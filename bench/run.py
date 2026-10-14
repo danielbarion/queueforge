@@ -465,7 +465,9 @@ def merge_load(C, fresh, kinds):
     main = os.path.join(C.OUT_DIR, "load.tsv")
     keep = open(main).readlines() if os.path.exists(main) else []
     rows = open(fresh).readlines()
-    head = keep[0] if keep else rows[0]
+    # The fresh header: a newer run can add a column (`repeat`); older rows
+    # just lack it at the end.
+    head = rows[0] if rows else keep[0]
     old = [ln for ln in keep[1:] if ln.split("\t", 1)[0] not in kinds]
     with open(main, "w") as f:
         f.writelines([head] + old + rows[1:])

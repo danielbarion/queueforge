@@ -160,3 +160,29 @@ class BacklogReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoadRepeatTests(unittest.TestCase):
+    def row(self, confirm, consume=None, ok="1", err="none", mib="100"):
+        return {"ok": ok, "confirm_s": str(confirm), "consume_s": str(consume if consume is not None else confirm),
+                "broker_mib": mib, "err": err}
+
+    def test_median_of_passing_repeats_with_range(self):
+        s = report.load_summary([self.row(100), self.row(300, 250), self.row(200, mib="120")])
+        self.assertEqual((s["ok"], s["rate"], s["lo"], s["hi"], s["n"], s["of"]), ("1", 200, 100, 250, 3, 3))
+        self.assertEqual(s["broker_mib"], "100")
+        self.assertEqual(report.load_text(s), "200.0 [100–250; n=3]")
+
+    def test_one_failed_repeat_of_three_still_scores(self):
+        s = report.load_summary([self.row(100), self.row(0, ok="0", err="c2_541"), self.row(300)])
+        self.assertEqual((s["ok"], s["rate"], s["n"], s["of"]), ("1", 200, 2, 3))
+
+    def test_most_repeats_failed_is_unscored(self):
+        s = report.load_summary([self.row(100), self.row(0, ok="0", err="c2_541"), self.row(0, ok="0", err="oom")])
+        self.assertEqual(s["ok"], "0")
+        self.assertEqual(report.load_text(s), "oom")
+        self.assertIsNone(report.load_rate(s, "spread"))
+
+    def test_one_sample_reads_as_before(self):
+        s = report.load_summary([self.row(123.45)])
+        self.assertEqual(report.load_text(s), "123.5")

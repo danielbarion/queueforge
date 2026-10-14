@@ -130,9 +130,17 @@ between runs (1 CPU stream reads 110,721 against 101,538, but one
 fourth-run repeat had 67% broker CPU). Memory is unchanged; 4 CPU broadcast's anonymous memory is
 332–339 MiB against 361–373 at the lower rate. The load sweep passed every
 cell with `queueforge_confirm_before_fsync_total` at 0, and 260,000
-connections held at 4 CPU / 8 GiB, as before. Its cells are one sample
-each: 4 CPU / 8 GiB single reads 104,876 here and 256,604 in the fourth run
-at about the same broker CPU.
+connections held at 4 CPU / 8 GiB, as before.
+
+Bun's load sweep in the tables is a second pass on the same image
+(2026-10-14 10:37Z–10:46Z), three rounds of the whole sweep, each cell the
+median of its three 8 s repeats with the range (H3 in PENDING.md):
+`python3 bench/run.py --kinds bun --steps load,report --out bench/results/2026-10-14b`.
+All 45 repeats passed with no refused confirm. The ranges are why one sample
+misled: 4 CPU / 4 GiB single ran 43,152–294,384 msg/s and 4 CPU / 8 GiB
+spread 286,873–777,752 across its three repeats. RabbitMQ, Rust and PHP
+rows are still one sample from 2026-10-12; their local images have been
+rebuilt since, so measuring them now would not match their scenario rows.
 
 Tried and dropped: keeping two log chunks ahead and unlinking retired chunks
 on the thread pool. The unlinks fell behind under 1 CPU heavy (101 chunk
@@ -440,28 +448,31 @@ the per-publish confirm chains).
 
 ### Load
 
-| Container | Broker | single confirm/s | single consume/s | shared confirm/s | shared consume/s | spread confirm/s | spread consume/s | spread MiB |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 CPU / 512 MiB | RabbitMQ | 55,637.0 | 55,632.2 | 40,960.0 | 40,959.9 | 41,172.8 | 41,239.8 | 180 |
-| 1 CPU / 512 MiB | Rust | 151,312.0 | 151,317.4 | 100,552.1 | 62,989.5 | 151,524.4 | 151,546.2 | 365 |
-| 1 CPU / 512 MiB | Bun | 191,964.0 | 191,968.0 | 75,439.1 | 75,417.1 | 236,912.0 | 237,440.0 | 161 |
-| 1 CPU / 512 MiB | PHP | 11,840.0 | 11,840.0 | 81,814.0 | 81,814.0 | 75,295.9 | 75,506.8 | 184 |
-| 1 CPU / 1 GiB | RabbitMQ | 53,795.9 | 53,804.6 | 38,629.5 | 38,811.0 | 40,813.8 | 40,854.9 | 181 |
-| 1 CPU / 1 GiB | Rust | 163,130.8 | 163,130.9 | 105,525.9 | 61,090.6 | 143,286.2 | 143,230.4 | 362 |
-| 1 CPU / 1 GiB | Bun | 189,354.9 | 189,354.9 | 201,620.0 | 201,104.0 | 208,493.8 | 208,965.8 | 159 |
-| 1 CPU / 1 GiB | PHP | 11,808.0 | 11,808.0 | 76,244.0 | 76,244.0 | 72,301.5 | 72,413.1 | 177 |
-| 2 CPU / 2 GiB | RabbitMQ | 67,773.8 | 67,769.0 | 65,547.4 | 65,825.5 | 81,053.1 | 81,258.8 | 199 |
-| 2 CPU / 2 GiB | Rust | 198,000.0 | 197,997.5 | 183,290.0 | 85,598.5 | 250,681.1 | 250,649.5 | 538 |
-| 2 CPU / 2 GiB | Bun | 249,304.0 | 249,304.0 | 154,632.1 | 154,384.1 | 162,714.4 | 162,394.4 | 249 |
-| 2 CPU / 2 GiB | PHP | 11,888.0 | 11,888.0 | 76,672.0 | 76,672.0 | 78,290.0 | 78,134.2 | 190 |
-| 4 CPU / 4 GiB | RabbitMQ | 76,623.0 | 76,630.5 | 67,982.0 | 67,918.0 | 159,719.5 | 159,492.4 | 245 |
-| 4 CPU / 4 GiB | Rust | 203,650.8 | 203,649.4 | 245,078.6 | 124,121.1 | 384,363.2 | 384,290.6 | 701 |
-| 4 CPU / 4 GiB | Bun | 208,588.0 | 208,588.0 | 182,979.5 | 183,142.5 | 593,860.0 | 593,956.0 | 449 |
-| 4 CPU / 4 GiB | PHP | 11,760.0 | 11,751.1 | 76,672.1 | 76,254.0 | 82,567.5 | 82,386.8 | 205 |
-| 4 CPU / 8 GiB | RabbitMQ | 77,608.0 | 77,596.2 | 66,674.9 | 65,965.4 | 156,266.4 | 156,328.1 | 228 |
-| 4 CPU / 8 GiB | Rust | 199,301.2 | 199,296.0 | 216,175.0 | 109,002.2 | 361,168.5 | 361,130.1 | 722 |
-| 4 CPU / 8 GiB | Bun | 104,876.0 | 104,876.0 | 228,160.0 | 228,746.0 | 410,290.6 | 410,066.6 | 403 |
-| 4 CPU / 8 GiB | PHP | 11,920.0 | 11,920.0 | 81,813.9 | 81,813.9 | 77,862.8 | 77,807.4 | 196 |
+Each cell is the lower of confirm/s and consume/s, the median over repeats with
+its range; a cell without a range was measured once.
+
+| Container | Broker | single msg/s | shared msg/s | spread msg/s | spread MiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 CPU / 512 MiB | RabbitMQ | 55,632.2 | 40,959.9 | 41,172.8 | 180 |
+| 1 CPU / 512 MiB | Rust | 151,312.0 | 62,989.5 | 151,524.4 | 365 |
+| 1 CPU / 512 MiB | Bun | 197,904.0 [129,827–218,444; n=3] | 177,544.0 [93,013–197,092; n=3] | 237,708.0 [237,339–241,984; n=3] | 160 |
+| 1 CPU / 512 MiB | PHP | 11,840.0 | 81,814.0 | 75,295.9 | 184 |
+| 1 CPU / 1 GiB | RabbitMQ | 53,795.9 | 38,629.5 | 40,813.8 | 181 |
+| 1 CPU / 1 GiB | Rust | 163,130.8 | 61,090.6 | 143,230.4 | 362 |
+| 1 CPU / 1 GiB | Bun | 218,460.0 [138,636–236,996; n=3] | 150,736.4 [140,551–202,552; n=3] | 239,680.0 [191,622–251,536; n=3] | 164 |
+| 1 CPU / 1 GiB | PHP | 11,808.0 | 76,244.0 | 72,301.5 | 177 |
+| 2 CPU / 2 GiB | RabbitMQ | 67,769.0 | 65,547.4 | 81,053.1 | 199 |
+| 2 CPU / 2 GiB | Rust | 197,997.5 | 85,598.5 | 250,649.5 | 538 |
+| 2 CPU / 2 GiB | Bun | 275,196.0 [147,124–277,536; n=3] | 217,460.0 [180,354–220,968; n=3] | 381,604.0 [273,276–441,572; n=3] | 248 |
+| 2 CPU / 2 GiB | PHP | 11,888.0 | 76,672.0 | 78,134.2 | 190 |
+| 4 CPU / 4 GiB | RabbitMQ | 76,623.0 | 67,918.0 | 159,492.4 | 245 |
+| 4 CPU / 4 GiB | Rust | 203,649.4 | 124,121.1 | 384,290.6 | 701 |
+| 4 CPU / 4 GiB | Bun | 180,100.0 [43,152–294,384; n=3] | 210,415.6 [95,260–231,024; n=3] | 522,317.8 [452,150–784,248; n=3] | 371 |
+| 4 CPU / 4 GiB | PHP | 11,751.1 | 76,254.0 | 82,386.8 | 205 |
+| 4 CPU / 8 GiB | RabbitMQ | 77,596.2 | 65,965.4 | 156,266.4 | 228 |
+| 4 CPU / 8 GiB | Rust | 199,296.0 | 109,002.2 | 361,130.1 | 722 |
+| 4 CPU / 8 GiB | Bun | 262,524.0 [103,676–290,252; n=3] | 216,304.0 [149,982–228,872; n=3] | 475,899.0 [286,873–777,752; n=3] | 386 |
+| 4 CPU / 8 GiB | PHP | 11,920.0 | 81,813.9 | 77,807.4 | 196 |
 
 ### Scenarios, 1 CPU / 1 GiB
 

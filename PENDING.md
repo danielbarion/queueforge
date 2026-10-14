@@ -79,7 +79,11 @@ tool shell. Write scripts to a file and run the file.
 
 ### B1. No publisher flow control
 
-Status: implemented, final A/B not run. Destination-aware publish holds, bounded
+Status: done (2026-10-14, by measurement). The 2026-10-14b run meets the
+"Verify" line below at 1 CPU: telemetry p50 0.75 ms at 49–51 MiB anonymous
+(RabbitMQ 55–59 ms at 191–195 MiB), transactions p50 0.11 ms with `kept=yes`,
+backlog fill and drain ~149k msg/s as before. Earlier: implemented, final A/B
+not run. Destination-aware publish holds, bounded
 pending/transaction work, ACK-safe reads and socket output credit are in the tree
 (Codex, 2026-10-09/10). In the 2026-10-11 run at 1 CPU, telemetry is 450k msg/s
 at 59 MiB anonymous (RabbitMQ 103k) and transactions 53.6k (RabbitMQ 20.5k); a
@@ -275,7 +279,8 @@ file-backed), and every message, callback and promise is a GC object.
 
 ### B12. 200 ms stalls in the multi-connection load cells (2026-10-13)
 
-Status: not a code regression; the host. The load sweep's shared (16
+Status: done (2026-10-14): not a code regression, the host; H3 now publishes
+medians. The load sweep's shared (16
 connections, one queue) and spread (16 queues) cells for Bun often show a p99
 at the 200 ms overflow bucket, with the broker at 25–70% CPU instead of
 95–370% and the median latency where it was (40 ms against 39 ms): pauses,
@@ -291,8 +296,8 @@ CPU spread cell gave every image from `7b571bf` to HEAD a median of
 528k–548k consume/s, each ranging about 200k–690k. The Cortex Code renderer
 used ~300% CPU of the host throughout.
 
-What is left is H3: one 8 s sample per cell cannot separate builds on a busy
-host.
+What was left was H3, now done: one 8 s sample per cell could not separate
+builds on a busy host.
 
 ### B13. Refused confirms in one load cell (2026-10-13)
 
@@ -553,10 +558,13 @@ Status: done (2026-10-10); see Done.
 
 ### H3. The load sweep measures each cell once
 
-Status: open. `bench/load.py` runs every container size and shape once for 8 s,
-and the site charts that single number, so one stall moves a point by 2× (B12).
-Run each cell three times and publish the median with its range, like the
-scenario matrix.
+Status: done (2026-10-14). `bench/load.py` runs the whole sweep in rounds
+(`QF_LOAD_REPEATS`, default 3) and writes a `repeat` column; `bench/report.py`
+publishes each cell's median of its passing repeats with the range, and scores
+a cell when at least half passed. Older files read as one sample. Bun's sweep in
+`bench/results/2026-10-14b` is the first with three: 4 CPU / 4 GiB single ran
+43,152–294,384 msg/s across them. RabbitMQ, Rust and PHP get repeats at their
+next full run.
 
 ---
 
