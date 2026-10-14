@@ -7,6 +7,12 @@ require_once __DIR__ . '/Raft.php';
 final class RaftNode
 {
     public const PROPOSE_TIMEOUT_MS = 5000;
+    /**
+     * Body bytes applied since the last snapshot that compact a group early.
+     * The entry count alone let 10,000 base64 1 MiB bodies, about 13 GiB, sit
+     * in the in-memory log, and the memory alarm blocked publishers first.
+     */
+    public const COMPACT_BYTES = 64 * 1024 * 1024;
     /** @var array<string,array<string,mixed>> */
     private array $groups = [];
     private array $pending = [];
@@ -89,7 +95,7 @@ final class RaftNode
         $core->snapshotSource = fn () => ($this->state)($name);
         $this->groups[$name] = ['core' => $core, 'path' => $path, 'persist' => null, 'outbox' => [],
             'install' => $snapshot, 'apply' => [], 'waiters' => [], 'retryAt' => 0, 'retryDelay' => 100,
-            'sinceSnapshot' => 0, 'announced' => null, 'leadFrom' => null, 'applied' => (int) ($snapshot['index'] ?? 0)];
+            'sinceSnapshot' => 0, 'sinceBytes' => 0, 'announced' => null, 'leadFrom' => null, 'applied' => (int) ($snapshot['index'] ?? 0)];
         // A local queue leader locator is a preference, not a forced election.
         if ($lead) $core->expedite();
     }
@@ -228,6 +234,7 @@ final class RaftNode
                     unset($g['waiters'][$entry['i']]);
                     if ($waiter !== null) $finished[] = [$waiter['done'], $waiter['term'] === $entry['term'], $waiter['term'] === $entry['term'] ? null : 'entry replaced'];
                     $g['sinceSnapshot']++;
+                    $g['sinceBytes'] += self::bodyBytes($entry);
                 }
             } finally {
                 // Completions only mark a publish settled. `applied` then syncs
@@ -247,13 +254,14 @@ final class RaftNode
                 if ($this->leaderChanged !== null) ($this->leaderChanged)($name, $leader);
             }
             $g['retryAt'] = 0; $g['retryDelay'] = 100;
-            if ($g['sinceSnapshot'] >= ($name === 'meta' ? 50000 : 10000)) {
+            if ($g['sinceSnapshot'] >= ($name === 'meta' ? 50000 : 10000) || $g['sinceBytes'] >= self::COMPACT_BYTES) {
                 $snapshot = $core->compact(($this->state)($name));
                 if ($snapshot !== null) {
                     $g['persist'] = ['hard' => null, 'snapshot' => $snapshot, 'rewrite' => $core->logEntries(), 'append' => [], 'appended' => false];
                     $this->persist($g);
                 }
                 $g['sinceSnapshot'] = 0;
+                $g['sinceBytes'] = 0;
             }
         } catch (Throwable $error) {
             $g['retryAt'] = $now + $g['retryDelay']; $g['retryDelay'] = min(1000, $g['retryDelay'] * 2);
@@ -287,6 +295,13 @@ final class RaftNode
             } finally { fclose($fp); }
         }
         $g['persist'] = null;
+    }
+
+    /** The encoded body an entry carries in the log, for the compaction byte budget. */
+    private static function bodyBytes(array $entry): int
+    {
+        $data = $entry['data'] ?? null;
+        return is_array($data) && is_string($data['body_b64'] ?? null) ? strlen($data['body_b64']) : 0;
     }
 
     private function logBytes(array $entries): string
