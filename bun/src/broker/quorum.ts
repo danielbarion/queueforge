@@ -389,6 +389,10 @@ export function noteConsumed(this: Broker, vhost: string, queue: string, id: str
   // ~90 bytes per acked message: 650 MiB after 25 s of 1 CPU quorum.
   if (!this.cfg.members.some((m) => m.id !== this.cfg.nodeId)) return;
   if (this.cluster?.consensus?.siblingsOnly()) return;
+  // With Raft every drop is a committed entry, which a member that was away
+  // gets from the log or a snapshot (no snapshot carries bodies). The list only
+  // served clusters without it, and with real peers it grew without bound.
+  if (this.cluster?.consensus?.node) return;
   this.consumedIds.add(vhost, queue, id);
 }
 

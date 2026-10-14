@@ -65,7 +65,8 @@ test("quorum snapshots replace ready, replicas and unacked in leader order", asy
     expect([...other.replicas.keys()]).toEqual(["untouched"]);
     expect([...f.consensus.live.keys()]).toEqual(["/\0other\0untouched", "/\0target\0first", "/\0target\0second"]);
     expect(f.store.listMessages().map(row => Buffer.from(row.body).toString())).toEqual(["untouched", "first", "second"]);
-    expect(f.broker.consumed.map(m => m.id).sort()).toEqual(["absent-body", "removed-ready", "removed-replica", "removed-unacked"]);
+    // With Raft the drops are log entries; nothing is kept for a hello.
+    expect(f.broker.consumed).toEqual([]);
     // Reinstalling is idempotent and does not leave duplicate durable bodies.
     await f.install({ queues: [{ messages: [first, second] }] });
     expect(f.store.listMessages()).toHaveLength(3);

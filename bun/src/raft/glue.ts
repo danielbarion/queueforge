@@ -257,7 +257,6 @@ export class Consensus {
       const leader = this.broker.isQuorumLeader(this.broker.queues.get(this.broker.key(vhost, queue)));
       for (const id of ids) {
         this.live.delete(`${vhost}\0${queue}\0${id}`);
-        this.broker.noteConsumed(vhost, queue, id);
         // The leader delivered this body; its ack settles it there.
         if (!leader) this.broker.dropLocal(vhost, queue, id);
       }
@@ -328,10 +327,6 @@ export class Consensus {
     }
     for (const key of [...this.live.keys()]) {
       if (!this.holds(group, key)) continue;
-      if (!messages.has(key)) {
-        const [vhost, queue, id] = key.split("\0");
-        this.broker.noteConsumed(vhost!, queue!, id!);
-      }
       this.live.delete(key);
     }
     for (const q of this.broker.queues.values()) {
@@ -342,8 +337,6 @@ export class Consensus {
       const rows = new Set<number>();
       for (const m of bodies) {
         if (m.rowId != null) rows.add(m.rowId);
-        // Removing a retained body is only replacement, not consumption.
-        if (!messages.has(`${q.vhost}\0${q.name}\0${m.id}`)) this.broker.noteConsumed(q.vhost, q.name, m.id);
       }
       for (const row of rows) this.broker.store.deleteMessage(row);
     }

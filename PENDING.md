@@ -259,9 +259,11 @@ file-backed), and every message, callback and promise is a GC object.
 - Done: quorum consumed ids are no longer kept without a peer that could hold
   a copy (lone broker, or sibling workers with single-voter groups). The set
   never shrank: 1 CPU quorum ~660 MiB after 25 s, now 79 MiB.
-- Open, clusters: with real peers the consumed-id set still grows without
-  bound (`bun/src/broker/consumed-set.ts`). Trim an id once every peer has
-  applied its drop, or after the peers' next hello.
+- Done, clusters (2026-10-14): with Raft on, no consumed id is kept. Every
+  drop is a committed log entry that an absent member gets from the log or a
+  snapshot (snapshots carry no bodies), so the list, which only a hello reads,
+  served clusters without Raft. Those (a PHP member turns Raft off) still keep
+  it, and it still grows there (`bun/src/broker/consumed-set.ts`).
 - Measured, not adopted: `BUN_JSC_smallHeapGrowthFactor` (default 2) trades
   throughput for memory at 1 CPU, where cells run at 95% CPU. 3: quorum,
   work-queue, telemetry, heavy +5–11% rate, +30–50% memory. 4: +7–9% rate,

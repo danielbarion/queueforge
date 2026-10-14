@@ -470,6 +470,24 @@ test("consumed ids stay listed and a duplicate does not grow the list", () => {
   }
 });
 
+test("a Raft cluster keeps no consumed ids: its drops are log entries", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-qseen-raft-"));
+  const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
+  const broker = new Broker(cfg("a", members), store);
+  broker.cluster = { consensus: { node: {}, siblingsOnly: () => false } } as unknown as Cluster;
+  try {
+    for (let i = 0; i < 1000; i++) broker.noteConsumed("/", "q", `id-${i}`);
+    expect(broker.consumed).toHaveLength(0);
+    // Without Raft the same peers still get the list in a hello.
+    broker.cluster = { consensus: { node: null, siblingsOnly: () => false } } as unknown as Cluster;
+    broker.noteConsumed("/", "q", "id-0");
+    expect(broker.consumed).toHaveLength(1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a broker with no other member keeps no consumed ids", () => {
   const dir = mkdtempSync(join(tmpdir(), "qf-qseen-solo-"));
   const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
