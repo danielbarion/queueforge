@@ -232,19 +232,17 @@ async function publishSlow(this: Broker, input: {
       continue;
     }
     waits.push(
-      this.cluster!.call(home, "enqueue", {
+      this.cluster!.callBytes(home, "enqueue", {
         vhost: input.vhost,
         queue: names[0],
         queues: names,
-        body: Buffer.from(src.body).toString("base64"),
         exchange: src.exchange,
         routingKey: src.routingKey,
         headers: src.headers,
-        propRaw: Buffer.from(src.propRaw).toString("base64"),
         persistent: src.persistent,
         priority: src.priority,
         expiration: src.expiration,
-      }).then(
+      }, src.body, src.propRaw).then(
         () => true,
         () => {
           throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
@@ -295,18 +293,16 @@ export async function enqueue(this: Broker,
   if (q.argsParsed.queueType === "stream" && q.raftGroup) return this.enqueueStreamRaft(q, src);
   if (!this.isLocalHome(q.home)) {
     try {
-      await this.cluster!.call(q.home!, "enqueue", {
+      await this.cluster!.callBytes(q.home!, "enqueue", {
         vhost,
         queue: name,
-        body: Buffer.from(src.body).toString("base64"),
         exchange: src.exchange,
         routingKey: src.routingKey,
         headers: src.headers,
-        propRaw: Buffer.from(src.propRaw).toString("base64"),
         persistent: src.persistent,
         priority: src.priority,
         expiration: src.expiration,
-      });
+      }, src.body, src.propRaw);
       return true;
     } catch (err) {
       throw new ChanError(541, `INTERNAL_ERROR - queue home is unavailable`);

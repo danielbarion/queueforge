@@ -53,6 +53,8 @@ export class Consensus {
   private brokerOf = new Map<string, string>();
   /** Peers that take one `enqueue` for several queues (`queues`). */
   manyPeers = new Set<string>();
+  /** Peers that read binary frames (`encodeFrame` in cluster.ts). */
+  binPeers = new Set<string>();
   /** Quorum messages the quorum group holds, by `vhost\0queue\0id`, as their `enq` data. */
   live = new Map<string, Record<string, unknown>>();
 
@@ -77,8 +79,8 @@ export class Consensus {
 
   /** The `features` list for a hello payload. */
   features(): string[] {
-    if (!raftSupported()) return ["enqueue_many"];
-    const out = ["raft", "enqueue_many"];
+    if (!raftSupported()) return ["enqueue_many", "bin_frames"];
+    const out = ["raft", "enqueue_many", "bin_frames"];
     if (this.node || existsSync(join(this.dir(), "auto"))) out.push("raft_auto");
     if (this.node) out.push("raft_on");
     if (queueGroupsSupported()) out.push("raft_qgroups");
@@ -143,11 +145,19 @@ export class Consensus {
     this.node?.stop();
   }
 
-  noteFeatures(peer: string, payload: Record<string, unknown> | undefined) {
+  /**
+   * @param hello True for a hello or its reply, whose missing list means none.
+   *   Every other reply passes through here too: reading its missing list as
+   *   empty dropped the peer from `manyPeers` at the first forwarded reply.
+   */
+  noteFeatures(peer: string, payload: Record<string, unknown> | undefined, hello = true) {
     if (!peer) return;
+    if (!hello && !Array.isArray(payload?.features)) return;
     const list = Array.isArray(payload?.features) ? (payload!.features as unknown[]) : [];
     if (list.includes("enqueue_many")) this.manyPeers.add(peer);
     else this.manyPeers.delete(peer);
+    if (list.includes("bin_frames")) this.binPeers.add(peer);
+    else this.binPeers.delete(peer);
     if (!raftSupported()) return;
     if (!list.includes("raft")) return;
     this.advertised.add(peer);

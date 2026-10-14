@@ -127,6 +127,7 @@ export function decodeQuorumAppend(payload: Record<string, unknown>): QuorumAppe
     priority: Number(source.priority ?? 0),
     expiration: String(source.expiration ?? ""),
     headers: (source.headers as QuorumAppend["headers"]) ?? [],
-    propRaw: new Uint8Array(Buffer.from(String(source.propRaw ?? ""), "base64")),
+    // Bytes when the payload came in a binary cluster frame.
+    propRaw: source.propRaw instanceof Uint8Array ? source.propRaw : new Uint8Array(Buffer.from(String(source.propRaw ?? ""), "base64")),
   };
 }

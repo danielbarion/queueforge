@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import type { Broker, LiveMsg } from "./broker/index.ts";
-import { decodeQuorumAppend } from "./wire.ts";
+import { decodeQuorumAppend, QUORUM_BODY } from "./wire.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";
 import { Consensus } from "./raft/glue.ts";
@@ -10,10 +10,18 @@ import { META } from "./raft/node.ts";
 type Waiter = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  deadline: number;
+  onTimeout: () => void;
 };
 
-type Peer = { id: string; write: (line: object) => void; pending: Map<number, Waiter>; token: object };
+type Peer = {
+  id: string;
+  write: (line: object) => void;
+  /** Set when the socket takes binary frames (`encodeFrame`). */
+  writeParts?: (parts: Uint8Array[]) => void;
+  pending: Map<number, Waiter>;
+  token: object;
+};
 
 /**
  * Write pressure on one cluster socket. `full` is set when a write is left in
@@ -32,7 +40,93 @@ function drained(flow: Flow) {
   for (const wake of [...flow.wake]) wake();
 }
 
-/** Start a 3s timeout that leaves the peer map when the reply wins. */
+/** A batch this large goes out before the turn ends, so `flow.full` still trips. */
+const LINE_FLUSH = 1024 * 1024;
+
+/**
+ * Join the lines written to one socket in a turn into one write.
+ *
+ * Each cluster message was its own `socket.write`, so every forwarded copy of
+ * a fanout publish was a syscall: about half of a four-CPU child's time in the
+ * fanout-20 profile. Lines and frames keep their order; a reply still leaves
+ * in the turn that produced it.
+ */
+function lineWriter(sock: Socket, flow: Flow): (part: string | Uint8Array) => void {
+  let parts: Array<string | Uint8Array> = [];
+  let bytes = 0;
+  let binary = false;
+  let armed = false;
+  const flush = () => {
+    armed = false;
+    if (!parts.length) return;
+    const out = binary ? joinParts(parts) : parts.length === 1 ? parts[0]! : (parts as string[]).join("");
+    parts = [];
+    bytes = 0;
+    binary = false;
+    if (sock.destroyed) return;
+    if (!sock.write(out)) flow.full = true;
+  };
+  return (part) => {
+    parts.push(part);
+    bytes += part.length;
+    if (typeof part !== "string") binary = true;
+    if (bytes >= LINE_FLUSH) flush();
+    else if (!armed) {
+      armed = true;
+      queueMicrotask(flush);
+    }
+  };
+}
+
+/** One buffer from lines and frame parts; each run of lines is encoded once. */
+function joinParts(parts: Array<string | Uint8Array>): Buffer {
+  const out: Uint8Array[] = [];
+  let text: string[] = [];
+  for (const part of parts) {
+    if (typeof part === "string") {
+      text.push(part);
+      continue;
+    }
+    if (text.length) {
+      out.push(Buffer.from(text.join("")));
+      text = [];
+    }
+    out.push(part);
+  }
+  if (text.length) out.push(Buffer.from(text.join("")));
+  return Buffer.concat(out);
+}
+
+/** How long a call waits for its reply. */
+const WAIT_MS = 3000;
+/** Peers with calls in flight, for the shared timeout sweep. */
+const waiting = new Set<Peer>();
+let sweeper: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Time out every call past its deadline. All share `WAIT_MS`, so a peer's
+ * pending map is oldest first and the walk stops at the first live call.
+ */
+function sweepWaiters() {
+  const now = Date.now();
+  for (const peer of waiting) {
+    for (const [id, waiter] of peer.pending) {
+      if (waiter.deadline > now) break;
+      peer.pending.delete(id);
+      waiter.onTimeout();
+    }
+    if (peer.pending.size === 0) waiting.delete(peer);
+  }
+  if (waiting.size === 0 && sweeper) {
+    clearInterval(sweeper);
+    sweeper = null;
+  }
+}
+
+/**
+ * Wait up to 3 s for the reply. One sweep timer covers every call: a timer
+ * per forwarded publish was ~5% of a four-CPU fanout child.
+ */
 function armWaiter(
   peer: Peer,
   id: number,
@@ -40,46 +134,124 @@ function armWaiter(
   reject: (e: Error) => void,
   onTimeout: () => void,
 ) {
-  const timer = setTimeout(() => {
-    if (!peer.pending.has(id)) return;
-    peer.pending.delete(id);
-    onTimeout();
-  }, 3000);
-  peer.pending.set(id, { resolve, reject, timer });
+  peer.pending.set(id, { resolve, reject, deadline: Date.now() + WAIT_MS, onTimeout });
+  waiting.add(peer);
+  sweeper ??= setInterval(sweepWaiters, 100);
 }
 
-/** Drop the timeout. A reply that arrives after the timeout finds nothing. */
+/** A reply that arrives after the timeout finds nothing. */
 function takeWaiter(peer: Peer, id: number): Waiter | undefined {
   const waiter = peer.pending.get(id);
   if (!waiter) return undefined;
   peer.pending.delete(id);
-  clearTimeout(waiter.timer);
   return waiter;
 }
 
+/** First byte of a binary frame. A JSON line starts with `{`. */
+const FRAME = 0;
+/** Marker, then the JSON, body and properties lengths as u32 big-endian. */
+const FRAME_HEAD = 13;
+
 /**
- * Split `buf + text` into complete lines.
- *
- * The remainder is copied once. Slicing the rest of the buffer on every line
- * copied a full TCP chunk once per message, and a quorum burst made that
- * quadratic.
+ * Encode a message whose payload carries a body and properties as bytes, for a
+ * peer that advertised `bin_frames`. The JSON part is the message without them;
+ * base64 of each body and its decode were a fifth of both processes in the
+ * four-CPU fanout profile.
  */
-export function takeLines(buf: string, text: string): { rest: string; lines: string[] } {
-  const data = buf + text;
-  const lines: string[] = [];
-  let start = 0;
-  while (true) {
-    const idx = data.indexOf("\n", start);
-    if (idx < 0) break;
-    const line = data.slice(start, idx);
-    start = idx + 1;
-    if (line.trim()) lines.push(line);
+export function encodeFrame(msg: object, body: Uint8Array, propRaw: Uint8Array): Uint8Array[] {
+  const json = Buffer.from(JSON.stringify(msg));
+  const head = Buffer.allocUnsafe(FRAME_HEAD);
+  head[0] = FRAME;
+  head.writeUInt32BE(json.length, 1);
+  head.writeUInt32BE(body.length, 5);
+  head.writeUInt32BE(propRaw.length, 9);
+  return [head, json, body, propRaw];
+}
+
+function copyOf(buf: Buffer, start: number, end: number): Uint8Array {
+  const out = new Uint8Array(end - start);
+  out.set(buf.subarray(start, end));
+  return out;
+}
+
+/**
+ * Cluster socket input: JSON lines and binary frames, in arrival order.
+ *
+ * Bytes, not text: a chunk decoded on its own could split a UTF-8 character.
+ * A frame's body and properties arrive as `payload.body` and
+ * `payload.propRaw`, copied out so a stored message does not hold the chunk.
+ */
+export class FrameReader {
+  private rest: Buffer | null = null;
+  /** Chunks held while a frame of known length is still incomplete. */
+  private parts: Buffer[] = [];
+  private held = 0;
+  private need = 0;
+
+  push(chunk: Buffer, onMessage: (msg: Record<string, unknown>) => void) {
+    if (this.need > 0 && this.held + chunk.length < this.need) {
+      this.parts.push(chunk);
+      this.held += chunk.length;
+      return;
+    }
+    let buf = chunk;
+    if (this.parts.length) buf = Buffer.concat([...this.parts, chunk]);
+    else if (this.rest) buf = Buffer.concat([this.rest, chunk]);
+    this.parts = [];
+    this.rest = null;
+    this.held = 0;
+    this.need = 0;
+    let at = 0;
+    while (at < buf.length) {
+      if (buf[at] === FRAME) {
+        if (buf.length - at < FRAME_HEAD) break;
+        const jsonEnd = at + FRAME_HEAD + buf.readUInt32BE(at + 1);
+        const bodyEnd = jsonEnd + buf.readUInt32BE(at + 5);
+        const end = bodyEnd + buf.readUInt32BE(at + 9);
+        if (end > buf.length) {
+          this.need = end - at;
+          break;
+        }
+        try {
+          const msg = JSON.parse(buf.toString("utf8", at + FRAME_HEAD, jsonEnd)) as Record<string, unknown>;
+          const payload = (msg.payload ?? {}) as Record<string, unknown>;
+          const body = copyOf(buf, jsonEnd, bodyEnd);
+          payload.body = body;
+          payload.propRaw = copyOf(buf, bodyEnd, end);
+          (payload as { [QUORUM_BODY]?: Uint8Array })[QUORUM_BODY] = body;
+          msg.payload = payload;
+          onMessage(msg);
+        } catch {
+          /* ignore, as a bad line is */
+        }
+        at = end;
+        continue;
+      }
+      const nl = buf.indexOf(10, at);
+      if (nl < 0) break;
+      if (nl > at) {
+        try {
+          onMessage(JSON.parse(buf.toString("utf8", at, nl)) as Record<string, unknown>);
+        } catch {
+          /* ignore */
+        }
+      }
+      at = nl + 1;
+    }
+    if (at >= buf.length) return;
+    const tail = buf.subarray(at);
+    if (this.need > 0) {
+      this.parts = [tail];
+      this.held = tail.length;
+    } else {
+      // Copied: a short tail must not keep a whole chunk alive.
+      this.rest = Buffer.from(tail);
+    }
   }
-  return { rest: start === 0 ? data : data.slice(start), lines };
 }
 
 /** Per-connection state stored on the cluster listen socket. */
-type ClusterSock = { buf?: string; peerId?: string; token?: object };
+type ClusterSock = { peerId?: string; token?: object };
 
 export class Cluster {
   peers = new Map<string, Peer>();
@@ -131,17 +303,22 @@ export class Cluster {
     const server = createServer((socket) => {
       socket.setNoDelay(true);
       this.sockets.push(socket);
-      const st: ClusterSock = { buf: "" };
+      const st: ClusterSock = {};
       const flow = newFlow();
       socket.on("drain", () => drained(flow));
+      const send = lineWriter(socket, flow);
+      const reader = new FrameReader();
       const wrapped = {
         data: st,
         write: (s: string) => {
-          if (!socket.write(s)) flow.full = true;
+          send(s);
           return s.length;
         },
+        writeParts: (parts: Uint8Array[]) => {
+          for (const part of parts) send(part);
+        },
       };
-      socket.on("data", (data) => this.onData(wrapped, data, flow));
+      socket.on("data", (data: Buffer) => this.onData(wrapped, reader, data, flow));
       socket.on("close", () => {
         this.sockets = this.sockets.filter((open) => open !== socket);
         const id = st.peerId;
@@ -220,19 +397,19 @@ export class Cluster {
       const { host, port } = splitHost(member.addr);
       const sock = connect({ host, port });
       sock.setNoDelay(true);
-      const peerBuf = { buf: "" };
       const flow = newFlow();
       sock.on("drain", () => drained(flow));
-      const write = (line: object) => {
-        if (!sock.write(`${JSON.stringify(line)}\n`)) flow.full = true;
+      const send = lineWriter(sock, flow);
+      const write = (line: object) => send(`${JSON.stringify(line)}\n`);
+      const writeParts = (parts: Uint8Array[]) => {
+        for (const part of parts) send(part);
       };
-      sock.on("data", (chunk) =>
-        this.readLines(peerBuf, chunk.toString(), (line) => this.dispatch(member.id, line, write, undefined, flow)),
-      );
+      const reader = new FrameReader();
+      sock.on("data", (chunk: Buffer) => reader.push(chunk, (line) => this.dispatch(member.id, line, write, undefined, flow)));
       const token = {};
       sock.on("connect", () => {
         this.broker.clearQuorumStrikes(member.id);
-        const peer: Peer = { id: member.id, write, pending: new Map(), token };
+        const peer: Peer = { id: member.id, write, writeParts, pending: new Map(), token };
         this.peers.set(member.id, peer);
         this.broker.promoteIfLeader();
         write({ v: 1, op: "hello", id: 0, nodeId: self, payload: { v: 1, node: self, snapshot: this.broker.snapshot(), consumed: this.broker.consumed, features: this.consensus.features() } });
@@ -273,32 +450,20 @@ export class Cluster {
     sock.on("error", () => finish(true));
   }
 
-  private onData(socket: { data: ClusterSock; write: (s: string) => number }, data: Buffer | string, flow?: Flow) {
-    const st = socket.data;
-    if (st.buf == null) st.buf = "";
-    const text = typeof data === "string" ? data : data.toString();
-    this.readLines(st as { buf: string }, text, (line) =>
-      this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`), socket, flow),
-    );
-  }
-
-  private readLines(st: { buf: string }, text: string, onLine: (line: Record<string, unknown>) => void) {
-    const taken = takeLines(st.buf, text);
-    st.buf = taken.rest;
-    for (const line of taken.lines) {
-      try {
-        onLine(JSON.parse(line));
-      } catch {
-        /* ignore */
-      }
-    }
+  private onData(
+    socket: { data: ClusterSock; write: (s: string) => number; writeParts: (parts: Uint8Array[]) => void },
+    reader: FrameReader,
+    data: Buffer,
+    flow?: Flow,
+  ) {
+    reader.push(data, (line) => this.dispatch("", line, (obj) => socket.write(`${JSON.stringify(obj)}\n`), socket, flow));
   }
 
   private dispatch(
     fallbackId: string,
     msg: Record<string, unknown>,
     write: (obj: object) => void,
-    socket?: { data?: { peerId?: string; token?: object } },
+    socket?: { data?: { peerId?: string; token?: object }; writeParts?: (parts: Uint8Array[]) => void },
     flow?: Flow,
   ) {
     const op = String(msg.op ?? "");
@@ -307,7 +472,7 @@ export class Cluster {
       const id = String(msg.nodeId ?? payload.node ?? fallbackId);
       if (id) {
         const token = {};
-        this.peers.set(id, { id, write: (line) => write(line), pending: new Map(), token });
+        this.peers.set(id, { id, write: (line) => write(line), writeParts: socket?.writeParts, pending: new Map(), token });
         if (socket?.data) {
           socket.data.peerId = id;
           socket.data.token = token;
@@ -359,7 +524,7 @@ export class Cluster {
         /* a peer of the other implementation keeps its own files */
       }
       this.broker.applyConsumed(payload.consumed);
-      this.consensus.noteFeatures(String(msg.from ?? msg.nodeId ?? id ?? ""), payload as Record<string, unknown>);
+      this.consensus.noteFeatures(String(msg.from ?? msg.nodeId ?? id ?? ""), payload as Record<string, unknown>, Number(msg.id) === 0);
       if (Array.isArray(payload.consumed) || Number(msg.id) === 0) {
         this.broker.noteQuorumPeer(String(msg.from ?? msg.nodeId ?? ""));
       }
@@ -688,6 +853,26 @@ export class Cluster {
       });
     });
     peer.write({ op, id, payload, from: this.broker.cfg.nodeId });
+    return result;
+  }
+
+  /**
+   * `call` for a payload with a message body. A peer that reads binary frames
+   * gets the bytes as they are; any other (Rust, PHP, an older Bun) gets
+   * `body` and `propRaw` in base64, as before.
+   */
+  async callBytes(home: string, op: string, payload: Record<string, unknown>, body: Uint8Array, propRaw: Uint8Array): Promise<unknown> {
+    const peer = this.peers.get(home);
+    if (!peer?.writeParts || !this.consensus.binPeers.has(home)) {
+      return this.call(home, op, { ...payload, body: Buffer.from(body).toString("base64"), propRaw: Buffer.from(propRaw).toString("base64") });
+    }
+    const id = this.seq++;
+    const result = new Promise((resolve, reject) => {
+      armWaiter(peer, id, resolve, reject, () => {
+        reject(new ChanError(541, "INTERNAL_ERROR - queue home is unavailable"));
+      });
+    });
+    peer.writeParts(encodeFrame({ op, id, payload, from: this.broker.cfg.nodeId }, body, propRaw));
     return result;
   }
 
