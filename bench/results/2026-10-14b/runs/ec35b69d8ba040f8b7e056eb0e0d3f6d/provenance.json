@@ -1,0 +1,51 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:21edf8e6606646f27ce8d72d71dedaf464e4a5f0df9b44702f297077ea251f20",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "bbea2c5a77584f47b10e1f50150ce94b",
+  "expected_repeats": 2,
+  "harness_sha256": "78506122f89642da79008840fa3de75a44e7c43b53481ee14ab4bb1c925a2401",
+  "image_source_revision": "744846f844374847c902b5e7fd59b4342a51ef99",
+  "image_source_sha256": null,
+  "invocation_source_commit": "88ef0ab0fa29ba11069aedaa47ebe6258370ea96",
+  "invocation_source_content_sha256": "13f33cc04b93d5851767d033dc242f481dc54a8b2c5784cbe695270a2c7b5f8d",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "M bun/src/broker/topology.ts",
+    " M bun/src/config.ts",
+    " M bun/src/cores.ts",
+    " M bun/src/raft/glue.ts",
+    " M bun/src/raft/node.ts",
+    " M bun/src/supervise.ts",
+    " M docs/ci.md",
+    " M rust/crates/queueforge-core/src/queue/durable.rs",
+    " M rust/crates/queueforge-core/src/queue/stream.rs",
+    " M rust/crates/queueforge-store/src/wal/mod.rs",
+    "?? bench/results/2026-10-12/",
+    "?? bun/test/quorum-cores.test.ts"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 4,
+    "broker_cpuset": "0-3",
+    "broker_memory": "4g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "d0851ccf1136f62c04578915a7c9ec89a1bb9e23b3e6b01b3df58bf7b6bf22d7",
+  "run_id": "ec35b69d8ba040f8b7e056eb0e0d3f6d",
+  "scenario": {
+    "args": "-qp heavy-%d -qpf 1 -qpt 16 -x 64 -y 64 -f persistent -s 1024 -c 200 -q 200",
+    "id": "heavy",
+    "real": "64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each.",
+    "title": "Heavy mixed load"
+  },
+  "scenario_sha256": "307027787db9a764a435320f3e6c63440505afe6b0f7ee61c8909c8d7937549e",
+  "started_utc": "2026-10-12T12:48:41Z"
+}

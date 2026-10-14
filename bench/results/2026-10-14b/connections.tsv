@@ -1,0 +1,74 @@
+broker	cpus	mem	asked	held	connect_ms	oom	probe_ok	p50	p99	reason	usage
+rabbit	1	512m	7000	0	2127	true	0	-1.000	-1.000	oom-killed	?
+rabbit	1	512m	3500	3500	1089	false	40	0.134	0.543		454.7MiB / 512MiB 0.29%
+rabbit	1	512m	4920	0	1620	true	0	-1.000	-1.000	oom-killed	0B / 0B 0.00%
+rabbit	2	2g	20000	0	3421	true	0	-1.000	-1.000	oom-killed	0B / 0B 0.00%
+rabbit	2	2g	10000	10000	1519	false	40	0.302	0.441		1.029GiB / 2GiB 0.35%
+rabbit	2	2g	15000	15000	2663	false	40	0.290	0.613		1.421GiB / 2GiB 0.35%
+rabbit	2	2g	17500	17500	3049	false	40	0.315	0.543		1.637GiB / 2GiB 0.32%
+rabbit	2	2g	18750	18750	3359	false	40	0.297	0.686		1.93GiB / 2GiB 29.17%
+rabbit	4	4g	20000	20000	2189	false	40	0.309	0.731		2.015GiB / 4GiB 0.48%
+rabbit	4	4g	33746	33746	5323	false	40	0.317	0.672		3.45GiB / 4GiB 56.96%
+rabbit	4	4g	38795	38795	10071	false	40	0.203	0.476		3.872GiB / 4GiB 61.22%
+rabbit	4	4g	44450	0	16020	true	0	-1.000	-1.000	oom-killed	0B / 0B 0.00%
+rabbit	4	4g	41622	41622	12968	false	40	0.204	0.533		3.579GiB / 4GiB 35.13%
+rabbit	4	8g	20000	20000	1992	false	40	0.189	0.423		1.955GiB / 8GiB 0.27%
+rabbit	4	8g	40000	40000	10487	false	40	0.309	0.543		3.612GiB / 8GiB 33.68%
+rabbit	4	8g	75304	65527	12980	false	0	-1.000	-1.000	short held=65527 refused=0 reset=25 timeout=0 other=9752 addr=0 pending=0	5.6GiB / 8GiB 50.42%
+rabbit	4	8g	57652	57652	6755	false	40	0.280	0.732		4.843GiB / 8GiB 72.38%
+rabbit	4	8g	66478	65527	8590	false	0	-1.000	-1.000	short held=65527 refused=0 reset=9 timeout=0 other=942 addr=0 pending=0	5.73GiB / 8GiB 70.71%
+rabbit	4	8g	62065	62065	7247	false	40	0.204	0.420		5.55GiB / 8GiB 57.70%
+rust	1	512m	12000	0	1610	true	0	-1.000	-1.000	oom-killed	?
+rust	1	512m	6000	6000	724	false	40	0.129	3.577		337.4MiB / 512MiB 0.13%
+rust	1	512m	8000	8000	1045	false	40	0.116	4.223		449.3MiB / 512MiB 0.11%
+rust	1	512m	9960	0	1611	true	0	-1.000	-1.000	oom-killed	?
+rust	1	512m	8980	8980	1156	false	40	0.118	4.406		503.4MiB / 512MiB 0.08%
+rust	2	2g	40000	0	10556	true	0	-1.000	-1.000	oom-killed	?
+rust	2	2g	20000	20000	2130	false	40	0.134	3.926		1.085GiB / 2GiB 0.14%
+rust	2	2g	30000	30000	4509	false	40	0.151	3.638		1.63GiB / 2GiB 0.13%
+rust	2	2g	34600	34600	7680	false	40	0.147	4.238		1.876GiB / 2GiB 0.15%
+rust	2	2g	37300	0	10570	true	0	-1.000	-1.000	oom-killed	?
+rust	4	4g	40000	40000	13705	false	40	0.157	3.804		2.165GiB / 4GiB 0.14%
+rust	4	4g	62817	62817	21058	false	40	0.151	3.420		3.41GiB / 4GiB 0.17%
+rust	4	4g	71355	71355	29818	true	40	0.153	3.886	oom-killed	3.865GiB / 4GiB 0.15%
+rust	4	4g	67086	67086	25526	false	40	0.145	3.674		3.634GiB / 4GiB 0.13%
+rust	4	8g	40000	40000	14074	false	40	0.150	3.483		2.164GiB / 8GiB 0.15%
+rust	4	8g	80000	80000	39752	false	40	0.165	4.227		4.327GiB / 8GiB 0.16%
+rust	4	8g	100000	100000	69088	false	0	-1.000	-1.000	confirms-failed	5.395GiB / 8GiB 0.18%
+rust	4	8g	90000	90000	53734	false	40	0.148	3.730		4.861GiB / 8GiB 0.16%
+rust	4	8g	95000	95000	61404	false	40	0.159	3.613		5.126GiB / 8GiB 0.14%
+php	1	512m	7000	7000	3648	false	40	0.767	2.896		64.81MiB / 512MiB 27.31%
+php	1	512m	14000	14000	15748	false	40	1.292	2.734		114.6MiB / 512MiB 27.13%
+php	1	512m	28000	28000	73016	false	40	2.023	3.020		210.9MiB / 512MiB 33.90%
+php	1	512m	56000	43235	180030	false	40	5.081	50.370	login-window	319.2MiB / 512MiB 45.69%
+php	2	2g	20000	20000	30123	false	40	2.679	20.283		159.8MiB / 2GiB 30.68%
+php	2	2g	40000	40000	151439	false	40	5.189	11.673		296.4MiB / 2GiB 50.52%
+php	2	2g	80000	44495	180013	false	40	4.973	21.217	login-window	329.7MiB / 2GiB 56.08%
+php	4	4g	20000	20000	32482	false	40	1.989	7.067		159.1MiB / 4GiB 31.70%
+php	4	4g	40000	40000	159831	false	40	4.202	5.859		298.6MiB / 4GiB 51.15%
+php	4	4g	80000	40174	180000	false	40	5.074	6.180	login-window	304.2MiB / 4GiB 46.30%
+php	4	8g	20000	20000	34485	false	40	2.302	3.552		159.5MiB / 8GiB 30.55%
+php	4	8g	40000	39726	180001	false	40	5.884	32.059	login-window	297.5MiB / 8GiB 54.89%
+bun	1	512m	54000	0	15371	true	0	-1.000	-1.000	oom-killed	?
+bun	1	512m	27000	27000	4975	false	40	0.180	7.390		253.7MiB / 512MiB 0.74%
+bun	1	512m	40500	40500	15040	false	40	0.130	4.681		357.1MiB / 512MiB 1.36%
+bun	1	512m	47250	47250	22584	true	40	0.166	7.305	oom-killed	411.8MiB / 512MiB 1.49%
+bun	1	512m	43875	43875	18497	true	40	0.168	7.613	oom-killed	385.5MiB / 512MiB 1.76%
+bun	1	512m	42187	42187	16756	false	40	0.187	5.943		372.7MiB / 512MiB 1.01%
+bun	2	2g	80000	80000	22982	false	40	0.169	3.987		962.8MiB / 2GiB 4.71%
+bun	2	2g	144644	144644	76944	true	40	0.188	4.055	oom-killed	1.655GiB / 2GiB 6.07%
+bun	2	2g	112322	112322	43974	false	40	0.184	4.144		1.319GiB / 2GiB 5.27%
+bun	2	2g	128483	128483	61604	true	40	0.158	5.974	oom-killed	1.436GiB / 2GiB 6.79%
+bun	2	2g	120402	120402	52846	false	40	0.162	3.813		1.39GiB / 2GiB 5.03%
+bun	4	4g	80000	80000	16198	false	40	0.181	4.299		1GiB / 4GiB 9.23%
+bun	4	4g	160000	160000	43269	false	40	0.206	4.288		1.813GiB / 4GiB 35.69%
+bun	4	4g	300055	0	145079	false	0	-1.000	-1.000	broker-exited:missing	?
+bun	4	4g	230027	230027	95635	false	40	0.246	6.211		2.738GiB / 4GiB 8.86%
+bun	4	4g	265041	261373	180699	false	0	-1.000	-1.000	broker-exited:missing	?
+bun	4	4g	247534	247534	129014	false	40	0.178	5.723		2.851GiB / 4GiB 13.71%
+bun	4	8g	80000	80000	15241	false	40	0.181	4.379		1.06GiB / 8GiB 6.27%
+bun	4	8g	160000	160000	46584	false	40	0.175	4.421		1.935GiB / 8GiB 8.31%
+bun	4	8g	320000	185871	180331	false	0	-1.000	-1.000	broker-exited:missing	?
+bun	4	8g	240000	240000	111162	false	40	0.172	4.337		2.689GiB / 8GiB 8.15%
+bun	4	8g	280000	0	162101	false	0	-1.000	-1.000	broker-exited:missing	?
+bun	4	8g	260000	260000	112295	false	40	0.178	3.894		3.072GiB / 8GiB 10.12%

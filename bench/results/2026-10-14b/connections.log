@@ -1,0 +1,81 @@
+04:57:24 START vm ncpu=8 mem=25159827456 mode=bun
+04:57:24 memory_swap=on
+04:57:25 CELL bun cpus=1 mem=512m n=54000 clients=2 parts=[27000, 27000]
+04:57:25 ready bun after 1s ip=172.23.0.4
+04:57:40 broker_down bun true exited
+04:57:41 PROGRESS bun cpus=1 mem=512m n=54000 held=0 connect_ms=15371 oom=true probe_ok=0 p50=-1.000 p99=-1.000 reason=oom-killed mem=?
+04:57:41 CELL bun cpus=1 mem=512m n=27000 clients=1 parts=[27000]
+04:57:41 ready bun after 1s ip=172.23.0.3
+04:57:53 PROGRESS bun cpus=1 mem=512m n=27000 held=27000 connect_ms=4975 oom=false probe_ok=40 p50=0.180 p99=7.390 reason=held mem=253.7MiB / 512MiB 0.74%
+04:57:54 CELL bun cpus=1 mem=512m n=40500 clients=1 parts=[40500]
+04:57:54 ready bun after 1s ip=172.23.0.3
+04:58:16 PROGRESS bun cpus=1 mem=512m n=40500 held=40500 connect_ms=15040 oom=false probe_ok=40 p50=0.130 p99=4.681 reason=held mem=357.1MiB / 512MiB 1.36%
+04:58:17 CELL bun cpus=1 mem=512m n=47250 clients=1 parts=[47250]
+04:58:18 ready bun after 1s ip=172.23.0.3
+04:58:47 PROGRESS bun cpus=1 mem=512m n=47250 held=47250 connect_ms=22584 oom=true probe_ok=40 p50=0.166 p99=7.305 reason=oom-killed mem=411.8MiB / 512MiB 1.49%
+04:58:48 CELL bun cpus=1 mem=512m n=43875 clients=1 parts=[43875]
+04:58:48 ready bun after 1s ip=172.23.0.3
+04:59:13 PROGRESS bun cpus=1 mem=512m n=43875 held=43875 connect_ms=18497 oom=true probe_ok=40 p50=0.168 p99=7.613 reason=oom-killed mem=385.5MiB / 512MiB 1.76%
+04:59:14 CELL bun cpus=1 mem=512m n=42187 clients=1 parts=[42187]
+04:59:15 ready bun after 1s ip=172.23.0.3
+04:59:39 PROGRESS bun cpus=1 mem=512m n=42187 held=42187 connect_ms=16756 oom=false probe_ok=40 p50=0.187 p99=5.943 reason=held mem=372.7MiB / 512MiB 1.01%
+04:59:39 MAX bun cpus=1 mem=512m n=42187 connect_ms=16756 p50=0.187 p99=5.943 usage=372.7MiB / 512MiB 1.01%
+04:59:39 CELL bun cpus=2 mem=2g n=80000 clients=2 parts=[40000, 40000]
+04:59:40 ready bun after 1s ip=172.23.0.4
+05:00:10 PROGRESS bun cpus=2 mem=2g n=80000 held=80000 connect_ms=22982 oom=false probe_ok=40 p50=0.169 p99=3.987 reason=held mem=962.8MiB / 2GiB 4.71%
+05:00:11 CELL bun cpus=2 mem=2g n=144644 clients=3 parts=[48215, 48215, 48214]
+05:00:12 ready bun after 1s ip=172.23.0.5
+05:01:36 PROGRESS bun cpus=2 mem=2g n=144644 held=144644 connect_ms=76944 oom=true probe_ok=40 p50=0.188 p99=4.055 reason=oom-killed mem=1.655GiB / 2GiB 6.07%
+05:01:38 CELL bun cpus=2 mem=2g n=112322 clients=3 parts=[37441, 37441, 37440]
+05:01:39 ready bun after 1s ip=172.23.0.5
+05:02:30 PROGRESS bun cpus=2 mem=2g n=112322 held=112322 connect_ms=43974 oom=false probe_ok=40 p50=0.184 p99=4.144 reason=held mem=1.319GiB / 2GiB 5.27%
+05:02:31 CELL bun cpus=2 mem=2g n=128483 clients=3 parts=[42828, 42828, 42827]
+05:02:32 ready bun after 1s ip=172.23.0.5
+05:03:41 PROGRESS bun cpus=2 mem=2g n=128483 held=128483 connect_ms=61604 oom=true probe_ok=40 p50=0.158 p99=5.974 reason=oom-killed mem=1.436GiB / 2GiB 6.79%
+05:03:42 CELL bun cpus=2 mem=2g n=120402 clients=3 parts=[40134, 40134, 40134]
+05:03:43 ready bun after 1s ip=172.23.0.5
+05:04:43 PROGRESS bun cpus=2 mem=2g n=120402 held=120402 connect_ms=52846 oom=false probe_ok=40 p50=0.162 p99=3.813 reason=held mem=1.39GiB / 2GiB 5.03%
+05:04:45 MAX bun cpus=2 mem=2g n=120402 connect_ms=52846 p50=0.162 p99=3.813 usage=1.39GiB / 2GiB 5.03%
+05:04:45 CELL bun cpus=4 mem=4g n=80000 clients=2 parts=[40000, 40000]
+05:04:46 ready bun after 1s ip=172.23.0.4
+05:05:10 PROGRESS bun cpus=4 mem=4g n=80000 held=80000 connect_ms=16198 oom=false probe_ok=40 p50=0.181 p99=4.299 reason=held mem=1GiB / 4GiB 9.23%
+05:05:11 CELL bun cpus=4 mem=4g n=160000 clients=4 parts=[40000, 40000, 40000, 40000]
+05:05:12 ready bun after 1s ip=172.23.0.6
+05:06:03 PROGRESS bun cpus=4 mem=4g n=160000 held=160000 connect_ms=43269 oom=false probe_ok=40 p50=0.206 p99=4.288 reason=held mem=1.813GiB / 4GiB 35.69%
+05:06:05 CELL bun cpus=4 mem=4g n=300055 clients=7 parts=[42865, 42865, 42865, 42865, 42865, 42865, 42865]
+05:06:06 ready bun after 1s ip=172.23.0.9
+05:08:31 broker_down bun false missing
+05:08:31 PROGRESS bun cpus=4 mem=4g n=300055 held=0 connect_ms=145079 oom=false probe_ok=0 p50=-1.000 p99=-1.000 reason=broker-exited:missing mem=?
+05:08:37 CELL bun cpus=4 mem=4g n=230027 clients=5 parts=[46006, 46006, 46005, 46005, 46005]
+05:08:38 ready bun after 1s ip=172.23.0.7
+05:10:21 PROGRESS bun cpus=4 mem=4g n=230027 held=230027 connect_ms=95635 oom=false probe_ok=40 p50=0.246 p99=6.211 reason=held mem=2.738GiB / 4GiB 8.86%
+05:10:25 CELL bun cpus=4 mem=4g n=265041 clients=6 parts=[44174, 44174, 44174, 44173, 44173, 44173]
+05:10:26 ready bun after 1s ip=172.23.0.8
+05:13:27 broker_down bun false missing
+05:13:27 PROGRESS bun cpus=4 mem=4g n=265041 held=261373 connect_ms=180699 oom=false probe_ok=0 p50=-1.000 p99=-1.000 reason=broker-exited:missing mem=?
+05:13:48 CELL bun cpus=4 mem=4g n=247534 clients=5 parts=[49507, 49507, 49507, 49507, 49506]
+05:13:49 ready bun after 1s ip=172.23.0.7
+05:16:06 PROGRESS bun cpus=4 mem=4g n=247534 held=247534 connect_ms=129014 oom=false probe_ok=40 p50=0.178 p99=5.723 reason=held mem=2.851GiB / 4GiB 13.71%
+05:16:10 MAX bun cpus=4 mem=4g n=247534 connect_ms=129014 p50=0.178 p99=5.723 usage=2.851GiB / 4GiB 13.71%
+05:16:10 CELL bun cpus=4 mem=8g n=80000 clients=2 parts=[40000, 40000]
+05:16:11 ready bun after 1s ip=172.23.0.4
+05:16:34 PROGRESS bun cpus=4 mem=8g n=80000 held=80000 connect_ms=15241 oom=false probe_ok=40 p50=0.181 p99=4.379 reason=held mem=1.06GiB / 8GiB 6.27%
+05:16:35 CELL bun cpus=4 mem=8g n=160000 clients=4 parts=[40000, 40000, 40000, 40000]
+05:16:36 ready bun after 1s ip=172.23.0.6
+05:17:30 PROGRESS bun cpus=4 mem=8g n=160000 held=160000 connect_ms=46584 oom=false probe_ok=40 p50=0.175 p99=4.421 reason=held mem=1.935GiB / 8GiB 8.31%
+05:17:32 CELL bun cpus=4 mem=8g n=320000 clients=7 parts=[45715, 45715, 45714, 45714, 45714, 45714, 45714]
+05:17:33 ready bun after 1s ip=172.23.0.9
+05:20:34 broker_down bun false missing
+05:20:34 PROGRESS bun cpus=4 mem=8g n=320000 held=185871 connect_ms=180331 oom=false probe_ok=0 p50=-1.000 p99=-1.000 reason=broker-exited:missing mem=?
+05:20:56 CELL bun cpus=4 mem=8g n=240000 clients=5 parts=[48000, 48000, 48000, 48000, 48000]
+05:20:57 ready bun after 1s ip=172.23.0.7
+05:22:56 PROGRESS bun cpus=4 mem=8g n=240000 held=240000 connect_ms=111162 oom=false probe_ok=40 p50=0.172 p99=4.337 reason=held mem=2.689GiB / 8GiB 8.15%
+05:22:59 CELL bun cpus=4 mem=8g n=280000 clients=6 parts=[46667, 46667, 46667, 46667, 46666, 46666]
+05:23:01 ready bun after 1s ip=172.23.0.8
+05:25:43 broker_down bun false missing
+05:25:43 PROGRESS bun cpus=4 mem=8g n=280000 held=0 connect_ms=162101 oom=false probe_ok=0 p50=-1.000 p99=-1.000 reason=broker-exited:missing mem=?
+05:27:07 CELL bun cpus=4 mem=8g n=260000 clients=6 parts=[43334, 43334, 43333, 43333, 43333, 43333]
+05:27:08 ready bun after 1s ip=172.23.0.8
+05:29:08 PROGRESS bun cpus=4 mem=8g n=260000 held=260000 connect_ms=112295 oom=false probe_ok=40 p50=0.178 p99=3.894 reason=held mem=3.072GiB / 8GiB 10.12%
+05:29:12 MAX bun cpus=4 mem=8g n=260000 connect_ms=112295 p50=0.178 p99=3.894 usage=3.072GiB / 8GiB 10.12%
+05:29:12 DONE

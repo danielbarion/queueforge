@@ -109,7 +109,17 @@ queue not growing (`kept=yes`); backlog fill not slower.
 
 ### B2. Fanout on more than one core
 
-Status: open, improved. 4 CPU fanout-20 171k deliveries/s at 372 MiB in the
+Status: done (2026-10-14, `608050d`). 4 CPU fanout-20 490,062
+deliveries/s in the fifth 2026-10-14 run (`bench/results/2026-10-14b`),
+against 176,130 the run before, Rust 183,530 and RabbitMQ 161,952. Every
+reply passed through the hello's feature handling, and a reply without a
+feature list removed the peer from `manyPeers`, so after the first forwarded
+reply each copy went in its own call; now only a hello or its reply sets
+features. Cluster socket writes of one turn are one write, a forwarded
+publish to a Bun peer is a binary frame (feature `bin_frames`; Rust and PHP
+still get base64 JSON), and one sweep times out calls.
+
+Earlier: open, improved. 4 CPU fanout-20 171k deliveries/s at 372 MiB in the
 2026-10-12c run (`BENCHMARK.md`, "Bun re-measured (2026-10-13)"); 169k at 379 MiB on 2026-10-13. It had
 grown to 2 GiB: a message forwarded to one queue on another process got the
 id `""`, so every such message in that queue shared it and its rows were never
@@ -286,7 +296,7 @@ host.
 
 ### B13. Refused confirms in one load cell (2026-10-13)
 
-Status: likeliest cause fixed (2026-10-14), not confirmed; watch the next runs.
+Status: done (2026-10-14, `329e53c`); see the last paragraph.
 In the fourth 2026-10-13 run (`bench/results/2026-10-14`) the 4
 CPU / 8 GiB spread cell failed before its measure: the broker refused the
 confirms of 2,048 publishes (16 queues × the 128-confirm flush window) and a
@@ -316,6 +326,18 @@ the chunk itself while the worker still zero-filled it, which can erase
 confirmed records (`bun/test/fast-log.stall.test.ts` loses one that way). The
 load harness now keeps the whole broker log of a failed cell, or one with
 refused confirms, as `cells/<cell>.broker.log`.
+
+The cause (`329e53c`): a rotation that hands the old chunk to the sync worker
+stored its fd in PREVIOUS before the new chunk's fd was in FD. A worker
+already in its loop synced and closed PREVIOUS, then read FD while it still
+held that closed fd; `fdatasync` failed with EBADF, FAILED latched, every
+batch on the worker reported a failed sync, and the store refused their
+confirms. With the harness's docker flags (one pinned core) and rotations a
+little more frequent, the 1 MiB cell stalled in 3 of 3 runs with "EBADF ...
+fdatasync" from the worker, and in 0 of 4 after. The same review found that
+a chunk holding an unsynced batch could be removed once an earlier delete
+batch synced, losing that insert (`f3f7b08`). The fifth run's load sweep
+read 0 refused confirms in every cell.
 
 ### B6. Peak memory and latency vary between runs
 
@@ -542,6 +564,14 @@ scenario matrix.
 
 Move finished items here: id, date, what changed, before → after. A/B numbers are
 Docker, PerfTest 2.25, 1 CPU / 1 GiB unless noted; captures in `/tmp/qf-ab/coco/`.
+
+- **B2, B13 and Bun quorum** (2026-10-14; numbers in BENCHMARK.md, "Bun
+  re-measured, fifth run"). Cluster forwards (4 CPU broadcast 176k → 490k
+  deliveries/s); quorum leaders keep shallow queues whole (1 CPU quorum 91k →
+  102k, 4 CPU 76k → 83k); durable log: no 5 s give-up on its workers, no
+  removal of a chunk with an unsynced batch, and the hand-off fd race behind
+  B13. Dropped after an A/B: two chunks of lookahead and unlinks on the thread
+  pool (no rate gained, ~30 MiB more page cache).
 
 - **Bun resources** (2026-10-13, B11, not one item; numbers in BENCHMARK.md,
   "Bun resource changes after the third run"). Log chunks only on processes
