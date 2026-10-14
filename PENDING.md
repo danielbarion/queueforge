@@ -526,7 +526,12 @@ The fill is 60k. Only 76,200 of 300,000 messages were received in the recorded
 Status: done for single node (Cortex Code, 2026-10-11); see Done. Multi-node
 failure behaviour was not re-measured. 2026-10-14: the PHP suite, cores mode
 included, passes 38/38 with metadata answered after every worker applied it
-(see "PHP parity" in Done); no multi-node failure run yet.
+(see "PHP parity" in Done). `php/test/quorum-failover.test.php` (new, as
+`bun/test/quorum-failover.test.ts`): three PHP nodes with Raft, 100 confirmed
+quorum publishes, kill -9 of the queue's leader (read from the persisted
+votes), then the two left confirm 50 more and deliver all 100 first-round
+bodies once; 6/6 runs, about 11 s each. Throughput during a failover is not
+measured.
 
 Evidence: quorum 589 msg/s, stream 791 msg/s at 1 CPU (RabbitMQ 26.7k for both).
 
