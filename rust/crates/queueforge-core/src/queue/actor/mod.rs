@@ -169,6 +169,10 @@ struct DepthGauges {
     rabbit_unacked: metrics::Gauge,
     rabbit_total: metrics::Gauge,
     rabbit_consumers: metrics::Gauge,
+    /// `queueforge_deliver_total` and `queueforge_ack_total` for this queue.
+    /// A `counter!` per message built and hashed both label strings.
+    deliver_total: metrics::Counter,
+    ack_total: metrics::Counter,
 }
 
 /// Take one command already sitting in a mailbox, external first.

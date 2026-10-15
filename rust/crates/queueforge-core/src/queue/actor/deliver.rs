@@ -58,10 +58,8 @@ impl QueueState {
     ///
     /// The handles are built once. A pipelined confirm used to allocate a fresh
     /// label set on every enqueue, delivery, and ack.
-    pub(super) fn update_gauges(&mut self) {
-        let ready = self.ready.len() as f64;
-        let unacked = self.unacked.len() as f64;
-        let consumers = self.consumers.len() as f64;
+    /// This queue's metric handles, registered on first use.
+    pub(super) fn queue_metrics(&mut self) -> &DepthGauges {
         if self.depth_gauges.is_none() {
             let queue = self.key.name.to_string();
             let vhost = self.key.vhost.to_string();
@@ -93,15 +91,29 @@ impl QueueState {
                 ),
                 rabbit_consumers: metrics::gauge!(
                     "rabbitmq_queue_consumers",
+                    "vhost" => vhost.clone(),
+                    "queue" => queue.clone()
+                ),
+                deliver_total: metrics::counter!(
+                    "queueforge_deliver_total",
+                    "vhost" => vhost.clone(),
+                    "queue" => queue.clone()
+                ),
+                ack_total: metrics::counter!(
+                    "queueforge_ack_total",
                     "vhost" => vhost,
                     "queue" => queue
                 ),
             });
         }
-        let gauges = self
-            .depth_gauges
-            .as_ref()
-            .expect("depth gauges are installed above");
+        self.depth_gauges.as_ref().expect("metric handles are installed above")
+    }
+
+    pub(super) fn update_gauges(&mut self) {
+        let ready = self.ready.len() as f64;
+        let unacked = self.unacked.len() as f64;
+        let consumers = self.consumers.len() as f64;
+        let gauges = self.queue_metrics();
         gauges.ready.set(ready);
         gauges.unacked.set(unacked);
         gauges.rabbit_ready.set(ready);
@@ -261,12 +273,7 @@ impl QueueState {
             }
         }
 
-        metrics::counter!(
-            "queueforge_deliver_total",
-            "vhost" => self.key.vhost.to_string(),
-            "queue" => self.key.name.to_string()
-        )
-        .increment(1);
+        self.queue_metrics().deliver_total.increment(1);
         crate::prom::message_delivered_consume(no_ack);
         if redelivered {
             crate::prom::message_redelivered();
@@ -304,12 +311,7 @@ impl QueueState {
             },
         );
         self.update_gauges();
-        metrics::counter!(
-            "queueforge_deliver_total",
-            "vhost" => self.key.vhost.to_string(),
-            "queue" => self.key.name.to_string()
-        )
-        .increment(1);
+        self.queue_metrics().deliver_total.increment(1);
         crate::prom::message_delivered_consume(no_ack);
         if redelivered {
             crate::prom::message_redelivered();
@@ -338,12 +340,7 @@ impl QueueState {
         }
         let remaining = self.ready.len() as u32;
         self.update_gauges();
-        metrics::counter!(
-            "queueforge_deliver_total",
-            "vhost" => self.key.vhost.to_string(),
-            "queue" => self.key.name.to_string()
-        )
-        .increment(1);
+        self.queue_metrics().deliver_total.increment(1);
         crate::prom::message_delivered_get(no_ack);
         if redelivered {
             crate::prom::message_redelivered();

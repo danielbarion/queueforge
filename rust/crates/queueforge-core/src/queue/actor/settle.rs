@@ -24,12 +24,7 @@ impl QueueState {
         let message_id = entry.message.message.message_id.clone();
         self.mem_release(entry.message.message.tracked_bytes());
         self.note_acked_offset(entry.message.offset);
-        metrics::counter!(
-            "queueforge_ack_total",
-            "vhost" => self.key.vhost.to_string(),
-            "queue" => self.key.name.to_string()
-        )
-        .increment(1);
+        self.queue_metrics().ack_total.increment(1);
         crate::prom::message_acked();
         self.update_gauges();
         message_id

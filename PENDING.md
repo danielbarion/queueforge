@@ -135,6 +135,10 @@ Measured in A/Bs, not yet in the published tables:
   half the CPU idle. 4 CPU: routing-64 124,551 → 216,719 msg/s (CPU 166% →
   294%, confirm p50 9.9 → 4.9 ms), fanout-20 +15%; 1 CPU within range. A
   process-wide `syncfs` group commit was slower in every cell and was dropped.
+- Rust per-message costs: the queue actor caches its deliver and ack counter
+  handles (a `counter!` per message built and hashed two label strings), and
+  a connection reads the clock once per drained read instead of per frame.
+  1 CPU: telemetry 203,241 → 218,120, work-queue, routing-64, fanout-20 +5%.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
