@@ -226,7 +226,13 @@ final class Server
                 }
             }
             $left = $this->nextSync - microtime(true);
-            $wait = $this->broker->waiting === [] ? 1.0 : max(0.001, $left);
+            // With confirms waiting, a select that finds nothing to read for
+            // 1 ms commits them (the idle pass below). Publishers whose
+            // confirm windows are full send nothing until then, and waiting
+            // out the interval capped work-queue at one window per 10 ms
+            // tick: 36k msg/s at half the CPU. A busy loop keeps reading and
+            // still batches on the interval.
+            $wait = $this->broker->waiting === [] ? 1.0 : min(0.001, max(0.0005, $left));
             $wait = min($wait, max(0.001, $this->nextSweep - microtime(true)));
             // Consensus and chained metadata callbacks need ticks even without socket activity.
             if ($this->extras?->cluster->raftEnabled()) $wait = min($wait, 0.01);

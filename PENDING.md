@@ -139,6 +139,10 @@ Measured in A/Bs, not yet in the published tables:
   handles (a `counter!` per message built and hashed two label strings), and
   a connection reads the clock once per drained read instead of per frame.
   1 CPU: telemetry 203,241 → 218,120, work-queue, routing-64, fanout-20 +5%.
+- PHP: with confirms waiting, the loop selects for at most 1 ms and a pass
+  that reads nothing commits them; it used to sleep to the 10 ms interval,
+  so publishers with full windows waited a tick per batch. 1 CPU work-queue
+  36,108 → 54,787 msg/s (CPU 50% → 73%); latency cells within range.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
