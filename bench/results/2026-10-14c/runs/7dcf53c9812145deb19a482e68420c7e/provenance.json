@@ -1,0 +1,43 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:c95c01b0f9d74978416699d3db925ed7376786a3ddbd9b24dca54455b7dfe5c2",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "45ba5c94dceb47a6b23d2f6b390f553d",
+  "expected_repeats": 2,
+  "harness_sha256": "d8157e99e592cba17e1a44453c64b8f328242ead0c543b2b7608a15467fc95d3",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "90340fd0fddb605240697a61553b4e56cafb194d",
+  "invocation_source_content_sha256": "3f5d6b63756018133bfc78cbc9b4264dcd6c7c2084d71a87110ec6c65118370b",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-14c/"
+  ],
+  "repeat_ordinal": 2,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "7dcf53c9812145deb19a482e68420c7e",
+  "scenario": {
+    "args": "-qp svc-%d -qpf 1 -qpt 500 -x 500 -y 500 -f persistent -s 512 -c 10 -q 10 -r 10",
+    "id": "many-queues",
+    "rate": 5000,
+    "real": "Many small services: 500 queues, each with its own producer at 10 msg/s and its own consumer.",
+    "seconds": 50,
+    "title": "500 queues, 1,000 connections",
+    "warm": 20
+  },
+  "scenario_sha256": "ce0a241e6f0cf2209ca374ea14347f462e6a62502f7007f2a8f8e2f98c14b7d6",
+  "started_utc": "2026-10-15T02:21:12Z"
+}

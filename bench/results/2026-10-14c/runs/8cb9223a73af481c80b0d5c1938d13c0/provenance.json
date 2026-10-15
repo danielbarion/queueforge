@@ -1,0 +1,40 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:c95c01b0f9d74978416699d3db925ed7376786a3ddbd9b24dca54455b7dfe5c2",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "45ba5c94dceb47a6b23d2f6b390f553d",
+  "expected_repeats": 2,
+  "harness_sha256": "d8157e99e592cba17e1a44453c64b8f328242ead0c543b2b7608a15467fc95d3",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "90340fd0fddb605240697a61553b4e56cafb194d",
+  "invocation_source_content_sha256": "3f5d6b63756018133bfc78cbc9b4264dcd6c7c2084d71a87110ec6c65118370b",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-14c/"
+  ],
+  "repeat_ordinal": 2,
+  "resources": {
+    "broker_cpus": 4,
+    "broker_cpuset": "0-3",
+    "broker_memory": "4g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "d0851ccf1136f62c04578915a7c9ec89a1bb9e23b3e6b01b3df58bf7b6bf22d7",
+  "run_id": "8cb9223a73af481c80b0d5c1938d13c0",
+  "scenario": {
+    "args": "-t fanout -e events -qp events-%d -qpf 1 -qpt 20 -x 1 -y 20 -f persistent -s 512 -c 100 -q 100",
+    "id": "fanout-20",
+    "real": "Domain events on a fanout exchange, each copied to 20 durable subscriber queues.",
+    "title": "Broadcast to 20 services"
+  },
+  "scenario_sha256": "d8af471d0247e91a967352114b71c1d664ca0d6af714c4cf442f5c2e7aa8425d",
+  "started_utc": "2026-10-15T02:33:48Z"
+}
