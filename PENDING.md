@@ -193,17 +193,14 @@ Where: the cores supervisor (`bun/src/main.ts`, `bun/src/supervise.ts`) and
 
 ### B10. Quorum in cores mode pays for a Raft group of one
 
-Status: open, needs a design. With one process per core (2 CPU or more), each
-quorum queue is a single-voter Raft group on a sibling process
-(`siblingsOnly`, `soloQueueGroup`). A publish writes a JSON entry with a
-base64 body to the group's log (`enqueueQuorumRaft`, `stringify`,
-`encodeRecords`, `crc32`, an `fsyncSync` on that log) and the message again to
-the queue's store. 2 CPU (2026-10-15, broker on 2 CPUs, client on 2 others):
-quorum 83,811 msg/s against work-queue 201,992; 4 CPU published 86,567, below
-1 CPU 129,627. A one-voter group could skip the Raft entry and use the
-queue's own log as its durable copy, as a lone broker's quorum queue now does,
-but recovery, failover and membership change (B3's rules in
-`docs/bun-scaling.md`) have to be designed and tested for it first.
+Status: done 2026-10-15 (design and rules in `docs/bun-scaling.md`, B10). A
+persistent publish to a one-voter group on its voter skips the Raft log; the
+queue's store row, fsynced before the confirm, is the durable copy, and its
+ack proposes no `drop`. Transient publishes and multi-voter groups are
+unchanged. 2 CPU (broker on 2 CPUs, client on 2 others, three pairs,
+medians): quorum 88,134 to 159,557 msg/s, p99 12.75 to 10.12 ms; work-queue
+194,225 to 201,493. The published 2 and 4 CPU quorum cells change at the next
+full run.
 
 ### B5. Large messages: CPU per byte
 

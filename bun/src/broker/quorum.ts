@@ -9,7 +9,7 @@ import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
-import { QUORUM, type Group } from "../raft/node.ts";
+import { QUORUM, STORE_ONLY_PREFIX, soloVoter, type Group } from "../raft/node.ts";
 import { durableMajority, selectQuorumPeers, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
@@ -158,6 +158,24 @@ export async function enqueueQuorum(this: Broker,
 export async function enqueueQuorumRaft(this: Broker, q: QueueLive, src: Parameters<Broker["enqueueQuorum"]>[1]): Promise<boolean> {
   const consensus = this.cluster!.consensus;
   const node = consensus.node!;
+  // This process is the group's only voter: the queue's store row, fsynced
+  // before the confirm, is the copy a majority of one needs. Only a
+  // persistent body has a row, so a transient one still goes through the log.
+  if (src.persistent && this.soloLocal(q)) {
+    const id = `${STORE_ONLY_PREFIX}${this.cfg.nodeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const gate = { hold: true };
+    if (!this.enqueueLocal(q, { ...src, id, confirmGate: gate }, 0)) return false;
+    try {
+      await this.store.whenDurable();
+    } catch {
+      this.dropLocal(q.vhost, q.name, id);
+      this.pump(q);
+      return false;
+    }
+    gate.hold = false;
+    this.pump(q);
+    return true;
+  }
   const qid = `q-${this.cfg.nodeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const payload = encodeQuorumAppend({
     vhost: q.vhost,
@@ -350,6 +368,9 @@ export function clearQuorumStrikes(this: Broker, id: string) {
  */
 export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promise<boolean> {
   const node = this.cluster?.consensus?.node;
+  // Never in the log, so there is nothing to drop there: deleting its store
+  // row, which the settle already did, is the whole drop.
+  if (id.startsWith(STORE_ONLY_PREFIX)) return true;
   if (node) {
     // Committed before the body is written (docs/raft.md, section 6).
     return node.propose(quorumGroupOf(q), "drop", { vhost: q.vhost, queue: q.name, ids: [id] }).then(
@@ -542,6 +563,11 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
  * id leaves it once every member accepted its drop and made its delete durable
  * (`queueForget`).
  */
+/** Raft runs and this process is the only voter of `q`'s group (sibling workers). */
+export function soloLocal(this: Broker, q: QueueLive): boolean {
+  return !!this.cluster?.consensus?.node && soloVoter(quorumGroupOf(q)) === this.cfg.nodeId;
+}
+
 /** No other member configured: every quorum queue here is its only copy. */
 export function quorumAlone(this: Broker): boolean {
   return !this.cfg.members.some((m) => m.id !== this.cfg.nodeId);
@@ -600,6 +626,7 @@ Broker.prototype.applyForget = applyForget;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
 Broker.prototype.quorumAlone = quorumAlone;
+Broker.prototype.soloLocal = soloLocal;
 Broker.prototype.applyConsumed = applyConsumed;
 
 declare module "./class.ts" {
@@ -625,6 +652,7 @@ declare module "./class.ts" {
     dropLocal: typeof dropLocal;
     noteConsumed: typeof noteConsumed;
     quorumAlone: typeof quorumAlone;
+    soloLocal: typeof soloLocal;
     applyConsumed: typeof applyConsumed;
   }
 }

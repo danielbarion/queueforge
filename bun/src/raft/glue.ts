@@ -15,9 +15,10 @@
 import { existsSync, fsyncSync, mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { Broker } from "../broker/index.ts";
+import type { LiveMsg, QueueLive } from "../broker/model.ts";
 import { decodeQuorumAppend, quorumAppendKey } from "../wire.ts";
 import type { Entry, Msg } from "./core.ts";
-import { META, QUORUM, RaftNode, queueGroup, soloQueueGroup, type Group } from "./node.ts";
+import { META, QUORUM, RaftNode, STORE_ONLY_PREFIX, queueGroup, soloQueueGroup, type Group } from "./node.ts";
 
 export function raftSupported() {
   return process.env.QUEUEFORGE_RAFT !== "0";
@@ -333,9 +334,20 @@ export class Consensus {
       if (!this.holds(group, key)) continue;
       this.live.delete(key);
     }
+    // Store-only bodies were never in the log, so no snapshot holds them:
+    // they stay where they are, after the snapshot's messages.
+    const kept: Array<{ q: QueueLive; ready: LiveMsg[]; replicas: LiveMsg[]; unacked: LiveMsg[] }> = [];
     for (const q of this.broker.queues.values()) {
       if (q.argsParsed.queueType !== "quorum" || (q.raftGroup || QUORUM) !== group) continue;
-      const bodies = [...q.ready.extract(() => true), ...q.replicas.values(), ...q.unacked.values()];
+      const own = (m: LiveMsg) => m.id.startsWith(STORE_ONLY_PREFIX);
+      const keep = {
+        q,
+        ready: q.ready.extract(own),
+        replicas: [...q.replicas.values()].filter(own),
+        unacked: [...q.unacked.values()].filter(own),
+      };
+      kept.push(keep);
+      const bodies = [...q.ready.extract(() => true), ...q.replicas.values(), ...q.unacked.values()].filter((m) => !own(m));
       q.replicas.clear();
       q.unacked.clear();
       const rows = new Set<number>();
@@ -345,6 +357,11 @@ export class Consensus {
       for (const row of rows) this.broker.store.deleteMessage(row);
     }
     for (const data of messages.values()) this.applyEnq(data);
+    for (const { q, ready, replicas, unacked } of kept) {
+      for (const m of ready) q.ready.push(m);
+      for (const m of replicas) q.replicas.set(m.id, m);
+      for (const m of unacked) q.unacked.set(m.id, m);
+    }
   }
 
   private state(group: Group): unknown {

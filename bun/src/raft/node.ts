@@ -49,6 +49,18 @@ export function soloQueueGroup(owner: string, vhost: string, name: string): Grou
 /** Group name to its voter. A broker has few queue groups, and they are looked up on every message. */
 const soloVoters = new Map<Group, string | null>();
 
+/**
+ * Id prefix of a quorum message whose only durable copy is the queue's store.
+ *
+ * A group whose one voter is this process (`soloQueueGroup`) gains nothing
+ * from a Raft entry per message: the entry was a second, JSON-encoded copy of
+ * the body, fsynced to its own log, next to the store row. Such messages skip
+ * the log (`enqueueQuorumRaft`), so no `drop` follows them and a snapshot
+ * install leaves them in place. Bodies committed through the log keep their
+ * `q-` ids and their drops. See `docs/bun-scaling.md`, B10.
+ */
+export const STORE_ONLY_PREFIX = "ql-";
+
 /** The only voter of a `soloQueueGroup`, or null for any other group. */
 export function soloVoter(group: Group): string | null {
   if (!group.startsWith("q:s1:")) return null;

@@ -1,6 +1,6 @@
 # Bun queue ownership and scaling
 
-Design notes for `PENDING.md` B3 and B4, 2026-10-09. These options preserve the
+Design notes for `PENDING.md` B3 and B4, 2026-10-09, and B10, 2026-10-15. These options preserve the
 distinction between one physical broker and several independent replica nodes.
 This document is not a benchmark result; measured numbers are in `PENDING.md`
 and `BENCHMARK.md`.
@@ -57,3 +57,45 @@ durability work, but source inspection alone does not establish which limits a
 single queue. B5/B7 measurements should decide whether work can move safely
 off the actor. Preserve AMQP ordering and confirm semantics in all comparisons;
 multi-queue throughput is not evidence of single-queue scalability.
+
+## B10: store-only messages in a one-voter quorum group
+
+On sibling workers (B3) a quorum queue's group has one voter, its owner. Each
+persistent publish still appended a Raft `enq` entry, a JSON head and the
+body, CRC'd and fsynced to the group's `log.bin`, and also wrote the body to
+the queue's store. Each ack proposed a `drop` entry. With one voter, a
+majority is the owner's own disk, and the store row, fsynced before the
+confirm, already is that copy.
+
+A persistent publish to a queue whose group's only voter is this process
+(`soloLocal`) therefore skips the log. The body is stored with a `ql-` id
+(`STORE_ONLY_PREFIX`), held from delivery until the store's fsync
+(`store.whenDurable`), and confirmed then, as a classic durable queue. Its
+settle deletes the store row and proposes nothing (`quorumDrop`). A
+transient publish has no store row, so it still commits through the log.
+
+Rules that keep this safe:
+
+- Scope is the group's voter list, which the solo group's name fixes. Groups
+  with more than one voter, the shared `quorum` group and mixed Rust or PHP
+  clusters never take this path, and a solo group's membership cannot change.
+- Bodies committed through the log before the upgrade keep `q-` ids. Their
+  drops still go through the log, so a replay cannot bring back an acked one.
+- Recovery reads `ql-` bodies from the store, as it reads every quorum body,
+  and `promoteIfLeader` makes them ready. The log replay skips them.
+- A snapshot covers only log-committed bodies. Its install, which runs on
+  every start of a group that has one, keeps `ql-` bodies and their rows and
+  puts them back after the snapshot's messages. Before this rule a restart
+  after any snapshot dropped every store-only body
+  (`test/quorum-solo-store.test.ts` fails without it).
+- Purge and queue deletion already delete store rows.
+- Order is publish order for one kind of message. During an upgrade, bodies
+  replayed from an old snapshot come before newer store-only ones.
+
+Measured 2026-10-15, broker on 2 CPUs and client on 2 others, 4-CPU VM, three
+interleaved pairs (medians): quorum 88,134 to 159,557 msg/s, p99 12.75 to
+10.12 ms; work-queue 194,225 to 201,493, unchanged within noise.
+
+Proof: `test/quorum-solo-store.test.ts` (kill -9 of every worker after a group
+snapshot keeps exactly the confirmed, unacked bodies, in order) and
+`test/quorum-cores.test.ts`.

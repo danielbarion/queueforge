@@ -3,6 +3,7 @@
  *
  * These functions are the Broker methods. Loading this file installs them.
  */
+import { STORE_ONLY_PREFIX } from "../raft/node.ts";
 import { Broker } from "./class.ts";
 import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
 import type { Config } from "../config.ts";
@@ -196,7 +197,8 @@ export function pump(this: Broker, q: QueueLive) {
     // again. An auto-ack delivery is settled now, so it is dropped first.
     // With no other member there is no copy to claim: the claim round trip
     // per message made a lone quorum queue deliver one message per turn.
-    if (q.argsParsed.queueType === "quorum" && ((!chosen.noAck && this.cluster?.consensus?.node) || this.quorumAlone())) {
+    // A store-only body (see STORE_ONLY_PREFIX) has no drop to commit either.
+    if (q.argsParsed.queueType === "quorum" && ((!chosen.noAck && this.cluster?.consensus?.node) || this.quorumAlone() || msg.id.startsWith(STORE_ONLY_PREFIX))) {
       this.noteDeliver(false, msg.redelivered);
       if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
       chosen.deliver(msg);
