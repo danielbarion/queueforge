@@ -147,6 +147,9 @@ Measured in A/Bs, not yet in the published tables:
   binding per publish (13% of routing-64). 1 CPU: routing-64 +14%, fanout-20
   +13%, heavy +8%. Writing each connection once per pump instead of per
   delivery was tried with it: routing +15% but fanout-20 -15%, not kept.
+- Harness: `QF_BENCH_VM_CPUS=4` keeps Docker Desktop at 4 CPUs / 12 GiB for
+  A/B runs while the machine is in use (broker CPU 0, client 1-2, sidecars 3;
+  1 CPU cells only). Published runs keep the 8 CPU default.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
@@ -173,6 +176,12 @@ nothing at 64 KiB and costs worker CPU that shares the core at 1 CPU, so it
 was not kept. Hypothesis, not proven: the main heap now allocates one buffer
 less per batch, so its GC runs later and keeps more released bodies.
 
+Tried 2026-10-15, 2 CPU broker: leaving publisher connections on the process
+that accepted them, forwarding each publish to the queue's home, instead of
+moving the connection there. work-queue 202,387 → 183,090 msg/s at more CPU
+(119% → 157%), routing-64 196,962 → 178,820; heavy mixed. A forwarded publish
+costs the home more than parsing it. Not kept.
+
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
 
@@ -181,6 +190,20 @@ Rust 197,010 at 3 CPUs. The 16-queue shape does scale (522,318 at 4 CPU).
 
 Where: the cores supervisor (`bun/src/main.ts`, `bun/src/supervise.ts`) and
 `queueHome()`.
+
+### B10. Quorum in cores mode pays for a Raft group of one
+
+Status: open, needs a design. With one process per core (2 CPU or more), each
+quorum queue is a single-voter Raft group on a sibling process
+(`siblingsOnly`, `soloQueueGroup`). A publish writes a JSON entry with a
+base64 body to the group's log (`enqueueQuorumRaft`, `stringify`,
+`encodeRecords`, `crc32`, an `fsyncSync` on that log) and the message again to
+the queue's store. 2 CPU (2026-10-15, broker on 2 CPUs, client on 2 others):
+quorum 83,811 msg/s against work-queue 201,992; 4 CPU published 86,567, below
+1 CPU 129,627. A one-voter group could skip the Raft entry and use the
+queue's own log as its durable copy, as a lone broker's quorum queue now does,
+but recovery, failover and membership change (B3's rules in
+`docs/bun-scaling.md`) have to be designed and tested for it first.
 
 ### B5. Large messages: CPU per byte
 

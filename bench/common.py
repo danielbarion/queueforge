@@ -157,27 +157,35 @@ def _sidecars(cpuset):
         log(f"sidecar {name} cpuset={cpuset}")
 
 
+# QF_BENCH_VM_CPUS=4 keeps Docker Desktop at 4 CPUs and 12 GiB, for A/B runs
+# while the machine is in use: CPU 0 broker, 1-2 client, 3 sidecars. Only
+# 1 CPU cells fit. The default, 8 CPUs, is what published runs use.
+BIG_CPUS = 4 if os.environ.get("QF_BENCH_VM_CPUS") == "4" else 8
+
+
 def ensure_big():
-    """Docker Desktop at 8 CPUs and 24 GiB. CPUs 0-3 broker, 4-6 client, 7 sidecars."""
+    """Docker Desktop at 8 CPUs and 24 GiB (CPUs 0-3 broker, 4-6 client, 7 sidecars), or 4 CPUs, see BIG_CPUS."""
     if not docker_up():
         raise RuntimeError("docker is down")
     log(f"PROGRESS vm before ncpu={vm_ncpu} mem={vm_mem}")
-    if vm_ncpu >= 8 and vm_mem >= 20 * 1024 ** 3:
-        _sidecars("7")
+    side = "7" if BIG_CPUS == 8 else "3"
+    want_mem = 24576 if BIG_CPUS == 8 else 12288
+    if vm_ncpu == BIG_CPUS and vm_mem >= (want_mem - 4096) * 1024 ** 2:
+        _sidecars(side)
         return
     saved = _running_names()
     open(os.path.join(OUT_DIR, "was-running.txt"), "w").write("\n".join(saved) + "\n")
     if not _quit_docker():
         raise RuntimeError("docker did not quit")
-    _set_vm(8, 24576)
+    _set_vm(BIG_CPUS, want_mem)
     if not _start_docker():
         raise RuntimeError("docker did not start large")
     for name in saved:
         run(["docker", "start", name], check=False, timeout=40)
-    if not docker_up() or vm_ncpu < 8 or vm_mem < 20 * 1024 ** 3:
-        raise RuntimeError(f"vm still small ncpu={vm_ncpu} mem={vm_mem}")
+    if not docker_up() or vm_ncpu != BIG_CPUS or vm_mem < (want_mem - 4096) * 1024 ** 2:
+        raise RuntimeError(f"vm not resized ncpu={vm_ncpu} mem={vm_mem}")
     log(f"PROGRESS vm large ncpu={vm_ncpu} mem={vm_mem}")
-    _sidecars("7")
+    _sidecars(side)
 
 
 def restore_small():
@@ -219,6 +227,8 @@ def client_cpus():
     """cpuset and --cpus for the client container."""
     if vm_ncpu >= 8:
         return "4-6", "3"
+    if vm_ncpu >= 4:
+        return "1-2", "2"
     return "1", "1"
 
 
