@@ -194,7 +194,9 @@ export function pump(this: Broker, q: QueueLive) {
     // settled, as RabbitMQ's quorum queues keep it: a leader that dies with
     // it unacked leaves it on the followers, and the next leader delivers it
     // again. An auto-ack delivery is settled now, so it is dropped first.
-    if (q.argsParsed.queueType === "quorum" && !chosen.noAck && this.cluster?.consensus?.node) {
+    // With no other member there is no copy to claim: the claim round trip
+    // per message made a lone quorum queue deliver one message per turn.
+    if (q.argsParsed.queueType === "quorum" && ((!chosen.noAck && this.cluster?.consensus?.node) || this.quorumAlone())) {
       this.noteDeliver(false, msg.redelivered);
       if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
       chosen.deliver(msg);

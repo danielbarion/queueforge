@@ -39,6 +39,24 @@ export async function enqueueQuorum(this: Broker,
   },
 ): Promise<boolean> {
   if (this.cluster?.consensus?.node) return this.enqueueQuorumRaft(q, src);
+  // A lone broker has no copy to make: the replica payload and peer promise
+  // were most of a 1 CPU quorum publish. The local fsync is the whole durable
+  // majority of one, and the body stays gated until it lands.
+  if (this.quorumAlone()) {
+    const id = `q-${this.cfg.nodeId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const confirmGate = { hold: true };
+    if (!this.enqueueLocal(q, { ...src, id, confirmGate }, 0)) return false;
+    try {
+      await this.store.whenDurable();
+    } catch {
+      this.dropLocal(q.vhost, q.name, id);
+      this.pump(q);
+      return false;
+    }
+    confirmGate.hold = false;
+    this.pump(q);
+    return true;
+  }
   const members = this.cfg.members.length || 1;
   const majority = Math.floor(members / 2) + 1;
   const peers = this.cluster ? this.cluster.peerIds().filter((id) => id !== this.cfg.nodeId) : [];
@@ -524,6 +542,11 @@ export function dropLocal(this: Broker, vhost: string, queue: string, id: string
  * id leaves it once every member accepted its drop and made its delete durable
  * (`queueForget`).
  */
+/** No other member configured: every quorum queue here is its only copy. */
+export function quorumAlone(this: Broker): boolean {
+  return !this.cfg.members.some((m) => m.id !== this.cfg.nodeId);
+}
+
 export function noteConsumed(this: Broker, vhost: string, queue: string, id: string) {
   if (!id) return;
   // The list tells peers which copies to drop. With no other member, or only
@@ -576,6 +599,7 @@ Broker.prototype.runForgetRound = runForgetRound;
 Broker.prototype.applyForget = applyForget;
 Broker.prototype.dropLocal = dropLocal;
 Broker.prototype.noteConsumed = noteConsumed;
+Broker.prototype.quorumAlone = quorumAlone;
 Broker.prototype.applyConsumed = applyConsumed;
 
 declare module "./class.ts" {
@@ -600,6 +624,7 @@ declare module "./class.ts" {
     applyForget: typeof applyForget;
     dropLocal: typeof dropLocal;
     noteConsumed: typeof noteConsumed;
+    quorumAlone: typeof quorumAlone;
     applyConsumed: typeof applyConsumed;
   }
 }
