@@ -205,6 +205,7 @@ where
         // RabbitMQ keeps the socket until the client's close-ok, so the client
         // reads the close instead of a reset. Frames before it are dropped.
         let mut seen = std::mem::take(&mut self.read_buf);
+        seen.drain(..std::mem::take(&mut self.read_pos).min(seen.len()));
         let mut tmp = [0u8; 4096];
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {

@@ -113,6 +113,9 @@ fn next_consumer_session() -> u64 {
     }
 }
 
+/// Below this many staged bytes a delivery wake yields once before its write; see the delivery arm in `run`.
+const COALESCE_YIELD_BYTES: usize = 16 * 1024;
+
 /// Tunable connection parameters offered by the server.
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionParams {
@@ -200,6 +203,7 @@ pub async fn handle_connection<S>(
         params,
         state: State::ExpectHeader,
         read_buf: Vec::with_capacity(4096),
+        read_pos: 0,
         // Pre-tune: allow the server default frame size as the receive budget.
         frame_max: params.frame_max.max(FRAME_MAX_FLOOR),
         channel_max: params.channel_max,
@@ -370,6 +374,11 @@ struct Connection<'a, S> {
     params: ConnectionParams,
     state: State,
     read_buf: Vec<u8>,
+    /// Bytes at the front of `read_buf` already decoded. Dropped once per
+    /// [`Self::drain_buffer`]: a `drain` per frame moved the whole rest of the
+    /// buffer three times per publish, quadratic in the bytes a busy
+    /// publisher had queued.
+    read_pos: usize,
     frame_max: u32,
     channel_max: u16,
     heartbeat: u16,
@@ -726,11 +735,20 @@ where
                     // The wake delivers one message. Drain the rest in the same write.
                     self.begin_coalesce();
                     let forwarded = self.forward_delivery(delivery).await;
-                    let rest = if forwarded.is_ok() {
+                    let mut rest = if forwarded.is_ok() {
                         self.flush_deliveries().await
                     } else {
                         forwarded
                     };
+                    // A busy runtime woke this task for one or two messages:
+                    // a send per wake was a third of the 1 CPU telemetry
+                    // profile. Let the queue actors run once more and take
+                    // what they add in the same write. An idle broker finds
+                    // nothing new, so a lone delivery only pays the yield.
+                    if rest.is_ok() && !self.outbound.is_empty() && self.outbound.len() < COALESCE_YIELD_BYTES {
+                        tokio::task::yield_now().await;
+                        rest = self.flush_deliveries().await;
+                    }
                     let ended = self.end_coalesce().await;
                     if let Err(e) = rest.and(ended) {
                         debug!(peer = %self.peer, error = %e, "delivery forward failed");
@@ -898,6 +916,10 @@ where
         // coalesce writes that burst once when the buffered frames are done.
         self.begin_coalesce();
         let step = self.drain_buffered_frames().await;
+        if self.read_pos > 0 {
+            let used = std::mem::take(&mut self.read_pos).min(self.read_buf.len());
+            self.read_buf.drain(..used);
+        }
         let ended = self.end_coalesce().await;
         match step {
             Ok(step) => ended.map(|()| step),
@@ -912,12 +934,12 @@ where
             }
 
             if self.state == State::ExpectHeader {
-                if self.read_buf.len() < PROTOCOL_HEADER_LEN {
+                if self.read_buf.len() - self.read_pos < PROTOCOL_HEADER_LEN {
                     return Ok(Step::Continue);
                 }
-                match decode_protocol_header(&self.read_buf) {
+                match decode_protocol_header(&self.read_buf[self.read_pos..]) {
                     Ok(n) => {
-                        self.read_buf.drain(..n);
+                        self.read_pos += n;
                         self.last_recv = Instant::now();
                         self.send_connection_start().await?;
                         self.state = State::StartSent;
@@ -944,9 +966,9 @@ where
 
             // Decode one frame.
             let max_payload = self.max_payload();
-            match Frame::decode_with_limit(&self.read_buf, max_payload) {
+            match Frame::decode_with_limit(&self.read_buf[self.read_pos..], max_payload) {
                 Ok((frame, n)) => {
-                    self.read_buf.drain(..n);
+                    self.read_pos += n;
                     self.last_recv = Instant::now();
                     match self.handle_frame(frame).await? {
                         Step::Done => return Ok(Step::Done),

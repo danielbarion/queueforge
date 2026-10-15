@@ -8,7 +8,7 @@ use queueforge_core::{ExchangeRouter, QueueRegistry};
 use queueforge_mgmt::ConnectionTracker as MgmtConnectionTracker;
 use queueforge_store::MetadataStore;
 use rustls::ServerConfig;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -106,6 +106,29 @@ pub async fn start_amqp_listener(
     .await
 }
 
+/// Receive buffer of every AMQP connection (Linux doubles it). Accepted
+/// sockets inherit it from the listener. Left to auto-tuning, a publisher's
+/// socket grew to about 27 MB of unread publishes while the broker parsed
+/// more slowly than unconfirmed publishers sent: every message then waited
+/// about 2 s in the kernel, with the broker's own queue empty. A bounded
+/// buffer (2 MiB as Linux counts it; 256 KiB cost 1 MiB publishes 12%, 4 MiB
+/// left telemetry at 420 ms)
+/// makes TCP hold the publisher back much sooner, as
+/// RabbitMQ's credit flow does.
+const AMQP_RECV_BUFFER: u32 = 1024 * 1024;
+
+/// Bind and listen like `TcpListener::bind`, with [`AMQP_RECV_BUFFER`].
+fn bind_amqp(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    if let Err(e) = socket.set_recv_buffer_size(AMQP_RECV_BUFFER) {
+        warn!(error = %e, "could not bound the AMQP receive buffer");
+    }
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 /// Like [`start_amqp_listener`] with optional connection limiter and TLS.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_amqp_listener_with_limits(
@@ -119,7 +142,7 @@ pub async fn start_amqp_listener_with_limits(
     tls: Option<Arc<ServerConfig>>,
     cluster: Option<Arc<crate::cluster::Cluster>>,
 ) -> std::io::Result<AmqpListener> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = bind_amqp(addr)?;
     let local_addr = listener.local_addr()?;
     let tls_enabled = tls.is_some();
     info!(%local_addr, tls = tls_enabled, "AMQP listening");

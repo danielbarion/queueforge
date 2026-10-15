@@ -119,6 +119,16 @@ Measured in A/Bs, not yet in the published tables:
   other member, no consumed id is kept (the set grew by one per ack). 1 CPU
   quorum 90,842 → 135,402 msg/s, p99 5.1 s → 3.1 ms, anonymous 790 → 8 MiB:
   delivery now keeps up with confirms (it was "missed rate").
+- Rust: a delivery wake that staged less than 16 KiB yields once and takes
+  what the queue actors add in the same write (a send per wake was a third of
+  the 1 CPU telemetry profile); frames are parsed from an offset and the
+  consumed prefix dropped once per read (a `drain` per frame moved the rest of
+  the buffer three times per publish); AMQP sockets get a 1 MiB receive
+  buffer. Telemetry's backlog was in the kernel: unconfirmed publishers filled
+  auto-tuned receive buffers to ~27 MB each, every message waited ~2 s, and
+  the broker's queue stayed empty. 1 CPU: telemetry 91,941 → 202,949 msg/s,
+  p99 3.66 s → 123 ms; work-queue +7%, transactions 40,696 → 51,733, latency,
+  slow-consumers and many-queues within their ranges, large-1m within 1%.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
@@ -212,21 +222,6 @@ changing code.
 
 ## Rust
 
-### R5. Telemetry: per-message CPU
-
-Status: open, not profiled.
-
-Evidence: telemetry (4 producers, no confirms, transient 256 B, auto-ack)
-94,260 msg/s at 1 CPU and 175,799 at 4 CPU, with the broker at 99% and 330%
-CPU; Bun 544,774 / 479,113, RabbitMQ 104,101 / 326,615. At 1 CPU the publishers
-sent less than was delivered (85,916 sent, 94,143 received), so publishers were
-held back.
-
-Guess, to check with a profile: the per-message hops between the connection
-task, the queue actor and the consumer task (`queueforge-core/src/queue/actor`,
-`queueforge-broker/src/connection`), where Bun handles a batch per event-loop
-turn.
-
 ### R6. Routing and fanout at 4 CPU use half the cores
 
 Status: open, not profiled.
@@ -235,11 +230,6 @@ Evidence: 4 CPU routing-64 123,730 msg/s and fanout-20 183,530 deliveries/s
 at 182–204% of 400% CPU; Bun 295,157 / 490,062, RabbitMQ 139,264 on routing.
 Something makes the broker wait: lock contention, or fsyncs that serialize.
 Needs the overnight run to measure.
-
-### R8. Transactions
-
-Status: open, not profiled. 1 CPU 35,336 msg/s at 66% CPU; Bun 57,323. Partly
-waiting rather than working.
 
 ### R9. Raft compaction by entry count only
 
