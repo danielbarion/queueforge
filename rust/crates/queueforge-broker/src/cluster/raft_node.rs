@@ -74,6 +74,21 @@ pub(super) fn compact_after(group: &str) -> u64 {
     }
 }
 
+/// Applied body bytes that also compact a group. The entry count alone keeps
+/// up to 10,000 large bodies in the log; PHP's memory alarm tripped on that at
+/// 1 MiB, and Bun and PHP compact on the same budget.
+pub(super) const COMPACT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Body bytes an entry carries: its base64 body, at the top or in `message`.
+pub(super) fn entry_body_bytes(data: &Value) -> u64 {
+    let source = data.get("message").unwrap_or(data);
+    source
+        .get("body_b64")
+        .or_else(|| source.get("body"))
+        .and_then(Value::as_str)
+        .map_or(0, |b| b.len() as u64)
+}
+
 /// Who is told when an entry has been applied.
 pub(super) enum Waiter {
     /// A proposal made on this node.
@@ -1120,6 +1135,14 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_body_bytes_reads_top_level_and_nested_bodies() {
+        assert_eq!(entry_body_bytes(&json!({"body_b64": "AAAA"})), 4);
+        assert_eq!(entry_body_bytes(&json!({"message": {"body_b64": "AAAAAAAA"}})), 8);
+        assert_eq!(entry_body_bytes(&json!({"vhost": "/", "ids": ["a"]})), 0);
+        assert!(COMPACT_BYTES / 1_398_104 < compact_after("q-x"), "a 1 MiB body group compacts long before 10,000 entries");
+    }
 
     #[test]
     fn queue_groups_have_unambiguous_components() {

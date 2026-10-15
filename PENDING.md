@@ -25,7 +25,7 @@ best broker in that row.
   once a published run carries it.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-14): Bun suite 278/278, Rust 444/444, PHP 40/40 files;
+Current tree (2026-10-14): Bun suite 278/278, Rust 445/445, PHP 40/40 files;
 conformance Bun, Rust and PHP 135/135, RabbitMQ 134/135 (no delayed-message
 plugin).
 
@@ -230,12 +230,6 @@ Evidence: 4 CPU routing-64 123,730 msg/s and fanout-20 183,530 deliveries/s
 at 182–204% of 400% CPU; Bun 295,157 / 490,062, RabbitMQ 139,264 on routing.
 Something makes the broker wait: lock contention, or fsyncs that serialize.
 Needs the overnight run to measure.
-
-### R9. Raft compaction by entry count only
-
-Status: open. `compact_after` in `queueforge-broker/src/cluster/raft_apply.rs`
-counts entries only, so a group of large bodies holds up to 10,000 of them. PHP
-(`2b4c899`) and Bun now also compact after 64 MiB of applied bodies.
 
 ---
 

@@ -20,7 +20,7 @@ use super::net::promote_replicas;
 use super::qgroups;
 use super::quorum::local_forget;
 use super::raft::Entry;
-use super::raft_node::{compact_after, Applied, RaftNode, Waiter, META, QUORUM};
+use super::raft_node::{compact_after, entry_body_bytes, Applied, RaftNode, Waiter, COMPACT_BYTES, META, QUORUM};
 use super::state::{apply_snapshot, remember_consumed, snapshot};
 use super::wire::{json_str, replica_key};
 use super::{decode_quorum_append, Inner};
@@ -31,7 +31,8 @@ pub(super) async fn run_applier(
     node: Arc<RaftNode>,
     mut rx: mpsc::UnboundedReceiver<Applied>,
 ) {
-    let mut since_snapshot: HashMap<String, u64> = HashMap::new();
+    // Entries and body bytes applied per group since its last snapshot.
+    let mut since_snapshot: HashMap<String, (u64, u64)> = HashMap::new();
     while let Some(item) = rx.recv().await {
         match item {
             Applied::Entries { group, items } => {
@@ -72,17 +73,19 @@ pub(super) async fn run_applier(
                         }
                         None => {}
                     }
-                    let n = since_snapshot.entry(group.clone()).or_insert(0);
+                    let (n, bytes) = since_snapshot.entry(group.clone()).or_insert((0, 0));
                     *n += 1;
-                    if *n >= compact_after(&group) {
+                    *bytes += entry_body_bytes(&entry.data);
+                    if *n >= compact_after(&group) || *bytes >= COMPACT_BYTES {
                         *n = 0;
+                        *bytes = 0;
                         node.compact(&group, entry.index, group_state(&inner, &group).await);
                     }
                 }
             }
             Applied::Install { group, snapshot } => {
                 info!(group, index = snapshot.index, "raft snapshot installed");
-                since_snapshot.insert(group.clone(), 0);
+                since_snapshot.insert(group.clone(), (0, 0));
                 loop {
                     let result = if group == META {
                         apply_snapshot(&inner, &snapshot.state).await;
