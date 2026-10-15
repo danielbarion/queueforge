@@ -25,7 +25,7 @@ best broker in that row.
   once a published run carries it.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-14): Bun suite 275/275, Rust 444/444, PHP 40/40 files;
+Current tree (2026-10-14): Bun suite 276/276, Rust 444/444, PHP 40/40 files;
 conformance Bun, Rust and PHP 135/135, RabbitMQ 134/135 (no delayed-message
 plugin).
 

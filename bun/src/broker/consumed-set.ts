@@ -69,6 +69,12 @@ export class ConsumedSet {
     return true;
   }
 
+  /** Whether the id is held. */
+  has(vhost: string, queue: string, id: string): boolean {
+    const [a, b] = hashKey(vhost, queue, id);
+    return this.locate(a, b) >= 0;
+  }
+
   /** Forget an id. The space is reclaimed once deleted records outnumber live ones. */
   delete(vhost: string, queue: string, id: string): boolean {
     const [a, b] = hashKey(vhost, queue, id);

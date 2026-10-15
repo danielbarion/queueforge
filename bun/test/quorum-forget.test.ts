@@ -212,3 +212,18 @@ test("an acked quorum delivery is forgotten once every member dropped it at the 
     f.close();
   }
 });
+
+test("a lone broker queues nothing to forget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-qforget-lone-"));
+  const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 50);
+  const broker = new Broker(cfg("a", [], dir), store);
+  try {
+    for (let n = 0; n < 1000; n++) expect(await broker.dropOnPeers("/", "q", `m${n}`)).toEqual({ ok: true, complete: true });
+    expect(broker.forgetQueue.length).toBe(0);
+    expect(broker.forgetTimer).toBeNull();
+    expect(broker.consumed).toEqual([]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

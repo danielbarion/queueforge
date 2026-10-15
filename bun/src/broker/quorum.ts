@@ -342,6 +342,8 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
   return (await this.dropOnPeers(q.vhost, q.name, id)).ok;
 }
 
+const DROP_DONE = { ok: true, complete: true } as const;
+
 /**
  * Send `quorum_drop` to every connected peer (without Raft).
  *
@@ -353,6 +355,8 @@ export async function quorumDrop(this: Broker, q: QueueLive, id: string): Promis
  */
 export async function dropOnPeers(this: Broker, vhost: string, queue: string, id: string, except: readonly string[] = [], forget = true): Promise<{ ok: boolean; complete: boolean }> {
   const self = this.cfg.nodeId;
+  // A lone broker: nobody to ask, nothing listed (every delivery comes here).
+  if (!this.cfg.members.some((m) => m.id !== self)) return DROP_DONE;
   const peers = this.cluster?.peerIds().filter((peer) => peer !== self && !except.includes(peer)) ?? [];
   const reached = new Set(peers);
   const everyone = this.cfg.members.every((m) => m.id === self || except.includes(m.id) || reached.has(m.id));
@@ -366,7 +370,12 @@ export async function dropOnPeers(this: Broker, vhost: string, queue: string, id
   );
   const ok = results.every(Boolean);
   const complete = ok && everyone;
-  if (complete && forget) this.queueForget(vhost, queue, id);
+  // Listed here too, so the forget round also clears the receivers' copies of
+  // the id (a no-ack claim or a nack drop was never listed).
+  if (complete && forget) {
+    this.noteConsumed(vhost, queue, id);
+    this.queueForget(vhost, queue, id);
+  }
   return { ok, complete };
 }
 
@@ -384,6 +393,9 @@ const FORGET_EVERY_MS = 1000;
  * drop that copy at its hello, so nothing forgets the id before then.
  */
 export function queueForget(this: Broker, vhost: string, queue: string, id: string) {
+  // Only an id this broker lists: a lone broker, Raft and sibling workers list
+  // none, and queueing every delivery there grew without bound.
+  if (!this.consumedIds.has(vhost, queue, id)) return;
   this.forgetQueue.push({ vhost, queue, id });
   this.armForgetRound();
 }
