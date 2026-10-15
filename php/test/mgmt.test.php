@@ -236,6 +236,25 @@ Harness::guard('management routes', static function () use ($port): void {
     Harness::eq('delete our own exchange', 204, http($port, 'DELETE', '/api/exchanges/%2F/mx', null, $cookie)['status']);
 });
 
+Harness::guard('list paging', static function () use ($port): void {
+    $cookie = session($port);
+    foreach (['pg-c', 'pg-a', 'pg-b', 'other'] as $name) {
+        http($port, 'PUT', "/api/queues/%2F/$name", ['durable' => true], $cookie);
+    }
+    $all = http($port, 'GET', '/api/queues/%2F', null, $cookie)['json'];
+    Harness::eq('no paging parameters return every queue', true, count($all['items']) >= 4 && !isset($all['next_cursor']));
+    $first = http($port, 'GET', '/api/queues/%2F?name_prefix=pg-&page_size=2', null, $cookie)['json'];
+    Harness::eq('a page is sorted and sized', ['pg-a', 'pg-b'], array_column($first['items'], 'name'));
+    Harness::eq('total_count counts the filtered queues', 3, $first['total_count']);
+    Harness::eq('the cursor is the last name', 'pg-b', $first['next_cursor'] ?? null);
+    $second = http($port, 'GET', '/api/queues/%2F?name_prefix=pg-&page_size=2&cursor=pg-b', null, $cookie)['json'];
+    Harness::eq('the next page continues after it', ['pg-c'], array_column($second['items'], 'name'));
+    Harness::eq('the last page has no cursor', false, isset($second['next_cursor']));
+    foreach (['pg-c', 'pg-a', 'pg-b', 'other'] as $name) {
+        http($port, 'DELETE', "/api/queues/%2F/$name", null, $cookie);
+    }
+});
+
 Harness::guard('users and permissions', static function () use ($port): void {
     $cookie = session($port);
     Harness::eq('create a user', 201, http($port, 'PUT', '/api/users/alice', [

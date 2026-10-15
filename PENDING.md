@@ -261,12 +261,6 @@ Status: open. 1 CPU quorum 8,414 msg/s; Bun 101,988. Each publish is a JSON
 Raft entry with a base64 body, encoded and persisted in PHP code
 (`php/src/RaftNode.php`, `php/src/Broker.php`).
 
-### P12. List endpoints are not paged
-
-Status: open, small. The management list endpoints return the
-`{items, total_count}` shape but ignore `page` and `page_size`. The console and
-`php/test/mgmt.test.php` read that shape.
-
 ---
 
 ## Benchmark harness

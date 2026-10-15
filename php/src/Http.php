@@ -48,6 +48,9 @@ final class Http
         $method = $parts[0] ?? '';
         $target = $parts[1] ?? '/';
         $path = explode('?', $target, 2)[0];
+        $query = [];
+        parse_str(explode('?', $target, 2)[1] ?? '', $query);
+        $this->query = $query;
         $body = substr($raw, strlen($head) + 4);
         $cookie = '';
         $basic = null;
@@ -323,11 +326,11 @@ final class Http
                 if (!$broker->hasVhostAccess($user, $name)) continue;
                 $items[] = ['name' => $name];
             }
-            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
+            return $this->page($items);
         }
         if ($method === 'GET' && preg_match('#^/api/queues/([^/]+)$#', $path, $m) === 1) {
             $items = array_values(array_filter($this->queueItems($broker), fn($row) => $broker->resourceAllowed($user, $broker->vhost, 'read', $row['name'])));
-            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
+            return $this->page($items);
         }
         if ($method === 'PUT' && preg_match('#^/api/queues/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $json = json_decode($body, true);
@@ -341,7 +344,7 @@ final class Http
                 if (!$broker->resourceAllowed($user, $broker->vhost, 'read', $name)) continue;
                 $items[] = ['name' => $name, 'vhost' => $broker->vhost, 'type' => $type, 'durable' => true, 'auto_delete' => false, 'internal' => false];
             }
-            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
+            return $this->page($items);
         }
         if ($method === 'PUT' && preg_match('#^/api/exchanges/([^/]+)/([^/]+)$#', $path, $m) === 1) {
             $json = json_decode($body, true);
@@ -365,7 +368,8 @@ final class Http
                     'properties_key' => $row['key'],
                 ];
             }
-            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
+            // Source, destination and key: one source has many bindings.
+            return $this->page($items, static fn(array $b): string => $b['source'] . "\0" . $b['destination'] . "\0" . $b['routing_key']);
         }
         if ($method === 'POST' && preg_match('#^/api/bindings/([^/]+)$#', $path) === 1) {
             $json = json_decode($body, true);
@@ -1191,6 +1195,40 @@ final class Http
     }
 
     /** @param list<string> $extra */
+    /** @var array<array-key, mixed> Query parameters of the request being handled. */
+    private array $query = [];
+
+    /**
+     * A list response. Without `page_size`, `cursor` or `name_prefix` every
+     * item is returned, as before. With them it pages like Rust: items sorted
+     * by `$key`, a name prefix filter, an exclusive cursor (the last key of
+     * the previous page), at most 500 per page (100 by default), and
+     * `next_cursor` while more remain. `total_count` counts the filtered items.
+     * The key must be unique per item, or a page boundary would skip rows.
+     *
+     * @param list<array<string, mixed>> $items
+     * @param null|callable(array<string, mixed>): string $key Defaults to `name`.
+     */
+    private function page(array $items, ?callable $key = null): string
+    {
+        $q = $this->query;
+        if (!isset($q['page_size']) && !isset($q['cursor']) && !isset($q['name_prefix'])) {
+            return $this->json(200, ['items' => $items, 'total_count' => count($items)]);
+        }
+        $name = $key ?? static fn(array $row): string => (string) ($row['name'] ?? '');
+        $prefix = is_string($q['name_prefix'] ?? null) ? $q['name_prefix'] : '';
+        if ($prefix !== '') $items = array_values(array_filter($items, fn($row) => str_starts_with($name($row), $prefix)));
+        usort($items, fn($a, $b) => strcmp($name($a), $name($b)));
+        $total = count($items);
+        $cursor = is_string($q['cursor'] ?? null) ? $q['cursor'] : '';
+        if ($cursor !== '') $items = array_values(array_filter($items, fn($row) => strcmp($name($row), $cursor) > 0));
+        $size = is_numeric($q['page_size'] ?? null) ? max(1, min(500, (int) $q['page_size'])) : 100;
+        $out = ['items' => array_slice($items, 0, $size)];
+        if (count($items) > $size) $out['next_cursor'] = $name($out['items'][$size - 1]);
+        $out['total_count'] = $total;
+        return $this->json(200, $out);
+    }
+
     private function json(int $code, mixed $body, array $extra = []): string
     {
         $encoded = json_encode($body);
