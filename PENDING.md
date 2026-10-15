@@ -174,11 +174,28 @@ cannot show what only many cores bring:
 - the supervisor accepts every connection and hands it to a worker over IPC;
 - NUMA, network-card queues and memory bandwidth on a large host.
 
-Next: measure the idle and per-connection cost of 32-128 workers on a small
-host (`QUEUEFORGE_CORES=64` in a 4-CPU container shows the coordination cost
-with no load), then run `bench/scaling.py` on a 32-64 vCPU cloud host to
-check the projection. The metadata group could keep a few voters and make
-the other workers learners.
+Fixed 2026-10-15: from 9 workers on, worker metrics ports (fixed at 25680 +
+i) took the cluster ports of workers 8 and up (25672 + i). Those workers
+exited with EADDRINUSE and restarted in a loop, and `weak-t` with 12
+workers delivered nothing. Metrics ports now follow the last cluster port
+(`childPlans`); 12 workers on 6 CPUs: 1,923,602 msg/s. No benchmark or test
+had used more than 8 workers.
+
+Idle cost after that fix (`QUEUEFORGE_CORES=N` in a 4-CPU container, no
+clients, 20 s after start):
+
+| workers | ready after | idle CPU | anonymous memory | established TCP |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | <1 s | 6% | 120 MiB | 12 |
+| 8 | <1 s | 11% | 237 MiB | 56 |
+| 16 | 1 s | 20% | 463 MiB | 240 |
+| 32 | 1 s | 39% | 870 MiB | 992 |
+| 64 | 2 s | 62% | 1,781 MiB | 4,032 |
+
+About 1% of a core and 28 MiB per worker; links grow as N(N-1). Next: run
+`bench/scaling.py` on a 32-64 vCPU cloud host to check the projection, and
+measure the metadata group with 64 voters under declare and bind churn. The
+group could keep a few voters and make the other workers learners.
 
 ### B14. GC helper threads competed across workers
 

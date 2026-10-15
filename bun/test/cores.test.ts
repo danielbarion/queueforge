@@ -36,6 +36,16 @@ describe("child plans", () => {
       { id: "n3", addr: "127.0.0.1:25675" },
     ]);
   });
+
+  // Fixed metrics ports from 25680 collided with cluster ports from 9 workers on.
+  test("no two listeners share a port, at any worker count", () => {
+    for (const cores of [1, 4, 8, 9, 16, 64, 128]) {
+      const plans = childPlans(cores, "/var/lib/queueforge");
+      const ports = plans.flatMap((plan) => [plan.clusterListen, plan.metricsListen].map((a) => Number(a.split(":")[1])));
+      expect(new Set(ports).size).toBe(2 * cores);
+      expect(ports.every((port) => port !== 5672 && port !== 15672 && port < 65536)).toBe(true);
+    }
+  });
 });
 
 describe("worker environment", () => {

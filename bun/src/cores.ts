@@ -57,7 +57,13 @@ export function coresFromCgroup(cpuMax: string | null, cpuset: string | null): n
   return 1;
 }
 
-/** One plan per granted core. Cluster ports start at 25672 and do not overlap AMQP. */
+/**
+ * One plan per granted core. Cluster ports are 25672 + i; metrics ports follow
+ * the last of them, 25672 + cores + i, so the two ranges never meet. Metrics
+ * at a fixed 25680 + i took worker 8's cluster port from worker 0 and so on,
+ * and from 9 workers on the later ones exited with EADDRINUSE and restarted
+ * in a loop (PENDING.md B16).
+ */
 export function childPlans(cores: number, dataDir: string): ChildPlan[] {
   const plans: ChildPlan[] = [];
   const root = dataDir.replace(/\/$/, "");
@@ -67,7 +73,7 @@ export function childPlans(cores: number, dataDir: string): ChildPlan[] {
       id,
       dataDir: `${root}/${id}`,
       clusterListen: `127.0.0.1:${25672 + i}`,
-      metricsListen: `127.0.0.1:${25680 + i}`,
+      metricsListen: `127.0.0.1:${25672 + cores + i}`,
       bindMgmt: i === 0,
     });
   }
