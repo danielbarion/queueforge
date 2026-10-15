@@ -85,8 +85,12 @@ work-queue 165,339 → 203,577 msg/s, fanout-20 +9%. Three cells fell and are
 not explained yet: 4 CPU heavy 302k → 238k msg/s (−21%), 4 CPU quorum −28%
 (the 14b repeats spread 55k–85k), 1 CPU transactions −18% (a 1 CPU A/B of
 `90340fd` against `f0a8d6e` showed both images bimodal, 37k–65k, so not B4).
-Next: a 4 CPU A/B of heavy and quorum across `881a2eb` (the 14b code),
-`7ef8c7c`, `eb4760e` and `90340fd`, overnight. The connections step stopped at
+A 4 CPU A/B of heavy and quorum across `881a2eb` (the 14b code), `7ef8c7c`,
+`eb4760e` and `90340fd`, three interleaved repeats (2026-10-15), found no
+regression: heavy 255,931 / 224,975 / 267,083 / 284,198 msg/s, quorum 64,756 /
+70,776 / 65,676 / 70,225, every image spreading as widely (quorum 28k–85k,
+heavy 180k–332k). The 14c drops were the host. It did show what B4 costs:
+4 CPU heavy anonymous memory 466–511 → 616–878 MiB, p99 about 140 → 180 ms. The connections step stopped at
 4 CPU / 8 GiB when Docker's engine returned 500s; 4 GiB held 249,768 (14b
 247,534).
 
@@ -126,9 +130,15 @@ record crcs and writes the batch from a shared staging ring (1 MiB, growing to
 8 MiB for large batches); rotations queue a close job for the old chunk. A/B
 at 1 CPU, three repeats: large-64k 532.2 → 572.0 MB/s, large-1m 618.1 →
 891.4, work-queue 136,850 → 143,903 msg/s, latency-1k p99 within the range.
-Cost: anonymous memory +23–44 MiB in work-queue and large-64k (the ring, and
-the worker's per-record views; quorum unchanged). Not measured at 2–4 CPU,
-where the gain should show: needs the overnight run.
+4 CPU (2026-10-15, against the 14b code): heavy +11%, quorum +8%, work-queue
+165,339 → 203,577 in the 14c run. Cost: anonymous memory +23–44 MiB per cell
+at 1 CPU, +150 MiB in 4 CPU heavy (four processes). Not the ring: untouched
+SharedArrayBuffer pages are not resident, and a variant that never stages has
+the same increase in the container. Locally the extra is in the staging path;
+a table crc in the worker (no view per record) saved ~10 MiB in work-queue but
+nothing at 64 KiB and costs worker CPU that shares the core at 1 CPU, so it
+was not kept. Hypothesis, not proven: the main heap now allocates one buffer
+less per batch, so its GC runs later and keeps more released bodies.
 
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
