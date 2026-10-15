@@ -122,6 +122,17 @@ final class Broker
     /** @var list<array{exchange:string,queue:string,key:string,args:list<array{0:string,1:string}>}> */
     public array $bindings = [];
     /**
+     * `bindings` by exchange, and the array it was built from. Holding that
+     * array makes any write to `bindings` copy it, so `!==` on an unchanged
+     * list is a pointer compare. A publish filtered every binding through a
+     * closure: 13% of the routing-64 profile with 64 queues bound.
+     *
+     * @var array<string, list<array{exchange:string,queue:string,key:string,args:list<array{0:string,1:string}>}>>
+     */
+    private array $bindIndex = [];
+    /** @var list<array{exchange:string,queue:string,key:string,args:list<array{0:string,1:string}>}> */
+    private array $bindIndexFrom = [];
+    /**
      * Exchange-to-exchange links. In memory only, so they do not survive a
      * restart. Bun keeps them the same way (bun/src/broker/topology.ts:255).
      *
@@ -1172,6 +1183,17 @@ final class Broker
         return array_values(array_unique($out));
     }
 
+    /** @return list<array{exchange:string,queue:string,key:string,args:list<array{0:string,1:string}>}> */
+    private function bindingsOf(string $exchange): array
+    {
+        if ($this->bindIndexFrom !== $this->bindings) {
+            $this->bindIndex = [];
+            foreach ($this->bindings as $row) $this->bindIndex[$row['exchange']][] = $row;
+            $this->bindIndexFrom = $this->bindings;
+        }
+        return $this->bindIndex[$exchange] ?? [];
+    }
+
     /** @param list<array{0:string,1:string}> $headers
      *  @return list<string> */
     private function routeDirect(string $exchange, string $key, array $headers = []): array
@@ -1182,10 +1204,7 @@ final class Broker
         if (!isset($this->exchanges[$exchange])) {
             return [];
         }
-        $rows = array_values(array_filter(
-            $this->bindings,
-            static fn (array $row): bool => $row['exchange'] === $exchange,
-        ));
+        $rows = $this->bindingsOf($exchange);
         $kind = $this->exchanges[$exchange];
         if ($kind === 'x-delayed-message') $kind = $this->exchangeRows[$exchange]['arguments']['x-delayed-type'] ?? 'direct';
         if ($kind === 'x-local-random') return $rows === [] ? [] : [$rows[random_int(0, count($rows)-1)]['queue']];

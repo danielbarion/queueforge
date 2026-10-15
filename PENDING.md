@@ -143,6 +143,10 @@ Measured in A/Bs, not yet in the published tables:
   that reads nothing commits them; it used to sleep to the 10 ms interval,
   so publishers with full windows waited a tick per batch. 1 CPU work-queue
   36,108 → 54,787 msg/s (CPU 50% → 73%); latency cells within range.
+- PHP: routing looks bindings up by exchange instead of filtering every
+  binding per publish (13% of routing-64). 1 CPU: routing-64 +14%, fanout-20
+  +13%, heavy +8%. Writing each connection once per pump instead of per
+  delivery was tried with it: routing +15% but fanout-20 -15%, not kept.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
@@ -261,9 +265,10 @@ prefetch-1 worker waits for it on every round trip.
 
 ### P11. Quorum throughput
 
-Status: open. 1 CPU quorum 8,414 msg/s; Bun 101,988. Each publish is a JSON
-Raft entry with a base64 body, encoded and persisted in PHP code
-(`php/src/RaftNode.php`, `php/src/Broker.php`).
+Status: improved, open. The voter scan read the whole Raft log on every
+proposal (76% of the profile); it now reads only new entries. 1 CPU quorum
+8,124 → 29,569 msg/s. What remains is mostly encoding each entry as JSON
+(`RaftNode::logBytes`, 12%) and socket writes (12%); Bun does 125k.
 
 ---
 

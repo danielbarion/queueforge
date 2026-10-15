@@ -177,17 +177,49 @@ final class Raft
     private ?string $votersKey = null;
     /** @var list<string> */
     private array $votersCache = [];
+    /** Newest index the last scan covered, and its term: see {@link scanVoters}. */
+    private int $scannedIndex = 0;
+    private int $scannedTerm = -1;
+    /** @var list<string>|null The newest config at or below `scannedIndex`, null when none was in the log. */
+    private ?array $scannedConfig = null;
 
-    /** @return list<string> */
+    /**
+     * The newest config in the log, else the snapshot's, else the initial set.
+     *
+     * Each proposal changes the cache key above, and a log without a config
+     * entry (a lone broker's) was walked end to end every time: 76% of PHP's
+     * quorum publish. By log matching, an entry still at `scannedIndex` with
+     * the same term means nothing at or below it changed, so only the entries
+     * after it are read. A truncation, snapshot or term change rescans.
+     *
+     * @return list<string>
+     */
     private function scanVoters(): array
     {
-        for ($i = count($this->log) - 1; $i >= 0; $i--) {
+        $from = 0;
+        $config = null;
+        $at = $this->scannedIndex - $this->snapIndex - 1;
+        if ($this->scannedIndex > $this->snapIndex && ($this->log[$at]['i'] ?? null) === $this->scannedIndex && ($this->log[$at]['term'] ?? null) === $this->scannedTerm) {
+            $from = $at + 1;
+            $config = $this->scannedConfig;
+        }
+        $count = count($this->log);
+        for ($i = $count - 1; $i >= $from; $i--) {
             $entry = $this->log[$i];
             if ($entry['kind'] === 'config' && is_array($entry['data']) && isset($entry['data']['voters']) && is_array($entry['data']['voters'])) {
-                return self::sorted(array_map('strval', $entry['data']['voters']));
+                $config = self::sorted(array_map('strval', $entry['data']['voters']));
+                break;
             }
         }
-        return $this->snapVoters !== [] ? $this->snapVoters : $this->initialVoters;
+        if ($count > 0) {
+            $this->scannedIndex = $this->log[$count - 1]['i'];
+            $this->scannedTerm = $this->log[$count - 1]['term'];
+        } else {
+            $this->scannedIndex = 0;
+            $this->scannedTerm = -1;
+        }
+        $this->scannedConfig = $config;
+        return $config ?? ($this->snapVoters !== [] ? $this->snapVoters : $this->initialVoters);
     }
 
     private function quorum(): int
