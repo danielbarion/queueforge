@@ -78,6 +78,18 @@ tool shell. Write scripts to a file and run the file.
 
 ## Waiting for the next full run
 
+2026-10-14c (Bun only, image `90340fd`, results in `bench/results/2026-10-14c/`,
+not published) against 2026-10-14b, medians of two repeats: 1 CPU large-1m
+548 → 1,064 MB/s, large-64k 527 → 856, quorum +20%, work-queue +15%; 4 CPU
+work-queue 165,339 → 203,577 msg/s, fanout-20 +9%. Three cells fell and are
+not explained yet: 4 CPU heavy 302k → 238k msg/s (−21%), 4 CPU quorum −28%
+(the 14b repeats spread 55k–85k), 1 CPU transactions −18% (a 1 CPU A/B of
+`90340fd` against `f0a8d6e` showed both images bimodal, 37k–65k, so not B4).
+Next: a 4 CPU A/B of heavy and quorum across `881a2eb` (the 14b code),
+`7ef8c7c`, `eb4760e` and `90340fd`, overnight. The connections step stopped at
+4 CPU / 8 GiB when Docker's engine returned 500s; 4 GiB held 249,768 (14b
+247,534).
+
 Measured in A/Bs, not yet in the published tables:
 
 - Bun: retired durable-log chunks are reused (`a8e3962`). 1 CPU: large-64k
