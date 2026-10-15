@@ -182,6 +182,27 @@ moving the connection there. work-queue 202,387 → 183,090 msg/s at more CPU
 (119% → 157%), routing-64 196,962 → 178,820; heavy mixed. A forwarded publish
 costs the home more than parsing it. Not kept.
 
+Tried 2026-10-15, 2 CPU broker (client on 2 others, client at ~130% of 2 CPUs,
+so not the limit): the queue's main thread runs at 92-94% of a core; its
+largest single cost is the socket write (`writeBuffered`, 18% of samples,
+24,000 writes/s of ~9.6 KB and 16 frames each). A local microbenchmark puts a
+9.6 KB write at 2.7-3.0 us through `node:net` or `fs.writeSync` on the fd and
+2.2-2.4 us through a Bun native socket: the cost is the kernel send, so a
+different socket API saves little. Three prototypes, all within noise:
+coalescing writes per event-loop turn (`setImmediate` instead of a
+microtask): work-queue 205,501 -> 196,584, routing-64 196,349 -> 190,355;
+a writer thread per process sending from a 1 MiB shared ring per connection
+(`writeSync` on the socket fd, woken by `Atomics.notify`): work-queue 183,726
+-> 184,376, routing-64 194,647 -> 188,033; the same writer polling every
+50 us instead of being woken: work-queue 177,715 -> 180,912, routing-64
+183,689 -> 182,240. The writer took the sends off the queue's thread (it ran
+at ~13% of a core), but the ring copy and the wakeups cost most of what was
+saved. None kept. Rust in the same 2 CPU setup: work-queue 203,989 at 176%
+CPU, so at 2 CPU Bun's single queue (180,000-205,000) is level with Rust;
+the gap is in the 4 CPU cell. What is left on the queue's thread is spread out
+(body copy at `finishPublish` 6%, `encodeDeliver` 8%, routing 5%, parsing),
+so no single cost is left to move.
+
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
 
