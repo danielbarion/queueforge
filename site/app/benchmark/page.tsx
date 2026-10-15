@@ -97,9 +97,8 @@ export default function BenchmarkPage() {
             QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
             batch write, or a consumer ack if that happens first, and classic does not fsync before
             the confirm. The figure below is the average across scenarios, not one of them. The
-            rows where QueueForge loses stay in the table. RabbitMQ, Rust and PHP are the 2026-10-12
-            run; Bun was measured again on 2026-10-13, after memory fixes, a faster stream path,
-            and quorum queues that scale past one core.
+            rows where QueueForge loses stay in the table. Rust, Bun and PHP are the 2026-10-15
+            run; RabbitMQ is the 2026-10-12 run, with the same image.
           </p>
         </div>
       </section>
@@ -134,9 +133,9 @@ export default function BenchmarkPage() {
             Unpaced message rate at each container in the load sweep. 16 connections is consume/s,
             the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
             The numbers are the same ones in the table further down. Bun&apos;s points are the median of
-            three 8 s measurements, run in rounds over the whole sweep; across those three, its 4 CPU
-            one-connection point ranged from 43k to 294k msg/s, so one sample could be off by 2× or
-            more. RabbitMQ, Rust and PHP are still one 8 s measurement from 2026-10-12. The
+            three 8 s measurements, run in rounds over the whole sweep, for Rust, Bun and PHP; Bun&apos;s
+            4 CPU / 8 GiB one-connection point ranged from 68k to 324k msg/s across those three, so
+            one sample could be off by 2× or more. RabbitMQ is one 8 s measurement from 2026-10-12. The
             application scenarios below repeat every cell.
           </p>
           <SizeCharts rows={loadRows} />

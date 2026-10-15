@@ -60,15 +60,15 @@ python3 bench/run.py
 ```
 
 A full run takes about 3¼ hours. Measured on 2026-10-12, with 4 brokers and 2
-repeats:
+repeats; the 2026-10-15 run of three brokers (RabbitMQ rows kept) took 3 hours 6 minutes:
 
-| Step | Time |
-| --- | ---: |
-| scenarios | 108 min |
-| connections | 64 min |
-| load | 12 min |
-| paced | 8 min |
-| build | 2.5 min |
+| Step | 2026-10-12, 4 brokers | 2026-10-15, 3 brokers |
+| --- | ---: | ---: |
+| scenarios | 108 min | 87 min |
+| connections | 64 min | 67 min |
+| load | 12 min | 26 min |
+| paced | 8 min | 5 min |
+| build | 2.5 min | 5 s (cached) |
 
 To check a change, use the quick run instead:
 

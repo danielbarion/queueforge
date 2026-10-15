@@ -217,6 +217,12 @@ stalls about once a second on Docker Desktop (the VM descheduling the vCPU);
 GC cycles are p99 5.7 ms and there is no cgroup throttling. A stall in Bun's one
 JavaScript thread delays every socket; Rust's other threads keep serving.
 
+2026-10-15, with the host disk healthy: an idle Bun broker shows 5–17 ms loop
+stalls about twice a second, and so do a bare Bun timer loop and a bare Python
+loop in the same 1 CPU container (5–11 ms about once a second). The stalls are
+the VM, not Bun's code; Rust keeps serving through them on its other threads.
+latency-10k p99 2.8 ms (Rust 0.7 ms) in the 2026-10-15 run.
+
 Where: the lone-publish path (`SOCKET_WAIT_MS`, lone mode in `driveInbound`,
 `bun/src/amqp/frames.ts`; `armLoneFlush`, `SMALL_GROUP` in `bun/src/store.ts`).
 Anything that shortens the work done per event-loop turn helps; the VM stall
