@@ -306,7 +306,12 @@ pub async fn run(
             // at 200 msg/s against a 10 ms interval. A deeper window (one
             // producer with 20 in flight) keeps the interval and its batching.
             let few = (2..=4).contains(&waiting_now) && state.wal.is_some();
-            let coalesce = waiting_now == 1 || few || (follow_up && state.pipeline_follow_up_ready());
+            // A publisher whose confirm window is full sends nothing until
+            // this fsync: 20 in flight on each of 64 queues waited out the
+            // 10 ms tick and routing-64 sat at 20 x 100 x 64 = 128k msg/s
+            // with the CPU half idle. A mailbox quiet for 1 ms syncs them.
+            let stalled = waiting_now > 4 && state.wal.is_some();
+            let coalesce = waiting_now == 1 || few || stalled || (follow_up && state.pipeline_follow_up_ready());
             let coalesce_deadline = if use_timer && interval_fsync.is_none() && coalesce {
                 if waiting_now == 1 && state.immediate_lone {
                     Some(Instant::now())
@@ -394,7 +399,7 @@ pub async fn run(
                     let waiting = state.fsync_waiters.len();
                     let learned = waiting == 1 && state.immediate_lone;
                     let first_lone = waiting == 1 && quiet;
-                    let paused_burst = follow_up && state.pipeline_follow_up_ready() && quiet;
+                    let paused_burst = ((follow_up && state.pipeline_follow_up_ready()) || waiting > 4) && quiet;
                     let few = (2..=4).contains(&waiting) && state.wal.is_some() && quiet;
                     if state.needs_group_commit_flush() && (learned || first_lone) {
                         if let Some(handle) = state.begin_lone_fsync() {

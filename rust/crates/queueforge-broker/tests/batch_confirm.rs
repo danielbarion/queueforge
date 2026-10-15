@@ -222,6 +222,9 @@ async fn pipelined_classic_confirms_share_one_fsync() {
         .subsec_nanos();
     // Ports sit below the macOS ephemeral range (49152+), so outbound dials cannot take them.
     let base = 30000 + (nanos % 400) as u16;
+    // A full confirm window leaves the mailbox quiet, and after 1 ms of that
+    // Rust syncs the batch without waiting for the 80 ms interval. One fsync
+    // still covers it, and no confirm is counted before its fsync.
     batch(
         "rust",
         base,
@@ -229,7 +232,7 @@ async fn pipelined_classic_confirms_share_one_fsync() {
         base + 200,
         24,
         80,
-        Duration::from_millis(40),
+        Duration::from_millis(0),
         Duration::from_millis(800),
         12.0,
     )

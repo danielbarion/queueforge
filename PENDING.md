@@ -129,6 +129,12 @@ Measured in A/Bs, not yet in the published tables:
   the broker's queue stayed empty. 1 CPU: telemetry 91,941 → 202,949 msg/s,
   p99 3.66 s → 123 ms; work-queue +7%, transactions 40,696 → 51,733, latency,
   slow-consumers and many-queues within their ranges, large-1m within 1%.
+- Rust R6: a queue whose confirm window is full (5+ waiters, mailbox quiet
+  for 1 ms) syncs then instead of on the 10 ms tick. Each routing-64 queue
+  synced once per tick, so the cell sat at 64 x 20 x 100 = 128k msg/s with
+  half the CPU idle. 4 CPU: routing-64 124,551 → 216,719 msg/s (CPU 166% →
+  294%, confirm p50 9.9 → 4.9 ms), fanout-20 +15%; 1 CPU within range. A
+  process-wide `syncfs` group commit was slower in every cell and was dropped.
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
@@ -221,15 +227,6 @@ changing code.
 ---
 
 ## Rust
-
-### R6. Routing and fanout at 4 CPU use half the cores
-
-Status: open, not profiled.
-
-Evidence: 4 CPU routing-64 123,730 msg/s and fanout-20 183,530 deliveries/s
-at 182–204% of 400% CPU; Bun 295,157 / 490,062, RabbitMQ 139,264 on routing.
-Something makes the broker wait: lock contention, or fsyncs that serialize.
-Needs the overnight run to measure.
 
 ---
 
