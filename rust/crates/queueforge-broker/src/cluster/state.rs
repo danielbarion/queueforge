@@ -65,7 +65,23 @@ pub(super) async fn snapshot(inner: &Inner) -> Value {
 }
 
 /// Record `message_id` as consumed on `key` in `inner`. A later snapshot must not resurrect that id on this node.
+///
+/// Only a cluster without Raft needs the set: it is what a hello tells a
+/// restarted member to drop. With no other member there is no copy to drop,
+/// and with Raft every drop is a committed entry a member that was away gets
+/// from the log or a snapshot. The set never shrinks: one entry per ack held
+/// 791 MiB after the 1 CPU quorum cell and 3 GiB at 4 CPU.
 pub(super) async fn remember_consumed(inner: &Inner, key: &QueueKey, message_id: &str) {
+    if super::consensus::node(inner).is_some() {
+        return;
+    }
+    let alone = {
+        let members = inner.members.lock().unwrap_or_else(|e| e.into_inner());
+        !members.iter().any(|m| m.id != inner.node_id)
+    };
+    if alone {
+        return;
+    }
     inner.consumed.lock().await.insert(ConsumedId {
         vhost: key.vhost.to_string(),
         queue: key.name.to_string(),

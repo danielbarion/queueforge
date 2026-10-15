@@ -170,7 +170,11 @@ where
                 .unwrap_or_else(|err| err.into_inner())
                 .queue_type
                 == Some(QueueType::Quorum);
-            if quorum {
+            // The reported id only feeds the cluster's drop. A lone broker
+            // waiting for it put one actor round trip on the consumer's read
+            // loop per ack, and the quorum cell's delivery fell behind its
+            // confirms.
+            if quorum && self.cluster.is_some() {
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let cmd = if nack {
                     QueueCmd::NackReport {

@@ -114,6 +114,11 @@ Measured in A/Bs, not yet in the published tables:
   762.0 (separate A/Bs, so the steps are not additive).
 - PHP: Raft groups compact by applied bytes (`2b4c899`). large-1m-quorum: no
   delivery → 172 MB/s.
+- Rust: a quorum ack on a broker without a cluster no longer waits for the
+  actor's report (only the cluster's drop uses it), and with Raft on, or no
+  other member, no consumed id is kept (the set grew by one per ack). 1 CPU
+  quorum 90,842 → 135,402 msg/s, p99 5.1 s → 3.1 ms, anonymous 790 → 8 MiB:
+  delivery now keeps up with confirms (it was "missed rate").
 - Harness: the `disk` step, per-cell disk and fsync columns, and the
   `large-64k-quorum` / `large-1m-quorum` cells (`660e589`). The site's average
   score will include the two new cells.
@@ -230,16 +235,6 @@ Evidence: 4 CPU routing-64 123,730 msg/s and fanout-20 183,530 deliveries/s
 at 182–204% of 400% CPU; Bun 295,157 / 490,062, RabbitMQ 139,264 on routing.
 Something makes the broker wait: lock contention, or fsyncs that serialize.
 Needs the overnight run to measure.
-
-### R7. Quorum delivery falls behind
-
-Status: open, not profiled.
-
-Evidence: the quorum cell is "missed rate" at both sizes. 1 CPU 85,211–87,126
-confirmed/s, 75,479–79,628 delivered; 4 CPU 145,620–146,920 confirmed/s,
-77,356–86,320 delivered, so the queue grows. Bun keeps up (101,988 at 1 CPU).
-
-Where: the quorum apply and delivery path (`queueforge-broker/src/cluster/`).
 
 ### R8. Transactions
 
