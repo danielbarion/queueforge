@@ -12,6 +12,22 @@ import { brokerIdentity, childPlans, grantedCores, memberList, type ChildPlan } 
 import { splitHost, type Config } from "./config.ts";
 import { mergeChildMetrics } from "./metrics-merge.ts";
 
+/**
+ * GC marking threads per worker, unless the environment sets its own.
+ *
+ * JavaScriptCore sizes its parallel marker pool from the machine's cores, not
+ * the cgroup quota, so each of N workers ran up to N - 1 HeapHelper threads on
+ * the same N CPUs. At 6 workers they took ~30% of every core; one marker (no
+ * helpers) raised the scaling `weak-t` load from 1,785,342 to 2,059,000 msg/s,
+ * 98% of six independent 1-CPU brokers (docs/bun-scaling.md, B14).
+ */
+export const GC_MARKERS_ENV = "BUN_JSC_numberOfGCMarkers";
+
+/** A worker's environment before its own settings: the inherited one, with one GC marker unless it says otherwise. */
+export function workerBaseEnv(inherited: Record<string, string | undefined>): Record<string, string | undefined> {
+  return { [GC_MARKERS_ENV]: "1", ...inherited };
+}
+
 export async function supervise(configPath: string, dev: boolean, cfg: Config): Promise<void> {
   const cores = grantedCores();
   const plans = childPlans(cores, cfg.dataDir);
@@ -29,7 +45,7 @@ export async function supervise(configPath: string, dev: boolean, cfg: Config): 
       cmd: args,
       cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...workerBaseEnv(process.env),
         QUEUEFORGE_CHILD: "1",
         QUEUEFORGE_NODE_ID: plan.id,
         QUEUEFORGE_DATA_DIR: plan.dataDir,

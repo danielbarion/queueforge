@@ -79,7 +79,16 @@ export async function declareQueue(this: Broker, opts: {
   let name = opts.name;
   if (!name) name = `amq.gen-${crypto.randomUUID()}`;
   const existing = this.queues.get(this.key(opts.vhost, name));
-  const home = existing ? existing.home : this.placeQueue(opts.vhost, name, opts.exclusive, opts.args["x-queue-leader-locator"]);
+  // Only a new classic queue among workers waits on the placement worker; a
+  // passive declare and a quorum or stream queue do not need the answer.
+  const qtypeAsked = String(opts.args["x-queue-type"] ?? "");
+  const classicNew = !existing && !opts.passive && qtypeAsked !== "quorum" && qtypeAsked !== "stream"
+    && !(qtypeAsked === "" && this.cfg.defaultQueueType === "quorum" && opts.durable && !opts.exclusive);
+  const home = existing
+    ? existing.home
+    : classicNew
+      ? await this.placeQueueAsync(opts.vhost, name, opts.exclusive, opts.args["x-queue-leader-locator"])
+      : this.placeQueue(opts.vhost, name, opts.exclusive, opts.args["x-queue-leader-locator"]);
   if (opts.passive) {
     if (!existing) throw new ChanError(404, `NOT_FOUND - queue ${opts.vhost}/${name}`);
     // RabbitMQ counts a passive declare as use of the queue for x-expires.

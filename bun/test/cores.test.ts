@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { childPlans, coresFromCgroup, countCpuset, memberList, quotaCpus } from "../src/cores.ts";
+import { workerBaseEnv } from "../src/supervise.ts";
 
 describe("cgroup cores", () => {
   test("counts a cpuset range and a list", () => {
@@ -34,5 +35,14 @@ describe("child plans", () => {
       { id: "n2", addr: "127.0.0.1:25674" },
       { id: "n3", addr: "127.0.0.1:25675" },
     ]);
+  });
+});
+
+describe("worker environment", () => {
+  // One GC marker per worker: the default helper pool is sized from the host's
+  // cores, and every worker's helpers competed for the same CPUs.
+  test("one GC marker unless the environment sets its own", () => {
+    expect(workerBaseEnv({ PATH: "/bin" })).toEqual({ BUN_JSC_numberOfGCMarkers: "1", PATH: "/bin" });
+    expect(workerBaseEnv({ BUN_JSC_numberOfGCMarkers: "4" }).BUN_JSC_numberOfGCMarkers).toBe("4");
   });
 });

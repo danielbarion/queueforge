@@ -242,6 +242,66 @@ export function placeQueue(this: Broker, vhost: string, name: string, exclusive:
 }
 
 /**
+ * Every member is a worker the cores supervisor started for this broker
+ * (`n0`..`nN-1`, see `childPlans`). Fixed at start and the same on every
+ * worker, so they all apply the same placement rule.
+ */
+export function workerPool(this: Broker): boolean {
+  return process.env.QUEUEFORGE_CHILD === "1" && !!this.cfg.brokerId && this.cfg.members.length > 1
+    && this.cfg.members.every((m) => /^n\d+$/.test(m.id));
+}
+
+/** Pending homes handed out by `assignHome` whose declare has not landed yet. */
+const assigned = new Map<string, { home: string; at: number }>();
+
+/**
+ * On the placement worker (`n0`): the home for a new classic queue among the
+ * workers. A known queue keeps its home; a name already handed out gets the
+ * same answer, so concurrent declares on two workers agree; otherwise the
+ * worker with the fewest classic queues, counting pending ones, ties to the
+ * lowest id. The name hash left the busiest of 32 workers with 9 of 128
+ * queues, so one process set the pace while others idled.
+ */
+export function assignHome(this: Broker, vhost: string, name: string): string {
+  const key = this.key(vhost, name);
+  const known = this.queues.get(key);
+  if (known?.home) return known.home;
+  const now = Date.now();
+  const pending = assigned.get(key);
+  if (pending && now - pending.at < 60_000) return pending.home;
+  const counts = new Map<string, number>(this.cfg.members.map((m) => [m.id, 0]));
+  for (const q of this.queues.values()) {
+    if (q.home && counts.has(q.home) && q.argsParsed.queueType === "classic") counts.set(q.home, counts.get(q.home)! + 1);
+  }
+  for (const [k, a] of assigned) {
+    if (now - a.at >= 60_000 || this.queues.has(k)) assigned.delete(k);
+    else if (counts.has(a.home)) counts.set(a.home, counts.get(a.home)! + 1);
+  }
+  const ids = [...counts.keys()].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  const home = ids.reduce((best, id) => (counts.get(id)! < counts.get(best)! ? id : best), ids[0]!);
+  assigned.set(key, { home, at: now });
+  return home;
+}
+
+/**
+ * `placeQueue` for a declare. Among workers with no explicit locator, `n0`
+ * assigns the home (`assignHome`); if it cannot be reached the shared hash
+ * decides, as in any other cluster.
+ */
+export async function placeQueueAsync(this: Broker, vhost: string, name: string, exclusive: boolean, locator: unknown): Promise<string | null> {
+  if (exclusive || locator != null || !this.workerPool()) return this.placeQueue(vhost, name, exclusive, locator);
+  const placer = "n0";
+  if (this.cfg.nodeId === placer) return this.assignHome(vhost, name);
+  try {
+    const home = await this.cluster!.call(placer, "place_queue", { vhost, name });
+    if (typeof home === "string" && this.cfg.members.some((m) => m.id === home)) return home;
+  } catch {
+    /* the placement worker is down: use the hash */
+  }
+  return this.homeOf(vhost, name, false);
+}
+
+/**
  * Report whether this process should serve a queue.
  *
  * @param home Home node id, or null when the queue is local.
@@ -252,6 +312,9 @@ export function isLocalHome(this: Broker, home: string | null): boolean {
 }
 
 Broker.prototype.load = load;
+Broker.prototype.workerPool = workerPool;
+Broker.prototype.assignHome = assignHome;
+Broker.prototype.placeQueueAsync = placeQueueAsync;
 Broker.prototype.makeQueue = makeQueue;
 Broker.prototype.ensureBuiltins = ensureBuiltins;
 Broker.prototype.verify = verify;
@@ -265,6 +328,9 @@ Broker.prototype.isLocalHome = isLocalHome;
 declare module "./class.ts" {
   interface Broker {
     load: typeof load;
+    workerPool: typeof workerPool;
+    assignHome: typeof assignHome;
+    placeQueueAsync: typeof placeQueueAsync;
     makeQueue: typeof makeQueue;
     ensureBuiltins: typeof ensureBuiltins;
     verify: typeof verify;

@@ -99,3 +99,105 @@ interleaved pairs (medians): quorum 88,134 to 159,557 msg/s, p99 12.75 to
 Proof: `test/quorum-solo-store.test.ts` (kill -9 of every worker after a group
 snapshot keeps exactly the confirmed, unacked bodies, in order) and
 `test/quorum-cores.test.ts`.
+
+## Measuring scaling: growing load and the host ceiling
+
+`bench/scaling.py` runs a scenario at 1 to 6 broker CPUs in a 15-CPU VM, with
+the client on the same eight CPUs at every size. It records the client's CPU
+and flags points where the client, not the broker, set the rate. It fits the
+Universal Scalability Law, X(N) = X(1) N / (1 + s(N-1) + k N(N-1)), where s is
+work that serializes and k is work that grows with every pair of cores.
+
+The PerfTest scenarios are the wrong shape for this. Their load is fixed: in
+work-queue, four publishers keep 100 messages each unconfirmed. Past 2 CPUs
+the broker idles on that window (Bun at 3 CPUs used 62%), so the curve
+measures fsync latency and zig-zags for both brokers. A server with more
+cores serves more tenants, so the curve that predicts it grows the load with
+N. `weak` adds, per broker CPU, 4 classic durable queues with 4 publishers
+(512 unconfirmed each) and 4 consumers, as two `bench/loadgen` processes. A
+single-threaded loadgen tops out near 300,000 msg/s. `weak-t` is the same
+with transient messages, so no fsync sits in the confirm loop and the curve
+shows CPU scaling alone. Every point in these runs had its broker at 95% or
+more of its CPUs and its client under 20% of its eight.
+
+`bench/ceiling.py` gives the reference curve. It runs K independent 1-CPU
+brokers that share nothing but the host. Their efficiency at 6 is 0.71
+(2.00 to 2.82 us per message), and that loss belongs to the VM and the Mac
+(network path, memory bandwidth, efficiency cores), not to any broker. A
+broker's multi-process overhead is the gap between its curve and this one.
+
+## B14: one GC marker per worker
+
+At 6 CPUs, Bun's `weak-t` reached 1,785,342 msg/s against the host
+ceiling's 2,109,003. Per-thread CPU showed each worker's main thread at
+~74% of a core. Each worker also ran five JavaScriptCore `HeapHelper`
+threads (parallel GC marking) at 5-7% of a core apiece, about 30% of a core
+per worker. JavaScriptCore sizes that pool from the machine's cores, not the
+cgroup's, so N workers each brought up to N - 1 helpers onto the same N
+CPUs. Their marking was parallel within one heap and contended across
+heaps.
+
+`BUN_JSC_numberOfGCMarkers=1` (no helpers) is now the default: the
+supervisor sets it for every worker unless the environment sets its own
+(`workerBaseEnv`), and the image sets it for the supervisor and the
+one-process broker. A/B, the same image with and without it (`weak-t`):
+
+| CPUs | default | one marker |
+| ---: | ---: | ---: |
+| 1 | 479,083 | 488,653–496,387 |
+| 2 | 771,326 | 773,219–832,728 |
+| 4 | 1,291,016 | 1,434,030–1,437,280 |
+| 6 | 1,785,342 | 2,056,610–2,062,166 |
+
+Two markers (one helper) gave 1,854,846–1,872,226 at 6. Peak anonymous
+memory rose 2–10% (449 to 478 MiB at 6 workers). The gain grows with the
+worker count, so it is larger on bigger machines.
+
+## B15: classic queues balanced over workers
+
+A new classic queue's home was the name hash over the members (`queueHome`),
+the rule every implementation in a mixed cluster shares. With 4 queues per
+worker the busiest worker held 5 of 20 at 5 workers, 6 of 64 at 16, and 9 of
+128 at 32. Throughput then follows the busiest worker, an efficiency cap of
+0.80, 0.67 and 0.44 (`bun/scripts/home-spread.ts`).
+
+When every member is a worker this broker's supervisor started
+(`workerPool`: a child with a broker id and members `n0`..`nN-1`, fixed at
+start and the same on every worker), the placement worker `n0` assigns
+homes (`assignHome`, cluster op `place_queue`):
+
+- a known queue keeps its home;
+- a name already handed out gets the same answer for 60 s, so concurrent
+  declares on two workers agree;
+- otherwise the worker with the fewest classic queues, counting pending ones,
+  ties to the lowest id.
+
+Explicit `x-queue-leader-locator`, exclusive queues, quorum queues (B3, B10)
+and streams keep their rules. If `n0` cannot be reached the hash decides, as
+before. Homes are stored with the queue, so a restart keeps them. The one
+remaining hash use, `tryMigrate` for a name this worker does not know yet, only
+picks where a connection moves first; the publish is forwarded to the real
+home. Test: `test/cores-placement.test.ts` (16 queues declared racing from 4
+workers land 4/4/4/4; the hash gives 3/5/5/3).
+
+## After B14 and B15 (2026-10-15)
+
+`bench/results/scaling-2026-10-15/`, three repeats per point, medians:
+
+| CPUs | weak before | weak after | weak-t before | weak-t after |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 302,917 | 305,282 | 479,083 | 494,416 |
+| 2 | 520,621 | 534,949 | 771,326 | 823,374 |
+| 3 | 704,589 | 753,541 | 1,051,266 | 1,120,288 |
+| 4 | 938,867 | 1,017,875 | 1,291,016 | 1,436,203 |
+| 5 | 1,081,373 | 1,228,382 | 1,590,865 | 1,761,050 |
+| 6 | 1,306,698 | 1,412,531 | 1,785,342 | 2,031,339 |
+
+The fitted contention s fell from 0.094 to 0.066 (`weak`) and from 0.136 to
+0.107 (`weak-t`); k is 0 in all four fits. At 6 CPUs `weak-t` is 96% of the
+host ceiling. Rust in the same runs: `weak` 498,464 and `weak-t` 560,500 at
+6 (s = 0.29 and 0.23). The extrapolations to 32 or 128 cores in `scaling.md`
+are the model's, not measurements: a larger machine adds NUMA, network-card
+queues and per-worker coordination (each worker is a cluster member with a
+link to every other, and a voter in the metadata group). Eight cores cannot
+show those, so confirm on a large host before relying on the projection.

@@ -8,9 +8,45 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ confirms before its flush in every session. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [2026-10-15 session](#session-2026-10-15) is the current result: Rust, Bun and PHP re-measured, RabbitMQ rows from 2026-10-12. The [2026-10-12 session](#session-2026-10-12) is the previous result for all four brokers: paced, the load sweep, 16 application scenarios driven by RabbitMQ PerfTest at two container sizes with two repeats per cell, and the connection hold, all in Docker with the harness in `bench/`. Bun's rows there are a later run, [Bun re-measured, fifth run (2026-10-14)](#bun-re-measured-fifth-run-2026-10-14). The [2026-10-11 session](#session-2026-10-11) is the previous one, then the [2026-10-09 session](#session-2026-10-09), and the [2026-10-08 session](#session-2026-10-08) the one before, with a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
+The [scaling curves](#scaling-2026-10-15) are 1 to 6 CPUs under a load that grows with the core count. The [2026-10-15 session](#session-2026-10-15) is the current result: Rust, Bun and PHP re-measured, RabbitMQ rows from 2026-10-12. The [2026-10-12 session](#session-2026-10-12) is the previous result for all four brokers: paced, the load sweep, 16 application scenarios driven by RabbitMQ PerfTest at two container sizes with two repeats per cell, and the connection hold, all in Docker with the harness in `bench/`. Bun's rows there are a later run, [Bun re-measured, fifth run (2026-10-14)](#bun-re-measured-fifth-run-2026-10-14). The [2026-10-11 session](#session-2026-10-11) is the previous one, then the [2026-10-09 session](#session-2026-10-09), and the [2026-10-08 session](#session-2026-10-08) the one before, with a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
 
 The PHP rows are the parity build, the one with client-visible parity with Bun and Rust. The earlier PHP image is kept in [PHP paced](#php-paced-2026-10-06t161324z) for comparison.
+
+## Scaling (2026-10-15)
+
+`python3 bench/scaling.py run --scenarios weak-t,weak --sizes 1,2,3,4,5,6 --repeat 3`
+in a 15-CPU Docker Desktop VM: broker on CPUs 0..N-1, the client
+(`bench/loadgen`, two processes per broker CPU) on the same eight CPUs at
+every size. The load grows with N: per broker CPU, 4 classic durable queues,
+4 publishers with 512 unconfirmed messages each, 4 consumers, 256-byte
+messages; `weak` is persistent and `weak-t` transient. Every point below had
+its broker at 95% or more of its CPUs and its client under 20% of its eight.
+Median of three repeats; ranges and the Universal Scalability Law fits are
+in `bench/results/scaling-2026-10-15/`. Bun is the tree with B14 and B15
+(`docs/bun-scaling.md`). Rust is the 2026-10-15 image.
+
+| CPUs | Bun weak | Rust weak | Bun weak-t | Rust weak-t | Host ceiling (weak-t) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 305,282 | 201,574 | 494,416 | 199,566 | 498,253 |
+| 2 | 534,949 | 298,786 | 823,374 | 302,684 | 890,005 |
+| 3 | 753,541 | 335,546 | 1,120,288 | 396,742 | |
+| 4 | 1,017,875 | 437,344 | 1,436,203 | 463,991 | 1,511,993 |
+| 5 | 1,228,382 | 471,891 | 1,761,050 | 530,937 | |
+| 6 | 1,412,531 | 498,464 | 2,031,339 | 560,500 | 2,109,003 |
+
+Efficiency at 6 CPUs, X(6) / (6 X(1)): Bun 0.77 (`weak`) and 0.68
+(`weak-t`), Rust 0.41 and 0.47. The host ceiling (`bench/ceiling.py`) is K
+independent 1-CPU Bun brokers sharing only the host, efficiency 0.71 at 6:
+that loss is the VM and the Mac (network path, memory bandwidth, efficiency
+cores). Bun's `weak-t` is 96% of it at 6 CPUs.
+
+Before B14 and B15, Bun was 1,306,698 (`weak`) and 1,785,342 (`weak-t`) at 6.
+The PerfTest scenarios (work-queue, routing-64, fanout-20, heavy, quorum) at
+1 to 8 CPUs are in `fixed-load-before/`. Their load is fixed, so past 2 CPUs
+the broker mostly waited on the confirm window, and those curves measure
+latency, not capacity. Projections to larger machines from these fits are
+the model's, not measurements; `PENDING.md` B16 lists what eight cores
+cannot show.
 
 ## Session (2026-10-15)
 

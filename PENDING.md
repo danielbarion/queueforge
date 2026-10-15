@@ -158,6 +158,45 @@ Measured in A/Bs, not yet in the published tables:
 
 ## Bun
 
+### B16. Scaling past 6 cores is extrapolated, not measured
+
+Status: open. `bench/scaling.py` (`weak`, `weak-t`) is the curve to watch
+for multithreading changes: load grows with the core count, every point had
+the broker at 95% or more of its CPUs, and repeats sit within ~4%. After
+B14 and B15, at 6 CPUs: `weak-t` 2,031,339 msg/s (efficiency 0.68, 96% of
+the `bench/ceiling.py` host ceiling), `weak` 1,412,531 (0.77); Rust 560,500
+and 498,464. The USL fits have k = 0, so the model never peaks, but this Mac
+cannot show what only many cores bring:
+
+- every worker is a cluster member with a link to every other, a voter in
+  the metadata Raft group, and sends heartbeats and peer status to all the
+  others: N(N-1)/2 links and N voters, for 64 or 128 workers;
+- the supervisor accepts every connection and hands it to a worker over IPC;
+- NUMA, network-card queues and memory bandwidth on a large host.
+
+Next: measure the idle and per-connection cost of 32-128 workers on a small
+host (`QUEUEFORGE_CORES=64` in a 4-CPU container shows the coordination cost
+with no load), then run `bench/scaling.py` on a 32-64 vCPU cloud host to
+check the projection. The metadata group could keep a few voters and make
+the other workers learners.
+
+### B14. GC helper threads competed across workers
+
+Status: done 2026-10-15 (`docs/bun-scaling.md`, B14). JavaScriptCore sized
+each worker's parallel GC marker pool from the host's cores. At 6 workers
+each ran five `HeapHelper` threads, ~30% of a core per worker. The supervisor
+now gives workers `BUN_JSC_numberOfGCMarkers=1` unless the environment sets
+it, and the image sets it. `weak-t` at 6 CPUs 1,785,342 to 2,056,610–2,062,166
+msg/s, at 4 CPUs +11%, at 1 CPU +2–4%; anonymous memory +2–10%.
+
+### B15. Hash placement overloaded one worker
+
+Status: done 2026-10-15 (`docs/bun-scaling.md`, B15). With 4 queues per
+worker the name hash gave the busiest worker 5 of 20 queues at 5 workers and
+9 of 128 at 32 (efficiency caps 0.80 and 0.44). Among a broker's own workers,
+`n0` now assigns each new classic queue to the least-loaded worker. `weak`
+at 5 CPUs 1,081,373 to 1,228,382 (+14%, with B14).
+
 ### B4. One queue is limited to one core
 
 Status: in progress. Chosen (2026-10-14): move bounded log work off the queue's
