@@ -1,0 +1,73 @@
+19:47:29 PROGRESS scaling vm ncpu=15 mem=50425278464
+19:47:30 PROGRESS scaling repeat 1/3 cell 1/12 bun 4 weak
+19:47:59 CELL weak bun 4 ok=1 err= rate=1026729.6 cpu=393 client=63 p99=18.40
+19:47:59 PROGRESS scaling repeat 1/3 cell 2/12 bun 6 weak
+19:48:28 CELL weak bun 6 ok=1 err= rate=1412531.2 cpu=582 client=94 p99=20.80
+19:48:28 PROGRESS scaling repeat 1/3 cell 3/12 bun 1 weak-t
+19:48:57 CELL weak-t bun 1 ok=1 err= rate=491670.4 cpu=99 client=26 p99=5.70
+19:48:57 PROGRESS scaling repeat 1/3 cell 4/12 bun 5 weak-t
+19:49:27 CELL weak-t bun 5 ok=1 err= rate=1766654.4 cpu=494 client=109 p99=9.10
+19:49:27 PROGRESS scaling repeat 1/3 cell 5/12 bun 3 weak
+19:49:56 CELL weak bun 3 ok=1 err= rate=753540.8 cpu=294 client=44 p99=18.80
+19:49:56 PROGRESS scaling repeat 1/3 cell 6/12 bun 4 weak-t
+19:50:25 CELL weak-t bun 4 ok=1 err= rate=1436203.2 cpu=394 client=86 p99=10.40
+19:50:25 PROGRESS scaling repeat 1/3 cell 7/12 bun 2 weak
+19:50:54 CELL weak bun 2 ok=1 err= rate=536008.0 cpu=197 client=30 p99=15.80
+19:50:55 PROGRESS scaling repeat 1/3 cell 8/12 bun 6 weak-t
+19:51:24 CELL weak-t bun 6 ok=1 err= rate=2033924.8 cpu=594 client=129 p99=9.30
+19:51:24 PROGRESS scaling repeat 1/3 cell 9/12 bun 3 weak-t
+19:51:53 CELL weak-t bun 3 ok=1 err= rate=1112534.4 cpu=295 client=65 p99=9.60
+19:51:53 PROGRESS scaling repeat 1/3 cell 10/12 bun 1 weak
+19:52:22 CELL weak bun 1 ok=1 err= rate=305281.6 cpu=98 client=15 p99=12.00
+19:52:22 PROGRESS scaling repeat 1/3 cell 11/12 bun 5 weak
+19:52:52 CELL weak bun 5 ok=1 err= rate=1228382.4 cpu=486 client=78 p99=20.60
+19:52:52 PROGRESS scaling repeat 1/3 cell 12/12 bun 2 weak-t
+19:53:21 CELL weak-t bun 2 ok=1 err= rate=811416.0 cpu=197 client=44 p99=8.40
+19:53:21 PROGRESS scaling repeat 2/3 cell 1/12 bun 5 weak-t
+19:53:50 CELL weak-t bun 5 ok=1 err= rate=1761049.6 cpu=495 client=109 p99=8.90
+19:53:50 PROGRESS scaling repeat 2/3 cell 2/12 bun 6 weak
+19:54:19 CELL weak bun 6 ok=1 err= rate=1426102.4 cpu=587 client=93 p99=20.40
+19:54:20 PROGRESS scaling repeat 2/3 cell 3/12 bun 3 weak-t
+19:54:49 CELL weak-t bun 3 ok=1 err= rate=1126523.2 cpu=297 client=65 p99=8.20
+19:54:49 PROGRESS scaling repeat 2/3 cell 4/12 bun 1 weak
+19:55:18 CELL weak bun 1 ok=1 err= rate=303153.6 cpu=99 client=15 p99=12.00
+19:55:18 PROGRESS scaling repeat 2/3 cell 5/12 bun 2 weak-t
+19:55:47 CELL weak-t bun 2 ok=1 err= rate=827857.6 cpu=198 client=45 p99=7.10
+19:55:48 PROGRESS scaling repeat 2/3 cell 6/12 bun 2 weak
+19:56:17 CELL weak bun 2 ok=1 err= rate=534948.8 cpu=197 client=30 p99=16.60
+19:56:17 PROGRESS scaling repeat 2/3 cell 7/12 bun 3 weak
+19:56:46 CELL weak bun 3 ok=1 err= rate=758294.4 cpu=296 client=44 p99=18.00
+19:56:46 PROGRESS scaling repeat 2/3 cell 8/12 bun 6 weak-t
+19:57:15 CELL weak-t bun 6 ok=1 err= rate=2031339.2 cpu=594 client=129 p99=9.20
+19:57:16 PROGRESS scaling repeat 2/3 cell 9/12 bun 5 weak
+19:57:45 CELL weak bun 5 ok=1 err= rate=1239691.2 cpu=487 client=78 p99=20.40
+19:57:45 PROGRESS scaling repeat 2/3 cell 10/12 bun 4 weak-t
+19:58:14 CELL weak-t bun 4 ok=1 err= rate=1419198.4 cpu=396 client=88 p99=8.80
+19:58:14 PROGRESS scaling repeat 2/3 cell 11/12 bun 1 weak-t
+19:58:43 CELL weak-t bun 1 ok=1 err= rate=494416.0 cpu=100 client=26 p99=5.40
+19:58:43 PROGRESS scaling repeat 2/3 cell 12/12 bun 4 weak
+19:59:13 CELL weak bun 4 ok=1 err= rate=1017875.2 cpu=389 client=62 p99=18.00
+19:59:13 PROGRESS scaling repeat 3/3 cell 1/12 bun 3 weak-t
+19:59:42 CELL weak-t bun 3 ok=1 err= rate=1120288.0 cpu=297 client=64 p99=8.10
+19:59:42 PROGRESS scaling repeat 3/3 cell 2/12 bun 4 weak
+20:00:11 CELL weak bun 4 ok=1 err= rate=1008236.8 cpu=388 client=61 p99=18.30
+20:00:11 PROGRESS scaling repeat 3/3 cell 3/12 bun 2 weak-t
+20:00:40 CELL weak-t bun 2 ok=1 err= rate=823374.4 cpu=197 client=45 p99=8.70
+20:00:41 PROGRESS scaling repeat 3/3 cell 4/12 bun 4 weak-t
+20:01:10 CELL weak-t bun 4 ok=1 err= rate=1443782.4 cpu=396 client=86 p99=8.40
+20:01:10 PROGRESS scaling repeat 3/3 cell 5/12 bun 1 weak
+20:01:39 CELL weak bun 1 ok=1 err= rate=306208.0 cpu=99 client=15 p99=12.00
+20:01:39 PROGRESS scaling repeat 3/3 cell 6/12 bun 6 weak
+20:02:08 CELL weak bun 6 ok=1 err= rate=1392620.8 cpu=578 client=94 p99=22.90
+20:02:08 PROGRESS scaling repeat 3/3 cell 7/12 bun 2 weak
+20:02:38 CELL weak bun 2 ok=1 err= rate=518764.8 cpu=191 client=29 p99=16.60
+20:02:38 PROGRESS scaling repeat 3/3 cell 8/12 bun 5 weak-t
+20:03:07 CELL weak-t bun 5 ok=1 err= rate=1726052.8 cpu=494 client=107 p99=9.30
+20:03:07 PROGRESS scaling repeat 3/3 cell 9/12 bun 5 weak
+20:03:36 CELL weak bun 5 ok=1 err= rate=1205793.6 cpu=480 client=77 p99=20.00
+20:03:37 PROGRESS scaling repeat 3/3 cell 10/12 bun 6 weak-t
+20:04:06 CELL weak-t bun 6 ok=1 err= rate=2024356.8 cpu=595 client=131 p99=9.70
+20:04:06 PROGRESS scaling repeat 3/3 cell 11/12 bun 1 weak-t
+20:04:35 CELL weak-t bun 1 ok=1 err= rate=496096.0 cpu=99 client=26 p99=5.70
+20:04:35 PROGRESS scaling repeat 3/3 cell 12/12 bun 3 weak
+20:05:04 CELL weak bun 3 ok=1 err= rate=752320.0 cpu=295 client=45 p99=18.00

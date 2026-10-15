@@ -416,6 +416,7 @@ class Sampler(threading.Thread):
         self.stop_flag = threading.Event()
         self.cpu_marks = {}
         self.io_marks = {}
+        self.client_last = None
         self.samples = []
         self.error = None
 
@@ -440,6 +441,13 @@ class Sampler(threading.Thread):
                 self.cpu_marks["a"] = (time.monotonic(), C.cpu_usec(BROKER), C.cpu_usec(CLIENT))
                 self.io_marks["a"] = (time.monotonic(), C.container_usage(BROKER)["disk_write"], fsync)
                 marked = True
+            elif marked:
+                # The client container is gone by the final mark, so its share
+                # comes from the last reading taken while it ran.
+                client = C.cpu_usec(CLIENT)
+                start = self.cpu_marks["a"][2]
+                if client is not None and (start is None or client >= start):
+                    self.client_last = (time.monotonic(), client)
             self.stop_flag.wait(1.0)
         self.cpu_marks["b"] = (time.monotonic(), C.cpu_usec(BROKER), C.cpu_usec(CLIENT))
         disk = C.container_usage(BROKER)["disk_write"]
@@ -451,10 +459,13 @@ class Sampler(threading.Thread):
             return "", ""
         dt = b[0] - a[0]
 
-        def pct(x, y):
-            return f"{(y - x) / (dt * 1e6) * 100:.0f}" if x is not None and y is not None else ""
+        def pct(x, y, span=dt):
+            return f"{(y - x) / (span * 1e6) * 100:.0f}" if x is not None and y is not None and span > 0 else ""
 
-        return pct(a[1], b[1]), pct(a[2], b[2])
+        client = pct(a[2], b[2])
+        if self.client_last and a[2] is not None:
+            client = pct(a[2], self.client_last[1], self.client_last[0] - a[0])
+        return pct(a[1], b[1]), client
 
     def io(self):
         return io_rates(self.io_marks.get("a"), self.io_marks.get("b"))

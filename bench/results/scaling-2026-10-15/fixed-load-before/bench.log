@@ -1,0 +1,242 @@
+17:35:37 PROGRESS scaling vm ncpu=14 mem=50425409536
+17:35:37 PROGRESS scaling repeat 1/3 cell 1/60 bun 8 routing-64
+17:36:07 CELL bun 8 CPU routing-64 ok=1 err= sent=465715.2 recv=465908.0 mb= p50=1.07 p99=10.83 mib=1018 anon=891 cpu=544 client=447 kept=yes disk=378.0 fsyncs=10600.6 fsync_ms=0.58
+17:36:08 PROGRESS scaling repeat 1/3 cell 2/60 rust 8 quorum
+17:36:36 CELL rust 8 CPU quorum ok=1 err= sent=216017.9 recv=216016.7 mb= p50=1.28 p99=1.96 mib=151 anon=15 cpu=452 client=312 kept=yes disk=263.2 fsyncs=1666.9 fsync_ms=0.22
+17:36:37 PROGRESS scaling repeat 1/3 cell 3/60 bun 6 heavy
+17:37:07 CELL bun 6 CPU heavy ok=1 err= sent=515190.0 recv=515200.8 mb= p50=11.05 p99=70.71 mib=973 anon=859 cpu=479 client=478 kept=yes disk=733.4 fsyncs=5688.3 fsync_ms=0.50
+17:37:07 PROGRESS scaling repeat 1/3 cell 4/60 bun 2 quorum
+17:37:36 CELL bun 2 CPU quorum ok=1 err= sent=150152.2 recv=150153.7 mb= p50=1.76 p99=14.94 mib=170 anon=152 cpu=119 client=130 kept=yes disk=202.3 fsyncs=1869.9 fsync_ms=0.17
+17:37:37 PROGRESS scaling repeat 1/3 cell 5/60 bun 1 fanout-20
+17:38:06 CELL bun 1 CPU fanout-20 ok=1 err= sent=19986.0 recv=399734.8 mb= p50=2.39 p99=6.80 mib=152 anon=134 cpu=98 client=161 kept=yes disk=31.3 fsyncs=479.7 fsync_ms=0.34
+17:38:06 PROGRESS scaling repeat 1/3 cell 6/60 bun 2 work-queue
+17:38:36 CELL bun 2 CPU work-queue ok=1 err= sent=187708.6 recv=187701.5 mb= p50=0.83 p99=3.52 mib=185 anon=166 cpu=120 client=177 kept=yes disk=244.0 fsyncs=2221.2 fsync_ms=0.17
+17:38:36 PROGRESS scaling repeat 1/3 cell 7/60 bun 4 heavy
+17:39:06 CELL bun 4 CPU heavy ok=1 err= sent=477984.6 recv=477982.5 mb= p50=11.81 p99=51.60 mib=782 anon=703 cpu=372 client=449 kept=yes disk=676.0 fsyncs=4078.4 fsync_ms=0.43
+17:39:06 PROGRESS scaling repeat 1/3 cell 8/60 rust 3 heavy
+17:39:35 CELL rust 3 CPU heavy ok=1 err= sent=237476.1 recv=237565.7 mb= p50=37.99 p99=83.10 mib=2190 anon=69 cpu=273 client=235 kept=yes disk=334.5 fsyncs=2224.1 fsync_ms=0.69
+17:39:36 PROGRESS scaling repeat 1/3 cell 9/60 rust 4 fanout-20
+17:40:05 CELL rust 4 CPU fanout-20 ok=1 err= sent=11593.6 recv=231912.4 mb= p50=0.44 p99=3.86 mib=2663 anon=14 cpu=202 client=164 kept=yes disk=261.3 fsyncs=2356.9 fsync_ms=1.57
+17:40:05 PROGRESS scaling repeat 1/3 cell 10/60 bun 6 fanout-20
+17:40:35 CELL bun 6 CPU fanout-20 ok=1 err= sent=23577.7 recv=471595.3 mb= p50=1.64 p99=4.56 mib=743 anon=654 cpu=314 client=249 kept=yes disk=136.3 fsyncs=4842.7 fsync_ms=0.47
+17:40:35 PROGRESS scaling repeat 1/3 cell 11/60 rust 8 fanout-20
+17:41:04 CELL rust 8 CPU fanout-20 ok=1 err= sent=9938.9 recv=198770.4 mb= p50=0.49 p99=2.52 mib=2659 anon=18 cpu=312 client=155 kept=yes disk=239.1 fsyncs=2066.6 fsync_ms=2.84
+17:41:04 PROGRESS scaling repeat 1/3 cell 12/60 bun 8 work-queue
+17:41:34 CELL bun 8 CPU work-queue ok=1 err= sent=110875.1 recv=110879.6 mb= p50=0.79 p99=3.82 mib=356 anon=328 cpu=91 client=106 kept=yes disk=134.8 fsyncs=1173.5 fsync_ms=0.56
+17:41:35 PROGRESS scaling repeat 1/3 cell 13/60 bun 4 quorum
+17:42:09 CELL bun 4 CPU quorum ok=1 err= sent=122937.0 recv=122937.4 mb= p50=1.73 p99=16.26 mib=235 anon=214 cpu=105 client=109 kept=yes disk=168.2 fsyncs=1573.6 fsync_ms=0.30
+17:42:09 PROGRESS scaling repeat 1/3 cell 14/60 bun 3 work-queue
+17:42:45 CELL bun 3 CPU work-queue ok=1 err= sent=123660.1 recv=123665.9 mb= p50=0.78 p99=3.41 mib=216 anon=196 cpu=62 client=117 kept=yes disk=117.6 fsyncs=1048.9 fsync_ms=0.49
+17:42:45 PROGRESS scaling repeat 1/3 cell 15/60 bun 1 heavy
+17:43:15 CELL bun 1 CPU heavy ok=1 err= sent=123666.3 recv=123596.5 mb= p50=36.93 p99=144.58 mib=329 anon=274 cpu=84 client=121 kept=yes disk=238.4 fsyncs=1213.6 fsync_ms=0.36
+17:43:15 PROGRESS scaling repeat 1/3 cell 16/60 bun 3 routing-64
+17:43:45 CELL bun 3 CPU routing-64 ok=1 err= sent=201828.2 recv=201813.1 mb= p50=1.05 p99=7.12 mib=418 anon=368 cpu=146 client=195 kept=yes disk=156.1 fsyncs=2419.4 fsync_ms=0.87
+17:43:45 PROGRESS scaling repeat 1/3 cell 17/60 bun 8 quorum
+17:44:15 CELL bun 8 CPU quorum ok=1 err= sent=91617.3 recv=91617.4 mb= p50=1.74 p99=17.99 mib=340 anon=312 cpu=98 client=83 kept=yes disk=127.3 fsyncs=1169.7 fsync_ms=0.51
+17:44:15 PROGRESS scaling repeat 1/3 cell 18/60 rust 2 fanout-20
+17:44:44 CELL rust 2 CPU fanout-20 ok=1 err= sent=8078.3 recv=161576.0 mb= p50=0.49 p99=6.17 mib=2048 anon=15 cpu=105 client=113 kept=yes disk=220.4 fsyncs=1705.6 fsync_ms=3.37
+17:44:44 PROGRESS scaling repeat 1/3 cell 19/60 bun 4 work-queue
+17:45:14 CELL bun 4 CPU work-queue ok=1 err= sent=157274.3 recv=157274.2 mb= p50=0.81 p99=3.46 mib=240 anon=219 cpu=111 client=155 kept=yes disk=206.6 fsyncs=1879.0 fsync_ms=0.26
+17:45:14 PROGRESS scaling repeat 1/3 cell 20/60 rust 2 work-queue
+17:45:43 CELL rust 2 CPU work-queue ok=1 err= sent=169600.9 recv=169597.4 mb= p50=1.28 p99=2.04 mib=144 anon=9 cpu=149 client=167 kept=yes disk=210.4 fsyncs=1310.8 fsync_ms=0.36
+17:45:43 PROGRESS scaling repeat 1/3 cell 21/60 rust 6 fanout-20
+17:46:12 CELL rust 6 CPU fanout-20 ok=1 err= sent=10077.8 recv=201576.7 mb= p50=0.44 p99=2.79 mib=2657 anon=16 cpu=256 client=149 kept=yes disk=240.9 fsyncs=2103.3 fsync_ms=2.74
+17:46:12 PROGRESS scaling repeat 1/3 cell 22/60 rust 6 heavy
+17:46:42 CELL rust 6 CPU heavy ok=1 err= sent=278670.3 recv=278637.4 mb= p50=25.52 p99=63.31 mib=2198 anon=77 cpu=405 client=268 kept=yes disk=362.3 fsyncs=1941.8 fsync_ms=3.69
+17:46:42 PROGRESS scaling repeat 1/3 cell 23/60 rust 3 work-queue
+17:47:11 CELL rust 3 CPU work-queue ok=1 err= sent=154669.4 recv=154686.8 mb= p50=1.11 p99=1.95 mib=146 anon=11 cpu=169 client=162 kept=yes disk=181.4 fsyncs=1102.6 fsync_ms=0.57
+17:47:11 PROGRESS scaling repeat 1/3 cell 24/60 rust 4 work-queue
+17:47:41 CELL rust 4 CPU work-queue ok=1 err= sent=105434.3 recv=105451.7 mb= p50=1.12 p99=1.83 mib=147 anon=12 cpu=147 client=121 kept=yes disk=123.3 fsyncs=738.0 fsync_ms=1.03
+17:47:41 PROGRESS scaling repeat 1/3 cell 25/60 rust 1 quorum
+17:48:10 CELL rust 1 CPU quorum ok=1 err= sent=148777.6 recv=148775.2 mb= p50=2.02 p99=2.85 mib=144 anon=8 cpu=97 client=128 kept=yes disk=180.7 fsyncs=1136.5 fsync_ms=0.24
+17:48:10 PROGRESS scaling repeat 1/3 cell 26/60 bun 6 routing-64
+17:48:41 CELL bun 6 CPU routing-64 ok=1 err= sent=257039.0 recv=257138.3 mb= p50=1.10 p99=8.31 mib=796 anon=701 cpu=205 client=200 kept=yes disk=165.3 fsyncs=4359.5 fsync_ms=1.19
+17:48:42 PROGRESS scaling repeat 1/3 cell 27/60 bun 3 fanout-20
+17:49:11 CELL bun 3 CPU fanout-20 ok=1 err= sent=24062.8 recv=481211.3 mb= p50=1.53 p99=4.93 mib=397 anon=351 cpu=195 client=226 kept=yes disk=77.5 fsyncs=2216.8 fsync_ms=0.36
+17:49:11 PROGRESS scaling repeat 1/3 cell 28/60 rust 6 work-queue
+17:49:40 CELL rust 6 CPU work-queue ok=1 err= sent=192063.3 recv=192045.4 mb= p50=1.28 p99=1.94 mib=149 anon=14 cpu=386 client=276 kept=yes disk=239.2 fsyncs=1505.0 fsync_ms=0.30
+17:49:41 PROGRESS scaling repeat 1/3 cell 29/60 rust 8 heavy
+17:50:10 CELL rust 8 CPU heavy ok=1 err= sent=266047.8 recv=266298.2 mb= p50=24.44 p99=62.33 mib=2203 anon=82 cpu=423 client=248 kept=yes disk=356.3 fsyncs=1782.6 fsync_ms=4.81
+17:50:10 PROGRESS scaling repeat 1/3 cell 30/60 rust 1 heavy
+17:50:40 CELL rust 1 CPU heavy ok=1 err= sent=101074.5 recv=100619.3 mb= p50=81.20 p99=196.84 mib=1024 anon=76 cpu=94 client=103 kept=yes disk=209.4 fsyncs=1295.2 fsync_ms=1.44
+17:50:40 PROGRESS scaling repeat 1/3 cell 31/60 rust 2 quorum
+17:51:09 CELL rust 2 CPU quorum ok=1 err= sent=146952.3 recv=146948.1 mb= p50=1.29 p99=2.06 mib=144 anon=9 cpu=132 client=148 kept=yes disk=182.4 fsyncs=1126.3 fsync_ms=0.48
+17:51:09 PROGRESS scaling repeat 1/3 cell 32/60 rust 1 fanout-20
+17:51:38 CELL rust 1 CPU fanout-20 ok=1 err= sent=7896.5 recv=157935.8 mb= p50=0.94 p99=2.40 mib=1024 anon=13 cpu=94 client=113 kept=yes disk=203.9 fsyncs=1851.1 fsync_ms=1.17
+17:51:38 PROGRESS scaling repeat 1/3 cell 33/60 rust 3 fanout-20
+17:52:08 CELL rust 3 CPU fanout-20 ok=1 err= sent=10574.3 recv=211500.0 mb= p50=0.44 p99=4.82 mib=2655 anon=14 cpu=149 client=144 kept=yes disk=253.8 fsyncs=2080.0 fsync_ms=2.37
+17:52:10 PROGRESS scaling repeat 1/3 cell 34/60 bun 6 work-queue
+17:52:40 CELL bun 6 CPU work-queue ok=1 err= sent=147968.1 recv=147980.6 mb= p50=0.81 p99=3.66 mib=305 anon=281 cpu=110 client=143 kept=yes disk=186.1 fsyncs=1684.7 fsync_ms=0.31
+17:52:42 PROGRESS scaling repeat 1/3 cell 35/60 rust 3 quorum
+17:53:11 CELL rust 3 CPU quorum ok=1 err= sent=173533.5 recv=173551.3 mb= p50=1.14 p99=1.93 mib=146 anon=10 cpu=189 client=182 kept=yes disk=202.5 fsyncs=1245.0 fsync_ms=0.46
+17:53:11 PROGRESS scaling repeat 1/3 cell 36/60 bun 3 quorum
+17:53:41 CELL bun 3 CPU quorum ok=1 err= sent=100908.2 recv=100909.1 mb= p50=1.69 p99=16.11 mib=201 anon=182 cpu=79 client=87 kept=yes disk=131.0 fsyncs=1207.7 fsync_ms=0.51
+17:53:41 PROGRESS scaling repeat 1/3 cell 37/60 bun 4 fanout-20
+17:54:11 CELL bun 4 CPU fanout-20 ok=1 err= sent=17058.1 recv=341319.2 mb= p50=1.58 p99=4.70 mib=517 anon=457 cpu=157 client=158 kept=yes disk=60.8 fsyncs=1956.0 fsync_ms=1.19
+17:54:11 PROGRESS scaling repeat 1/3 cell 38/60 rust 4 quorum
+17:54:43 CELL rust 4 CPU quorum ok=1 err= sent=148787.2 recv=148805.6 mb= p50=1.14 p99=1.83 mib=147 anon=12 cpu=162 client=137 kept=yes disk=132.9 fsyncs=807.6 fsync_ms=0.91
+17:54:43 PROGRESS scaling repeat 1/3 cell 39/60 bun 1 work-queue
+17:55:12 CELL bun 1 CPU work-queue ok=1 err= sent=137550.6 recv=137554.2 mb= p50=0.91 p99=4.37 mib=141 anon=124 cpu=85 client=130 kept=yes disk=179.3 fsyncs=1499.8 fsync_ms=0.34
+17:55:12 PROGRESS scaling repeat 1/3 cell 40/60 rust 2 heavy
+17:55:42 CELL rust 2 CPU heavy ok=1 err= sent=147233.9 recv=147287.6 mb= p50=49.29 p99=117.35 mib=2048 anon=79 cpu=150 client=142 kept=yes disk=240.0 fsyncs=1408.8 fsync_ms=3.65
+17:55:42 PROGRESS scaling repeat 1/3 cell 41/60 bun 8 fanout-20
+17:56:12 CELL bun 8 CPU fanout-20 ok=1 err= sent=16847.2 recv=337074.2 mb= p50=1.66 p99=4.86 mib=968 anon=848 cpu=206 client=128 kept=yes disk=85.3 fsyncs=3428.9 fsync_ms=1.64
+17:56:12 PROGRESS scaling repeat 1/3 cell 42/60 rust 4 routing-64
+17:56:41 CELL rust 4 CPU routing-64 ok=1 err= sent=135644.6 recv=135671.9 mb= p50=1.66 p99=4.37 mib=2419 anon=39 cpu=164 client=136 kept=yes disk=222.9 fsyncs=6701.3 fsync_ms=6.29
+17:56:42 PROGRESS scaling repeat 1/3 cell 43/60 bun 1 routing-64
+17:57:13 CELL bun 1 CPU routing-64 ok=1 err= sent=143765.6 recv=143805.1 mb= p50=3.66 p99=11.22 mib=147 anon=127 cpu=84 client=139 kept=yes disk=111.4 fsyncs=1759.4 fsync_ms=0.27
+17:57:13 PROGRESS scaling repeat 1/3 cell 44/60 rust 8 routing-64
+17:57:42 CELL rust 8 CPU routing-64 ok=1 err= sent=132958.5 recv=132938.3 mb= p50=1.07 p99=3.19 mib=2424 anon=45 cpu=240 client=142 kept=yes disk=214.4 fsyncs=6732.8 fsync_ms=6.88
+17:57:42 PROGRESS scaling repeat 1/3 cell 45/60 bun 2 routing-64
+17:58:14 CELL bun 2 CPU routing-64 ok=1 err= sent=180691.0 recv=180704.5 mb= p50=1.69 p99=8.16 mib=285 anon=250 cpu=90 client=129 kept=yes disk=99.5 fsyncs=1455.3 fsync_ms=1.00
+17:58:14 PROGRESS scaling repeat 1/3 cell 46/60 bun 3 heavy
+17:58:44 CELL bun 3 CPU heavy ok=1 err= sent=331522.1 recv=331521.1 mb= p50=17.24 p99=49.51 mib=592 anon=521 cpu=244 client=314 kept=yes disk=475.1 fsyncs=3030.3 fsync_ms=0.49
+17:58:44 PROGRESS scaling repeat 1/3 cell 47/60 bun 6 quorum
+17:59:14 CELL bun 6 CPU quorum ok=1 err= sent=124200.9 recv=124200.9 mb= p50=1.75 p99=16.14 mib=288 anon=264 cpu=109 client=104 kept=yes disk=157.6 fsyncs=1464.8 fsync_ms=0.33
+17:59:14 PROGRESS scaling repeat 1/3 cell 48/60 rust 3 routing-64
+17:59:49 CELL rust 3 CPU routing-64 ok=1 err= sent=103605.6 recv=103605.2 mb= p50=2.07 p99=4.90 mib=1367 anon=38 cpu=82 client=74 kept=yes disk=114.9 fsyncs=3671.5 fsync_ms=13.68
+17:59:49 PROGRESS scaling repeat 1/3 cell 49/60 rust 1 work-queue
+18:00:18 CELL rust 1 CPU work-queue ok=1 err= sent=123113.8 recv=123113.6 mb= p50=1.99 p99=2.77 mib=144 anon=8 cpu=81 client=109 kept=yes disk=152.2 fsyncs=945.4 fsync_ms=0.44
+18:00:18 PROGRESS scaling repeat 1/3 cell 50/60 bun 8 heavy
+18:00:50 CELL bun 8 CPU heavy ok=1 err= sent=376927.8 recv=376954.7 mb= p50=11.19 p99=97.38 mib=1180 anon=1046 cpu=375 client=313 kept=yes disk=483.7 fsyncs=3447.1 fsync_ms=1.69
+18:00:50 PROGRESS scaling repeat 1/3 cell 51/60 rust 8 work-queue
+18:01:19 CELL rust 8 CPU work-queue ok=1 err= sent=165893.5 recv=165897.8 mb= p50=1.34 p99=1.95 mib=149 anon=14 cpu=353 client=242 kept=yes disk=200.5 fsyncs=1264.4 fsync_ms=0.39
+18:01:19 PROGRESS scaling repeat 1/3 cell 52/60 rust 1 routing-64
+18:01:48 CELL rust 1 CPU routing-64 ok=1 err= sent=96850.3 recv=96883.6 mb= p50=7.23 p99=10.94 mib=1024 anon=24 cpu=92 client=93 kept=yes disk=161.7 fsyncs=4806.2 fsync_ms=4.08
+18:01:49 PROGRESS scaling repeat 1/3 cell 53/60 bun 2 fanout-20
+18:02:18 CELL bun 2 CPU fanout-20 ok=1 err= sent=22847.4 recv=456949.1 mb= p50=1.62 p99=5.66 mib=290 anon=259 cpu=152 client=204 kept=yes disk=53.4 fsyncs=1121.3 fsync_ms=0.27
+18:02:18 PROGRESS scaling repeat 1/3 cell 54/60 bun 4 routing-64
+18:02:49 CELL bun 4 CPU routing-64 ok=1 err= sent=274609.2 recv=274615.4 mb= p50=1.00 p99=7.13 mib=553 anon=489 cpu=193 client=242 kept=yes disk=183.0 fsyncs=3249.9 fsync_ms=0.88
+18:02:55 PROGRESS scaling repeat 1/3 cell 55/60 bun 1 quorum
+18:03:25 CELL bun 1 CPU quorum ok=1 err= sent=110029.2 recv=110028.7 mb= p50=2.26 p99=12.00 mib=124 anon=108 cpu=84 client=97 kept=yes disk=148.7 fsyncs=1282.9 fsync_ms=0.41
+18:03:25 PROGRESS scaling repeat 1/3 cell 56/60 rust 4 heavy
+18:03:54 CELL rust 4 CPU heavy ok=1 err= sent=213636.4 recv=214285.9 mb= p50=29.71 p99=69.40 mib=2260 anon=140 cpu=268 client=212 kept=yes disk=307.9 fsyncs=1565.6 fsync_ms=4.83
+18:03:55 PROGRESS scaling repeat 1/3 cell 57/60 rust 6 routing-64
+18:04:27 CELL rust 6 CPU routing-64 ok=1 err= sent=99220.7 recv=99220.6 mb= p50=1.32 p99=3.77 mib=1628 anon=38 cpu=136 client=95 kept=yes disk=137.8 fsyncs=4596.4 fsync_ms=11.09
+18:04:27 PROGRESS scaling repeat 1/3 cell 58/60 rust 6 quorum
+18:04:56 CELL rust 6 CPU quorum ok=1 err= sent=163162.7 recv=163165.1 mb= p50=1.28 p99=1.94 mib=149 anon=14 cpu=324 client=230 kept=yes disk=200.3 fsyncs=1248.7 fsync_ms=0.44
+18:04:56 PROGRESS scaling repeat 1/3 cell 59/60 rust 2 routing-64
+18:05:27 CELL rust 2 CPU routing-64 ok=1 err= sent=84149.6 recv=84175.2 mb= p50=3.10 p99=8.89 mib=1091 anon=30 cpu=61 client=63 kept=yes disk=98.5 fsyncs=3109.8 fsync_ms=15.31
+18:05:27 PROGRESS scaling repeat 1/3 cell 60/60 bun 2 heavy
+18:05:57 CELL bun 2 CPU heavy ok=1 err= sent=200740.3 recv=200702.0 mb= p50=26.80 p99=80.69 mib=449 anon=391 cpu=141 client=200 kept=yes disk=285.2 fsyncs=1630.7 fsync_ms=0.74
+18:05:57 PROGRESS scaling repeat 2/3 cell 1/60 bun 4 fanout-20
+18:06:27 CELL bun 4 CPU fanout-20 ok=1 err= sent=27928.8 recv=558517.2 mb= p50=1.58 p99=4.80 mib=546 anon=485 cpu=269 client=273 kept=yes disk=110.5 fsyncs=3471.1 fsync_ms=0.26
+18:06:27 PROGRESS scaling repeat 2/3 cell 2/60 rust 6 work-queue
+18:06:56 CELL rust 6 CPU work-queue ok=1 err= sent=142982.1 recv=142993.4 mb= p50=1.23 p99=1.90 mib=149 anon=14 cpu=260 client=188 kept=yes disk=163.7 fsyncs=1009.0 fsync_ms=0.64
+18:06:56 PROGRESS scaling repeat 2/3 cell 3/60 bun 6 work-queue
+18:07:26 CELL bun 6 CPU work-queue ok=1 err= sent=154347.6 recv=154341.5 mb= p50=0.81 p99=3.81 mib=297 anon=272 cpu=113 client=145 kept=yes disk=187.6 fsyncs=1691.6 fsync_ms=0.31
+18:07:26 PROGRESS scaling repeat 2/3 cell 4/60 bun 6 routing-64
+18:07:56 CELL bun 6 CPU routing-64 ok=1 err= sent=236529.4 recv=236529.3 mb= p50=1.08 p99=8.43 mib=770 anon=675 cpu=228 client=225 kept=yes disk=181.6 fsyncs=4855.9 fsync_ms=1.04
+18:07:59 PROGRESS scaling repeat 2/3 cell 5/60 bun 2 fanout-20
+18:08:29 CELL bun 2 CPU fanout-20 ok=1 err= sent=22881.9 recv=457670.2 mb= p50=1.59 p99=5.62 mib=321 anon=290 cpu=155 client=207 kept=yes disk=54.1 fsyncs=1182.2 fsync_ms=0.26
+18:08:29 PROGRESS scaling repeat 2/3 cell 6/60 rust 3 heavy
+18:08:58 CELL rust 3 CPU heavy ok=1 err= sent=248888.6 recv=248903.6 mb= p50=36.87 p99=82.24 mib=2184 anon=65 cpu=271 client=237 kept=yes disk=375.9 fsyncs=2260.4 fsync_ms=0.86
+18:08:59 PROGRESS scaling repeat 2/3 cell 7/60 bun 1 quorum
+18:09:28 CELL bun 1 CPU quorum ok=1 err= sent=126373.3 recv=126373.3 mb= p50=2.21 p99=11.64 mib=127 anon=110 cpu=89 client=103 kept=yes disk=160.9 fsyncs=1389.9 fsync_ms=0.35
+18:09:28 PROGRESS scaling repeat 2/3 cell 8/60 rust 4 fanout-20
+18:09:57 CELL rust 4 CPU fanout-20 ok=1 err= sent=8907.1 recv=178133.6 mb= p50=0.44 p99=3.11 mib=2673 anon=16 cpu=163 client=127 kept=yes disk=224.6 fsyncs=1863.5 fsync_ms=3.95
+18:09:58 PROGRESS scaling repeat 2/3 cell 9/60 rust 3 work-queue
+18:10:32 CELL rust 3 CPU work-queue ok=1 err= sent=162879.8 recv=162886.8 mb= p50=1.15 p99=1.91 mib=146 anon=10 cpu=137 client=167 kept=yes disk=147.4 fsyncs=905.2 fsync_ms=0.53
+18:10:33 PROGRESS scaling repeat 2/3 cell 10/60 bun 3 work-queue
+18:11:02 CELL bun 3 CPU work-queue ok=1 err= sent=156330.1 recv=156325.0 mb= p50=0.79 p99=3.44 mib=217 anon=197 cpu=101 client=148 kept=yes disk=198.8 fsyncs=1807.4 fsync_ms=0.29
+18:11:02 PROGRESS scaling repeat 2/3 cell 11/60 bun 3 quorum
+18:11:32 CELL bun 3 CPU quorum ok=1 err= sent=101888.6 recv=101887.3 mb= p50=1.78 p99=19.44 mib=193 anon=174 cpu=88 client=93 kept=yes disk=143.0 fsyncs=1321.3 fsync_ms=0.42
+18:11:32 PROGRESS scaling repeat 2/3 cell 12/60 bun 3 heavy
+18:12:03 CELL bun 3 CPU heavy ok=1 err= sent=231765.9 recv=231865.3 mb= p50=19.40 p99=107.98 mib=572 anon=504 cpu=169 client=223 kept=yes disk=322.0 fsyncs=1861.2 fsync_ms=1.11
+18:12:03 PROGRESS scaling repeat 2/3 cell 13/60 bun 6 fanout-20
+18:12:33 CELL bun 6 CPU fanout-20 ok=1 err= sent=23542.1 recv=471129.3 mb= p50=1.64 p99=5.08 mib=744 anon=655 cpu=130 client=98 kept=yes disk=50.3 fsyncs=1851.2 fsync_ms=1.04
+18:12:33 PROGRESS scaling repeat 2/3 cell 14/60 bun 1 heavy
+18:13:03 CELL bun 1 CPU heavy ok=1 err= sent=128286.7 recv=128068.7 mb= p50=38.22 p99=137.32 mib=321 anon=274 cpu=89 client=132 kept=yes disk=245.4 fsyncs=1275.5 fsync_ms=0.32
+18:13:03 PROGRESS scaling repeat 2/3 cell 15/60 bun 2 heavy
+18:13:33 CELL bun 2 CPU heavy ok=1 err= sent=225400.8 recv=225423.7 mb= p50=24.63 p99=110.18 mib=439 anon=379 cpu=151 client=210 kept=yes disk=304.5 fsyncs=1849.5 fsync_ms=0.58
+18:13:34 PROGRESS scaling repeat 2/3 cell 16/60 rust 1 heavy
+18:14:03 CELL rust 1 CPU heavy ok=1 err= sent=102354.1 recv=102552.9 mb= p50=86.81 p99=210.31 mib=1024 anon=67 cpu=97 client=103 kept=yes disk=202.3 fsyncs=1316.7 fsync_ms=1.05
+18:14:03 PROGRESS scaling repeat 2/3 cell 17/60 bun 8 quorum
+18:14:33 CELL bun 8 CPU quorum ok=1 err= sent=127809.4 recv=127810.7 mb= p50=1.75 p99=14.73 mib=346 anon=318 cpu=138 client=116 kept=yes disk=173.7 fsyncs=1616.5 fsync_ms=0.23
+18:14:33 PROGRESS scaling repeat 2/3 cell 18/60 rust 8 work-queue
+18:15:02 CELL rust 8 CPU work-queue ok=1 err= sent=139584.6 recv=139584.1 mb= p50=1.26 p99=1.97 mib=150 anon=14 cpu=304 client=210 kept=yes disk=176.0 fsyncs=1092.0 fsync_ms=0.54
+18:15:02 PROGRESS scaling repeat 2/3 cell 19/60 rust 4 quorum
+18:15:31 CELL rust 4 CPU quorum ok=1 err= sent=148546.3 recv=148562.0 mb= p50=1.16 p99=1.86 mib=146 anon=11 cpu=206 client=175 kept=yes disk=171.1 fsyncs=1041.0 fsync_ms=0.63
+18:15:31 PROGRESS scaling repeat 2/3 cell 20/60 bun 2 quorum
+18:16:01 CELL bun 2 CPU quorum ok=1 err= sent=123946.2 recv=123944.4 mb= p50=1.70 p99=15.23 mib=171 anon=153 cpu=93 client=101 kept=yes disk=158.8 fsyncs=1466.1 fsync_ms=0.34
+18:16:01 PROGRESS scaling repeat 2/3 cell 21/60 bun 1 routing-64
+18:16:31 CELL bun 1 CPU routing-64 ok=1 err= sent=147599.3 recv=147655.8 mb= p50=3.56 p99=11.27 mib=141 anon=121 cpu=81 client=139 kept=yes disk=109.0 fsyncs=1679.6 fsync_ms=0.30
+18:16:31 PROGRESS scaling repeat 2/3 cell 22/60 rust 6 fanout-20
+18:17:01 CELL rust 6 CPU fanout-20 ok=1 err= sent=6564.7 recv=131311.1 mb= p50=0.46 p99=3.49 mib=2170 anon=15 cpu=150 client=88 kept=yes disk=158.5 fsyncs=1312.8 fsync_ms=9.23
+18:17:01 PROGRESS scaling repeat 2/3 cell 23/60 bun 1 work-queue
+18:17:30 CELL bun 1 CPU work-queue ok=1 err= sent=157968.1 recv=157962.9 mb= p50=0.92 p99=4.28 mib=142 anon=126 cpu=97 client=150 kept=yes disk=204.8 fsyncs=1734.0 fsync_ms=0.25
+18:17:31 PROGRESS scaling repeat 2/3 cell 24/60 rust 2 routing-64
+18:18:00 CELL rust 2 CPU routing-64 ok=1 err= sent=132396.6 recv=132395.2 mb= p50=3.12 p99=6.38 mib=2047 anon=38 cpu=132 client=127 kept=yes disk=208.1 fsyncs=6453.8 fsync_ms=4.47
+18:18:00 PROGRESS scaling repeat 2/3 cell 25/60 rust 3 routing-64
+18:18:30 CELL rust 3 CPU routing-64 ok=1 err= sent=103003.5 recv=103002.9 mb= p50=2.06 p99=4.64 mib=1620 anon=31 cpu=122 client=108 kept=yes disk=174.6 fsyncs=5462.3 fsync_ms=7.90
+18:18:30 PROGRESS scaling repeat 2/3 cell 26/60 rust 2 heavy
+18:18:59 CELL rust 2 CPU heavy ok=1 err= sent=124501.5 recv=124458.3 mb= p50=45.93 p99=116.45 mib=2048 anon=60 cpu=127 client=119 kept=yes disk=234.5 fsyncs=1160.7 fsync_ms=5.56
+18:19:00 PROGRESS scaling repeat 2/3 cell 27/60 rust 6 routing-64
+18:19:29 CELL rust 6 CPU routing-64 ok=1 err= sent=138849.7 recv=138959.6 mb= p50=1.27 p99=3.68 mib=1628 anon=39 cpu=151 client=106 kept=yes disk=161.5 fsyncs=5090.5 fsync_ms=9.74
+18:19:30 PROGRESS scaling repeat 2/3 cell 28/60 rust 2 quorum
+18:19:59 CELL rust 2 CPU quorum ok=1 err= sent=195059.1 recv=195055.0 mb= p50=1.31 p99=2.09 mib=145 anon=10 cpu=164 client=182 kept=yes disk=228.5 fsyncs=1433.8 fsync_ms=0.30
+18:20:00 PROGRESS scaling repeat 2/3 cell 29/60 bun 4 routing-64
+18:20:30 CELL bun 4 CPU routing-64 ok=1 err= sent=238386.2 recv=238420.2 mb= p50=0.95 p99=7.32 mib=532 anon=467 cpu=182 client=215 kept=yes disk=178.1 fsyncs=3094.4 fsync_ms=0.97
+18:20:30 PROGRESS scaling repeat 2/3 cell 30/60 rust 1 quorum
+18:20:59 CELL rust 1 CPU quorum ok=1 err= sent=116265.7 recv=116275.2 mb= p50=2.01 p99=2.84 mib=144 anon=8 cpu=72 client=98 kept=yes disk=133.5 fsyncs=829.2 fsync_ms=0.66
+18:20:59 PROGRESS scaling repeat 2/3 cell 31/60 bun 6 quorum
+18:21:28 CELL bun 6 CPU quorum ok=1 err= sent=93867.4 recv=93867.4 mb= p50=1.80 p99=17.61 mib=282 anon=258 cpu=96 client=85 kept=yes disk=129.3 fsyncs=1192.7 fsync_ms=0.48
+18:21:29 PROGRESS scaling repeat 2/3 cell 32/60 bun 2 routing-64
+18:21:59 CELL bun 2 CPU routing-64 ok=1 err= sent=154889.2 recv=154915.7 mb= p50=1.72 p99=7.71 mib=283 anon=249 cpu=103 client=150 kept=yes disk=110.1 fsyncs=1565.6 fsync_ms=0.91
+18:21:59 PROGRESS scaling repeat 2/3 cell 33/60 rust 8 heavy
+18:22:33 CELL rust 8 CPU heavy ok=1 err= sent=295871.2 recv=296890.1 mb= p50=27.22 p99=71.39 mib=2251 anon=129 cpu=508 client=290 kept=yes disk=381.9 fsyncs=2063.1 fsync_ms=3.54
+18:22:33 PROGRESS scaling repeat 2/3 cell 34/60 bun 8 heavy
+18:23:06 CELL bun 8 CPU heavy ok=1 err= sent=318405.7 recv=319033.2 mb= p50=9.24 p99=84.80 mib=1164 anon=1042 cpu=384 client=311 kept=yes disk=443.7 fsyncs=3021.9 fsync_ms=2.03
+18:23:06 PROGRESS scaling repeat 2/3 cell 35/60 bun 2 work-queue
+18:23:38 CELL bun 2 CPU work-queue ok=1 err= sent=120499.1 recv=120518.6 mb= p50=0.83 p99=3.68 mib=192 anon=174 cpu=63 client=90 kept=yes disk=117.0 fsyncs=1026.7 fsync_ms=0.70
+18:23:39 PROGRESS scaling repeat 2/3 cell 36/60 rust 3 quorum
+18:24:07 CELL rust 3 CPU quorum ok=1 err= sent=233914.9 recv=233915.3 mb= p50=1.18 p99=1.98 mib=146 anon=11 cpu=268 client=255 kept=yes disk=284.9 fsyncs=1782.1 fsync_ms=0.21
+18:24:08 PROGRESS scaling repeat 2/3 cell 37/60 rust 2 work-queue
+18:24:37 CELL rust 2 CPU work-queue ok=1 err= sent=208832.5 recv=208836.3 mb= p50=1.30 p99=2.07 mib=146 anon=11 cpu=182 client=202 kept=yes disk=254.8 fsyncs=1599.0 fsync_ms=0.21
+18:24:37 PROGRESS scaling repeat 2/3 cell 38/60 bun 6 heavy
+18:25:07 CELL bun 6 CPU heavy ok=1 err= sent=420062.7 recv=419991.0 mb= p50=11.29 p99=87.47 mib=953 anon=845 cpu=375 client=374 kept=yes disk=573.4 fsyncs=3904.0 fsync_ms=0.99
+18:25:07 PROGRESS scaling repeat 2/3 cell 39/60 bun 3 routing-64
+18:25:37 CELL bun 3 CPU routing-64 ok=1 err= sent=173839.9 recv=173885.2 mb= p50=1.05 p99=6.55 mib=411 anon=362 cpu=105 client=136 kept=yes disk=104.4 fsyncs=1580.5 fsync_ms=1.52
+18:25:37 PROGRESS scaling repeat 2/3 cell 40/60 bun 8 routing-64
+18:26:08 CELL bun 8 CPU routing-64 ok=1 err= sent=224572.6 recv=224566.5 mb= p50=0.89 p99=7.29 mib=1022 anon=896 cpu=300 client=234 kept=yes disk=200.1 fsyncs=5575.2 fsync_ms=1.25
+18:26:08 PROGRESS scaling repeat 2/3 cell 41/60 rust 8 quorum
+18:26:37 CELL rust 8 CPU quorum ok=1 err= sent=155287.7 recv=155301.3 mb= p50=1.34 p99=1.97 mib=150 anon=15 cpu=324 client=223 kept=yes disk=183.8 fsyncs=1143.3 fsync_ms=0.48
+18:26:37 PROGRESS scaling repeat 2/3 cell 42/60 bun 4 work-queue
+18:27:06 CELL bun 4 CPU work-queue ok=1 err= sent=174845.0 recv=174847.1 mb= p50=0.85 p99=3.39 mib=243 anon=221 cpu=122 client=164 kept=yes disk=218.9 fsyncs=2000.6 fsync_ms=0.25
+18:27:07 PROGRESS scaling repeat 2/3 cell 43/60 rust 1 work-queue
+18:27:36 CELL rust 1 CPU work-queue ok=1 err= sent=121191.8 recv=121189.9 mb= p50=2.00 p99=2.81 mib=143 anon=8 cpu=80 client=107 kept=yes disk=149.3 fsyncs=931.1 fsync_ms=0.45
+18:27:36 PROGRESS scaling repeat 2/3 cell 44/60 bun 1 fanout-20
+18:28:05 CELL bun 1 CPU fanout-20 ok=1 err= sent=19335.7 recv=386692.4 mb= p50=2.41 p99=6.91 mib=151 anon=134 cpu=98 client=159 kept=yes disk=30.3 fsyncs=464.6 fsync_ms=0.36
+18:28:05 PROGRESS scaling repeat 2/3 cell 45/60 rust 4 heavy
+18:28:35 CELL rust 4 CPU heavy ok=1 err= sent=255429.8 recv=255074.6 mb= p50=32.38 p99=76.94 mib=2198 anon=78 cpu=311 client=241 kept=yes disk=363.1 fsyncs=2159.4 fsync_ms=1.62
+18:28:35 PROGRESS scaling repeat 2/3 cell 46/60 bun 8 work-queue
+18:29:05 CELL bun 8 CPU work-queue ok=1 err= sent=158900.7 recv=158908.5 mb= p50=0.82 p99=4.04 mib=359 anon=332 cpu=129 client=149 kept=yes disk=196.1 fsyncs=1789.1 fsync_ms=0.25
+18:29:05 PROGRESS scaling repeat 2/3 cell 47/60 rust 6 quorum
+18:29:34 CELL rust 6 CPU quorum ok=1 err= sent=152344.4 recv=152357.3 mb= p50=1.29 p99=1.99 mib=154 anon=18 cpu=290 client=208 kept=yes disk=178.8 fsyncs=1110.7 fsync_ms=0.53
+18:29:34 PROGRESS scaling repeat 2/3 cell 48/60 rust 1 routing-64
+18:30:04 CELL rust 1 CPU routing-64 ok=1 err= sent=81600.9 recv=81564.6 mb= p50=7.04 p99=11.65 mib=1024 anon=23 cpu=82 client=84 kept=yes disk=138.8 fsyncs=4310.5 fsync_ms=5.68
+18:30:04 PROGRESS scaling repeat 2/3 cell 49/60 rust 2 fanout-20
+18:30:33 CELL rust 2 CPU fanout-20 ok=1 err= sent=6029.8 recv=120602.1 mb= p50=0.55 p99=5.95 mib=1996 anon=14 cpu=80 client=85 kept=yes disk=157.1 fsyncs=1284.7 fsync_ms=7.48
+18:30:33 PROGRESS scaling repeat 2/3 cell 50/60 bun 4 heavy
+18:31:03 CELL bun 4 CPU heavy ok=1 err= sent=355593.9 recv=355548.2 mb= p50=12.55 p99=55.88 mib=740 anon=658 cpu=277 client=331 kept=yes disk=489.4 fsyncs=2698.4 fsync_ms=0.93
+18:31:03 PROGRESS scaling repeat 2/3 cell 51/60 bun 4 quorum
+18:31:33 CELL bun 4 CPU quorum ok=1 err= sent=106321.4 recv=106321.4 mb= p50=1.81 p99=16.86 mib=225 anon=203 cpu=93 client=93 kept=yes disk=142.2 fsyncs=1313.3 fsync_ms=0.42
+18:31:33 PROGRESS scaling repeat 2/3 cell 52/60 bun 3 fanout-20
+18:32:03 CELL bun 3 CPU fanout-20 ok=1 err= sent=20474.7 recv=409570.2 mb= p50=1.60 p99=5.03 mib=396 anon=349 cpu=157 client=183 kept=yes disk=60.0 fsyncs=1670.6 fsync_ms=0.70
+18:32:03 PROGRESS scaling repeat 2/3 cell 53/60 rust 3 fanout-20
+18:32:33 CELL rust 3 CPU fanout-20 ok=1 err= sent=6191.1 recv=123824.4 mb= p50=0.59 p99=6.77 mib=1831 anon=14 cpu=128 client=128 kept=yes disk=162.4 fsyncs=1374.6 fsync_ms=7.38
+18:32:33 PROGRESS scaling repeat 2/3 cell 54/60 rust 6 heavy
+18:33:03 CELL rust 6 CPU heavy ok=1 err= sent=219444.7 recv=219540.7 mb= p50=7.18 p99=63.67 mib=2199 anon=79 cpu=297 client=207 kept=yes disk=299.0 fsyncs=1331.8 fsync_ms=7.10
+18:33:03 PROGRESS scaling repeat 2/3 cell 55/60 rust 8 routing-64
+18:33:34 CELL rust 8 CPU routing-64 ok=1 err= sent=111480.8 recv=111479.1 mb= p50=0.95 p99=3.41 mib=1838 anon=39 cpu=158 client=93 kept=yes disk=143.3 fsyncs=4503.3 fsync_ms=11.56
+18:33:34 PROGRESS scaling repeat 2/3 cell 56/60 bun 8 fanout-20
+18:34:04 CELL bun 8 CPU fanout-20 ok=1 err= sent=10880.6 recv=217616.8 mb= p50=1.79 p99=6.16 mib=908 anon=759 cpu=62 client=31 kept=yes disk=19.8 fsyncs=796.5 fsync_ms=5.93
+18:34:04 PROGRESS scaling repeat 2/3 cell 57/60 rust 1 fanout-20
+18:34:33 CELL rust 1 CPU fanout-20 ok=1 err= sent=7928.5 recv=158578.7 mb= p50=0.95 p99=3.08 mib=1024 anon=12 cpu=98 client=120 kept=yes disk=212.2 fsyncs=1926.5 fsync_ms=0.70
+18:34:34 PROGRESS scaling repeat 2/3 cell 58/60 rust 4 work-queue
+18:35:04 CELL rust 4 CPU work-queue ok=1 err= sent=163363.8 recv=163368.7 mb= p50=1.18 p99=1.90 mib=147 anon=12 cpu=237 client=195 kept=yes disk=196.1 fsyncs=1201.2 fsync_ms=0.50
+18:35:04 PROGRESS scaling repeat 2/3 cell 59/60 rust 4 routing-64
+18:35:34 CELL rust 4 CPU routing-64 ok=1 err= sent=99790.4 recv=99790.1 mb= p50=1.64 p99=4.15 mib=1414 anon=36 cpu=103 client=86 kept=yes disk=130.9 fsyncs=4198.4 fsync_ms=12.10
+18:35:34 PROGRESS scaling repeat 2/3 cell 60/60 rust 8 fanout-20
+18:36:03 CELL rust 8 CPU fanout-20 ok=1 err= sent=7215.3 recv=144193.1 mb= p50=0.53 p99=2.90 mib=2164 anon=17 cpu=183 client=91 kept=yes disk=156.3 fsyncs=1260.1 fsync_ms=9.44
+18:36:04 PROGRESS scaling repeat 3/3 cell 1/60 bun 2 quorum

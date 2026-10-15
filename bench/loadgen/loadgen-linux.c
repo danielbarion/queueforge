@@ -78,6 +78,13 @@ static Conn *conns;
 static int nconns;
 static int epfd = -1;
 static int g_window = 128;
+/* QPREFIX: queue names are <prefix>q<i>, so several processes keep separate queues. */
+static const char *g_qprefix = "";
+/* BLOCK=1: wait up to 1 ms for events while running instead of spinning, so the
+   process's CPU time shows how busy it is. epoll still returns at the first event. */
+static int g_block = 0;
+/* PERSISTENT=0: delivery mode 1 (transient) instead of 2. */
+static int g_persistent = 1;
 static int g_pubs, g_cons, g_queues, g_prefetch, g_body;
 static int phase;
 static int ping_mode;
@@ -346,7 +353,7 @@ static int build_publish(unsigned char *out, int cap, const char *qname, int bod
   for (s = 56; s >= 0; s -= 8) header[h++] = (unsigned char)((unsigned long long)body_len >> s);
   header[h++] = 0x10;
   header[h++] = 0x00;
-  header[h++] = 2;
+  header[h++] = g_persistent ? 2 : 1;
   if (frame_write(out, cap, &off, 1, 1, method, m) < 0) return -1;
   if (frame_write(out, cap, &off, 2, 1, header, h) < 0) return -1;
   if (off + 8 + body_len > cap) return -1;
@@ -1110,6 +1117,9 @@ int main(int argc, char **argv) {
   g_window = env_int("WINDOW", 128, 1, 1024);
   g_prefetch = env_int("PREFETCH", 512, 1, 65535);
   g_body = env_int("BODY", 256, 1, 4096);
+  if (getenv("QPREFIX") && strlen(getenv("QPREFIX")) < 32) g_qprefix = getenv("QPREFIX");
+  g_block = env_int("BLOCK", 0, 0, 1);
+  g_persistent = env_int("PERSISTENT", 1, 0, 1);
   warmup_us = (long long)env_int("WARMUP_MS", 2000, 0, 60000) * 1000LL;
   measure_us = (long long)env_int("MEASURE_MS", 8000, 200, 120000) * 1000LL;
   startup_us = ping_mode ? 1500LL * 1000LL : 20000LL * 1000LL;
@@ -1134,8 +1144,8 @@ int main(int argc, char **argv) {
     }
     nconns = 1 + g_pubs + g_cons;
     for (i = 0; i < g_queues; i++) {
-      char name[16];
-      snprintf(name, sizeof name, "q%d", i);
+      char name[48];
+      snprintf(name, sizeof name, "%sq%d", g_qprefix, i);
       declare_blob[i].bytes = xmalloc(256);
       declare_blob[i].len = build_declare(declare_blob[i].bytes, 256, name);
       publish_blob[i].bytes = xmalloc((size_t)(512 + g_body));
@@ -1168,10 +1178,10 @@ int main(int argc, char **argv) {
       c->slot_used = xmalloc((size_t)g_window);
       for (s = 0; s < g_window; s++) c->free_stack[c->nfree++] = s;
     } else {
-      char qname[16], tag[16];
+      char qname[48], tag[16];
       c->role = R_CON;
       c->qindex = (i - 1 - g_pubs) % g_queues;
-      snprintf(qname, sizeof qname, "q%d", c->qindex);
+      snprintf(qname, sizeof qname, "%sq%d", g_qprefix, c->qindex);
       snprintf(tag, sizeof tag, "c%d", i);
       c->consume_len = build_consume(c->consume_frame, (int)sizeof c->consume_frame, qname, tag);
       if (c->consume_len < 0) return 1;
@@ -1214,7 +1224,7 @@ int main(int argc, char **argv) {
       for (i = 0; i < nconns; i++)
         if (conns[i].role == R_PUB) fill_pub(&conns[i], now);
     }
-    n = epoll_wait(epfd, evs, 256, phase == PH_RUN ? 0 : 20);
+    n = epoll_wait(epfd, evs, 256, phase == PH_RUN ? g_block : 20);
     if (n < 0) {
       if (errno == EINTR) continue;
       snprintf(first_err, sizeof first_err, "epoll");
