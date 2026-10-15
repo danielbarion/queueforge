@@ -87,7 +87,7 @@ def rows(samples, repeat):
 
 
 def measure(repeat=3):
-    C.run(["docker", "rm", "-f", NAME], check=False, timeout=40)
+    C.run(["docker", "rm", "-fv", NAME], check=False, timeout=40)
     try:
         p = C.run([
             "docker", "run", "--rm", "--name", NAME,
@@ -95,7 +95,7 @@ def measure(repeat=3):
             "-v", "/data", IMAGE, "sh", "-c", script(repeat),
         ], timeout=900)
     finally:
-        C.run(["docker", "rm", "-f", NAME], check=False, timeout=40)
+        C.run(["docker", "rm", "-fv", NAME], check=False, timeout=40)
     result = rows(parse(p.stdout or "", repeat), repeat)
     path = os.path.join(C.OUT_DIR, "disk.tsv")
     with open(path, "w") as f:

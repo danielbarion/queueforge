@@ -90,7 +90,7 @@ def main():
                     merge_load(load, kinds)
             if "scenarios" not in skip:
                 step("scenarios", lambda: scenarios.run_matrix(kinds or scenarios.KINDS))
-                C.run(["docker", "rm", "-f", scenarios.BROKER, scenarios.CLIENT], check=False)
+                C.run(["docker", "rm", "-fv", scenarios.BROKER, scenarios.CLIENT], check=False)
             if "connections" not in skip:
                 sys.argv = ["connections.py"] + kinds
                 step("connections", connections.main)

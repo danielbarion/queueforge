@@ -299,7 +299,7 @@ def amqp_ready(timeout=120):
 
 
 def start_broker(kind, cpus, mem, image=None):
-    C.run(["docker", "rm", "-f", BROKER], check=False, timeout=40)
+    C.run(["docker", "rm", "-fv", BROKER], check=False, timeout=40)
     C.run(["docker", "network", "create", NET], check=False)
     cmd = [
         "docker", "run", "-d", "--name", BROKER, "--network", NET,
@@ -737,7 +737,7 @@ def run_cell(kind, cpus, mem, size, sc, run_id=None, cohort_id=None, broker_imag
                 with open(os.path.join(absolute_dir, "broker.log"), "x") as f:
                     f.write((logs.stdout or "") + (logs.stderr or ""))
         finally:
-            C.run(["docker", "rm", "-f", BROKER, CLIENT], check=False, timeout=40)
+            C.run(["docker", "rm", "-fv", BROKER, CLIENT], check=False, timeout=40)
 
 
 
@@ -825,7 +825,7 @@ def main():
         try:
             run_matrix(opts.items or KINDS, opts.repeat)
         finally:
-            C.run(["docker", "rm", "-f", BROKER, CLIENT], check=False)
+            C.run(["docker", "rm", "-fv", BROKER, CLIENT], check=False)
             C.restore_small()
         return
     raise SystemExit(__doc__)

@@ -52,7 +52,7 @@ def stop():
     p = run(["docker", "ps", "-aq", "--filter", "name=qf-lim-"], check=False)
     ids = p.stdout.split()
     if ids:
-        run(["docker", "rm", "-f", *ids], timeout=120, check=False)
+        run(["docker", "rm", "-fv", *ids], timeout=120, check=False)
 
 
 def broker_status():

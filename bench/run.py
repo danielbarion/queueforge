@@ -272,7 +272,7 @@ def main():
                     try:
                         scenarios.run_matrix(opts.kinds, opts.repeat, only=opts.scenarios or None, cpus_only=opts.sizes or None)
                     finally:
-                        C.run(["docker", "rm", "-f", scenarios.BROKER, scenarios.CLIENT], check=False)
+                        C.run(["docker", "rm", "-fv", scenarios.BROKER, scenarios.CLIENT], check=False)
 
                 def run_load():
                     all_kinds = opts.kinds == KINDS

@@ -104,7 +104,7 @@ def restore_small():
 def cleanup_load():
     if not docker_up():
         return
-    run(["docker", "rm", "-f", "qf-load-broker", "qf-load-client"], check=False, timeout=40)
+    run(["docker", "rm", "-fv", "qf-load-broker", "qf-load-client"], check=False, timeout=40)
     run(["docker", "network", "rm", "qf-load"], check=False, timeout=20)
 
 
@@ -142,7 +142,7 @@ def ensure_client():
 
 
 def start_broker(kind, cpus, mem):
-    run(["docker", "rm", "-f", "qf-load-broker"], check=False, timeout=40)
+    run(["docker", "rm", "-fv", "qf-load-broker"], check=False, timeout=40)
     common = [
         "docker", "run", "-d", "--name", "qf-load-broker",
         "--network", "qf-load",
@@ -326,7 +326,7 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
         write_row(tsv, row)
         log(f"FAILED kind={kind} cpus={cpus} mem={mem_mb} shape={shape} err={row['err']} oom={oom}")
         dump_logs()
-        run(["docker", "rm", "-f", "qf-load-broker"], check=False)
+        run(["docker", "rm", "-fv", "qf-load-broker"], check=False)
         return row
     boot_s = ready_at - t_boot
     out_path = os.path.join(HERE, "cells", f"{kind}-{cpus}-{mem_mb}-{shape}-{repeat}.out")
@@ -390,7 +390,7 @@ def run_cell(tsv, kind, cpus, mem, mem_mb, shape, env, warmup_ms, measure_ms, ch
         with open(out_path.removesuffix(".out") + ".broker.log", "w") as f:
             f.write((logs.stdout or "") + (logs.stderr or ""))
         dump_logs()
-    run(["docker", "rm", "-f", "qf-load-broker"], check=False, timeout=40)
+    run(["docker", "rm", "-fv", "qf-load-broker"], check=False, timeout=40)
     if fields:
         for key in (
             "ok", "confirm_s", "consume_s", "sent_s", "p50_us", "p99_us", "confirmed", "consumed", "sent",

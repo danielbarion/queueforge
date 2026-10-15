@@ -119,7 +119,7 @@ def main():
                                      expected_repeats=opts.repeat, repeat_ordinal=ordinal)
                     rows.setdefault((name, sc_id), []).append(row or {})
     finally:
-        C.run(["docker", "rm", "-f", S.BROKER, S.CLIENT], check=False)
+        C.run(["docker", "rm", "-fv", S.BROKER, S.CLIENT], check=False)
         C.restore_small()
         run.release_lease()
     text = summary_md(opts.kind, size, [(n, digests[n]) for n, _ in opts.images], opts.scenarios, rows)
