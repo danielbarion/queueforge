@@ -34,6 +34,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { crc32, RECORD_FIXED } from "./log-crc.ts";
 
 const HEADER = 16;
 const CHUNK = 4 * 1024 * 1024;
@@ -53,6 +54,20 @@ const START_CHUNKS = 8;
 const COMPACT_AFTER = 16;
 /** Retired chunks kept ahead of the active one for reuse. */
 const SPARES = 2;
+/**
+ * Staging ring shared with the sync worker, which fills in the crcs and writes
+ * the bytes. It uses the first {@link STAGE_START} bytes, and doubles (up to
+ * {@link STAGE}) when a batch needs more than a quarter while it is empty, so
+ * small messages keep 1 MiB resident. A batch larger than a quarter of the
+ * ring is written on this thread.
+ */
+const STAGE = 8 * 1024 * 1024;
+const STAGE_START = 1024 * 1024;
+/** Job slots shared with the sync worker, and the fields of one (`sync-worker.ts`). */
+const JOBS = 1024;
+const JOB_FIELDS = 8;
+const JOB_WRITE = 1;
+const JOB_CLOSE = 2;
 const MAX_NAME = 64 * 1024;
 const MAX_META = 1024 * 1024;
 const MAX_BODY = 64 * 1024 * 1024;
@@ -86,10 +101,6 @@ function saltOf(id: number): number {
   return Math.imul(id, 0x9e3779b1) >>> 0;
 }
 
-/** IEEE CRC-32, the same polynomial the table version used. Native, so replay and the group commit do not loop per byte in JS. */
-function crc32(buf: Uint8Array): number {
-  return Bun.hash.crc32(buf) >>> 0;
-}
 
 function chunkPath(dir: string, id: number): string {
   return `${dir}/${String(id).padStart(8, "0")}`;
@@ -155,8 +166,6 @@ function inspect(path: string): { logical: number; size: number; version: number
   }
 }
 
-/** Magic, type, id, the three length fields, body length, and crc. */
-const RECORD_FIXED = 4 + 1 + 8 + 2 + 2 + 4 + 4 + 4;
 const MAGIC = 0x4c4d4651; // "QFML" read as a little-endian u32
 
 /** Write one record at `o` and return the offset after it. Strings are encoded straight into `buf`. */
@@ -173,7 +182,7 @@ function writeRecord(
   metaLen: number,
   body: Uint8Array,
   salt: number,
-  crcs?: number[],
+  fill = true,
 ): number {
   const start = o;
   buf.writeUInt32LE(MAGIC, o);
@@ -195,8 +204,7 @@ function writeRecord(
   o += 4;
   buf.set(body, o);
   o += body.length;
-  buf.writeUInt32LE((crc32(buf.subarray(start, o)) ^ salt) >>> 0, o);
-  crcs?.push(o);
+  buf.writeUInt32LE(fill ? (crc32(buf.subarray(start, o)) ^ salt) >>> 0 : 0, o);
   return o + 4;
 }
 
@@ -225,7 +233,7 @@ function groupLength(inserts: LogInsert[], i: number): number {
  * then one queue name per member. `lens` holds each row's vhost, queue and
  * meta byte lengths, three per row.
  */
-function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: number, lens: number[], salt: number, crcs?: number[]): number {
+function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: number, lens: number[], salt: number, fill = true): number {
   const start = o;
   const head = rows[from]!;
   const vhostLen = lens[from * 3]!;
@@ -253,25 +261,22 @@ function writeGroup(buf: Buffer, o: number, rows: LogInsert[], from: number, n: 
     o += 2;
     if (queueLen) o += buf.write(rows[from + k]!.queue, o, queueLen, "utf8");
   }
-  buf.writeUInt32LE((crc32(buf.subarray(start, o)) ^ salt) >>> 0, o);
-  crcs?.push(o);
+  buf.writeUInt32LE(fill ? (crc32(buf.subarray(start, o)) ^ salt) >>> 0 : 0, o);
   return o + 4;
 }
 
 const EMPTY = new Uint8Array(0);
 
+/** A batch's size and record runs, computed before any byte is written. */
+type Layout = { total: number; lens: number[]; runs: number[] };
+
 /**
- * One buffer for a whole group commit, sized first, then written in one pass.
- * Deletes come first: a replay applies them before this group's inserts.
- * Rows that share a body (see {@link groupLength}) share one type 3 record,
- * so a fanout to 20 queues writes its body once instead of 20 times.
- *
- * @param starts Filled with each insert's record offset in the buffer.
- * @param ends Filled with each insert's record end. Members of one group share both.
- * @param salt The crc salt of the chunk the buffer is written to.
- * @param crcs Filled with each record's crc offset, for {@link resalt}.
+ * Size a whole group commit, so its place (and a rotation) is known before
+ * any byte is written. Rows that share a body (see {@link groupLength}) share
+ * one type 3 record, so a fanout to 20 queues writes its body once instead of
+ * 20 times.
  */
-function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], ends?: number[], salt = 0, crcs?: number[]): Buffer {
+function layoutRows(deletes: number[], inserts: LogInsert[]): Layout {
   let total = deletes.length * RECORD_FIXED;
   const lens = new Array<number>(inserts.length * 3);
   const runs: number[] = [];
@@ -297,17 +302,30 @@ function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], 
     }
     i += n;
   }
-  const buf = Buffer.allocUnsafe(total);
+  return { total, lens, runs };
+}
+
+/**
+ * Write a laid-out batch into `buf` from offset 0, deletes first: a replay
+ * applies them before this group's inserts.
+ *
+ * @param starts Filled with each insert's record offset in the batch.
+ * @param ends Filled with each insert's record end. Members of one group share both.
+ * @param salt The crc salt of the chunk the batch is written to.
+ * @param fill False leaves every crc zero for {@link fillCrcs} (the sync worker).
+ */
+function writeRows(buf: Buffer, deletes: number[], inserts: LogInsert[], layout: Layout, salt: number, starts?: number[], ends?: number[], fill = true) {
+  const { lens, runs } = layout;
   let o = 0;
-  for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY, salt, crcs);
+  for (const id of deletes) o = writeRecord(buf, o, 2, id, "", 0, "", 0, "", 0, EMPTY, salt, fill);
   let i = 0;
   for (const n of runs) {
     const at = o;
     if (n === 1) {
       const row = inserts[i]!;
-      o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body, salt, crcs);
+      o = writeRecord(buf, o, 1, row.id, row.vhost, lens[i * 3]!, row.queue, lens[i * 3 + 1]!, row.meta, lens[i * 3 + 2]!, row.body, salt, fill);
     } else {
-      o = writeGroup(buf, o, inserts, i, n, lens, salt, crcs);
+      o = writeGroup(buf, o, inserts, i, n, lens, salt, fill);
     }
     for (let k = 0; k < n; k++) {
       starts?.push(at);
@@ -315,14 +333,6 @@ function encodeRows(deletes: number[], inserts: LogInsert[], starts?: number[], 
     }
     i += n;
   }
-  return buf;
-}
-
-/** Move the records of an encoded batch from one chunk's salt to another's. */
-function resalt(buf: Buffer, crcs: number[], from: number, to: number) {
-  const delta = (from ^ to) >>> 0;
-  if (delta === 0) return;
-  for (const at of crcs) buf.writeUInt32LE((buf.readUInt32LE(at) ^ delta) >>> 0, at);
 }
 
 /**
@@ -581,10 +591,23 @@ export class FastLog {
   private syncedSeq = 0n;
   private syncWorker: Worker | null = null;
   /**
-   * Shared with `sync-worker.ts`: requested, done, fd, failed, previous chunk
-   * fd, its sync count and nanoseconds, directory changes, and whether it waits.
+   * Shared with `sync-worker.ts`: jobs published, highest batch synced, jobs
+   * taken, failed, staging bytes released, its sync count and nanoseconds,
+   * directory changes, and whether it waits.
    */
   private readonly syncState = new BigInt64Array(new SharedArrayBuffer(72));
+  /** Job slots and the staging ring, allocated with the sync worker. */
+  private jobs: Float64Array<ArrayBufferLike> = new Float64Array(0);
+  private stage: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private jobHead = 0;
+  private stageHead = 0;
+  /** Bytes of the ring in use, and the ring position its offset 0 maps to. */
+  private stageCap = STAGE_START;
+  private stageBase = 0;
+  /** The batch of the last write job published. */
+  private jobSeq = 0n;
+  /** A failed background write may have left a gap: the next batch starts a new chunk. */
+  private rotateNext = false;
   /** The directory changed since the last inline sync synced it. */
   private dirChanged = true;
   /** Commit syncs run on this thread, and their seconds. */
@@ -760,13 +783,15 @@ export class FastLog {
   syncRows(inserts: LogInsert[], deletes: number[]) {
     if (inserts.length === 0 && deletes.length === 0) return;
     this.prepare();
+    // Staged batches are written and synced first: this fsync covers its own
+    // bytes, and none of the worker's may still land before them.
+    this.drainWorker();
     const starts: number[] = [];
     const ends: number[] = [];
-    const crcs: number[] = [];
-    const salt = this.active.salt;
-    const buf = encodeRows(deletes, inserts, starts, ends, salt, crcs);
-    this.makeRoom(buf.length);
-    resalt(buf, crcs, salt, this.active.salt);
+    const layout = layoutRows(deletes, inserts);
+    this.makeRoom(layout.total);
+    const buf = Buffer.allocUnsafe(layout.total);
+    writeRows(buf, deletes, inserts, layout, this.active.salt, starts, ends);
     const at = this.active.len;
     // One sequential overwrite. Rewriting the header would dirty byte 0 and
     // make this fdatasync flush a second region.
@@ -807,59 +832,127 @@ export class FastLog {
   /**
    * Append these rows and sync them on the sync worker.
    *
-   * The event loop keeps reading and delivering during the fsync. Batches
-   * written while one sync runs share the next. `onSynced` reports each
-   * completion; nothing here is durable before it.
+   * This thread lays the records out in the staging ring; the worker fills in
+   * their crcs, writes them and syncs. The event loop keeps reading and
+   * delivering meanwhile. Batches published while one round runs share the
+   * next. `onSynced` reports each completion; nothing here is durable before it.
    *
    * @returns The batch sequence number that `onSynced` will cover.
    */
   appendRows(inserts: LogInsert[], deletes: number[]): bigint {
     if (inserts.length === 0 && deletes.length === 0) return this.writtenSeq;
     this.prepare();
+    this.startSyncWorker();
+    const layout = layoutRows(deletes, inserts);
+    this.makeRoom(layout.total, true);
+    const at = this.active.len;
     const starts: number[] = [];
     const ends: number[] = [];
-    const crcs: number[] = [];
-    const salt = this.active.salt;
-    const buf = encodeRows(deletes, inserts, starts, ends, salt, crcs);
-    this.makeRoom(buf.length, true);
-    // A rotation moved the batch to a chunk with another salt.
-    resalt(buf, crcs, salt, this.active.salt);
-    const at = this.active.len;
-    writeAllAt(this.active.fd, buf, at);
-    this.active.len += buf.length;
     const seq = ++this.writtenSeq;
+    if (this.stageFits(layout.total)) {
+      const from = this.reserveStage(layout.total);
+      const off = (from - this.stageBase) % this.stageCap;
+      writeRows(this.stage.subarray(off, off + layout.total), deletes, inserts, layout, 0, starts, ends, false);
+      this.pushJob(JOB_WRITE, seq, this.active.fd, at, from, layout.total, this.active.salt, off);
+    } else {
+      // Too large to stage: written here, synced by the worker's next round.
+      const buf = Buffer.allocUnsafe(layout.total);
+      writeRows(buf, deletes, inserts, layout, this.active.salt, starts, ends);
+      writeAllAt(this.active.fd, buf, at);
+      this.pushJob(JOB_WRITE, seq, this.active.fd, at, 0, 0, 0);
+    }
+    this.active.len += layout.total;
     this.unsynced.push({ seq, chunk: this.active.id, at, inserts: inserts.map((row) => row.id), starts, ends, deletes: [...deletes] });
     this.kick();
-    if (!this.syncWorker) {
-      this.syncWorker = new Worker(new URL("./sync-worker.ts", import.meta.url));
-      (this.syncWorker as unknown as { unref?: () => void }).unref?.();
-      this.syncWorker.onmessage = (event: MessageEvent<bigint>) => {
-        this.completeThrough(event.data, Atomics.load(this.syncState, 3) === 0n);
-      };
-      this.syncWorker.postMessage({ state: this.syncState.buffer, delayMs: this.workerDelayMs, dir: this.dir });
-    }
-    // The fd before the sequence: the worker reads them in the other order.
-    Atomics.store(this.syncState, 2, BigInt(this.active.fd));
-    Atomics.store(this.syncState, 0, seq);
-    // A busy worker reads the new sequence when its sync ends; waking it is a
-    // syscall per batch for nothing. See `WAITING` in `sync-worker.ts`.
-    if (Atomics.load(this.syncState, 8) === 1n) Atomics.notify(this.syncState, 0);
+    this.publishJobs();
     return seq;
   }
 
+  private startSyncWorker() {
+    if (this.syncWorker) return;
+    this.jobs = new Float64Array(new SharedArrayBuffer(JOBS * JOB_FIELDS * 8));
+    this.stage = Buffer.from(new SharedArrayBuffer(STAGE));
+    this.syncWorker = new Worker(new URL("./sync-worker.ts", import.meta.url));
+    (this.syncWorker as unknown as { unref?: () => void }).unref?.();
+    this.syncWorker.onmessage = (event: MessageEvent<bigint>) => {
+      this.completeThrough(event.data, Atomics.load(this.syncState, 3) === 0n);
+    };
+    this.syncWorker.postMessage({ state: this.syncState.buffer, jobs: this.jobs.buffer, stage: this.stage.buffer, delayMs: this.workerDelayMs, dir: this.dir });
+  }
+
   /**
-   * Rotate before a batch that does not fit.
+   * Whether `len` bytes go through the ring: at most a quarter of it, so the
+   * skip at its end never needs more than it holds. An empty ring grows first.
+   */
+  private stageFits(len: number): boolean {
+    if (len * 4 <= this.stageCap) return true;
+    if (this.stageCap >= STAGE || this.stageHead !== Number(Atomics.load(this.syncState, 4))) return false;
+    while (len * 4 > this.stageCap && this.stageCap < STAGE) this.stageCap *= 2;
+    // Nothing is staged: offset 0 starts again at the next position.
+    this.stageBase = this.stageHead;
+    return len * 4 <= this.stageCap;
+  }
+
+  /** The ring position for `len` staged bytes, waiting for the worker to release them. */
+  private reserveStage(len: number): number {
+    const cap = this.stageCap;
+    let from = this.stageHead;
+    const off = (from - this.stageBase) % cap;
+    // A batch is one contiguous range: skip the ring's tail end.
+    if (off + len > cap) from += cap - off;
+    const full = () => from + len - Number(Atomics.load(this.syncState, 4)) > cap;
+    if (full()) {
+      this.publishJobs();
+      this.waitWorker(full, this.syncState, 4, "sync", Infinity);
+    }
+    this.stageHead = from + len;
+    return from;
+  }
+
+  /** Queue one job for the worker; {@link publishJobs} hands it over. */
+  private pushJob(kind: number, seq: bigint, fd: number, fileAt: number, stageAt: number, len: number, salt: number, ringAt = 0) {
+    const taken = () => this.jobHead - Number(Atomics.load(this.syncState, 2)) >= JOBS;
+    if (taken()) {
+      this.publishJobs();
+      this.waitWorker(taken, this.syncState, 1, "sync", Infinity);
+    }
+    const o = (this.jobHead % JOBS) * JOB_FIELDS;
+    this.jobs[o] = kind;
+    this.jobs[o + 1] = Number(seq);
+    this.jobs[o + 2] = fd;
+    this.jobs[o + 3] = fileAt;
+    this.jobs[o + 4] = stageAt;
+    this.jobs[o + 5] = len;
+    this.jobs[o + 6] = salt;
+    this.jobs[o + 7] = ringAt;
+    this.jobHead++;
+    if (kind === JOB_WRITE) this.jobSeq = seq;
+  }
+
+  /** Publish the queued jobs (and the staged bytes before them) to the worker. */
+  private publishJobs() {
+    if (!this.syncWorker || Atomics.load(this.syncState, 0) === BigInt(this.jobHead)) return;
+    Atomics.store(this.syncState, 0, BigInt(this.jobHead));
+    // A busy worker takes the new jobs when its round ends; waking it is a
+    // syscall per batch for nothing. See `WAITING` in `sync-worker.ts`.
+    if (Atomics.load(this.syncState, 8) === 1n) Atomics.notify(this.syncState, 0);
+  }
+
+  /**
+   * Rotate before a batch that does not fit, or after a failed background
+   * write.
    *
-   * The inline path first lets the sync worker finish with the old fd. A
-   * worker batch hands the old chunk over instead: the next request syncs it
-   * before the new chunk, so its batches are covered in order without this
-   * thread waiting on that fsync. Only one chunk is handed over at a time.
+   * The inline path first lets the sync worker finish with every job. A
+   * worker batch queues a close job for the old chunk instead: the worker
+   * syncs and closes it after that chunk's last write, so this thread does
+   * not wait on that fsync.
    */
   private makeRoom(bytes: number, aside = false) {
-    if (this.active.len + bytes > this.active.size) {
-      const handOff = aside && !!this.syncWorker && !this.settled && Atomics.load(this.syncState, 4) === 0n;
-      if (!handOff) this.drainWorker();
-      this.rotate(Math.max(CHUNK, HEADER + bytes), handOff);
+    if (this.rotateNext || this.active.len + bytes > this.active.size) {
+      const viaWorker = aside && !!this.syncWorker;
+      if (!viaWorker) this.drainWorker();
+      this.rotate(Math.max(CHUNK, HEADER + bytes), viaWorker);
+      this.rotateNext = false;
     }
     if (this.active.len + bytes > this.active.size) {
       throw new Error("durable log chunk is too small");
@@ -871,11 +964,13 @@ export class FastLog {
     this.drainWorker();
   }
 
-  /** Block until the sync worker covered every request, then report it. */
+  /** Block until the sync worker took every job and synced every batch, then report it. */
   private drainWorker(deadlineMs = Infinity) {
     if (!this.syncWorker) return;
-    const want = Atomics.load(this.syncState, 0);
-    this.waitWorker(() => Atomics.load(this.syncState, 1) < want, this.syncState, 1, "sync", deadlineMs);
+    this.publishJobs();
+    const want = this.jobSeq;
+    const head = this.jobHead;
+    this.waitWorker(() => Atomics.load(this.syncState, 1) < want || Number(Atomics.load(this.syncState, 2)) < head, this.syncState, 1, "sync", deadlineMs);
     const done = Atomics.load(this.syncState, 1);
     this.completeThrough(done, done >= want && Atomics.load(this.syncState, 3) === 0n);
   }
@@ -915,6 +1010,7 @@ export class FastLog {
       }
     }
     if (ok) this.scheduleRetire();
+    else this.rotateNext = true;
     this.onSynced?.(seq, ok);
   }
 
@@ -1106,17 +1202,12 @@ export class FastLog {
     const ready = !!info && info.logical === HEADER && info.size >= size && info.version >= SALTED;
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
-    // The sync worker still owes this chunk an fsync. It syncs and closes it.
-    // The new fd goes into FD first: a worker that takes the old one from
-    // PREVIOUS and closes it then reads FD next. With the old fd still there
-    // (appendRows stored the new one only after its write), its fdatasync
-    // hit EBADF, FAILED latched, and every waiting confirm was refused.
+    // The sync worker may still owe the old chunk writes and an fsync. Its
+    // close job comes after them, so the worker closes the file only then.
     if (handOff) {
-      Atomics.store(this.syncState, 2, BigInt(fd));
-      Atomics.store(this.syncState, 4, BigInt(this.active.fd));
+      this.pushJob(JOB_CLOSE, 0n, this.active.fd, 0, 0, 0, 0);
       this.handOffs++;
-    }
-    else closeSync(this.active.fd);
+    } else closeSync(this.active.fd);
     this.unsalted.delete(nextId);
     this.active = { id: nextId, fd, len: HEADER, size: fileSize, salt: saltOf(nextId) };
     this.markDirChanged();

@@ -25,7 +25,7 @@ best broker in that row.
   once a published run carries it.
 - **Don't publish numbers you didn't measure.** If a cause is a guess, say so here.
 
-Current tree (2026-10-14): Bun suite 276/276, Rust 444/444, PHP 40/40 files;
+Current tree (2026-10-14): Bun suite 278/278, Rust 444/444, PHP 40/40 files;
 conformance Bun, Rust and PHP 135/135, RabbitMQ 134/135 (no delayed-message
 plugin).
 
@@ -108,7 +108,15 @@ Measured in A/Bs, not yet in the published tables:
 
 ### B4. One queue is limited to one core
 
-Status: open, needs a design choice. Options are in `docs/bun-scaling.md`.
+Status: in progress. Chosen (2026-10-14): move bounded log work off the queue's
+thread, keeping one owner per queue. Done: the sync worker now fills in the
+record crcs and writes the batch from a shared staging ring (1 MiB, growing to
+8 MiB for large batches); rotations queue a close job for the old chunk. A/B
+at 1 CPU, three repeats: large-64k 532.2 → 572.0 MB/s, large-1m 618.1 →
+891.4, work-queue 136,850 → 143,903 msg/s, latency-1k p99 within the range.
+Cost: anonymous memory +23–44 MiB in work-queue and large-64k (the ring, and
+the worker's per-record views; quorum unchanged). Not measured at 2–4 CPU,
+where the gain should show: needs the overnight run.
 
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
