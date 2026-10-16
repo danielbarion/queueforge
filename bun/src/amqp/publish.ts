@@ -6,7 +6,7 @@
  */
 import { ChanError } from "../broker/index.ts";
 import { bodyFrame, contentHeaderFrame, emptyProps, encodeSettle, method, methodFrame, R, readContentHeader } from "../codec.ts";
-import { Conn, type Ch } from "./listen.ts";
+import { Conn, type Ch, type PendingPublish, type Pub } from "./listen.ts";
 import { SENT } from "./frames.ts";
 import { headerList } from "../broker/routing.ts";
 
@@ -175,29 +175,85 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   // Outside a transaction the tag is the arrival order, before the fsync wait.
   // Inside a transaction the tag is assigned when the op runs, at commit.
   const confirm = c.confirm;
-  let pubTag = confirm && !c.tx ? c.nextPub++ : 0;
+  const pubTag = confirm && !c.tx ? c.nextPub++ : 0;
+  const bytes = body.length + propRaw.length;
+  const op = new Deferred(this, channel, c, pub, body, headers, propRaw, persistent, priority, expiration, confirm, pubTag, bytes);
+  if (c.tx) {
+    this.stageTransaction(c, () => {
+      const pending = op.runNow();
+      this.deferredPublish.push({ channel, bytes: 0, pressured: () => op.pressured(), run: () => this.publishSettled(0) });
+      return pending;
+    }, bytes);
+    return;
+  }
+  // A persistent confirm waits on the group-commit flush. Parking it lets the
+  // parser reach basic.ack frames before this body is enqueued, so one prefetch
+  // window can turn over inside a publish burst. `driveInbound` starts the batch.
+  if (this.deferredPublish.length + this.inFlightPublishes >= 65536) throw new ChanError(506, "RESOURCE_ERROR - pending publish operation limit");
+  this.publishBytes += bytes;
+  if (this.publishBytes > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - pending publishes exceed 64 MiB");
+  this.deferredPublish.push(op);
+}
+
+/**
+ * One routed publish waiting its turn on `deferredPublish`.
+ *
+ * Its steps are methods on one object, not eight closures and their contexts
+ * per publish: those allocations were most of `finishPublish`'s own time.
+ * `run` calls `conn.publishSettled(bytes)` once, in this turn or when the
+ * confirm is queued.
+ */
+class Deferred implements PendingPublish {
+  readonly batchConfirm: boolean;
+  /** Destinations for the back-pressure test, computed when first asked. */
+  private names: Iterable<string> | null = null;
+
+  constructor(
+    private readonly conn: Conn,
+    readonly channel: number,
+    private readonly c: Ch,
+    private readonly pub: Pub,
+    private readonly body: Uint8Array,
+    private readonly headers: Ch["headers"],
+    private readonly propRaw: Uint8Array,
+    private readonly persistent: boolean,
+    private readonly priority: number,
+    private readonly expiration: string,
+    private readonly confirm: boolean,
+    private pubTag: number,
+    readonly bytes: number,
+  ) {
+    this.batchConfirm = confirm && persistent;
+  }
+
   // Not an async function. An async wrapper allocates a promise per publish
   // before the durable wait, and `await` on an already-resolved send yields
   // again. The durable wait is the only promise on this path.
-  const start = () => {
-    if (c.tx && confirm) pubTag = c.nextPub++;
-    return this.broker.publish({
-      vhost: this.vhost,
+  private start() {
+    if (this.c.tx && this.confirm) this.pubTag = this.c.nextPub++;
+    const conn = this.conn;
+    const pub = this.pub;
+    return conn.broker.publish({
+      vhost: conn.vhost,
       exchange: pub.exchange,
       routingKey: pub.routingKey,
-      body,
-      headers,
-      propRaw,
-      persistent,
-      priority,
-      expiration,
-      confirm,
+      body: this.body,
+      headers: this.headers,
+      propRaw: this.propRaw,
+      persistent: this.persistent,
+      priority: this.priority,
+      expiration: this.expiration,
+      confirm: this.confirm,
       mandatory: pub.mandatory,
     });
-  };
-  const finish = (result: "ack" | "nack" | "return"): Promise<unknown> | void => {
+  }
+
+  private finish(result: "ack" | "nack" | "return"): Promise<unknown> | void {
+    const conn = this.conn;
+    const channel = this.channel;
+    const pub = this.pub;
     if (result === "return" && pub.mandatory) {
-      const returned = this.sendMany([
+      const returned = conn.sendMany([
         methodFrame(
           channel,
           method(60, 50, (w) => {
@@ -207,98 +263,91 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
             w.shortstr(pub.routingKey);
           }),
         ),
-        contentHeaderFrame(channel, body.length, propRaw),
-        bodyFrame(channel, body, this.frameMax),
+        contentHeaderFrame(channel, this.body.length, this.propRaw),
+        bodyFrame(channel, this.body, conn.frameMax),
       ]);
-      if (!confirm) return returned;
-      return returned.then(() => this.send(encodeSettle(channel, pubTag, false)));
+      if (!this.confirm) return returned;
+      return returned.then(() => conn.send(encodeSettle(channel, this.pubTag, false)));
     }
-    if (!confirm) return;
-    return this.send(encodeSettle(channel, pubTag, result === "nack"));
-  };
-  const run = (): Promise<unknown> | void => {
-    const pending = start();
-    if (typeof pending === "string") return finish(pending);
-    return pending.then(finish);
-  };
-  const fail = (err: unknown) => {
+    if (!this.confirm) return;
+    return conn.send(encodeSettle(channel, this.pubTag, result === "nack"));
+  }
+
+  private fail(err: unknown) {
     const code = err instanceof ChanError ? err.code : 541;
     const text = err instanceof ChanError ? err.message : "INTERNAL_ERROR";
     if (!(err instanceof ChanError)) console.error("publish failed", err);
-    return this.chanClose(channel, code, text, 60, 40);
-  };
+    return this.conn.chanClose(this.channel, code, text, 60, 40);
+  }
+
+  private failed(err: unknown) {
+    void this.fail(err);
+    this.conn.publishSettled(this.bytes);
+  }
+
+  // One reaction per publish on the durable wait, and the settle is a plain
+  // call: a tracked promise and a `finally` per confirm were most of the
+  // promises a deep confirm window held.
+  private done(result: "ack" | "nack" | "return") {
+    let sent: Promise<unknown> | void;
+    try {
+      sent = this.finish(result);
+    } catch (err) {
+      this.failed(err);
+      return;
+    }
+    // A staged write has nothing to wait for. A queued one still reports a failure.
+    if (sent && sent !== SENT) sent.then(undefined, (err) => this.fail(err));
+    this.conn.publishSettled(this.bytes);
+  }
+
+  run() {
+    let pending: ReturnType<Deferred["start"]>;
+    try {
+      pending = this.start();
+    } catch (err) {
+      this.failed(err);
+      return;
+    }
+    if (typeof pending === "string") this.done(pending);
+    else pending.then((result) => this.done(result), (err) => this.failed(err));
+  }
+
+  /** The transaction path: publish and send the outcome, without the settle. */
+  runNow(): Promise<unknown> | void {
+    const pending = this.start();
+    if (typeof pending === "string") return this.finish(pending);
+    return pending.then((result) => this.finish(result));
+  }
+
   // The destinations, for the back-pressure test only: the publish itself is
   // routed when it runs. Computed when the parser first asks, since most
   // publishes run before it does. `route` gives each queue once; only CC and
   // BCC can add a duplicate. A Set and two header lists per publish were 3%
   // of a 1 CPU transient load.
-  let names: Iterable<string> | null = null;
-  const destinations = (): Iterable<string> => {
-    if (names) return names;
-    names = this.broker.route(this.vhost, pub.exchange, pub.routingKey, headers);
+  private destinations(): Iterable<string> {
+    if (this.names) return this.names;
+    const conn = this.conn;
+    const pub = this.pub;
+    const headers = this.headers;
+    let names: Iterable<string> = conn.broker.route(conn.vhost, pub.exchange, pub.routingKey, headers);
     if (headers.length && headers.some(([key]) => key === "CC" || key === "BCC")) {
       const all = new Set(names);
       for (const key of [...headerList(headers, "CC"), ...headerList(headers, "BCC")]) {
-        for (const queue of this.broker.route(this.vhost, pub.exchange, key, headers)) all.add(queue);
+        for (const queue of conn.broker.route(conn.vhost, pub.exchange, key, headers)) all.add(queue);
       }
       names = all;
     }
-    return names;
-  };
-  const pressured = () => {
-    for (const name of destinations()) {
-      const queue = this.broker.queues.get(this.broker.key(this.vhost, name));
-      if (queue && this.broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
+    return (this.names = names);
+  }
+
+  pressured() {
+    const broker = this.conn.broker;
+    for (const name of this.destinations()) {
+      const queue = broker.queues.get(broker.key(this.conn.vhost, name));
+      if (queue && broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
     }
     return false;
-  };
-  if (c.tx) {
-    this.stageTransaction(c, () => {
-      const pending = run();
-      this.deferredPublish.push({ channel, bytes: 0, pressured, run: () => this.publishSettled(0) });
-      return pending;
-    }, body.length + propRaw.length);
-    return;
-  }
-  // A persistent confirm waits on the group-commit flush. Parking it lets the
-  // parser reach basic.ack frames before this body is enqueued, so one prefetch
-  // window can turn over inside a publish burst. `driveInbound` starts the batch.
-  {
-    const bytes = body.length + propRaw.length;
-    if (this.deferredPublish.length + this.inFlightPublishes >= 65536) throw new ChanError(506, "RESOURCE_ERROR - pending publish operation limit");
-    this.publishBytes += bytes;
-    if (this.publishBytes > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - pending publishes exceed 64 MiB");
-    // One reaction per publish on the durable wait, and the settle is a plain
-    // call: a tracked promise and a `finally` per confirm were most of the
-    // promises a deep confirm window held.
-    const failed = (err: unknown) => {
-      void fail(err);
-      this.publishSettled(bytes);
-    };
-    const done = (result: "ack" | "nack" | "return") => {
-      let sent: Promise<unknown> | void;
-      try {
-        sent = finish(result);
-      } catch (err) {
-        failed(err);
-        return;
-      }
-      // A staged write has nothing to wait for. A queued one still reports a failure.
-      if (sent && sent !== SENT) sent.then(undefined, fail);
-      this.publishSettled(bytes);
-    };
-    this.deferredPublish.push({ channel, bytes, batchConfirm: confirm && persistent, pressured, run: () => {
-      let pending: ReturnType<typeof start>;
-      try {
-        pending = start();
-      } catch (err) {
-        failed(err);
-        return;
-      }
-      if (typeof pending === "string") done(pending);
-      else pending.then(done, failed);
-    }});
-    return;
   }
 }
 
