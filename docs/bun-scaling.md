@@ -137,10 +137,14 @@ cgroup's, so N workers each brought up to N - 1 helpers onto the same N
 CPUs. Their marking was parallel within one heap and contended across
 heaps.
 
-`BUN_JSC_numberOfGCMarkers=1` (no helpers) is now the default: the
-supervisor sets it for every worker unless the environment sets its own
-(`workerBaseEnv`), and the image sets it for the supervisor and the
-one-process broker. A/B, the same image with and without it (`weak-t`):
+`BUN_JSC_numberOfGCMarkers=1` (no helpers) is now the default for workers:
+the supervisor sets it for every worker unless the environment sets its own
+(`workerBaseEnv`). A one-process broker keeps JavaScriptCore's default, since
+it has no sibling heaps to contend with. A 1 CPU A/B on large messages first
+showed -4% on `large-1m` with one marker, but the same image moved as much by
+its position in the run order (1,099.8 first, 1,058.2 third), so that was
+noise, and keeping the default there is the cautious choice. A/B, the same
+image with and without it (`weak-t`):
 
 | CPUs | default | one marker |
 | ---: | ---: | ---: |
@@ -173,7 +177,9 @@ homes (`assignHome`, cluster op `place_queue`):
   ties to the lowest id.
 
 Explicit `x-queue-leader-locator`, exclusive queues, quorum queues (B3, B10)
-and streams keep their rules. If `n0` cannot be reached the hash decides, as
+and streams keep their rules. The wait on `n0` sits between the declare's
+existence check and the insert, so the declare checks again after it: a queue
+that another declare made meanwhile is answered as existing, never replaced. If `n0` cannot be reached the hash decides, as
 before. Homes are stored with the queue, so a restart keeps them. The one
 remaining hash use, `tryMigrate` for a name this worker does not know yet, only
 picks where a connection moves first; the publish is forwarded to the real

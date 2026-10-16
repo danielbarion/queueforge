@@ -74,6 +74,25 @@ fsync_interval_ms = 10
       }
       expect(m && m.content.toString()).toBe(`m${i}`);
     }
+    // Declares of one new name racing on each worker (connections are dealt
+    // to workers in turn, so 8 put two on every one), each followed by a
+    // publish: the queue is made once and keeps every message. The placement
+    // wait sits between the existence check and the insert.
+    const raceConns = await Promise.all(Array.from({ length: 8 }, () => connect()));
+    const racers = await Promise.all(raceConns.map((c) => c.createConfirmChannel()));
+    await Promise.all(racers.map(async (ch, i) => {
+      await ch.assertQueue("raced", { durable: true });
+      ch.sendToQueue("raced", Buffer.from(`r${i}`), { persistent: true });
+      await ch.waitForConfirms();
+    }));
+    const seen: string[] = [];
+    for (let t = 0; t < 100 && seen.length < 8; t++) {
+      const m = await racers[0]!.get("raced", { noAck: true });
+      if (m) seen.push(m.content.toString());
+      else await Bun.sleep(50);
+    }
+    expect(seen.sort()).toEqual(Array.from({ length: 8 }, (_, i) => `r${i}`).sort());
+    for (const c of raceConns) await c.close();
     for (const c of conns) await c.close();
   } finally {
     const exited = new Promise((resolve) => child.once("exit", resolve));

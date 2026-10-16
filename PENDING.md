@@ -203,7 +203,7 @@ Status: done 2026-10-15 (`docs/bun-scaling.md`, B14). JavaScriptCore sized
 each worker's parallel GC marker pool from the host's cores. At 6 workers
 each ran five `HeapHelper` threads, ~30% of a core per worker. The supervisor
 now gives workers `BUN_JSC_numberOfGCMarkers=1` unless the environment sets
-it, and the image sets it. `weak-t` at 6 CPUs 1,785,342 to 2,056,610–2,062,166
+it; a one-process broker keeps the default. `weak-t` at 6 CPUs 1,785,342 to 2,056,610–2,062,166
 msg/s, at 4 CPUs +11%, at 1 CPU +2–4%; anonymous memory +2–10%.
 
 ### B15. Hash placement overloaded one worker
@@ -213,6 +213,18 @@ worker the name hash gave the busiest worker 5 of 20 queues at 5 workers and
 9 of 128 at 32 (efficiency caps 0.80 and 0.44). Among a broker's own workers,
 `n0` now assigns each new classic queue to the least-loaded worker. `weak`
 at 5 CPUs 1,081,373 to 1,228,382 (+14%, with B14).
+
+### H8. 4 CPU PerfTest cells with many publishers measure the client
+
+Status: open. `bench/ab.py --cpus 4` and the published 4 CPU scenarios give
+PerfTest 3 CPUs. In routing-64 (64 publishers) it used all three, and broker
+and client CPU rose and fell together: the same images ranged 96,853 to
+297,328 msg/s between repeats. `bench/scaling.py` (client on 8 CPUs) measured
+440,000-492,000 for the same cell. A 4 CPU A/B there showed routing-64 -41%
+for B14-B16 that was not reproducible. Give the 4 CPU client more CPUs, or
+flag cells whose client is near its limit, before trusting those cells.
+Durable cells late in a long session also drift (`weak` at 6 CPUs 949,000 to
+1,412,562 for one image, broker partly idle): the VM's disk latency, not code.
 
 ### B4. One queue is limited to one core
 

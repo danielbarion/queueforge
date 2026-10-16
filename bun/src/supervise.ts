@@ -19,7 +19,9 @@ import { mergeChildMetrics } from "./metrics-merge.ts";
  * the cgroup quota, so each of N workers ran up to N - 1 HeapHelper threads on
  * the same N CPUs. At 6 workers they took ~30% of every core; one marker (no
  * helpers) raised the scaling `weak-t` load from 1,785,342 to 2,059,000 msg/s,
- * 98% of six independent 1-CPU brokers (docs/bun-scaling.md, B14).
+ * 98% of six independent 1-CPU brokers (docs/bun-scaling.md, B14). Only
+ * workers get it: a lone process has no sibling heaps to contend with, and
+ * there the default pool was 4% faster on 1 MiB messages.
  */
 export const GC_MARKERS_ENV = "BUN_JSC_numberOfGCMarkers";
 

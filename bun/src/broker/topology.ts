@@ -102,6 +102,15 @@ export async function declareQueue(this: Broker, opts: {
     this.prom.queuesDeclared++;
     return { name, messages: existing.ready.length, consumers: existing.consumers.length };
   }
+  // Another declare of this name may have finished while this one waited on
+  // the placement worker: answer as for an existing queue, never replace it.
+  const landed = classicNew ? this.queues.get(this.key(opts.vhost, name)) : undefined;
+  if (landed) {
+    if (landed.durable !== opts.durable) throw new ChanError(406, `PRECONDITION_FAILED - inequivalent arg durable for queue ${name}`);
+    landed.lastUsed = Date.now();
+    this.prom.queuesDeclared++;
+    return { name, messages: landed.ready.length, consumers: landed.consumers.length };
+  }
   const locator = opts.args["x-queue-leader-locator"];
   if (locator != null && locator !== "client-local" && locator !== "balanced") {
     throw new ChanError(406, `PRECONDITION_FAILED - invalid arg 'x-queue-leader-locator' for queue '${name}' in vhost '${opts.vhost}': ${locator}`);
