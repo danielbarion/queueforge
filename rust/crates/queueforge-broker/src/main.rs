@@ -52,6 +52,11 @@ struct Cli {
     dev_bootstrap: bool,
 }
 
+/// mimalloc keeps a heap per thread: glibc malloc and free were ~7% of a
+/// 6 CPU profile, much of it on arenas the tokio workers share.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     if let Err(err) = run().await {
