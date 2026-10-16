@@ -207,3 +207,41 @@ are the model's, not measurements: a larger machine adds NUMA, network-card
 queues and per-worker coordination (each worker is a cluster member with a
 link to every other, and a voter in the metadata group). Eight cores cannot
 show those, so confirm on a large host before relying on the projection.
+
+## Per-message work (2026-10-15, after B14-B16)
+
+With the multi-worker overhead near the host ceiling, the remaining cost is
+per message, and it multiplies over every core. Profiles of one worker under
+`weak-t` led to five changes, each A/B'd against the one before
+(1 CPU `weak-t`, three interleaved repeats):
+
+| Change | Before | After |
+| --- | ---: | ---: |
+| Names read with one Latin-1 Buffer per socket read; a whole body frame copied once from the read buffer; back-pressure destinations computed only when asked | 464,803–502,902 | 551,061–573,683 |
+| A channel's property block reused when the next publish repeats it | 566,944–576,085 | 605,026–607,384 |
+| One `Deferred` object per publish instead of eight closures | 604,475–609,979 | 629,211–646,632 |
+| Short delivery fields and frames copied byte by byte (`set` costs ~10 ns at any length) | 642,096–651,517 | 668,702–675,376 |
+
+Tried and not kept: reading `basic.publish` and `basic.ack` in place in the
+read buffer, without a view (669,000–694,000 against 673,000–684,000, inside
+the noise). A loop of `String.fromCharCode` for names was faster for 5
+characters but slower than `TextDecoder` for PerfTest's 36-character keys
+(work-queue -6%, telemetry -9% at 1 CPU), so names use a Latin-1 Buffer read.
+
+1 CPU PerfTest against the B14 image: telemetry +21%, routing-64 +9%,
+work-queue +7%, priority +7%, quorum +5%, fanout-20 +3%; large-64k, large-1m
+and backlog unchanged.
+
+Scaling curve with all of it (`bench/results/scaling-2026-10-15/weak-final/`):
+
+| CPUs | weak | weak-t |
+| ---: | ---: | ---: |
+| 1 | 364,658 | 655,838 |
+| 2 | 639,914 | 1,090,534 |
+| 3 | 896,435 | 1,469,832 |
+| 4 | 1,228,758 | 1,892,536 |
+| 5 | 1,441,333 | 2,302,406 |
+| 6 | 1,685,293 | 2,653,190 |
+
+Efficiency at 6 is 0.77 and 0.67, as before the per-message work, so the
+cheaper message did not cost scaling. s = 0.067 and 0.112.

@@ -22,25 +22,28 @@ every size. The load grows with N: per broker CPU, 4 classic durable queues,
 messages; `weak` is persistent and `weak-t` transient. Every point below had
 its broker at 95% or more of its CPUs and its client under 20% of its eight.
 Median of three repeats; ranges and the Universal Scalability Law fits are
-in `bench/results/scaling-2026-10-15/`. Bun is the tree with B14 and B15
-(`docs/bun-scaling.md`). Rust is the 2026-10-15 image.
+in `bench/results/scaling-2026-10-15/`.
 
-| CPUs | Bun weak | Rust weak | Bun weak-t | Rust weak-t | Host ceiling (weak-t) |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 305,282 | 201,574 | 494,416 | 199,566 | 498,253 |
-| 2 | 534,949 | 298,786 | 823,374 | 302,684 | 890,005 |
-| 3 | 753,541 | 335,546 | 1,120,288 | 396,742 | |
-| 4 | 1,017,875 | 437,344 | 1,436,203 | 463,991 | 1,511,993 |
-| 5 | 1,228,382 | 471,891 | 1,761,050 | 530,937 | |
-| 6 | 1,412,531 | 498,464 | 2,031,339 | 560,500 | 2,109,003 |
+| CPUs | Bun weak | Rust weak | Bun weak-t | Rust weak-t |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 364,658 | 201,574 | 655,838 | 199,566 |
+| 2 | 639,914 | 298,786 | 1,090,534 | 302,684 |
+| 3 | 896,435 | 335,546 | 1,469,832 | 396,742 |
+| 4 | 1,228,758 | 437,344 | 1,892,536 | 463,991 |
+| 5 | 1,441,333 | 471,891 | 2,302,406 | 530,937 |
+| 6 | 1,685,293 | 498,464 | 2,653,190 | 560,500 |
 
-Efficiency at 6 CPUs, X(6) / (6 X(1)): Bun 0.77 (`weak`) and 0.68
-(`weak-t`), Rust 0.41 and 0.47. The host ceiling (`bench/ceiling.py`) is K
-independent 1-CPU Bun brokers sharing only the host, efficiency 0.71 at 6:
-that loss is the VM and the Mac (network path, memory bandwidth, efficiency
-cores). Bun's `weak-t` is 96% of it at 6 CPUs.
+Bun is the tree at `9bc63df` (`weak-final/`); Rust is the 2026-10-15 image
+(`weak-before/`). Efficiency at 6 CPUs, X(6) / (6 X(1)): Bun 0.77 (`weak`)
+and 0.67 (`weak-t`), Rust 0.41 and 0.47. The host ceiling
+(`bench/ceiling.py`, `host-ceiling.md`) is K independent 1-CPU brokers that
+share only the host, measured with the image before the per-message work:
+efficiency 0.71 at 6, a loss that belongs to the VM and the Mac (network path,
+memory bandwidth, efficiency cores).
 
-Before B14 and B15, Bun was 1,306,698 (`weak`) and 1,785,342 (`weak-t`) at 6.
+Earlier the same day Bun was 1,306,698 (`weak`) and 1,785,342 (`weak-t`) at
+6 CPUs; B14-B16 and the per-message work in `docs/bun-scaling.md` brought it
+here.
 The PerfTest scenarios (work-queue, routing-64, fanout-20, heavy, quorum) at
 1 to 8 CPUs are in `fixed-load-before/`. Their load is fixed, so past 2 CPUs
 the broker mostly waited on the confirm window, and those curves measure
