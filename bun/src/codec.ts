@@ -1,4 +1,7 @@
 const text = new TextDecoder();
+/** The ArrayBuffer `latinBuf` covers, for `R.shortstr`. */
+let latinOf: ArrayBufferLike | null = null;
+let latinBuf: Buffer | null = null;
 const enc = new TextEncoder();
 
 export class R {
@@ -49,9 +52,22 @@ export class R {
   }
   shortstr() {
     const n = this.u8();
-    const s = text.decode(this.b.subarray(this.o, this.o + n));
+    const b = this.b;
+    const at = this.o;
     this.o += n;
-    return s;
+    if (at + n > b.length) return text.decode(b.subarray(at, at + n));
+    // Names are almost always ASCII, where Latin-1 and UTF-8 agree, and a
+    // Latin-1 read takes no view: ~22 ns at any length, against ~45 ns for a
+    // view and a TextDecoder call. A loop of fromCharCode was faster for 5
+    // characters but slower for a 36-character UUID key.
+    for (let i = at; i < at + n; i++) if (b[i]! > 0x7f) return text.decode(b.subarray(at, at + n));
+    // One Buffer over the whole ArrayBuffer serves every frame of one socket
+    // read; holding the last one keeps a single read buffer alive.
+    if (b.buffer !== latinOf) {
+      latinOf = b.buffer;
+      latinBuf = Buffer.from(b.buffer);
+    }
+    return latinBuf!.toString("latin1", b.byteOffset + at, b.byteOffset + at + n);
   }
   longstr() {
     const n = this.u32();

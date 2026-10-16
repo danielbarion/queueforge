@@ -36,8 +36,9 @@ function concat(parts: Uint8Array[]): Uint8Array {
  * The body is not routed until {@link finishPublish}.
  */
 export function beginPublish(this: Conn, c: Ch, payload: Uint8Array) {
-  const r = new R(payload.subarray(4));
-  r.u16();
+  // Past class, method and the reserved short, without a view of its own.
+  const r = new R(payload);
+  r.o = 6;
   const exchange = r.shortstr();
   const routingKey = r.shortstr();
   const bits = r.u8();
@@ -75,9 +76,10 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
  * @param channel Channel the body arrived on.
  * @param payload Body bytes for this frame, not including the frame header.
  */
-export function onBody(this: Conn, channel: number, payload: Uint8Array): Promise<unknown> | void {
+export function onBody(this: Conn, channel: number, payload: Uint8Array, owned = false): Promise<unknown> | void {
   const c = this.ch(channel);
   c.chunks.push(payload);
+  c.chunksOwned = owned && c.chunks.length === 1;
   c.got += payload.length;
   if (c.got > c.bodySize) throw new ChanError(505, "UNEXPECTED_FRAME - body exceeds declared size");
   if (c.got >= c.bodySize) return this.finishPublish(channel, c);
@@ -106,7 +108,9 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
     c.got = 0;
     return;
   }
-  const body = concat(c.chunks);
+  // A whole body the parser already copied out of the read buffer is used as is.
+  const body = c.chunksOwned && c.chunks.length === 1 ? c.chunks[0]! : concat(c.chunks);
+  c.chunksOwned = false;
   c.chunks = [];
   c.got = 0;
   const headers = c.headers;
@@ -216,12 +220,26 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
     if (!(err instanceof ChanError)) console.error("publish failed", err);
     return this.chanClose(channel, code, text, 60, 40);
   };
-  const names = new Set(this.broker.route(this.vhost, pub.exchange, pub.routingKey, headers));
-  for (const key of [...headerList(headers, "CC"), ...headerList(headers, "BCC")]) {
-    for (const queue of this.broker.route(this.vhost, pub.exchange, key, headers)) names.add(queue);
-  }
+  // The destinations, for the back-pressure test only: the publish itself is
+  // routed when it runs. Computed when the parser first asks, since most
+  // publishes run before it does. `route` gives each queue once; only CC and
+  // BCC can add a duplicate. A Set and two header lists per publish were 3%
+  // of a 1 CPU transient load.
+  let names: Iterable<string> | null = null;
+  const destinations = (): Iterable<string> => {
+    if (names) return names;
+    names = this.broker.route(this.vhost, pub.exchange, pub.routingKey, headers);
+    if (headers.length && headers.some(([key]) => key === "CC" || key === "BCC")) {
+      const all = new Set(names);
+      for (const key of [...headerList(headers, "CC"), ...headerList(headers, "BCC")]) {
+        for (const queue of this.broker.route(this.vhost, pub.exchange, key, headers)) all.add(queue);
+      }
+      names = all;
+    }
+    return names;
+  };
   const pressured = () => {
-    for (const name of names) {
+    for (const name of destinations()) {
       const queue = this.broker.queues.get(this.broker.key(this.vhost, name));
       if (queue && this.broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
     }

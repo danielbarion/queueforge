@@ -660,7 +660,6 @@ async function parseAvailable(this: Conn): Promise<void> {
       const size = ((buf[pos + 3]! << 24) | (buf[pos + 4]! << 16) | (buf[pos + 5]! << 8) | buf[pos + 6]!) >>> 0;
       if (rest < 8 + size) return;
       const start = pos + 7;
-      const payload = buf.subarray(start, start + size);
       const end = buf[start + size];
       pos = start + size + 1;
       if (end !== FRAME_END) {
@@ -669,6 +668,22 @@ async function parseAvailable(this: Conn): Promise<void> {
         return;
       }
       if (type === 8) continue;
+      if (type === 3) {
+        // A body that arrives in one frame is copied straight out of the read
+        // buffer: the store and the queue must not hold a view of it, and a
+        // view first, then a copy in finishPublish, was a second object.
+        const c = this.channels.get(channel);
+        const whole = c !== undefined && c.publish !== null && c.got === 0 && size === c.bodySize;
+        const body = this.onBody(channel, whole ? buf.slice(start, start + size) : buf.subarray(start, start + size), whole);
+        if (body) {
+          commit();
+          await body;
+          buf = this.buf;
+        }
+        if (!hasConsumers(this) && (this.deferredPublish.length >= PUBLISH_BATCH || this.publishBytes >= 16 * 1024 * 1024)) return;
+        continue;
+      }
+      const payload = buf.subarray(start, start + size);
       // basic.publish, its header, and its body do not await. Awaiting a resolved
       // async function still allocates a promise per frame and caps the pipeline.
       if (
@@ -712,13 +727,6 @@ async function parseAvailable(this: Conn): Promise<void> {
         if (header) {
           commit();
           await header;
-          buf = this.buf;
-        }
-      } else if (type === 3) {
-        const body = this.onBody(channel, payload);
-        if (body) {
-          commit();
-          await body;
           buf = this.buf;
         }
       }

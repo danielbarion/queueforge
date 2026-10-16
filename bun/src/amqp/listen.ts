@@ -44,6 +44,8 @@ export type Ch = {
   bodySize: number;
   got: number;
   chunks: Uint8Array[];
+  /** `chunks` holds one body the parser copied out of the read buffer. */
+  chunksOwned: boolean;
   propRaw: Uint8Array;
   headers: LiveMsg["headers"];
   deliveryMode: number;
@@ -195,7 +197,7 @@ export interface Conn {
   ch(id: number): Ch;
   onMethod(channel: number, payload: Uint8Array): Promise<void>;
   onHeader(channel: number, payload: Uint8Array): Promise<unknown> | void;
-  onBody(channel: number, payload: Uint8Array): Promise<unknown> | void;
+  onBody(channel: number, payload: Uint8Array, owned?: boolean): Promise<unknown> | void;
   beginPublish(c: Ch, payload: Uint8Array): void;
   finishPublish(channel: number, c: Ch): Promise<unknown> | void;
   txCommit(channel: number, c: Ch): Promise<void>;
@@ -498,6 +500,7 @@ export function ch(this: Conn, id: number): Ch {
       bodySize: 0,
       got: 0,
       chunks: [],
+      chunksOwned: false,
       propRaw: emptyProps(),
       headers: [],
       deliveryMode: 1,
