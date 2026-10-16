@@ -650,6 +650,10 @@ th.scenario {
 .scenario-table .broker-column { width: 17%; }
 .scenario-table th.scenario { min-width: 0; max-width: none; }
 .scenario-table td { white-space: normal; overflow-wrap: normal; line-height: 1.5; vertical-align: top; }
+.scaling-table { margin: 12px 0 32px; }
+.scaling-table table { table-layout: fixed; min-width: 0; }
+.scaling-table td { vertical-align: top; line-height: 1.5; }
+.scaling-eff { display: block; color: var(--muted); font-size: 12.5px; }
 .memory-table table { table-layout: fixed; min-width: 0; }
 .memory-table .scenario-column { width: 32%; }
 .memory-table .broker-column { width: 17%; }

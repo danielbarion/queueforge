@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Bars } from "../bars";
 import {
   BENCH_MD,
+  GITHUB,
   diskCeiling,
   formatMemory,
   formatRate,
@@ -18,6 +19,7 @@ import {
   type Tone,
 } from "../bench";
 import { DiskCeilingTable, IoTable, MemoryTable, ScenarioTable } from "../scenario-table";
+import { ScalingTable } from "../scaling-table";
 import { SizeCharts } from "../size-chart";
 
 const TONES: Record<string, Tone> = { RabbitMQ: "mq", Rust: "rust", Bun: "bun", PHP: "php" };
@@ -160,6 +162,27 @@ export default function BenchmarkPage() {
             <p className="chart-title">16 queues, confirm/s</p>
             <Bars rows={scale} unit="/s" base={scale[0].rate} />
           </div>
+        </div>
+      </section>
+
+      <section className="band">
+        <div className="wrap">
+          <h2>Scaling with cores.</h2>
+          <p className="section-lead">
+            The fixed-load scenarios stop at the client or at latency, so they say little about
+            more cores. This load grows with the container instead: per CPU, 4 queues with 4
+            publishers and 4 consumers, confirms on, 256-byte bodies, 20 s after 5 s of warm-up,
+            loadgen on 8 CPUs of its own. The broker runs on CPUs 0 to N-1 of a 15-CPU VM. A cell
+            is the median of three repeats; &ldquo;of linear&rdquo; is X(N) / (N &middot; X(1)).
+            Transient messages first, then durable, where the VM&apos;s disk drifts late in long
+            sessions and Rust has an intermittent stall (PENDING R1). Method and the
+            Universal Scalability Law fits: <code>bench/scaling.py</code> and{" "}
+            <a href={`${GITHUB}/blob/main/docs/bun-scaling.md`}>docs/bun-scaling.md</a>.
+          </p>
+          <p className="chart-title">Transient, msg/s received</p>
+          <ScalingTable scenario="weak-t" />
+          <p className="chart-title">Durable, msg/s received</p>
+          <ScalingTable scenario="weak" />
         </div>
       </section>
 
