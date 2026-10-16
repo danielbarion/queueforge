@@ -358,7 +358,10 @@ export class Consensus {
     }
     for (const data of messages.values()) this.applyEnq(data);
     for (const { q, ready, replicas, unacked } of kept) {
-      for (const m of ready) q.ready.push(m);
+      for (const m of ready) {
+        if (q.argsParsed.maxPriority != null) q.ready.pushByPriority(m);
+        else q.ready.push(m);
+      }
       for (const m of replicas) q.replicas.set(m.id, m);
       for (const m of unacked) q.unacked.set(m.id, m);
     }

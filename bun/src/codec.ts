@@ -559,16 +559,69 @@ function put(b: Uint8Array, o: number, src: Uint8Array) {
 }
 
 /**
- * basic.deliver, content header, and body as one buffer.
- * Returns null when a shortstr would not fit or the body needs more than one
- * frame, so the caller uses the generic builder.
+ * Bodies at least this large are delivered as views by
+ * {@link encodeDeliverParts}: a 64 KiB copy into a fresh buffer cost more than
+ * the encode around it.
  */
-export function encodeDeliver(
+export const DELIVER_VIEW = 16 * 1024;
+
+/**
+ * basic.deliver as small pieces around views of `msg.body`, split at
+ * frame-max: the method frame, header frame and first body-frame header in one
+ * buffer, then the body bytes of each frame, separated by 8 bytes (an end
+ * octet and the next frame's header), then the last end octet. A 64 KiB body
+ * is three parts. The body is never written to after its publish, so a
+ * queued view stays valid. Returns null when a shortstr would not fit.
+ */
+export function encodeDeliverParts(
   channel: number,
   tag: string,
   deliveryTag: number,
   msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array },
   frameMax = FRAME_MAX,
+): Uint8Array[] | null {
+  const body = msg.body;
+  const chunk = Math.max(1, (frameMax > 0 ? frameMax : FRAME_MAX) - 8);
+  const first = Math.min(chunk, body.length);
+  const head = encodeDeliver(channel, tag, deliveryTag, { exchange: msg.exchange, routingKey: msg.routingKey, redelivered: msg.redelivered, propRaw: msg.propRaw, body: EMPTY_BODY_VIEW, size: body.length }, frameMax, 7);
+  if (!head) return null;
+  bodyFrameHeader(head, head.length - 7, channel, first);
+  const parts: Uint8Array[] = [head, body.subarray(0, first)];
+  for (let at = first; at < body.length; at += chunk) {
+    const n = Math.min(chunk, body.length - at);
+    const sep = new Uint8Array(8);
+    sep[0] = 0xce;
+    bodyFrameHeader(sep, 1, channel, n);
+    parts.push(sep, body.subarray(at, at + n));
+  }
+  parts.push(FRAME_END_OCTET);
+  return parts;
+}
+
+function bodyFrameHeader(b: Uint8Array, o: number, channel: number, n: number) {
+  b[o] = 3;
+  b[o + 1] = channel >> 8;
+  b[o + 2] = channel & 0xff;
+  putU32(b, o + 3, n);
+}
+
+const EMPTY_BODY_VIEW = new Uint8Array(0);
+const FRAME_END_OCTET = new Uint8Array([0xce]);
+
+/**
+ * basic.deliver, content header, and body as one buffer.
+ * Returns null when a shortstr would not fit or the body needs more than one
+ * frame, so the caller uses the generic builder. `size`, when given, is the
+ * body size the header declares with `body` left out, and `spare` bytes are
+ * left at the end for the caller (see {@link encodeDeliverParts}).
+ */
+export function encodeDeliver(
+  channel: number,
+  tag: string,
+  deliveryTag: number,
+  msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array; size?: number },
+  frameMax = FRAME_MAX,
+  spare = 0,
 ): Uint8Array | null {
   const tagB = shortBytes(tag);
   const exB = shortBytes(msg.exchange);
@@ -581,7 +634,7 @@ export function encodeDeliver(
   const headerLen = 12 + prop.length;
   // An empty body has no body frame: amqplib refuses one after a size-0 header.
   const bodyLen = msg.body.length ? 8 + msg.body.length : 0;
-  const b = new Uint8Array(8 + methodLen + 8 + headerLen + bodyLen);
+  const b = new Uint8Array(8 + methodLen + 8 + headerLen + bodyLen + spare);
   let o = 0;
   b[o++] = 1;
   putU16(b, o, channel);
@@ -615,7 +668,7 @@ export function encodeDeliver(
   o += 2;
   putU16(b, o, 0);
   o += 2;
-  putU64(b, o, msg.body.length);
+  putU64(b, o, msg.size ?? msg.body.length);
   o += 8;
   put(b, o, prop);
   o += prop.length;

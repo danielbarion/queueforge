@@ -130,6 +130,49 @@ export class ReadyQueue {
     this.rebuild(items);
   }
 
+  /** The newest message, or undefined. */
+  last(): LiveMsg | undefined {
+    if (this.length === 0) return undefined;
+    const tail = this.chunks[this.chunks.length - 1]!;
+    return tail[tail.length - 1];
+  }
+
+  /**
+   * Add `msg` to a priority queue: after every message of its priority or
+   * higher, ahead of lower ones. A message no higher than the tail appends,
+   * which is every publish of a burst at one priority.
+   */
+  pushByPriority(msg: LiveMsg): void {
+    const tail = this.last();
+    if (!tail || tail.priority >= msg.priority) {
+      this.push(msg);
+      return;
+    }
+    const items = this.toArray();
+    let i = items.length;
+    while (i > 0 && items[i - 1]!.priority < msg.priority) i--;
+    items.splice(i, 0, msg);
+    this.rebuild(items);
+  }
+
+  /**
+   * Put a requeued message back on a priority queue: ahead of the rest of its
+   * priority, behind every higher one, as RabbitMQ requeues to the head of
+   * the message's own priority.
+   */
+  unshiftByPriority(msg: LiveMsg): void {
+    const head = this.at(0);
+    if (!head || head.priority <= msg.priority) {
+      this.unshift(msg);
+      return;
+    }
+    const items = this.toArray();
+    let i = 0;
+    while (i < items.length && items[i]!.priority > msg.priority) i++;
+    items.splice(i, 0, msg);
+    this.rebuild(items);
+  }
+
   /** Remove messages matching `pred` and return them. The rest stay in order. */
   extract(pred: (msg: LiveMsg) => boolean): LiveMsg[] {
     const keep: LiveMsg[] = [];

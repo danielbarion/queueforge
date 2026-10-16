@@ -4,7 +4,7 @@
  * Owns delivery tags and prefetch credit for one channel. Ack and reject
  * inside a transaction wait for tx.commit.
  */
-import { bodyFrame, contentHeaderFrame, emptyProps, encodeDeliver, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
+import { bodyFrame, contentHeaderFrame, DELIVER_VIEW, emptyProps, encodeDeliver, encodeDeliverParts, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
 import { ChanError, type LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
 
@@ -207,6 +207,13 @@ export function flushParked(this: Conn, c: Ch) {
  * @param msg Message body, properties, and routing fields from the broker.
  */
 export function deliver(this: Conn, channel: number, tag: string, dtag: number, msg: LiveMsg): void {
+  if (msg.body.length >= DELIVER_VIEW) {
+    const parts = encodeDeliverParts(channel, tag, dtag, msg, this.frameMax);
+    if (parts) {
+      void this.sendMany(parts);
+      return;
+    }
+  }
   const hot = encodeDeliver(channel, tag, dtag, msg, this.frameMax);
   if (hot) {
     void this.send(hot);

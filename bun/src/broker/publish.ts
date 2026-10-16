@@ -3,7 +3,8 @@
  *
  * These functions are the Broker methods. Loading this file installs them.
  */
-import { Broker } from "./class.ts";
+import { Broker, type QuorumAcks } from "./class.ts";
+import { STORE_ONLY_PREFIX } from "../raft/node.ts";
 import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
@@ -52,7 +53,7 @@ function localClassicFast(
     confirm?: boolean;
     mandatory?: boolean;
   },
-): "ack" | "nack" | Promise<"ack"> | typeof SLOW {
+): "ack" | "nack" | Promise<"ack" | "nack"> | typeof SLOW {
   if (input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
   if (fedLinks.some((link) => link.upstream === input.vhost)) return SLOW;
   let name = input.routingKey;
@@ -67,6 +68,7 @@ function localClassicFast(
     name = dests[0]!;
   }
   const q = this.queues.get(this.key(input.vhost, name));
+  if (q && q.argsParsed.queueType === "quorum") return localQuorumFast.call(this, q, input);
   if (!q || q.argsParsed.queueType === "quorum" || q.raftGroup || !this.isLocalHome(q.home)) return SLOW;
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;
@@ -108,6 +110,76 @@ function localClassicFast(
   }
   if (input.confirm) acks.confirms++;
   return acks.ack;
+}
+
+/**
+ * A unique part of quorum message ids for this process: its start time and a
+ * random tag, then a counter. A `Date.now()` and a random string per publish
+ * were a visible share of a 1 CPU quorum publish.
+ */
+const QUORUM_ID_BASE = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}-`;
+let quorumIdSeq = 0;
+
+/**
+ * Persistent publish to a quorum queue whose whole durable majority is this
+ * process: a lone broker (`quorumAlone`), or the only voter of its Raft group
+ * (`soloLocal`, which skips the log). The body is stored here and held from
+ * delivery until the covering fsync, as `enqueueQuorum` does, but without an
+ * async chain per message: every publish in one group commit shares one ack,
+ * which opens their gates and pumps each queue once.
+ */
+function localQuorumFast(
+  this: Broker,
+  q: QueueLive,
+  input: { body: Uint8Array; exchange: string; routingKey: string; headers: Array<[string, Field]>; propRaw: Uint8Array; persistent: boolean; priority: number; expiration: string; confirm?: boolean },
+): "nack" | Promise<"ack" | "nack"> | typeof SLOW {
+  if (!input.persistent || !q.durable) return SLOW;
+  const raft = !!this.cluster?.consensus?.node;
+  const solo = raft ? this.soloLocal(q) : this.quorumAlone();
+  if (!solo || !this.isQuorumLeader(q)) return SLOW;
+  this.prom.received++;
+  if (input.confirm) this.prom.receivedConfirm++;
+  this.prom.routed++;
+  const id = `${raft ? STORE_ONLY_PREFIX : "q-"}${this.cfg.nodeId}-${QUORUM_ID_BASE}${++quorumIdSeq}`;
+  const gate = { hold: true };
+  const ok = this.enqueueLocal(q, {
+    body: input.body,
+    exchange: input.exchange,
+    routingKey: input.routingKey,
+    headers: input.headers,
+    propRaw: input.propRaw,
+    persistent: true,
+    priority: input.priority,
+    expiration: input.expiration,
+    id,
+    confirmGate: gate,
+  }, 0);
+  if (!ok) return "nack";
+  // After the insert: the group commit that covers this row.
+  const durable = this.store.whenDurable();
+  let batch = this.quorumAcks;
+  if (!batch || batch.of !== durable) {
+    const next: QuorumAcks = { of: durable, confirms: 0, gates: [], queues: [], ids: [], ack: null as unknown as Promise<"ack" | "nack"> };
+    next.ack = durable.then(
+      () => {
+        for (const g of next.gates) g.hold = false;
+        for (const held of new Set(next.queues)) this.pump(held);
+        this.prom.confirmed += next.confirms;
+        return "ack" as const;
+      },
+      () => {
+        for (let i = 0; i < next.ids.length; i++) this.dropLocal(next.queues[i]!.vhost, next.queues[i]!.name, next.ids[i]!);
+        for (const held of new Set(next.queues)) this.pump(held);
+        return "nack" as const;
+      },
+    );
+    batch = this.quorumAcks = next;
+  }
+  batch.gates.push(gate);
+  batch.queues.push(q);
+  batch.ids.push(id);
+  if (input.confirm) batch.confirms++;
+  return batch.ack;
 }
 
 export function publish(this: Broker, input: {
@@ -515,9 +587,9 @@ export function enqueueLocal(this: Broker,
   if (q.argsParsed.maxPriority != null) {
     const p = Math.min(src.priority, q.argsParsed.maxPriority);
     msg.priority = p;
-    let i = 0;
-    while (i < q.ready.length && q.ready.at(i)!.priority >= p) i++;
-    q.ready.insertAt(i, msg);
+    // A burst at one priority appends; walking the queue per publish (and
+    // rebuilding it) made a priority queue publish O(depth).
+    q.ready.pushByPriority(msg);
   } else {
     q.ready.push(msg);
   }

@@ -89,6 +89,16 @@ export function load(this: Broker) {
       q.ready.push(live);
     }
   }
+  // Rows load in insert order. A priority queue delivers its highest
+  // priority first, and within one priority the oldest; the sort is stable.
+  for (const q of this.queues.values()) {
+    const max = q.argsParsed.maxPriority;
+    if (max == null || q.ready.length === 0) continue;
+    const items = q.ready.toArray();
+    // As enqueueLocal does: priorities above x-max-priority count as the max.
+    for (const m of items) m.priority = Math.min(m.priority, max);
+    q.ready.rebuild(items.sort((a, b) => b.priority - a.priority));
+  }
   this.quorumHold = recoveredQuorum;
   this.ready = !recoveredQuorum;
 }

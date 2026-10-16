@@ -218,6 +218,68 @@ test("enqueueQuorum does not deliver the body before the local fsync", async () 
   }
 });
 
+test("a burst of quorum publishes shares one fsync and is delivered only after it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qf-qfast-"));
+  const store = new Store(join(dir, "bun.sqlite"), "every_n_ms", 80);
+  const broker = new Broker(cfg("a", []), store);
+  broker.cfg = { ...broker.cfg, dataDir: dir };
+  try {
+    await broker.declareQueue({
+      vhost: "/",
+      name: "q",
+      durable: true,
+      exclusive: false,
+      autoDelete: false,
+      passive: false,
+      args: { "x-queue-type": "quorum" },
+    });
+    const q = broker.queues.get(broker.key("/", "q"));
+    if (!q) throw new Error("queue missing");
+    const got: string[] = [];
+    await broker.consume("/", "q", {
+      tag: "c",
+      session: 1,
+      noAck: true,
+      exclusive: false,
+      want: () => true,
+      deliver: (item) => got.push(item.id),
+    });
+    const before = store.fullFlushCount;
+    const pending = [];
+    for (let i = 0; i < 5; i++) {
+      pending.push(broker.publish({
+        vhost: "/",
+        exchange: "",
+        routingKey: "q",
+        body: body(),
+        headers: [],
+        propRaw: new Uint8Array(),
+        persistent: true,
+        priority: 0,
+        expiration: "",
+        confirm: true,
+      }));
+    }
+    // One ack for the group, and nothing delivered or confirmed before the fsync.
+    expect(new Set(pending).size).toBe(1);
+    expect(got).toEqual([]);
+    expect(q.ready.length).toBe(5);
+    expect(broker.prom.confirmed).toBe(0);
+    expect(await pending[0]).toBe("ack");
+    expect(store.fullFlushCount).toBe(before + 1);
+    expect(store.confirmsBeforeFsync).toBe(0);
+    expect(broker.prom.confirmed).toBe(5);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(got).toHaveLength(5);
+    expect(new Set(got).size).toBe(5);
+    // A transient publish keeps the general path.
+    expect(await broker.publish({ vhost: "/", exchange: "", routingKey: "q", body: body(), headers: [], propRaw: new Uint8Array(), persistent: false, priority: 0, expiration: "", confirm: true })).toBe("ack");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const members = [
   { id: "a", addr: "127.0.0.1:1" },
   { id: "b", addr: "127.0.0.1:2" },

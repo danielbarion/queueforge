@@ -16,6 +16,16 @@ import { emptyProm } from "./model.ts";
  *
  * Construct this with the parsed config and the open store. Call load before serving.
  */
+/** One group commit's quorum publishes: their gates, queues and ids, in order, and the shared ack. */
+export type QuorumAcks = {
+  of: Promise<void>;
+  confirms: number;
+  gates: Array<{ hold: boolean }>;
+  queues: QueueLive[];
+  ids: string[];
+  ack: Promise<"ack" | "nack">;
+};
+
 export class Broker {
   ready = false;
   prom = emptyProm();
@@ -54,6 +64,8 @@ export class Broker {
   blocked = false;
   /** The shared ack of the current group commit on the publish fast path (see `localClassicFast`). */
   durableAcks: { of: Promise<void>; confirms: number; ack: Promise<"ack"> } | null = null;
+  /** The same for quorum publishes this process alone makes durable (see `localQuorumFast`). */
+  quorumAcks: QuorumAcks | null = null;
   alarmListeners = new Set<AlarmListener>();
   unblockWaiters: Array<() => void> = [];
   /** Stream queue logs, by vhost and name. Loaded on first use. */

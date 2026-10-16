@@ -22,6 +22,14 @@ const QUEUEFORGE_VERSION = "0.1.0";
 const FRAME_END = 0xce;
 
 /**
+ * A body frame at least this large is streamed into its channel's body buffer
+ * while it arrives; only a channel with one (`DIRECT_BODY` in publish.ts)
+ * accepts it.
+ */
+const STREAM_FRAME = 16 * 1024;
+const EMPTY_BODY = new Uint8Array(0);
+
+/**
  * Queue one frame behind any write already in flight.
  *
  * @param frame A complete frame, including its end octet.
@@ -125,6 +133,10 @@ function flushCoalesced(this: Conn) {
   else {
     let n = 0;
     for (let i = 0; i < parts.length; i++) n += parts[i]!.length;
+    if (this.reuseWrites && n > GATHER_MAX) {
+      writeGathered(this, parts);
+      return;
+    }
     if (this.reuseWrites && n <= GATHER_MAX) {
       if (gather.length < n) gather = new Uint8Array(Math.min(GATHER_MAX, Math.max(n, gather.length * 2)));
       buf = gather.subarray(0, n);
@@ -153,6 +165,51 @@ function flushCoalesced(this: Conn) {
   this.outbound.push(shared ? tail.slice() : tail);
   this.outboundBytes += tail.length;
   this.outHead = 0;
+}
+
+/**
+ * Write staged frames larger than the gather buffer through it, one full
+ * buffer per write, instead of into a fresh allocation of their whole size
+ * (a 1 MiB delivery). After a short write the unsent bytes of the buffer are
+ * copied out and the frames after them queue on `outbound` as they are.
+ */
+function writeGathered(conn: Conn, parts: Uint8Array[]) {
+  if (gather.length < GATHER_MAX) gather = new Uint8Array(GATHER_MAX);
+  let i = 0;
+  let from = 0;
+  while (i < parts.length) {
+    let o = 0;
+    while (i < parts.length && o < gather.length) {
+      const part = parts[i]!;
+      const n = Math.min(part.length - from, gather.length - o);
+      if (n <= 24) for (let j = 0; j < n; j++) gather[o + j] = part[from + j]!;
+      else gather.set(from === 0 && n === part.length ? part : part.subarray(from, from + n), o);
+      o += n;
+      from += n;
+      if (from === part.length) {
+        i++;
+        from = 0;
+      }
+    }
+    const wrote = conn.socket.write(gather.subarray(0, o));
+    if (wrote === o) continue;
+    const tail = gather.slice(Math.max(0, wrote), o);
+    conn.outbound.push(tail);
+    conn.outboundBytes += tail.length;
+    if (i < parts.length) {
+      const rest = from > 0 ? parts[i]!.subarray(from) : parts[i]!;
+      conn.outbound.push(rest);
+      conn.outboundBytes += rest.length;
+      for (let k = i + 1; k < parts.length; k++) {
+        conn.outbound.push(parts[k]!);
+        conn.outboundBytes += parts[k]!.length;
+      }
+    }
+    conn.outHead = 0;
+    return;
+  }
+  conn.socket.flush?.();
+  wakeOutput(conn);
 }
 
 /**
@@ -445,6 +502,7 @@ async function driveInbound(this: Conn): Promise<void> {
       this.publishBytes = this.inFlightBytes;
       this.fresh = [];
       this.buf = new Uint8Array();
+      this.bodyFrameOpen = false;
       this.readsPaused = false;
     }
   }
@@ -453,6 +511,14 @@ async function driveInbound(this: Conn): Promise<void> {
 /** Fold bytes that arrived during this parse onto the inbound buffer. */
 function absorbFresh(this: Conn) {
   if (!this.fresh.length) return;
+  // Each socket read is its own buffer, never written again, so a read with
+  // nothing left over before it is parsed where it is. A copy into a fresh
+  // allocation was 11% of a 64 KiB publish.
+  if (this.buf.length === 0 && this.fresh.length === 1) {
+    this.buf = this.fresh[0]!;
+    this.fresh = [];
+    return;
+  }
   let extra = 0;
   for (const chunk of this.fresh) extra += chunk.length;
   const next = new Uint8Array(this.buf.length + extra);
@@ -652,6 +718,33 @@ async function parseAvailable(this: Conn): Promise<void> {
         absorbFresh.call(this);
         buf = this.buf;
       }
+      if (this.bodyFrameOpen) {
+        // The rest of a large body frame: copied into the body, then its end.
+        const avail = buf.length - pos;
+        if (avail === 0) return;
+        const take = Math.min(this.bodyFrameLeft, avail);
+        if (take > 0) {
+          this.streamBody(this.bodyFrameChannel, take, buf.subarray(pos, pos + take));
+          pos += take;
+          this.bodyFrameLeft -= take;
+          if (this.bodyFrameLeft > 0) return;
+        }
+        if (pos >= buf.length) return;
+        this.bodyFrameOpen = false;
+        if (buf[pos++] !== FRAME_END) {
+          commit();
+          await this.connClose(501, "FRAME_ERROR");
+          return;
+        }
+        const body = this.onBody(this.bodyFrameChannel, EMPTY_BODY);
+        if (body) {
+          commit();
+          await body;
+          buf = this.buf;
+        }
+        if (!hasConsumers(this) && (this.deferredPublish.length >= PUBLISH_BATCH || this.publishBytes >= 16 * 1024 * 1024)) return;
+        continue;
+      }
       const rest = buf.length - pos;
       if (rest < 7) return;
       if (tryMigrate.call(this, buf, pos)) {
@@ -662,7 +755,17 @@ async function parseAvailable(this: Conn): Promise<void> {
       const type = buf[pos]!;
       const channel = (buf[pos + 1]! << 8) | buf[pos + 2]!;
       const size = ((buf[pos + 3]! << 24) | (buf[pos + 4]! << 16) | (buf[pos + 5]! << 8) | buf[pos + 6]!) >>> 0;
-      if (rest < 8 + size) return;
+      if (rest < 8 + size) {
+        // A large body frame is copied into its body as it arrives, so the
+        // read buffer is not concatenated again on every read until it is whole.
+        if (type === 3 && size >= STREAM_FRAME && this.streamBody(channel, size, buf.subarray(pos + 7))) {
+          this.bodyFrameChannel = channel;
+          this.bodyFrameLeft = size - (rest - 7);
+          this.bodyFrameOpen = true;
+          pos = buf.length;
+        }
+        return;
+      }
       const start = pos + 7;
       const end = buf[start + size];
       pos = start + size + 1;
@@ -675,9 +778,10 @@ async function parseAvailable(this: Conn): Promise<void> {
       if (type === 3) {
         // A body that arrives in one frame is copied straight out of the read
         // buffer: the store and the queue must not hold a view of it, and a
-        // view first, then a copy in finishPublish, was a second object.
+        // view first, then a copy in finishPublish, was a second object. A
+        // large body already has its own buffer, which onBody copies into.
         const c = this.channels.get(channel);
-        const whole = c !== undefined && c.publish !== null && c.got === 0 && size === c.bodySize;
+        const whole = c !== undefined && c.publish !== null && c.body === null && c.got === 0 && size === c.bodySize;
         const body = this.onBody(channel, whole ? buf.slice(start, start + size) : buf.subarray(start, start + size), whole);
         if (body) {
           commit();

@@ -1,10 +1,19 @@
 import { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.ts";
-import type { FastLog } from "../src/fast-log.ts";
+import { CHUNK, FastLog } from "../src/fast-log.ts";
+
+// These count rotations and reuse of fixed-size chunks.
+const grown = FastLog.defaultMaxChunk;
+beforeAll(() => {
+  FastLog.defaultMaxChunk = CHUNK;
+});
+afterAll(() => {
+  FastLog.defaultMaxChunk = grown;
+});
 
 const BODY = 64 * 1024;
 /** Rows per 4 MiB chunk at this body size, a little under. */

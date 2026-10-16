@@ -66,19 +66,63 @@ const ASIDE_GROUP = Number(process.env.QUEUEFORGE_ASIDE_GROUP) || Infinity;
 
 export type FsyncMode = "never" | "every_n_ms" | "always" | "every_n_messages";
 
+type StreamMeta = { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string; r?: number };
+
+/**
+ * The last stream meta string read back, parsed, and its decoded properties.
+ * A publisher repeats its exchange, key and properties, so consecutive rows
+ * of a stream mostly share one meta string; a JSON parse and a base64 decode
+ * per entry read were a sixth of a stream cell. Nothing writes into the
+ * shared header list or property block (deliveries copy before changing them).
+ */
+let lastMeta = "";
+let lastParsed: StreamMeta | null = null;
+let lastProps: Uint8Array = new Uint8Array(0);
+
 /** One `stream_messages` row as a stream entry. */
 function streamRow(r: { offset: number; ts: number; body: Uint8Array; meta: string }) {
-  const m = JSON.parse(r.meta) as { x: string; k: string; h: Array<[string, import("./codec.ts").Field]>; p: string; r?: number };
+  if (r.meta !== lastMeta || !lastParsed) {
+    lastParsed = JSON.parse(r.meta) as StreamMeta;
+    lastProps = new Uint8Array(Buffer.from(lastParsed.p, "base64"));
+    lastMeta = r.meta;
+  }
+  const m = lastParsed;
   return {
     offset: Number(r.offset),
     ts: Number(r.ts),
-    body: new Uint8Array(r.body),
+    // sqlite returns a fresh buffer per row.
+    body: r.body instanceof Uint8Array ? r.body : new Uint8Array(r.body),
     exchange: m.x,
     routingKey: m.k,
     headers: m.h ?? [],
-    propRaw: new Uint8Array(Buffer.from(m.p, "base64")),
+    propRaw: lastProps,
     raftIndex: m.r ?? 0,
   };
+}
+
+/** The last stream meta written: its inputs, compared by identity or bytes, and the string. */
+let metaIn: { x: string; k: string; h: unknown; p: Uint8Array; r: number } | null = null;
+let metaOut = "";
+
+function streamMeta(e: { exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array; raftIndex?: number }): string {
+  const r = e.raftIndex ?? 0;
+  const last = metaIn;
+  if (last && last.x === e.exchange && last.k === e.routingKey && last.r === r && sameHeaders(last.h, e.headers) && sameBytes(last.p, e.propRaw)) return metaOut;
+  metaOut = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64"), ...(r ? { r } : {}) });
+  metaIn = { x: e.exchange, k: e.routingKey, h: e.headers, p: e.propRaw, r };
+  return metaOut;
+}
+
+/** The same list, or two empty ones: each publish parses its own empty list. */
+function sameHeaders(a: unknown, b: unknown): boolean {
+  return a === b || (Array.isArray(a) && Array.isArray(b) && a.length === 0 && b.length === 0);
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export class Store {
@@ -569,7 +613,7 @@ export class Store {
   }
   /** Append one stream entry. */
   appendStreamEntry(vhost: string, queue: string, e: { offset: number; ts: number; body: Uint8Array; exchange: string; routingKey: string; headers: unknown; propRaw: Uint8Array; raftIndex?: number }) {
-    const meta = JSON.stringify({ x: e.exchange, k: e.routingKey, h: e.headers, p: Buffer.from(e.propRaw).toString("base64"), ...(e.raftIndex ? { r: e.raftIndex } : {}) });
+    const meta = streamMeta(e);
     if (this.streamError) throw this.streamError;
     // One transaction per task: an autocommit insert per append was most of a
     // stream publisher's time. The microtask runs before any timer, so before

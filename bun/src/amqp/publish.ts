@@ -29,6 +29,24 @@ function concat(parts: Uint8Array[]): Uint8Array {
 }
 
 /**
+ * Bodies at least this large are copied into a buffer of their declared size
+ * as their frames arrive (see {@link onBody}), and the parser streams a body
+ * frame that spans socket reads into it. Below this, a copy per publish is
+ * cheaper than tracking a partial frame.
+ */
+export const DIRECT_BODY = 16 * 1024;
+
+/**
+ * A buffer for `n` body bytes, every one written before it is read.
+ * `allocUnsafe` skips the zero fill; at this size it is not pooled, so the
+ * view covers its own buffer and `slice` keeps copying.
+ */
+function bodyBuffer(n: number): Uint8Array {
+  const b = Buffer.allocUnsafe(n);
+  return new Uint8Array(b.buffer, b.byteOffset, n);
+}
+
+/**
  * Remember the exchange and routing key from basic.publish.
  *
  * @param c Channel that will receive the following header and body.
@@ -74,7 +92,22 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
   c.replyTo = parsed.props.replyTo;
   c.got = 0;
   c.chunks = [];
+  c.body = c.bodySize >= DIRECT_BODY && reserved(this) + c.bodySize <= RESERVE_MAX ? bodyBuffer(c.bodySize) : null;
   if (c.bodySize === 0) return this.finishPublish(channel, c);
+}
+
+/**
+ * Body bytes one connection may hold in buffers sized from content headers,
+ * not yet received: the inbound buffering limit in `push`. Past it a body is
+ * gathered from its frames as before, so a client that declares large bodies
+ * on many channels cannot reserve memory it has not sent.
+ */
+const RESERVE_MAX = 64 * 1024 * 1024;
+
+function reserved(conn: Conn): number {
+  let n = 0;
+  for (const ch of conn.channels.values()) if (ch.body) n += ch.body.length;
+  return n;
 }
 
 /**
@@ -85,11 +118,29 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
  */
 export function onBody(this: Conn, channel: number, payload: Uint8Array, owned = false): Promise<unknown> | void {
   const c = this.ch(channel);
-  c.chunks.push(payload);
-  c.chunksOwned = owned && c.chunks.length === 1;
+  if (c.got + payload.length > c.bodySize) throw new ChanError(505, "UNEXPECTED_FRAME - body exceeds declared size");
+  if (c.body) c.body.set(payload, c.got);
+  else {
+    c.chunks.push(payload);
+    c.chunksOwned = owned && c.chunks.length === 1;
+  }
   c.got += payload.length;
-  if (c.got > c.bodySize) throw new ChanError(505, "UNEXPECTED_FRAME - body exceeds declared size");
   if (c.got >= c.bodySize) return this.finishPublish(channel, c);
+}
+
+/**
+ * Copy the leading part of a body frame that has not fully arrived.
+ *
+ * @returns False when this channel does not stream bodies or the frame is
+ * larger than what is left of the body; the parser then waits for the whole
+ * frame, and {@link onBody} reports the error.
+ */
+export function streamBody(this: Conn, channel: number, size: number, part: Uint8Array): boolean {
+  const c = this.channels.get(channel);
+  if (!c?.body || c.publish === null || size > c.bodySize - c.got) return false;
+  c.body.set(part, c.got);
+  c.got += part.length;
+  return true;
 }
 
 /**
@@ -112,11 +163,13 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   if (!c.flow) {
     c.publish = null;
     c.chunks = [];
+    c.body = null;
     c.got = 0;
     return;
   }
   // A whole body the parser already copied out of the read buffer is used as is.
-  const body = c.chunksOwned && c.chunks.length === 1 ? c.chunks[0]! : concat(c.chunks);
+  const body = c.body ?? (c.chunksOwned && c.chunks.length === 1 ? c.chunks[0]! : concat(c.chunks));
+  c.body = null;
   c.chunksOwned = false;
   c.chunks = [];
   c.got = 0;
@@ -354,4 +407,5 @@ class Deferred implements PendingPublish {
 Conn.prototype.beginPublish = beginPublish;
 Conn.prototype.onHeader = onHeader;
 Conn.prototype.onBody = onBody;
+Conn.prototype.streamBody = streamBody;
 Conn.prototype.finishPublish = finishPublish;

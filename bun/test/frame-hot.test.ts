@@ -4,6 +4,7 @@ import {
   contentHeaderFrame,
   emptyProps,
   encodeDeliver,
+  encodeDeliverParts,
   encodeSettle,
   method,
   methodFrame,
@@ -24,6 +25,7 @@ function legacyDeliver(
   tag: string,
   dtag: number,
   msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array },
+  frameMax?: number,
 ): Uint8Array {
   const frames = [
     methodFrame(
@@ -37,7 +39,7 @@ function legacyDeliver(
       }),
     ),
     contentHeaderFrame(channel, msg.body.length, msg.propRaw.length ? msg.propRaw : emptyProps()),
-    bodyFrame(channel, msg.body),
+    bodyFrame(channel, msg.body, frameMax),
   ];
   const n = frames.reduce((sum, frame) => sum + frame.length, 0);
   const out = new Uint8Array(n);
@@ -63,4 +65,27 @@ test("hot confirm and deliver frames match the generic builder", () => {
   const again = { ...msg, exchange: "amq.direct", redelivered: true, propRaw: new Uint8Array() };
   expect(encodeDeliver(1, "ctag", 1, again)).toEqual(legacyDeliver(1, "ctag", 1, again));
   expect(encodeDeliver(1, "t", 1, { ...msg, routingKey: "x".repeat(300) })).toBeNull();
+});
+
+test("delivery parts around a body view match the generic builder", () => {
+  for (const [size, frameMax] of [[16384, 131072], [65536, 131072], [131064, 131072], [131065, 131072], [1048576, 131072], [70000, 4096]] as const) {
+    const msg = {
+      exchange: "amq.direct",
+      routingKey: "blobs",
+      redelivered: size % 2 === 1,
+      propRaw: Uint8Array.of(0x10, 0x00, 0x02),
+      body: new Uint8Array(size).map((_, i) => i % 251),
+    };
+    const parts = encodeDeliverParts(4, "ctag-1", 7, msg, frameMax)!;
+    // The body is referenced, not copied.
+    expect(parts[1]!.buffer).toBe(msg.body.buffer);
+    const joined = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) {
+      joined.set(p, o);
+      o += p.length;
+    }
+    const legacy = legacyDeliver(4, "ctag-1", 7, msg, frameMax);
+    expect(Buffer.compare(joined, legacy)).toBe(0);
+  }
 });

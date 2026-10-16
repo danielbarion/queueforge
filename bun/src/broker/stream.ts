@@ -388,8 +388,47 @@ function streamHeaders(headers: unknown, propRaw: Uint8Array): Array<[string, Fi
   return propRaw.length >= 2 ? readProps(propRaw).headers : [];
 }
 
+/**
+ * The last property block {@link withOffset} encoded, for its inputs, and where
+ * its offset value sits. `x-stream-offset` is the table's last entry, so its
+ * eight bytes end right before the rest of the properties. Entries of one
+ * publisher share their properties, and re-encoding the table per entry was a
+ * tenth of a stream cell.
+ */
+let offsetProps: Uint8Array | null = null;
+let offsetHeaders: Array<[string, Field]> | null = null;
+let offsetTemplate: Uint8Array = new Uint8Array(0);
+let offsetAt = 0;
+
+function sameHeaderList(a: Array<[string, Field]> | null, b: Array<[string, Field]>): boolean {
+  return a === b || (a !== null && a.length === 0 && b.length === 0);
+}
+
 /** Copy properties with `x-stream-offset` added to the headers table. */
-function withOffset(propRaw: Uint8Array, headers: Array<[string, Field]>, offset: number): Uint8Array {
+export function withOffset(propRaw: Uint8Array, headers: Array<[string, Field]>, offset: number): Uint8Array {
+  if (offsetProps !== propRaw || !sameHeaderList(offsetHeaders, headers)) {
+    const template = encodeWithOffset(propRaw, headers, 0);
+    offsetTemplate = template.encoded;
+    offsetAt = template.valueAt;
+    offsetProps = propRaw;
+    offsetHeaders = headers;
+  }
+  const out = offsetTemplate.slice();
+  const hi = Math.floor(offset / 0x100000000);
+  const lo = offset >>> 0;
+  out[offsetAt] = hi >>> 24;
+  out[offsetAt + 1] = (hi >>> 16) & 0xff;
+  out[offsetAt + 2] = (hi >>> 8) & 0xff;
+  out[offsetAt + 3] = hi & 0xff;
+  out[offsetAt + 4] = lo >>> 24;
+  out[offsetAt + 5] = (lo >>> 16) & 0xff;
+  out[offsetAt + 6] = (lo >>> 8) & 0xff;
+  out[offsetAt + 7] = lo & 0xff;
+  return out;
+}
+
+/** {@link withOffset} without the cache, and where the offset's eight bytes are. */
+export function encodeWithOffset(propRaw: Uint8Array, headers: Array<[string, Field]>, offset: number): { encoded: Uint8Array; valueAt: number } {
   const flags = propRaw.length >= 2 ? (propRaw[0]! << 8) | propRaw[1]! : 0;
   const table: Array<[string, Field]> = [...headers.filter(([k]) => k !== "x-stream-offset"), ["x-stream-offset", { t: "l", v: offset }]];
   const w = new W();
@@ -407,8 +446,10 @@ function withOffset(propRaw: Uint8Array, headers: Array<[string, Field]>, offset
     at += 4 + n;
   }
   writeTable(w, table);
-  w.bytes(propRaw.subarray(at));
-  return w.concat();
+  const rest = propRaw.subarray(at);
+  w.bytes(rest);
+  const encoded = w.concat();
+  return { encoded, valueAt: encoded.length - rest.length - 8 };
 }
 
 /** The entry at `offset` with its body: from memory, the read-ahead, or one range read. */

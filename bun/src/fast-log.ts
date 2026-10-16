@@ -37,7 +37,17 @@ import {
 import { crc32, RECORD_FIXED } from "./log-crc.ts";
 
 const HEADER = 16;
-const CHUNK = 4 * 1024 * 1024;
+export const CHUNK = 4 * 1024 * 1024;
+/**
+ * Chunks grow, doubling, up to this size while rotations come faster than
+ * {@link FAST_ROTATE_MS} apart, and shrink back while slower than
+ * {@link SLOW_ROTATE_MS}. Every rotation costs a directory fsync and the old
+ * chunk's own fsync in the next round: at 1 GB/s, 4 MiB chunks rotated 250
+ * times a second and doubled the fsync time of a 64 KiB publish.
+ */
+const MAX_CHUNK = 32 * 1024 * 1024;
+const FAST_ROTATE_MS = 250;
+const SLOW_ROTATE_MS = 2000;
 /** Prepare the next file once the active chunk has less than this left. */
 const KICK_REMAINING = 2 * 1024 * 1024;
 /**
@@ -544,6 +554,8 @@ export class LiveIndex {
 }
 
 export class FastLog {
+  /** {@link MAX_CHUNK}; tests that count rotations set {@link CHUNK}. */
+  static defaultMaxChunk = MAX_CHUNK;
   private active: ActiveChunk;
   /** Lowest chunk id still on disk. */
   private oldest: number;
@@ -608,6 +620,11 @@ export class FastLog {
   private jobSeq = 0n;
   /** A failed background write may have left a gap: the next batch starts a new chunk. */
   private rotateNext = false;
+  /** Size of the next chunk; see {@link MAX_CHUNK}. */
+  chunkSize = CHUNK;
+  /** Tests that count rotations pin chunks at {@link CHUNK} with {@link FastLog.defaultMaxChunk}. */
+  maxChunkSize = FastLog.defaultMaxChunk;
+  private lastRotateAt = 0;
   /** The directory changed since the last inline sync synced it. */
   private dirChanged = true;
   /** Commit syncs run on this thread, and their seconds. */
@@ -951,7 +968,7 @@ export class FastLog {
     if (this.rotateNext || this.active.len + bytes > this.active.size) {
       const viaWorker = aside && !!this.syncWorker;
       if (!viaWorker) this.drainWorker();
-      this.rotate(Math.max(CHUNK, HEADER + bytes), viaWorker);
+      this.rotate(HEADER + bytes, viaWorker);
       this.rotateNext = false;
     }
     if (this.active.len + bytes > this.active.size) {
@@ -1014,6 +1031,11 @@ export class FastLog {
     this.onSynced?.(seq, ok);
   }
 
+  /** {@link COMPACT_AFTER} chunks of {@link CHUNK} bytes, in chunks of the current size. */
+  private compactAfter(): number {
+    return Math.max(2, Math.round((COMPACT_AFTER * CHUNK) / this.chunkSize));
+  }
+
   /**
    * Live rows that still hold the oldest chunk, once enough chunks sit behind
    * it. The caller appends them again; that insert moves them to the active
@@ -1021,14 +1043,15 @@ export class FastLog {
    * rewritten per call.
    */
   relocationCandidates(): number[] {
-    if (this.active.id - this.oldest <= COMPACT_AFTER) return [];
+    const after = this.compactAfter();
+    if (this.active.id - this.oldest <= after) return [];
     const live = this.liveCount.get(this.oldest) ?? 0;
     if (live === 0) return [];
     // A mostly live chunk is a backlog, not a few stragglers. Writing it
     // forward frees nothing and rewrote the whole backlog every 16 chunks.
     if (live * 4 > (this.chunkInserts.get(this.oldest) ?? live)) return [];
     const { chunk, at } = this.relocating;
-    if (chunk === this.oldest && this.active.id - at < COMPACT_AFTER) return [];
+    if (chunk === this.oldest && this.active.id - at < after) return [];
     this.relocating = { chunk: this.oldest, at: this.active.id };
     const ids: number[] = [];
     for (const [id, slot] of this.live.entries()) {
@@ -1187,7 +1210,16 @@ export class FastLog {
     }
   }
 
-  private rotate(size: number, handOff = false) {
+  /**
+   * Make the next chunk active.
+   *
+   * @param needed Bytes the next chunk must hold. A prepared file at least
+   * that big is used as it is; otherwise one of {@link chunkSize} (or
+   * `needed`, when larger) is written here.
+   */
+  private rotate(needed: number, handOff = false) {
+    this.adaptChunkSize();
+    const size = Math.max(this.chunkSize, needed);
     const nextId = this.active.id + 1;
     const path = chunkPath(this.dir, nextId);
     if (this.preparingId === nextId) {
@@ -1199,7 +1231,7 @@ export class FastLog {
     // A batch larger than one chunk (relocated rows can be) needs a file at
     // least that big. The preallocated next chunk is only CHUNK bytes. A
     // version 1 file is written again: its records carry no salt.
-    const ready = !!info && info.logical === HEADER && info.size >= size && info.version >= SALTED;
+    const ready = !!info && info.logical === HEADER && info.size >= needed && info.version >= SALTED;
     const fd = ready ? openSync(path, constants.O_RDWR) : createChunkFile(path, size);
     const fileSize = ready && info ? info.size : size;
     // The sync worker may still owe the old chunk writes and an fsync. Its
@@ -1217,16 +1249,26 @@ export class FastLog {
     Atomics.store(this.view, 0, 0n);
   }
 
+  /** Grow or shrink {@link chunkSize} with the time since the last rotation. */
+  private adaptChunkSize() {
+    const now = performance.now();
+    const since = now - this.lastRotateAt;
+    this.lastRotateAt = now;
+    if (since < FAST_ROTATE_MS && this.chunkSize < this.maxChunkSize) this.chunkSize *= 2;
+    else if (since > SLOW_ROTATE_MS && this.chunkSize > CHUNK) this.chunkSize /= 2;
+  }
+
   /** Materialize the next chunk on its own file so this fsync stays an overwrite. */
   private kick() {
     if (this.closed) return;
-    if (this.active.size - this.active.len >= KICK_REMAINING) return;
+    // A larger chunk takes longer to zero-fill, so it is started earlier.
+    if (this.active.size - this.active.len >= Math.max(KICK_REMAINING, this.chunkSize / 2)) return;
     if (this.nextReady) return;
     const state = Atomics.load(this.view, 0);
     if (state === 1n || state === 2n) return;
     const nextId = this.active.id + 1;
     const ready = inspect(chunkPath(this.dir, nextId));
-    if (ready && ready.logical === HEADER && ready.size >= CHUNK && ready.version >= SALTED) {
+    if (ready && ready.logical === HEADER && ready.size >= this.chunkSize && ready.version >= SALTED) {
       this.nextReady = true;
       return;
     }
@@ -1236,7 +1278,7 @@ export class FastLog {
       this.worker = new Worker(new URL("./prealloc-worker.ts", import.meta.url));
       (this.worker as unknown as { unref?: () => void }).unref?.();
     }
-    this.worker.postMessage({ path: chunkPath(this.dir, nextId), size: CHUNK, state: this.state, delayMs: this.workerDelayMs });
+    this.worker.postMessage({ path: chunkPath(this.dir, nextId), size: this.chunkSize, state: this.state, delayMs: this.workerDelayMs });
   }
 }
 

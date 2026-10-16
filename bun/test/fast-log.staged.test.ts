@@ -1,8 +1,17 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FastLog, type LogInsert, type LogOp } from "../src/fast-log.ts";
+import { CHUNK, FastLog, type LogInsert, type LogOp } from "../src/fast-log.ts";
+
+// These count rotations and reuse of fixed-size chunks.
+const grown = FastLog.defaultMaxChunk;
+beforeAll(() => {
+  FastLog.defaultMaxChunk = CHUNK;
+});
+afterAll(() => {
+  FastLog.defaultMaxChunk = grown;
+});
 
 /** Body of row `id`: `len` bytes that encode the id, so a misplaced byte shows. */
 function body(id: number, len: number): Uint8Array {

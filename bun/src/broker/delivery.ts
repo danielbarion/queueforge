@@ -456,14 +456,16 @@ export function nack(this: Broker, vhost: string, queue: string, id: string, req
       if (q.argsParsed.queueType === "quorum") void this.quorumDrop(q, id).catch(() => {});
     } else {
       msg.redelivered = true;
-      q.ready.unshift(msg);
+      if (q.argsParsed.maxPriority != null) q.ready.unshiftByPriority(msg);
+      else q.ready.unshift(msg);
       this.pump(q);
     }
   } else {
     const accepted = this.deadLetter(q, msg, 0, "rejected");
     if (!accepted && q.argsParsed.dlxStrategy === "at-least-once") {
       msg.redelivered = true;
-      q.ready.unshift(msg);
+      if (q.argsParsed.maxPriority != null) q.ready.unshiftByPriority(msg);
+      else q.ready.unshift(msg);
       this.pump(q);
       return;
     }

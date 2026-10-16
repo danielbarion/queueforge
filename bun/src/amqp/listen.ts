@@ -46,6 +46,8 @@ export type Ch = {
   chunks: Uint8Array[];
   /** `chunks` holds one body the parser copied out of the read buffer. */
   chunksOwned: boolean;
+  /** A large body's own buffer, filled as its frames arrive (`DIRECT_BODY`); `chunks` stays empty. */
+  body: Uint8Array | null;
   propRaw: Uint8Array;
   headers: LiveMsg["headers"];
   deliveryMode: number;
@@ -138,6 +140,14 @@ export class Conn {
   /** Bytes that arrived while a burst of publishes was being parsed. */
   fresh: Uint8Array[] = [];
   /**
+   * A large body frame whose payload is being copied into its channel's body
+   * as reads arrive: its channel, the payload bytes still to come, and
+   * whether its frame end is still due. See `streamBody`.
+   */
+  bodyFrameChannel = 0;
+  bodyFrameLeft = 0;
+  bodyFrameOpen = false;
+  /**
    * Persistent confirms staged by the frame parser. They run after ack frames
    * already in the buffer, and in groups when the ready queue is ahead of consumers.
    */
@@ -198,6 +208,7 @@ export interface Conn {
   onMethod(channel: number, payload: Uint8Array): Promise<void>;
   onHeader(channel: number, payload: Uint8Array): Promise<unknown> | void;
   onBody(channel: number, payload: Uint8Array, owned?: boolean): Promise<unknown> | void;
+  streamBody(channel: number, size: number, part: Uint8Array): boolean;
   beginPublish(c: Ch, payload: Uint8Array): void;
   finishPublish(channel: number, c: Ch): Promise<unknown> | void;
   txCommit(channel: number, c: Ch): Promise<void>;
@@ -501,6 +512,7 @@ export function ch(this: Conn, id: number): Ch {
       got: 0,
       chunks: [],
       chunksOwned: false,
+      body: null,
       propRaw: emptyProps(),
       headers: [],
       deliveryMode: 1,

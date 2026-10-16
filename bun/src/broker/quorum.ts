@@ -296,7 +296,8 @@ export function promoteIfLeader(this: Broker, only?: QueueLive | null) {
     // A copy kept by a follower may have been delivered by the leader it replaces.
     for (const replica of q.replicas.values()) {
       replica.redelivered = true;
-      q.ready.push(replica);
+      if (q.argsParsed.maxPriority != null) q.ready.pushByPriority(replica);
+      else q.ready.push(replica);
     }
     q.replicas.clear();
     this.pump(q);
