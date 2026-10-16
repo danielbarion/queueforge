@@ -355,6 +355,39 @@ changing code.
 
 ## Rust
 
+### R1. A durable classic queue can stall from its first message
+
+Status: open, correctness, predates 2026-10-16. Under the growing durable load
+(`bench/scaling.py --scenarios weak`), now and then one loadgen process gets
+no deliveries at all: both its publishers stop at a full confirm window
+(`inflight=1024`, 170 to 16,303 confirmed) and both its consumers receive 0,
+while the other processes on the same broker run normally. loadgen reports
+`err=no_consume`. Seen in 7 of 160 Rust `weak` cells (2, 4 and 5 CPUs), never in
+`weak-t`, and in 0 of 193 Bun cells on the same loadgen, so the client is not
+the cause. The original image shows it (`weak-before`, 2 CPUs, repeat 2; and a
+local rerun). mimalloc made it more frequent at 4 CPUs (3 of 3 cells against 0
+of 12 for the other images), so it is timing: something lets a queue's
+confirms and deliveries stop together. Ten instrumented reruns polling
+`/api/queues/%2F` every 6 s did not reproduce it. Reading the actor loop, the
+interval tick re-arms whenever no fsync is in flight, so the likely shape is an
+in-flight fsync (`spawn_blocking`) that does not return, or a path that leaves
+`interval_fsync` set. Next: log the actor's fsync state on a timer while a
+cell runs, and capture a stalled process.
+
+### R2. Shared counters cap scaling near 7 CPUs
+
+Status: open. After the 2026-10-16 work (ledger counts, gauges written on
+change, cached counter handles, mimalloc, Fx hasher for broker-assigned keys)
+the growing transient load is 281,903 msg/s at 1 CPU and 1,010,452 at 6
+(0.60), against 199,566 and 560,500 before. The USL fit now has a coherency
+term, k = 0.018, peak near N = 7.4: every message still increments about six
+global Prometheus counters, one atomic each on lines all threads share, and
+per-queue depth gauges are written on every actor pass. Per-thread counters
+summed at scrape time would remove the shared lines. `prom::queue_depth` also
+writes `rabbitmq_queue_messages_ready` for the same labels as the actor, so
+writing the actor's gauges only on change needs that writer settled first.
+Tried and not kept: `lto = "fat"` with one codegen unit (inside the noise).
+
 ---
 
 ## PHP

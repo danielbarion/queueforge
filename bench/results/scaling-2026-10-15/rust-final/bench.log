@@ -1,0 +1,73 @@
+08:51:18 PROGRESS scaling vm ncpu=15 mem=50425278464
+08:51:18 PROGRESS scaling repeat 1/3 cell 1/12 rust 4 weak
+08:51:46 CELL weak rust 4 ok=0 err=loadgen 8/8 ok rate=438287.2 cpu=388 client=27 p99=26.60
+08:51:47 PROGRESS scaling repeat 1/3 cell 2/12 rust 6 weak
+08:52:15 CELL weak rust 6 ok=1 err= rate=684649.6 cpu=576 client=47 p99=49.20
+08:52:16 PROGRESS scaling repeat 1/3 cell 3/12 rust 1 weak-t
+08:52:44 CELL weak-t rust 1 ok=1 err= rate=287347.3 cpu=100 client=16 p99=9.40
+08:52:44 PROGRESS scaling repeat 1/3 cell 4/12 rust 5 weak-t
+08:53:13 CELL weak-t rust 5 ok=1 err= rate=920591.9 cpu=498 client=57 p99=17.20
+08:53:13 PROGRESS scaling repeat 1/3 cell 5/12 rust 3 weak
+08:53:41 CELL weak rust 3 ok=1 err= rate=389233.2 cpu=292 client=24 p99=67.00
+08:53:41 PROGRESS scaling repeat 1/3 cell 6/12 rust 4 weak-t
+08:54:10 CELL weak-t rust 4 ok=1 err= rate=835440.4 cpu=398 client=49 p99=15.40
+08:54:10 PROGRESS scaling repeat 1/3 cell 7/12 rust 2 weak
+08:54:39 CELL weak rust 2 ok=1 err= rate=312546.3 cpu=197 client=19 p99=17.60
+08:54:39 PROGRESS scaling repeat 1/3 cell 8/12 rust 6 weak-t
+08:55:07 CELL weak-t rust 6 ok=1 err= rate=1014454.7 cpu=596 client=69 p99=19.20
+08:55:07 PROGRESS scaling repeat 1/3 cell 9/12 rust 3 weak-t
+08:55:36 CELL weak-t rust 3 ok=1 err= rate=742810.9 cpu=299 client=42 p99=13.20
+08:55:36 PROGRESS scaling repeat 1/3 cell 10/12 rust 1 weak
+08:56:04 CELL weak rust 1 ok=1 err= rate=234339.3 cpu=99 client=13 p99=12.80
+08:56:05 PROGRESS scaling repeat 1/3 cell 11/12 rust 5 weak
+08:56:33 CELL weak rust 5 ok=1 err= rate=683826.8 cpu=483 client=44 p99=24.90
+08:56:33 PROGRESS scaling repeat 1/3 cell 12/12 rust 2 weak-t
+08:57:02 CELL weak-t rust 2 ok=1 err= rate=534719.2 cpu=199 client=29 p99=11.90
+08:57:02 PROGRESS scaling repeat 2/3 cell 1/12 rust 5 weak-t
+08:57:30 CELL weak-t rust 5 ok=1 err= rate=898792.6 cpu=497 client=55 p99=17.70
+08:57:31 PROGRESS scaling repeat 2/3 cell 2/12 rust 6 weak
+08:57:59 CELL weak rust 6 ok=1 err= rate=518312.0 cpu=588 client=36 p99=68.00
+08:57:59 PROGRESS scaling repeat 2/3 cell 3/12 rust 3 weak-t
+08:58:28 CELL weak-t rust 3 ok=1 err= rate=750876.9 cpu=298 client=42 p99=12.90
+08:58:28 PROGRESS scaling repeat 2/3 cell 4/12 rust 1 weak
+08:58:56 CELL weak rust 1 ok=1 err= rate=241323.7 cpu=99 client=13 p99=12.00
+08:58:57 PROGRESS scaling repeat 2/3 cell 5/12 rust 2 weak-t
+08:59:25 CELL weak-t rust 2 ok=1 err= rate=556127.8 cpu=199 client=31 p99=11.40
+08:59:25 PROGRESS scaling repeat 2/3 cell 6/12 rust 2 weak
+08:59:54 CELL weak rust 2 ok=1 err= rate=154669.1 cpu=199 client=11 p99=18.00
+08:59:54 PROGRESS scaling repeat 2/3 cell 7/12 rust 3 weak
+09:00:23 CELL weak rust 3 ok=1 err= rate=390530.3 cpu=296 client=24 p99=26.50
+09:00:23 PROGRESS scaling repeat 2/3 cell 8/12 rust 6 weak-t
+09:00:51 CELL weak-t rust 6 ok=1 err= rate=987279.2 cpu=597 client=63 p99=19.40
+09:00:52 PROGRESS scaling repeat 2/3 cell 9/12 rust 5 weak
+09:01:20 CELL weak rust 5 ok=1 err= rate=595837.0 cpu=492 client=39 p99=28.80
+09:01:20 PROGRESS scaling repeat 2/3 cell 10/12 rust 4 weak-t
+09:01:49 CELL weak-t rust 4 ok=1 err= rate=821331.1 cpu=398 client=48 p99=15.50
+09:01:49 PROGRESS scaling repeat 2/3 cell 11/12 rust 1 weak-t
+09:02:17 CELL weak-t rust 1 ok=1 err= rate=281903.4 cpu=100 client=16 p99=9.60
+09:02:18 PROGRESS scaling repeat 2/3 cell 12/12 rust 4 weak
+09:02:46 CELL weak rust 4 ok=0 err=loadgen 8/8 ok rate=430906.2 cpu=391 client=28 p99=93.30
+09:02:46 PROGRESS scaling repeat 3/3 cell 1/12 rust 3 weak-t
+09:03:15 CELL weak-t rust 3 ok=1 err= rate=761683.3 cpu=298 client=43 p99=12.50
+09:03:15 PROGRESS scaling repeat 3/3 cell 2/12 rust 4 weak
+09:03:43 CELL weak rust 4 ok=1 err= rate=548547.2 cpu=391 client=33 p99=56.40
+09:03:44 PROGRESS scaling repeat 3/3 cell 3/12 rust 2 weak-t
+09:04:12 CELL weak-t rust 2 ok=1 err= rate=544769.6 cpu=199 client=30 p99=11.60
+09:04:12 PROGRESS scaling repeat 3/3 cell 4/12 rust 4 weak-t
+09:04:41 CELL weak-t rust 4 ok=1 err= rate=825888.4 cpu=398 client=48 p99=15.60
+09:04:41 PROGRESS scaling repeat 3/3 cell 5/12 rust 1 weak
+09:05:09 CELL weak rust 1 ok=1 err= rate=229358.8 cpu=99 client=12 p99=12.90
+09:05:09 PROGRESS scaling repeat 3/3 cell 6/12 rust 6 weak
+09:05:38 CELL weak rust 6 ok=1 err= rate=845425.2 cpu=574 client=58 p99=25.30
+09:05:38 PROGRESS scaling repeat 3/3 cell 7/12 rust 2 weak
+09:06:07 CELL weak rust 2 ok=1 err= rate=213354.8 cpu=197 client=12 p99=127.70
+09:06:07 PROGRESS scaling repeat 3/3 cell 8/12 rust 5 weak-t
+09:06:35 CELL weak-t rust 5 ok=1 err= rate=942307.7 cpu=498 client=59 p99=17.00
+09:06:36 PROGRESS scaling repeat 3/3 cell 9/12 rust 5 weak
+09:07:04 CELL weak rust 5 ok=0 err=loadgen 10/10 ok rate=485662.6 cpu=482 client=30 p99=200.00
+09:07:04 PROGRESS scaling repeat 3/3 cell 10/12 rust 6 weak-t
+09:07:33 CELL weak-t rust 6 ok=1 err= rate=1010451.5 cpu=596 client=65 p99=18.90
+09:07:33 PROGRESS scaling repeat 3/3 cell 11/12 rust 1 weak-t
+09:08:01 CELL weak-t rust 1 ok=1 err= rate=274582.2 cpu=100 client=15 p99=9.60
+09:08:02 PROGRESS scaling repeat 3/3 cell 12/12 rust 3 weak
+09:08:30 CELL weak rust 3 ok=1 err= rate=398649.9 cpu=297 client=24 p99=23.50
