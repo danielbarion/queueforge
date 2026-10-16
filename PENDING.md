@@ -271,6 +271,19 @@ the gap is in the 4 CPU cell. What is left on the queue's thread is spread out
 (body copy at `finishPublish` 6%, `encodeDeliver` 8%, routing 5%, parsing),
 so no single cost is left to move.
 
+2026-10-16, 4 CPU, image `6bae16d`, per-thread CPU over 10 s in three
+work-queue runs: every connection is on the queue's worker; its main thread
+at 79%, 90% and 99% of a core, the sync worker 12–14%, the other three
+workers idle; 185,329 / 188,551 / 213,875 msg/s with the PerfTest client at
+151–171% (H8). Interleaved against Rust: work-queue 144,745 / 302,344 and
+221,023 / 234,919; quorum 204,321 / 265,976 and 202,016 / 272,135 (Bun was
+127,614 in the 2026-10-16 run; the one-voter quorum publish now confirms per
+group commit, `localQuorumFast`). The home's profile: `writeBuffered` (the
+node:net write of adopted sockets) 20%, `encodeDeliver` 9.5%, then many costs
+of 1–4%. Untried: keeping consumer connections on their own workers, so the
+delivery encode and send leave the home. Forwarded publishes were slower
+(above), and a forwarded delivery probably is too.
+
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
 
@@ -293,8 +306,38 @@ full run.
 
 ### B5. Large messages: CPU per byte
 
-Status: open. Chunk reuse and the off-loop directory sync are in the tree
-(see above). What the 1 CPU 64 KiB profile shows now, main thread: socket
+Status: mostly done 2026-10-16 (`6bae16d`). What was found and changed:
+
+- The durable log rotated a 4 MiB chunk every ~4 ms at 1 GB/s; each rotation
+  adds a directory fsync and the old chunk's fsync to a commit round, which
+  doubled the fsync time of a 64 KiB confirm (1.0 against 0.4 ms). Chunks now
+  double up to 32 MiB while rotations come under 250 ms apart and shrink
+  after 2 s (`fast-log.ts`, `adaptChunkSize`); compaction keeps ~64 MiB behind.
+- `absorbFresh` copied every socket read into a fresh buffer, a body frame
+  that spanned reads was concatenated again per read, and the body was then
+  sliced out: three fresh 64 KiB allocations per publish, each ~10 us in the
+  broker against ~1.6 us warm. A lone read is now parsed in place, a body of
+  16 KiB or more gets a buffer of its declared size (at most 64 MiB reserved
+  per connection), and a spanning body frame streams into it.
+- Deliveries of 16 KiB or more are the frame headers plus views of the stored
+  body (`encodeDeliverParts`); writes past the 1 MiB gather buffer go through
+  it in pieces instead of a fresh buffer of the whole size.
+
+Interleaved pairs against Rust, 1 CPU, fresh VM (MB/s, Bun / Rust): large-1m
+1,600 / 1,308 and 1,582 / 1,074; large-1m-quorum 1,453 / 1,173 and 1,269 /
+1,296; large-64k-quorum 1,069 / 1,233 and 967 / 764; large-64k 1,003 / 1,175,
+then 686 / 682 on a slower disk. Before (2026-10-16 run): 64k 797.6, 1m 810.5.
+
+What is left at 64 KiB: Bun is CPU-bound (87–92%). The profile's largest
+costs are the socket write, `Atomics.notify` (the sync worker taking the one
+CPU) and the body allocation. A 64 KiB body allocation is external memory to
+JavaScriptCore: 1 GB/s of bodies runs ~80 collections a second, half of them
+full (~5 s of collector time in a 30 s cell). Tried: carving bodies out of
+1 MiB slabs (no consistent gain, pins a slab per straggler, not kept);
+`BUN_JSC_largeHeapSize=64 MiB` (half the collections, no throughput change,
++100 MiB, not kept); a 32 MiB staging ring (inside the noise, not kept).
+
+Earlier notes, before 2026-10-16: What the 1 CPU 64 KiB profile shows now, main thread: socket
 `write` of deliveries 16%, `crc32` of log records 9%, the body copy in
 `concat` (`finishPublish`) 9.5%, three more copies of ~3% each (`absorbFresh`,
 `writeRecord`, `encodeDeliver`). Tried 2026-10-14: keeping a single-chunk body
@@ -331,6 +374,14 @@ stalls about twice a second, and so do a bare Bun timer loop and a bare Python
 loop in the same 1 CPU container (5–11 ms about once a second). The stalls are
 the VM, not Bun's code; Rust keeps serving through them on its other threads.
 latency-10k p99 2.8 ms (Rust 0.7 ms) in the 2026-10-15 run.
+
+2026-10-16: an idle 1 ms Bun timer and a Python sleep loop, each alone on one
+CPU of the 8 CPU VM, see the same gaps over 20 s: p999 5.4 / 5.3 ms, max 17.6
+/ 17.8 ms, 145 / 136 gaps past 2 ms. Interleaved pairs (Bun / Rust p99):
+latency-10k 3.25 / 0.59, 0.40 / 0.22, 1.98 / 1.16 ms; slow-consumers 0.40 /
+0.90 and 0.60 / 7.74 ms (Bun ahead since the per-message work of 2026-10-16).
+latency-10k is the one cell left where one thread waiting out a VM stall
+shows; it moves between 0.4 and 3.3 ms run to run.
 
 Where: the lone-publish path (`SOCKET_WAIT_MS`, lone mode in `driveInbound`,
 `bun/src/amqp/frames.ts`; `armLoneFlush`, `SMALL_GROUP` in `bun/src/store.ts`).
