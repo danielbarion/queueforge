@@ -1,5 +1,6 @@
 <?php
-$root=dirname(__DIR__,2);require "$root/php/src/Auth.php";require "$root/php/src/Codec.php";
+// The source sits next to test/ in the image (/opt/queueforge) and under php/ in the repo.
+$src=is_dir(dirname(__DIR__).'/src')?dirname(__DIR__).'/src':dirname(__DIR__,2).'/php/src';require "$src/Auth.php";require "$src/Codec.php";
 $dir='/tmp/qf-external-pki-'.bin2hex(random_bytes(4));mkdir($dir);
 register_shutdown_function(static function() use($dir): void {
     $files=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
@@ -33,7 +34,7 @@ foreach(['primary','secondary'] as $mode){
  $plain=port();$tls=$mode==='primary'?$plain:port();$data="$dir/$mode";mkdir($data);
  $perms=['/'=>['configure'=>'.*','write'=>'.*','read'=>'.*']];file_put_contents("$data/users.json",json_encode(['admin'=>['hash'=>Auth::hash('devpassword12'),'tags'=>['administrator'],'permissions'=>$perms],'cert-user'=>['hash'=>Auth::hash('unused-password'),'tags'=>[],'permissions'=>$perms]]));
  $config="[listeners]\namqp=\"127.0.0.1:$plain\"\n".($mode==='secondary'?"amqps=\"127.0.0.1:$tls\"\n":'')."[data]\ndir=\"$data\"\n[tls]\nenabled=".($mode==='primary'?'true':'false')."\ncert_path=\"$dir/server.pem\"\nkey_path=\"$dir/server.key\"\nca_path=\"$dir/ca.pem\"\n";file_put_contents("$dir/$mode.toml",$config);
- $proc=proc_open([PHP_BINARY,"$root/php/bin/queueforge",'--config',"$dir/$mode.toml"],[1=>['file',"$dir/$mode.out",'w'],2=>['file',"$dir/$mode.err",'w']],$pipes,$root);
+ $proc=proc_open([PHP_BINARY,dirname($src)."/bin/queueforge",'--config',"$dir/$mode.toml"],[1=>['file',"$dir/$mode.out",'w'],2=>['file',"$dir/$mode.err",'w']],$pipes,dirname($src));
  try{
  $until=microtime(true)+5;$ready=false;while(microtime(true)<$until){$ready=@stream_socket_client("tcp://127.0.0.1:$plain",$e,$s,.1);if($ready){fclose($ready);break;}usleep(10000);}check((bool)$ready,"$mode listener starts");
  $good=login($tls,'client','EXTERNAL');check($good['open']&&$good['mechanisms']==='PLAIN EXTERNAL',"$mode trusted CN authenticates EXTERNAL");

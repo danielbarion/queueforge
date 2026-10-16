@@ -121,6 +121,14 @@ final class Server
 {
     /** @var array<int, Sock> */
     public array $conns = [];
+    /**
+     * Connections with deliveries written since the last flush. One write per
+     * connection per loop pass: a write per delivery was 43% of the CPU under
+     * a growing transient load.
+     *
+     * @var array<int, true>
+     */
+    private array $dirty = [];
     /** @var array<int, int> stream resource id to connection id */
     private array $byFp = [];
     private int $nextConn = 1;
@@ -316,7 +324,18 @@ final class Server
                     elseif(feof($sock->fp))$this->drop($id);
                 }
             }
+            $this->flushDirty();
         }
+    }
+
+    /** Write the deliveries of this pass, one write per connection. */
+    private function flushDirty(): void
+    {
+        foreach ($this->dirty as $id => $_) {
+            $sock = $this->conns[$id] ?? null;
+            if ($sock !== null && !$sock->gone) $sock->flush();
+        }
+        $this->dirty = [];
     }
 
     /** @param resource $fp */
@@ -2046,7 +2065,6 @@ final class Server
         ];
         $msgId = $sub['noAck'] ? -1 : $broker->holdRemote(['peer' => $from, 'queue' => $queue, 'delivery' => $delivery]);
         $this->deliverMessage($broker, $sub['conn'], $sub['ch'], $sub['tag'], $sub['noAck'], $msg, $msgId);
-        $this->conns[$sub['conn']]->flush();
         return true;
     }
 
@@ -2054,7 +2072,7 @@ final class Server
     {
         $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId!==-1)$broker->requeue($msgId);return;}
         $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;}
-        $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[],$sock->frameMax));$sock->flush();
+        $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[],$sock->frameMax));$this->dirty[$id]=true;
         $broker->prom['delivered']++;$broker->prom[$noAck?'deliveredConsumeAuto':'deliveredConsumeManual']++;if($msg['redelivered']??false)$broker->prom['redelivered']++;
     }
     private function pumpStream(Broker $broker,string $name):void
