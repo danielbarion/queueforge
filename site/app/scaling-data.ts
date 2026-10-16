@@ -5,7 +5,8 @@ export type ScalingCurve = Partial<Record<"weak-t" | "weak", ScalingPoint[]>>;
 
 export const scalingSource: Record<string, string> = {
   "rust": "bench/results/scaling-2026-10-15/rust-final",
-  "bun": "bench/results/scaling-2026-10-15/weak-final"
+  "bun": "bench/results/scaling-2026-10-15/weak-final",
+  "php": "bench/results/scaling-2026-10-15/php-cores"
 };
 
 export const scaling: Record<"rust" | "bun" | "php", ScalingCurve> = {
@@ -18,5 +19,7 @@ export const scaling: Record<"rust" | "bun" | "php", ScalingCurve> = {
     "weak": [{"cpus": 1, "rate": 364657.6, "failed": 0, "repeats": 3}, {"cpus": 2, "rate": 639913.6, "failed": 0, "repeats": 3}, {"cpus": 3, "rate": 896435.2, "failed": 0, "repeats": 3}, {"cpus": 4, "rate": 1228758.4, "failed": 0, "repeats": 3}, {"cpus": 5, "rate": 1441332.8, "failed": 0, "repeats": 3}, {"cpus": 6, "rate": 1685292.8, "failed": 0, "repeats": 3}],
   },
   php: {
+    "weak-t": [{"cpus": 1, "rate": 153099.2, "failed": 0, "repeats": 3}, {"cpus": 2, "rate": 285511.4, "failed": 0, "repeats": 3}, {"cpus": 3, "rate": 405388.7, "failed": 0, "repeats": 3}, {"cpus": 4, "rate": 510693.2, "failed": 0, "repeats": 3}, {"cpus": 5, "rate": 607301.8, "failed": 0, "repeats": 3}, {"cpus": 6, "rate": 697252.2, "failed": 0, "repeats": 3}],
+    "weak": [{"cpus": 1, "rate": 118571.8, "failed": 0, "repeats": 3}, {"cpus": 2, "rate": 208345.9, "failed": 0, "repeats": 3}, {"cpus": 3, "rate": 293934.8, "failed": 0, "repeats": 3}, {"cpus": 4, "rate": 373638.8, "failed": 0, "repeats": 3}, {"cpus": 5, "rate": 444938.3, "failed": 0, "repeats": 3}, {"cpus": 6, "rate": 510091.7, "failed": 0, "repeats": 3}],
   },
 };

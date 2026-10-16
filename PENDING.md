@@ -399,7 +399,10 @@ process unless `QUEUEFORGE_CORES` is set. Under the growing transient load
 (independent queues, so each connection migrates to its queue's process) the
 per-core mode scales: 81,377 msg/s at 1 CPU; at 2 CPUs 82,090 one process vs
 159,185 per core; at 4 CPUs 77,500 vs 277,345 (0.85), and after the deferred
-delivery writes 520,170 at 4 CPUs. It lost in the fixed-load PerfTest cells
+delivery writes 520,170 at 4 CPUs. The full curve per core
+(`bench/results/scaling-2026-10-15/php-cores/`) is 153,099 at 1 CPU and
+697,252 at 6 transient (0.76), 118,572 and 510,092 durable (0.72), with no
+coherency term in the fit and every repeat passing. It lost in the fixed-load PerfTest cells
 (work-queue 36.9k vs 10.4k at 4 CPU), where most traffic crosses processes,
 and those cells are partly client-bound (H8). Following the cgroup by default
 would trade one shape for the other; measure the PerfTest cells again with a

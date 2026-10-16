@@ -652,7 +652,8 @@ th.scenario {
 .scenario-table td { white-space: normal; overflow-wrap: normal; line-height: 1.5; vertical-align: top; }
 .scaling-table { margin: 12px 0 32px; }
 .scaling-table table { table-layout: fixed; min-width: 0; }
-.scaling-table td { vertical-align: top; line-height: 1.5; }
+.scaling-table th:first-child { width: 14%; }
+.scaling-table td { vertical-align: top; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; font-size: 13px; }
 .scaling-eff { display: block; color: var(--muted); font-size: 12.5px; }
 .memory-table table { table-layout: fixed; min-width: 0; }
 .memory-table .scenario-column { width: 32%; }

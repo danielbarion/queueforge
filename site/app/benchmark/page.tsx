@@ -175,7 +175,8 @@ export default function BenchmarkPage() {
             loadgen on 8 CPUs of its own. The broker runs on CPUs 0 to N-1 of a 15-CPU VM. A cell
             is the median of three repeats; &ldquo;of linear&rdquo; is X(N) / (N &middot; X(1)).
             Transient messages first, then durable, where the VM&apos;s disk drifts late in long
-            sessions and Rust has an intermittent stall (PENDING R1). Method and the
+            sessions and Rust has an intermittent stall (PENDING R1). PHP runs one process per CPU
+            here (<code>QUEUEFORGE_CORES=cgroup</code>); by default it runs one. Method and the
             Universal Scalability Law fits: <code>bench/scaling.py</code> and{" "}
             <a href={`${GITHUB}/blob/main/docs/bun-scaling.md`}>docs/bun-scaling.md</a>.
           </p>

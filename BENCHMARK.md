@@ -25,19 +25,21 @@ CPUs and its client under 20% of its eight.
 Median of three repeats; ranges and the Universal Scalability Law fits are
 in `bench/results/scaling-2026-10-15/`.
 
-| CPUs | Bun weak | Rust weak | Bun weak-t | Rust weak-t |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 364,658 | 234,339 | 655,838 | 281,903 |
-| 2 | 639,914 | 213,355 * | 1,090,534 | 544,770 |
-| 3 | 896,435 | 390,530 | 1,469,832 | 750,877 |
-| 4 | 1,228,758 | 548,547 * | 1,892,536 | 825,888 |
-| 5 | 1,441,333 | 639,832 * | 2,302,406 | 920,592 |
-| 6 | 1,685,293 | 684,650 * | 2,653,190 | 1,010,452 |
+| CPUs | Bun weak | Rust weak | PHP weak | Bun weak-t | Rust weak-t | PHP weak-t |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 364,658 | 234,339 | 118,572 | 655,838 | 281,903 | 153,099 |
+| 2 | 639,914 | 213,355 * | 208,346 | 1,090,534 | 544,770 | 285,511 |
+| 3 | 896,435 | 390,530 | 293,935 | 1,469,832 | 750,877 | 405,389 |
+| 4 | 1,228,758 | 548,547 * | 373,639 | 1,892,536 | 825,888 | 510,693 |
+| 5 | 1,441,333 | 639,832 * | 444,938 | 2,302,406 | 920,592 | 607,302 |
+| 6 | 1,685,293 | 684,650 * | 510,092 | 2,653,190 | 1,010,452 | 697,252 |
 
 Bun is the tree at `9bc63df` (`weak-final/`); Rust is the tree at `a69c93b`
 (`rust-final/`), before the 640-byte memory charge, which this load (no
-backlog) does not reach. Efficiency at 6 CPUs, X(6) / (6 X(1)): Bun 0.77
-(`weak`) and 0.67 (`weak-t`), Rust 0.60 (`weak-t`). \* Rust's durable cells
+backlog) does not reach. PHP is the tree at `544bbe2` with
+`QUEUEFORGE_CORES=cgroup`, one process per CPU (`php-cores/`); by default it
+runs one process. Efficiency at 6 CPUs, X(6) / (6 X(1)): Bun 0.77 (`weak`)
+and 0.67 (`weak-t`), Rust 0.60 (`weak-t`), PHP 0.72 and 0.76. \* Rust's durable cells
 are not a curve: at 4 and 5 CPUs 2 of 3 and 1 of 3 repeats failed (one loadgen
 process got no deliveries, PENDING R1), at 2 and 6 the repeats ranged 155k-313k
 and 518k-845k. Rust's transient curve fits the Universal Scalability Law with
@@ -105,6 +107,9 @@ curves are in [Scaling](#scaling-2026-10-15).
   quorum 198,723 → 265,104, fanout-20 268,424 → 309,256. Transactions read
   23k–55k msg/s on both the 2026-10-15 and this image in an interleaved A/B
   (medians 34,762 and 34,923): an existing instability, not this change.
+  Rust's 1 CPU many-queues cell is unscored ("missed rate"): one of its two
+  repeats delivered 4,730 of the offered 5,000 msg/s. Six reruns on the
+  2026-10-15 and current images all held 5,002-5,003.
 - Rust memory: the load sweep's 16 publishers and 16 consumers on one queue
   (`shared`) was OOM-killed at 1 CPU / 512 MiB in 3 of 3 samples and at
   2 CPU / 2 GiB in 2 of 3, with the 2026-10-15 image as well: the container

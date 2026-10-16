@@ -1,0 +1,75 @@
+14:39:34 PROGRESS docker quit
+14:39:38 PROGRESS docker start
+14:39:41 PROGRESS scaling vm ncpu=15 mem=50425278464
+14:39:41 PROGRESS scaling repeat 1/3 cell 1/12 php 4 weak
+14:40:12 CELL weak php 4 ok=1 err= rate=341107.3 cpu=336 client=24 p99=45.30
+14:40:12 PROGRESS scaling repeat 1/3 cell 2/12 php 6 weak
+14:40:42 CELL weak php 6 ok=1 err= rate=455299.7 cpu=487 client=33 p99=48.60
+14:40:43 PROGRESS scaling repeat 1/3 cell 3/12 php 1 weak-t
+14:41:12 CELL weak-t php 1 ok=1 err= rate=145590.0 cpu=99 client=9 p99=17.40
+14:41:12 PROGRESS scaling repeat 1/3 cell 4/12 php 5 weak-t
+14:41:41 CELL weak-t php 5 ok=1 err= rate=602192.5 cpu=494 client=38 p99=26.70
+14:41:41 PROGRESS scaling repeat 1/3 cell 5/12 php 3 weak
+14:42:10 CELL weak php 3 ok=1 err= rate=283028.0 cpu=267 client=18 p99=37.70
+14:42:11 PROGRESS scaling repeat 1/3 cell 6/12 php 4 weak-t
+14:42:40 CELL weak-t php 4 ok=1 err= rate=507730.8 cpu=394 client=32 p99=21.90
+14:42:40 PROGRESS scaling repeat 1/3 cell 7/12 php 2 weak
+14:43:09 CELL weak php 2 ok=1 err= rate=211212.9 cpu=181 client=12 p99=33.30
+14:43:09 PROGRESS scaling repeat 1/3 cell 8/12 php 6 weak-t
+14:43:40 CELL weak-t php 6 ok=1 err= rate=704281.3 cpu=569 client=42 p99=22.50
+14:43:40 PROGRESS scaling repeat 1/3 cell 9/12 php 3 weak-t
+14:44:09 CELL weak-t php 3 ok=1 err= rate=405703.7 cpu=297 client=24 p99=18.60
+14:44:09 PROGRESS scaling repeat 1/3 cell 10/12 php 1 weak
+14:44:38 CELL weak php 1 ok=1 err= rate=118571.8 cpu=93 client=6 p99=26.20
+14:44:38 PROGRESS scaling repeat 1/3 cell 11/12 php 5 weak
+14:45:08 CELL weak php 5 ok=1 err= rate=444747.2 cpu=434 client=29 p99=44.50
+14:45:08 PROGRESS scaling repeat 1/3 cell 12/12 php 2 weak-t
+14:45:37 CELL weak-t php 2 ok=1 err= rate=285626.2 cpu=199 client=15 p99=17.10
+14:45:37 PROGRESS scaling repeat 2/3 cell 1/12 php 5 weak-t
+14:46:06 CELL weak-t php 5 ok=1 err= rate=607301.8 cpu=493 client=40 p99=26.20
+14:46:07 PROGRESS scaling repeat 2/3 cell 2/12 php 6 weak
+14:46:36 CELL weak php 6 ok=1 err= rate=513983.6 cpu=517 client=34 p99=42.10
+14:46:36 PROGRESS scaling repeat 2/3 cell 3/12 php 3 weak-t
+14:47:05 CELL weak-t php 3 ok=1 err= rate=405388.7 cpu=298 client=24 p99=18.50
+14:47:05 PROGRESS scaling repeat 2/3 cell 4/12 php 1 weak
+14:47:34 CELL weak php 1 ok=1 err= rate=119050.4 cpu=92 client=6 p99=24.50
+14:47:34 PROGRESS scaling repeat 2/3 cell 5/12 php 2 weak-t
+14:48:04 CELL weak-t php 2 ok=1 err= rate=285511.4 cpu=197 client=15 p99=17.10
+14:48:04 PROGRESS scaling repeat 2/3 cell 6/12 php 2 weak
+14:48:33 CELL weak php 2 ok=1 err= rate=208058.9 cpu=179 client=12 p99=29.90
+14:48:33 PROGRESS scaling repeat 2/3 cell 7/12 php 3 weak
+14:49:02 CELL weak php 3 ok=1 err= rate=299112.2 cpu=269 client=18 p99=34.20
+14:49:03 PROGRESS scaling repeat 2/3 cell 8/12 php 6 weak-t
+14:49:32 CELL weak-t php 6 ok=1 err= rate=697252.2 cpu=594 client=43 p99=23.70
+14:49:32 PROGRESS scaling repeat 2/3 cell 9/12 php 5 weak
+14:50:01 CELL weak php 5 ok=1 err= rate=444938.3 cpu=433 client=28 p99=43.90
+14:50:01 PROGRESS scaling repeat 2/3 cell 10/12 php 4 weak-t
+14:50:31 CELL weak-t php 4 ok=1 err= rate=510693.2 cpu=397 client=33 p99=19.20
+14:50:31 PROGRESS scaling repeat 2/3 cell 11/12 php 1 weak-t
+14:51:00 CELL weak-t php 1 ok=1 err= rate=153099.2 cpu=100 client=8 p99=14.60
+14:51:00 PROGRESS scaling repeat 2/3 cell 12/12 php 4 weak
+14:51:29 CELL weak php 4 ok=1 err= rate=378156.8 cpu=355 client=23 p99=41.70
+14:51:29 PROGRESS scaling repeat 3/3 cell 1/12 php 3 weak-t
+14:51:58 CELL weak-t php 3 ok=1 err= rate=403004.6 cpu=297 client=24 p99=17.90
+14:51:59 PROGRESS scaling repeat 3/3 cell 2/12 php 4 weak
+14:52:28 CELL weak php 4 ok=1 err= rate=373638.8 cpu=356 client=24 p99=35.00
+14:52:28 PROGRESS scaling repeat 3/3 cell 3/12 php 2 weak-t
+14:52:57 CELL weak-t php 2 ok=1 err= rate=285318.0 cpu=197 client=15 p99=16.80
+14:52:57 PROGRESS scaling repeat 3/3 cell 4/12 php 4 weak-t
+14:53:27 CELL weak-t php 4 ok=1 err= rate=514607.1 cpu=397 client=32 p99=18.90
+14:53:27 PROGRESS scaling repeat 3/3 cell 5/12 php 1 weak
+14:53:56 CELL weak php 1 ok=1 err= rate=117717.4 cpu=93 client=6 p99=23.70
+14:53:56 PROGRESS scaling repeat 3/3 cell 6/12 php 6 weak
+14:54:25 CELL weak php 6 ok=1 err= rate=510091.7 cpu=514 client=35 p99=39.80
+14:54:25 PROGRESS scaling repeat 3/3 cell 7/12 php 2 weak
+14:54:54 CELL weak php 2 ok=1 err= rate=208345.9 cpu=178 client=11 p99=30.80
+14:54:55 PROGRESS scaling repeat 3/3 cell 8/12 php 5 weak-t
+14:55:24 CELL weak-t php 5 ok=1 err= rate=608064.2 cpu=496 client=40 p99=26.10
+14:55:24 PROGRESS scaling repeat 3/3 cell 9/12 php 5 weak
+14:55:53 CELL weak php 5 ok=1 err= rate=446550.1 cpu=434 client=29 p99=41.50
+14:55:53 PROGRESS scaling repeat 3/3 cell 10/12 php 6 weak-t
+14:56:24 CELL weak-t php 6 ok=1 err= rate=682405.3 cpu=570 client=43 p99=23.50
+14:56:24 PROGRESS scaling repeat 3/3 cell 11/12 php 1 weak-t
+14:56:53 CELL weak-t php 1 ok=1 err= rate=154454.4 cpu=100 client=8 p99=14.10
+14:56:53 PROGRESS scaling repeat 3/3 cell 12/12 php 3 weak
+14:57:22 CELL weak php 3 ok=1 err= rate=293934.8 cpu=266 client=18 p99=36.00
