@@ -176,10 +176,17 @@ impl Message {
 
     /// Approximate tracked size: body + fixed slot overhead + properties length.
     ///
-    /// Matches the design watermark table (conservative vs RSS). Optional string
-    /// properties contribute their UTF-8 length; small scalar flags add 1–8 bytes.
+    /// The memory watermarks compare this sum to the container's limit, so the
+    /// overhead has to cover what a ready message really costs: the `Arc`'d
+    /// message, its queue entry, the ready index and the allocator's slack.
+    /// Measured with 256-byte bodies in a 1 GiB container, the container grew
+    /// ~880 bytes per ready message while 128 was charged here, so the hard
+    /// watermark sat past the limit: a 512 MiB container was OOM-killed under
+    /// 16 publishers on one queue instead of blocking them.
+    /// Optional string properties contribute their UTF-8 length; small scalar
+    /// flags add 1–8 bytes.
     pub fn tracked_bytes(&self) -> u64 {
-        const OVERHEAD: u64 = 128;
+        const OVERHEAD: u64 = 640;
         OVERHEAD
             .saturating_add(self.body.len() as u64)
             .saturating_add(self.properties_bytes())
