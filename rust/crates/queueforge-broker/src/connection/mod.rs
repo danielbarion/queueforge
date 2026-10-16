@@ -49,6 +49,10 @@ use helpers::*;
 use reply::*;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+/// Maps keyed by channel numbers and consumer sessions the broker assigns,
+/// not by client strings, so a fast hasher is safe: SipHash on them was ~6%
+/// of a 6 CPU profile.
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -210,7 +214,7 @@ pub async fn handle_connection<S>(
         heartbeat: params.heartbeat,
         last_recv: Instant::now(),
         last_send: Instant::now(),
-        channels: HashMap::new(),
+        channels: FxHashMap::default(),
         user: None,
         vhost: None,
         // True after connection.open-ok increments queueforge_connections.
@@ -224,7 +228,7 @@ pub async fn handle_connection<S>(
         reply_tx,
         reply_rx,
         reply_addrs: HashMap::new(),
-        granted_credit: HashMap::new(),
+        granted_credit: FxHashMap::default(),
         replay: VecDeque::new(),
         delivery_tx,
         delivery_rx,
@@ -241,7 +245,7 @@ pub async fn handle_connection<S>(
         tx_applying: false,
         tx_durable: Vec::new(),
         tx_flush: Vec::new(),
-        sessions: HashMap::new(),
+        sessions: FxHashMap::default(),
         declared_queues: Vec::new(),
         cleaned_up: false,
         cluster,
@@ -270,7 +274,7 @@ pub async fn handle_connection<S>(
 #[derive(Default)]
 struct DeliveryLedger {
     by_tag: BTreeMap<u64, OutstandingDelivery>,
-    per_session: HashMap<ConsumerSessionId, u32>,
+    per_session: FxHashMap<ConsumerSessionId, u32>,
 }
 
 impl DeliveryLedger {
@@ -456,7 +460,7 @@ struct Connection<'a, S> {
     heartbeat: u16,
     last_recv: Instant,
     last_send: Instant,
-    channels: HashMap<u16, ChannelState>,
+    channels: FxHashMap<u16, ChannelState>,
     user: Option<String>,
     vhost: Option<String>,
     /// Whether `queueforge_connections` has been incremented for this connection.
@@ -479,7 +483,7 @@ struct Connection<'a, S> {
     reply_addrs: HashMap<u16, (String, String)>,
     /// Unused credit already handed to each consumer. A channel-global cap counts
     /// this together with unacked deliveries on that channel.
-    granted_credit: HashMap<ConsumerSessionId, u32>,
+    granted_credit: FxHashMap<ConsumerSessionId, u32>,
     /// Frames released by `channel.flow active=true`, processed before the socket.
     replay: VecDeque<Frame>,
     delivery_tx: mpsc::Sender<QueueDelivery>,
@@ -513,7 +517,7 @@ struct Connection<'a, S> {
     /// The highest offset this `tx.commit` appended to each queue. Commit asks
     /// each one to fsync through it, instead of waiting for the interval.
     tx_flush: Vec<(QueueKey, mpsc::Sender<QueueCmd>, queueforge_core::queue::QueueOffset)>,
-    sessions: HashMap<ConsumerSessionId, SessionInfo>,
+    sessions: FxHashMap<ConsumerSessionId, SessionInfo>,
     /// Queues declared on this connection (for exclusive/auto-delete cleanup).
     declared_queues: Vec<QueueKey>,
     /// True after [`Self::cleanup_on_close`] has run (idempotent).

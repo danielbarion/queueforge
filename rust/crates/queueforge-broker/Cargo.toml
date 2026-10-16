@@ -37,6 +37,7 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 x509-parser = "0.17"
 mimalloc = { version = "0.1", default-features = false }
+rustc-hash = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
