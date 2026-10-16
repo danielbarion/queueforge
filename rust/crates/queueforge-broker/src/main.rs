@@ -260,6 +260,8 @@ async fn run() -> Result<()> {
     let ready = ReadyFlag::new();
     let metrics_handle = install_recorder().context("installing metrics recorder")?;
     queueforge_core::prom::prime();
+    queueforge_core::prom::cache_hot();
+    memory.publish_metrics();
     queueforge_core::prom::identity(
         &config
             .cluster

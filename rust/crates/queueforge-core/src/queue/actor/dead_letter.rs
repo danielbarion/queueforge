@@ -154,19 +154,23 @@ impl QueueState {
     ///
     /// Dead-letter every ready message whose deadline has passed. Each message leaves the ready set before the dead-letter task runs. Failure follows `dlx_on_fail` and must not spin on a still-due deadline.
     pub(super) fn expire_due_messages(&mut self) {
-        let now = Instant::now();
-        loop {
-            self.purge_stale_ttl_keys();
-            let Some(Reverse(k)) = self.ttl_heap.peek().copied() else {
-                break;
-            };
-            if k.at > now {
-                break;
-            }
-            self.ttl_heap.pop();
-            if let Some(qm) = self.remove_ready_offset(k.offset) {
-                self.schedule_dead_letter(qm, DeathReason::Expired, self.dlx_on_fail());
-                crate::prom::dead_lettered("expired");
+        // Most queues have no TTL: skip the clock read, which every pass of
+        // the actor loop paid (2.7% of a 1 CPU profile).
+        if !self.ttl_heap.is_empty() {
+            let now = Instant::now();
+            loop {
+                self.purge_stale_ttl_keys();
+                let Some(Reverse(k)) = self.ttl_heap.peek().copied() else {
+                    break;
+                };
+                if k.at > now {
+                    break;
+                }
+                self.ttl_heap.pop();
+                if let Some(qm) = self.remove_ready_offset(k.offset) {
+                    self.schedule_dead_letter(qm, DeathReason::Expired, self.dlx_on_fail());
+                    crate::prom::dead_lettered("expired");
+                }
             }
         }
         self.drain_ready();

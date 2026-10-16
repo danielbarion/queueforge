@@ -5,6 +5,40 @@
 //! swapped. Erlang, Raft, and stream internals are not emitted.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+
+/// Handles of the counters every message moves, looked up once.
+///
+/// `metrics::counter!` hashes the name and takes the registry's lock and an
+/// `Arc` count on each call; per message that was the hottest shared state
+/// at 6 CPUs. Filled by [`cache_hot`] after the recorder is installed: a
+/// handle taken earlier would be a no-op for good. Until then the macros run.
+struct Hot {
+    received: metrics::Counter,
+    received_confirm: metrics::Counter,
+    confirmed: metrics::Counter,
+    routed: metrics::Counter,
+    delivered: metrics::Counter,
+    delivered_consume_auto: metrics::Counter,
+    delivered_consume_manual: metrics::Counter,
+    acked: metrics::Counter,
+}
+
+static HOT: OnceLock<Hot> = OnceLock::new();
+
+/// Look up the per-message counters once. Call after the recorder is installed.
+pub fn cache_hot() {
+    let _ = HOT.set(Hot {
+        received: metrics::counter!("rabbitmq_global_messages_received_total"),
+        received_confirm: metrics::counter!("rabbitmq_global_messages_received_confirm_total"),
+        confirmed: metrics::counter!("rabbitmq_global_messages_confirmed_total"),
+        routed: metrics::counter!("rabbitmq_global_messages_routed_total"),
+        delivered: metrics::counter!("rabbitmq_global_messages_delivered_total"),
+        delivered_consume_auto: metrics::counter!("rabbitmq_global_messages_delivered_consume_auto_ack_total"),
+        delivered_consume_manual: metrics::counter!("rabbitmq_global_messages_delivered_consume_manual_ack_total"),
+        acked: metrics::counter!("rabbitmq_global_messages_acknowledged_total"),
+    });
+}
 
 static QUEUES: AtomicU64 = AtomicU64::new(0);
 static CONSUMERS: AtomicU64 = AtomicU64::new(0);
@@ -170,6 +204,13 @@ pub fn consumer_closed() {
 /// A publish body was accepted. `confirm` is publisher-confirm mode.
 pub fn message_received(confirm: bool) {
     PUBLISHED.fetch_add(1, Ordering::Relaxed);
+    if let Some(h) = HOT.get() {
+        h.received.increment(1);
+        if confirm {
+            h.received_confirm.increment(1);
+        }
+        return;
+    }
     counter("rabbitmq_global_messages_received_total");
     if confirm {
         counter("rabbitmq_global_messages_received_confirm_total");
@@ -178,12 +219,20 @@ pub fn message_received(confirm: bool) {
 
 /// A publisher confirm was acked.
 pub fn message_confirmed() {
+    if let Some(h) = HOT.get() {
+        h.confirmed.increment(1);
+        return;
+    }
     counter("rabbitmq_global_messages_confirmed_total");
 }
 
 /// A publish matched `n` queue destinations.
 pub fn message_routed(n: u64) {
     if n > 0 {
+        if let Some(h) = HOT.get() {
+            h.routed.increment(n);
+            return;
+        }
         metrics::counter!("rabbitmq_global_messages_routed_total").increment(n);
     }
 }
@@ -200,6 +249,15 @@ pub fn message_unroutable(returned: bool) {
 /// A message was pushed to a consumer.
 pub fn message_delivered_consume(auto_ack: bool) {
     DELIVERED.fetch_add(1, Ordering::Relaxed);
+    if let Some(h) = HOT.get() {
+        h.delivered.increment(1);
+        if auto_ack {
+            h.delivered_consume_auto.increment(1);
+        } else {
+            h.delivered_consume_manual.increment(1);
+        }
+        return;
+    }
     counter("rabbitmq_global_messages_delivered_total");
     if auto_ack {
         counter("rabbitmq_global_messages_delivered_consume_auto_ack_total");
@@ -227,6 +285,10 @@ pub fn message_get_empty() {
 /// A delivered message was acknowledged.
 pub fn message_acked() {
     ACKED.fetch_add(1, Ordering::Relaxed);
+    if let Some(h) = HOT.get() {
+        h.acked.increment(1);
+        return;
+    }
     counter("rabbitmq_global_messages_acknowledged_total");
 }
 

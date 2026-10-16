@@ -15,6 +15,8 @@ use crate::sysinfo::system_total_memory_bytes;
 #[derive(Debug)]
 pub struct MemoryTracker {
     tracked_bytes: AtomicU64,
+    /// `tracked_bytes` as last written to its gauge.
+    published_bytes: AtomicU64,
     /// Soft limit in bytes (`u64::MAX` = disabled).
     soft_limit_bytes: AtomicU64,
     /// Hard limit in bytes (`u64::MAX` = disabled / unlimited).
@@ -27,6 +29,7 @@ impl Default for MemoryTracker {
     fn default() -> Self {
         Self {
             tracked_bytes: AtomicU64::new(0),
+            published_bytes: AtomicU64::new(0),
             soft_limit_bytes: AtomicU64::new(u64::MAX),
             hard_limit_bytes: AtomicU64::new(u64::MAX),
             soft_alarm: AtomicBool::new(false),
@@ -77,7 +80,7 @@ impl MemoryTracker {
             .store(soft_limit_bytes.max(1), Ordering::Relaxed);
         self.hard_limit_bytes
             .store(hard_limit_bytes.max(1), Ordering::Relaxed);
-        self.refresh_alarms();
+        self.update_alarms(true);
     }
 
     /// Soft limit in bytes.
@@ -186,11 +189,28 @@ impl MemoryTracker {
         self.soft_alarm.store(false, Ordering::Relaxed);
         self.hard_alarm.store(false, Ordering::Relaxed);
         self.publish_alarm_metrics(false, false);
+        self.published_bytes.store(0, Ordering::Relaxed);
         metrics::gauge!("queueforge_memory_tracked_bytes").set(0.0);
     }
 
     /// Recompute soft/hard alarm flags from the current total and emit metrics.
     pub fn refresh_alarms(&self) {
+        self.update_alarms(false);
+    }
+
+    /// Write every memory gauge now. Call once the metrics recorder is
+    /// installed: the tracker is built before it, and later refreshes only
+    /// write what changed.
+    pub fn publish_metrics(&self) {
+        self.update_alarms(true);
+    }
+
+    /// [`Self::refresh_alarms`]. The gauges are written when an alarm flag
+    /// changes, or when `force` (new limits), and the tracked total when it
+    /// moved by 64 KiB since last written: every publish and ack came here,
+    /// and four registry lookups per call (hash, lock, Arc count) were the
+    /// largest shared cache lines at 6 CPUs.
+    fn update_alarms(&self, force: bool) {
         let tracked = self.tracked_bytes();
         let soft_limit = self.soft_limit_bytes();
         let hard_limit = self.hard_limit_bytes();
@@ -217,8 +237,14 @@ impl MemoryTracker {
             warn!(tracked, hard_limit, "memory hard watermark cleared");
         }
 
-        self.publish_alarm_metrics(soft_now, hard_now);
-        metrics::gauge!("queueforge_memory_tracked_bytes").set(tracked as f64);
+        if force || soft_now != soft_was || hard_now != hard_was {
+            self.publish_alarm_metrics(soft_now, hard_now);
+        }
+        let shown = self.published_bytes.load(Ordering::Relaxed);
+        if force || tracked.abs_diff(shown) >= TRACKED_GAUGE_STEP || (tracked == 0 && shown != 0) {
+            self.published_bytes.store(tracked, Ordering::Relaxed);
+            metrics::gauge!("queueforge_memory_tracked_bytes").set(tracked as f64);
+        }
     }
 
     fn publish_alarm_metrics(&self, soft: bool, hard: bool) {
@@ -235,6 +261,9 @@ impl MemoryTracker {
         crate::prom::memory_alarm(hard);
     }
 }
+
+/// The tracked-bytes gauge is rewritten when the total moved this far.
+const TRACKED_GAUGE_STEP: u64 = 64 * 1024;
 
 fn relative_to_bytes(relative: f64, total: u64) -> u64 {
     if relative <= 0.0 {
