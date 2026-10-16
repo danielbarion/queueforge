@@ -99,7 +99,7 @@ export default function BenchmarkPage() {
             QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
             batch write, or a consumer ack if that happens first, and classic does not fsync before
             the confirm. The figure below is the average across scenarios, not one of them. The
-            rows where QueueForge loses stay in the table. Rust, Bun and PHP are the 2026-10-15
+            rows where QueueForge loses stay in the table. Rust, Bun and PHP are the 2026-10-16
             run; RabbitMQ is the 2026-10-12 run, with the same image.
           </p>
         </div>
@@ -136,7 +136,7 @@ export default function BenchmarkPage() {
             the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
             The numbers are the same ones in the table further down. Bun&apos;s points are the median of
             three 8 s measurements, run in rounds over the whole sweep, for Rust, Bun and PHP; Bun&apos;s
-            4 CPU / 8 GiB one-connection point ranged from 68k to 324k msg/s across those three, so
+            1 CPU / 512 MiB one-connection point ranged from 68k to 272k msg/s across those three, so
             one sample could be off by 2× or more. RabbitMQ is one 8 s measurement from 2026-10-12. The
             application scenarios below repeat every cell.
           </p>
@@ -324,12 +324,12 @@ export default function BenchmarkPage() {
             unless <code>QUEUEFORGE_CORES</code> is set, so its rates do not grow with the container.
           </p>
           <p className="caption">
-            Bun at 4 CPU held 259,195 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
+            Bun at 4 CPU held 224,979 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
             GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near 65,527 sockets. PHP held
-            28,000 at 1 CPU and 40,000 at 2 and 4 CPU; at 4 CPU / 8 GiB its 40,000 logins took longer
-            than the login window, so it is listed at 20,000. Rust confirm/s on the shared queue,
-            small size to large, was 100,552.1, 105,525.9, 183,290.0, 245,078.6, and 216,175.0;
-            consume/s is the rate in the table. The source table is{" "}
+            41,961 at 1 CPU and 40,000 at 2 and 4 CPU. Rust confirm/s on the shared queue, small
+            size to large, was 171,793.6, 198,812.9, 311,388.8, 361,405.1, and 367,177.2;
+            consume/s is the rate in the table, and the queue grows by the difference until the
+            memory watermark holds the publishers. The source table is{" "}
             <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>
