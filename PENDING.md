@@ -394,15 +394,29 @@ Tried and not kept: `lto = "fat"` with one codegen unit (inside the noise).
 
 ### P8. One process, one core
 
-Status: open, architectural. PHP runs one process unless `QUEUEFORGE_CORES` is
-set, so its rates do not grow with the container: 16-queue load 75,296 msg/s at
-1 CPU, 82,387 at 4 CPU. The per-core mode measured worse in the scenario cells
-and is off by default.
+Status: open, architectural; the default needs a decision. PHP runs one
+process unless `QUEUEFORGE_CORES` is set. Under the growing transient load
+(independent queues, so each connection migrates to its queue's process) the
+per-core mode scales: 81,377 msg/s at 1 CPU; at 2 CPUs 82,090 one process vs
+159,185 per core; at 4 CPUs 77,500 vs 277,345 (0.85), and after the deferred
+delivery writes 520,170 at 4 CPUs. It lost in the fixed-load PerfTest cells
+(work-queue 36.9k vs 10.4k at 4 CPU), where most traffic crosses processes,
+and those cells are partly client-bound (H8). Following the cgroup by default
+would trade one shape for the other; measure the PerfTest cells again with a
+larger client before switching.
 
 ### P9. Per-frame cost
 
-Status: open. One connection moves about 11,800 msg/s at every size; Rust
-151,312 at 1 CPU. The frame parse and dispatch run in PHP userland.
+Status: improved, open. Each delivery was its own socket write, 43% of the CPU
+under the growing transient load; deliveries are now written once per
+connection per loop pass (1 CPU 82,564 -> 153,366 msg/s). What remains is
+spread over userland: `Server::pump` 12%, `onData` 9%, `brokerFor` 8% (a vhost
+lookup per frame), `Broker::publish` 7%. With Raft active, `awaitMetadata`
+parses every method frame for a queue name (6% inclusive) even when the
+connection already waited for that queue; remembering the last name per
+connection would skip the parse. The large-message cells swing by a factor of
+two between repeats on one image (large-64k 142-290 MB/s), which needs a look
+of its own.
 
 ### P10. Latency: the fsync runs on the event loop
 
