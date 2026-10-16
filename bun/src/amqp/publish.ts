@@ -58,7 +58,14 @@ export function onHeader(this: Conn, channel: number, payload: Uint8Array): Prom
   if (c.bodySize > 64 * 1024 * 1024) throw new ChanError(506, "RESOURCE_ERROR - message exceeds 64 MiB");
   // A copy: the parsed bytes are a view of the socket read buffer, and a stored
   // message holding that view kept the whole buffer (64 KiB and more) alive.
-  c.propRaw = parsed.props.raw.slice();
+  // A publisher usually repeats its properties, so the last copy is reused
+  // when the bytes match; nothing writes into a stored property block.
+  const from = parsed.props.rawStart;
+  const n = payload.length - from;
+  const last = c.propRaw;
+  let same = last.length === n;
+  for (let i = 0; same && i < n; i++) same = last[i] === payload[from + i];
+  if (!same) c.propRaw = payload.slice(from);
   c.headers = parsed.props.headers;
   c.deliveryMode = parsed.props.deliveryMode;
   c.priority = parsed.props.priority;

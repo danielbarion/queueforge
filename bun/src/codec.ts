@@ -351,7 +351,8 @@ export function tableGet(fields: Array<[string, Field]>, key: string): Field | u
 }
 
 export type ContentProps = {
-  raw: Uint8Array;
+  /** Offset in the header payload where the raw property block (flags on) starts. */
+  rawStart: number;
   headers: Array<[string, Field]>;
   deliveryMode: number;
   priority: number;
@@ -421,7 +422,7 @@ export function readContentHeader(payload: Uint8Array): { bodySize: number; prop
   }
   return {
     bodySize,
-    props: { raw: payload.subarray(flagStart), headers, deliveryMode, priority, expiration, userId, replyTo },
+    props: { rawStart: flagStart, headers, deliveryMode, priority, expiration, userId, replyTo },
   };
 }
 

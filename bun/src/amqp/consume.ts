@@ -260,7 +260,8 @@ export async function cancel(this: Conn, channel: number, c: Ch, payload: Uint8A
  * Inside a transaction the settle waits for tx.commit.
  */
 export function ack(this: Conn, c: Ch, payload: Uint8Array): Promise<void> | void {
-  const r = new R(payload.subarray(4));
+  const r = new R(payload);
+  r.o = 4;
   const tag = r.u64();
   const multiple = (r.u8() & 1) !== 0;
   if (c.tx) {
