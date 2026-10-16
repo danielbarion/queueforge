@@ -371,8 +371,11 @@ confirms and deliveries stop together. Ten instrumented reruns polling
 `/api/queues/%2F` every 6 s did not reproduce it. Reading the actor loop, the
 interval tick re-arms whenever no fsync is in flight, so the likely shape is an
 in-flight fsync (`spawn_blocking`) that does not return, or a path that leaves
-`interval_fsync` set. Next: log the actor's fsync state on a timer while a
-cell runs, and capture a stalled process.
+`interval_fsync` set. It is not memory flow control: the load sweep's spread
+cell (4 CPU / 4 GiB) stalled the same way once, and six reruns sampling the
+alarm gauges never saw the soft or hard alarm on (tracked bytes peaked at
+3-169 MiB of a 2 GiB soft mark). Next: log the actor's fsync state on a timer
+while a cell runs, and capture a stalled process.
 
 ### R2. Shared counters cap scaling near 7 CPUs
 

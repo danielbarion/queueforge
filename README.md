@@ -106,7 +106,8 @@ python3 bench/run.py --out /tmp/qf-ab/try         # keep an experiment out of be
 python3 bench/run.py --kinds bun --steps build,scenarios,report --scenarios quorum --sizes 4
 python3 bench/run.py --kinds rust,bun,php --baseline bench/results/2026-10-12
 python3 bench/scaling.py run --scenarios weak-t,weak --kinds bun,rust   # 1-6 CPUs, load grows with N; 15-CPU VM
-python3 bench/scaling.py report bench/results/scaling-2026-10-15/weak-after
+python3 bench/scaling.py report bench/results/scaling-2026-10-15/weak-final
+python3 bench/scaling_site.py DIR [DIR ...]   # site/app/scaling-data.ts from scaling.jsonl, oldest first
 python3 bench/ceiling.py queueforge-bun:bench bun 1,2,4,6 2              # host ceiling: K independent 1-CPU brokers
 ```
 
