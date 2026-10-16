@@ -135,8 +135,12 @@ function flushCoalesced(this: Conn) {
     let o = 0;
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]!;
-      buf.set(part, o);
-      o += part.length;
+      const n = part.length;
+      // `set` costs ~10 ns at any length; confirms (21 bytes) and other short
+      // frames copy faster byte by byte.
+      if (n <= 24) for (let j = 0; j < n; j++) buf[o + j] = part[j]!;
+      else buf.set(part, o);
+      o += n;
     }
   }
   const wrote = this.socket.write(buf);

@@ -545,6 +545,20 @@ function shortBytes(s: string): Uint8Array {
 }
 
 /**
+ * Copy `src` into `b` at `o`. `set` costs ~10 ns at any length; a loop is
+ * ~0.45 ns a byte, so it wins below about 20. Tags, names and property
+ * blocks are mostly that short; bodies keep `set`.
+ */
+function put(b: Uint8Array, o: number, src: Uint8Array) {
+  const n = src.length;
+  if (n < 16) {
+    for (let i = 0; i < n; i++) b[o + i] = src[i]!;
+  } else {
+    b.set(src, o);
+  }
+}
+
+/**
  * basic.deliver, content header, and body as one buffer.
  * Returns null when a shortstr would not fit or the body needs more than one
  * frame, so the caller uses the generic builder.
@@ -579,16 +593,16 @@ export function encodeDeliver(
   putU16(b, o, 60);
   o += 2;
   b[o++] = tagB.length;
-  b.set(tagB, o);
+  put(b, o, tagB);
   o += tagB.length;
   putU64(b, o, deliveryTag);
   o += 8;
   b[o++] = msg.redelivered ? 1 : 0;
   b[o++] = exB.length;
-  b.set(exB, o);
+  put(b, o, exB);
   o += exB.length;
   b[o++] = rkB.length;
-  b.set(rkB, o);
+  put(b, o, rkB);
   o += rkB.length;
   b[o++] = 0xce;
 
@@ -603,7 +617,7 @@ export function encodeDeliver(
   o += 2;
   putU64(b, o, msg.body.length);
   o += 8;
-  b.set(prop, o);
+  put(b, o, prop);
   o += prop.length;
   b[o++] = 0xce;
   if (!bodyLen) return b;
