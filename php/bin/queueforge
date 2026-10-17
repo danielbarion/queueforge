@@ -155,7 +155,7 @@ if (getenv('QUEUEFORGE_BIND_MGMT') === '0') {
     $cfg['management'] = '';
     // The first child serves the other client listeners; the rest would only
     // fail to bind them. It reaches their queues over the cluster links.
-    foreach (['mqtt', 'stomp', 'stream', 'amqps', 'mqtts', 'stomps'] as $kind) $cfg[$kind] = '';
+    foreach (['metrics', 'mqtt', 'stomp', 'stream', 'amqps', 'mqtts', 'stomps'] as $kind) $cfg[$kind] = '';
 }
 if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1) {
     Supervise::run(__FILE__, $configPath, $dev, $cfg);
@@ -171,6 +171,7 @@ $cfg['fresh']=!is_file($dir.'/messages.log')&&!is_file($dir.'/users.json')&&!is_
 $store = new Store($dir . '/messages.log');
 $broker = new Broker($store, $dir . '/users.json');
 $broker->authConfig=$cfg['auth'];
+$broker->clientLocal = getenv('QUEUEFORGE_CHILD') === '1';
 if (isset($cfg['consumer_timeout'])) $broker->consumerTimeoutMs = $cfg['consumer_timeout'];
 if ($dev) {
     $broker->bootstrap('devpassword12');

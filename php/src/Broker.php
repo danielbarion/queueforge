@@ -199,6 +199,13 @@ final class Broker
         'dlxDeliveryLimit' => 0,
     ];
 
+    /** @var array<int, array<string, mixed>> x-delayed-message publishes not yet due, by delay-log id */
+    public array $delayed = [];
+    private int $delayedSeq = 0;
+    private int $delayDead = 0;
+    private bool $releasingDelayed = false;
+    /** @var resource|null */
+    private $delayFp = null;
     public function __construct(public Store $store, public string $userFile, private ?Broker $registry = null, public string $vhost = "/")
     {
         if (is_file($userFile)) {
@@ -264,6 +271,7 @@ final class Broker
                 $this->nextId = $msg['id'] + 1;
             }
         }
+        $this->loadDelayed();
         if ($this->registry === null && is_file($this->dataDir() . '/topology.json')) {
             $state = json_decode((string) file_get_contents($this->dataDir() . '/topology.json'), true, 512, JSON_THROW_ON_ERROR);
             if (!is_array($state)) throw new RuntimeException('Invalid topology state');
@@ -317,15 +325,15 @@ final class Broker
         return $id;
     }
 
-    /** Tells the home what became of a delivery it pushed here. */
-    private function settleRemote(int $id, bool $ack, bool $requeue): void
+    /** Tells the home what became of a delivery it pushed here; `$dead` dead-letters it there. */
+    private function settleRemote(int $id, bool $ack, bool $requeue, ?string $dead = null): void
     {
         $ref = $this->remoteHeld[$id] ?? null;
         unset($this->remoteHeld[$id]);
         if ($ref === null || $this->cluster === null) return;
         $this->cluster->request($ref['peer'], $ack ? 'ack' : 'nack', [
             'vhost' => $this->vhost, 'queue' => $ref['queue'], 'delivery_id' => $ref['delivery'], 'requeue' => $requeue,
-        ]);
+        ] + ($dead !== null ? ['dead' => $dead] : []));
     }
 
     /**
@@ -575,7 +583,7 @@ final class Broker
             if($kind==='members'){$root->members=$data;$root->saveTopology();return;}
             if($kind==='feature_flag'){$flag=(string)($data['name']??'');if(in_array($flag,self::supportedFlags(),true)){$root->featureFlags[$flag]=($data['enabled']??true)===true;$root->saveTopology();}return;}
             $vhost=(string)($data['vhost']??'/');$name=(string)($data['name']??$data['queue']??'');
-            if($kind==='vhost'){$name=(string)($data['name']??$vhost);if(!in_array($name,$root->vhosts,true))$root->vhosts[]=$name;$root->forVhost($name);$root->saveTopology();return;}
+            if($kind==='vhost'){$name=(string)($data['name']??$vhost);if(!in_array($name,$root->vhosts,true))$root->vhosts[]=$name;$host=$root->forVhost($name);if(array_key_exists('tracing',$data))$host->tracing=$data['tracing']===true;$root->saveTopology();return;}
             if($kind==='delete_vhost') { $root->deleteVhost((string)($data['name'] ?? $vhost)); return; }
             $scope=in_array($kind,['user','delete_user','permission','delete_permission','topic_permission','delete_topic_permission','user_limits','vhost_limits','global_parameter','delete_global_parameter'],true)?$root:$root->forVhost($vhost);
             switch($kind){
@@ -587,8 +595,16 @@ final class Broker
                     if (isset($scope->queues[$name])) {
                         $scope->queues[$name]['declaredArgs']=$args; $scope->queues[$name]['args']=Features::parseArgs($scope->withPolicy($args,$name));
                         foreach (['durable'=>true,'exclusive'=>false,'autoDelete'=>false] as $field=>$default) $scope->queues[$name][$field]=$data[$field]??($field==='autoDelete'?($data['auto_delete']??$default):$default);
-                    } else $scope->declareQueue($name,$args,$data['durable']??true,$data['exclusive']??false,false,$data['autoDelete']??$data['auto_delete']??false);
-                    if(isset($data['home']))$scope->queues[$name]['home']=$data['home'];
+                    } else {
+                        // queue.created comes from the node the queue was declared on.
+                        $origin=$data['home']??$data['raftLeader']??null;
+                        $root->quietEvents=$origin!==null&&$origin!==''&&$origin!==$root->nodeId;
+                        try { $scope->declareQueue($name,$args,$data['durable']??true,$data['exclusive']??false,false,$data['autoDelete']??$data['auto_delete']??false); }
+                        finally { $root->quietEvents=false; }
+                        if(array_key_exists('home',$data))$scope->queues[$name]['home']=(string)($data['home']??'');
+                    }
+                    // A redeclare elsewhere keeps the first home.
+                    if(isset($data['home'])&&($scope->queues[$name]['home']??'')==='')$scope->queues[$name]['home']=$data['home'];
                     if(isset($data['raftGroup'])){$scope->queues[$name]['raftGroup']=$data['raftGroup'];$root->cluster?->registerQueueGroup($data['raftGroup'], ($data['raftLeader'] ?? '') === $root->nodeId);}break;
                 case 'exchange':
                     $type=(string)($data['type']??$data['kind']??'direct');if($type==='default')$type='direct';
@@ -730,12 +746,74 @@ final class Broker
     }
     public function registerProtocolConsumer(string $queue,int $conn,string $tag,callable $readyFn,callable $deliverFn,bool $noAck=false,int $priority=0):void
     {
+        // A queue homed on another member is subscribed to there (MQTT, STOMP
+        // and shovels run on one process in cores mode). The home holds each
+        // delivery until it is settled; one at a time is in flight, so the
+        // queue's depth stays what a single node would report.
+        $peer=$this->remoteHomeOf($queue);
+        if($peer!==null){
+            $session=$this->nextSession();
+            $this->protocolSubs[$session]=['queue'=>$queue,'conn'=>$conn,'tag'=>$tag,'readyFn'=>$readyFn,'deliverFn'=>$deliverFn,'noAck'=>$noAck,'peer'=>$peer,'buffer'=>[],'asked'=>false];
+            $this->queues[$queue]['consumers'][]=['conn'=>$conn,'ch'=>-1,'tag'=>$tag,'noAck'=>$noAck,'priority'=>$priority,'remoteSession'=>$session];
+            $this->prom['consumers']++;
+            $this->cluster->request($peer,'sub',['vhost'=>$this->vhost,'queue'=>$queue,'session'=>$session,'noAck'=>$noAck,'credit'=>0,'window'=>1,'pull'=>true]);
+            $this->pumpRemoteProtocol();
+            return;
+        }
         $this->addConsumer($queue,$conn,-1,$tag,$noAck,false,$priority);
         $at=array_key_last($this->queues[$queue]['consumers']);
         $this->queues[$queue]['consumers'][$at]['readyFn']=$readyFn;$this->queues[$queue]['consumers'][$at]['deliverFn']=$deliverFn;
     }
+    /**
+     * Protocol consumers subscribed to a queue on another member, by session.
+     *
+     * @var array<int, array{queue:string,conn:int,tag:string,readyFn:callable,deliverFn:callable,noAck:bool,peer:string,buffer:list<array{0:array<string,mixed>,1:int}>}>
+     */
+    private array $protocolSubs = [];
+    /** A delivery pushed by a queue's home for a protocol consumer here. False when no such subscription is held. */
+    public function protocolDeliver(array $payload, string $from): bool
+    {
+        $session=(int)($payload['session']??0);$sub=$this->protocolSubs[$session]??null;
+        if($sub===null)return false;
+        $source=is_array($payload['message']??null)?$payload['message']:[];
+        $body=base64_decode((string)($source['body_b64']??''),true);$raw=base64_decode((string)($source['propRaw']??''),true);
+        $msg=['queue'=>$sub['queue'],'key'=>(string)($source['routing_key']??$sub['queue']),'exchange'=>(string)($source['exchange']??''),'body'=>$body===false?'':$body,
+            'mode'=>($source['persistent']??true)!==false?2:1,'redelivered'=>($source['redelivered']??false)===true,'priority'=>0,'propRaw'=>is_string($raw)&&$raw!==''?$raw:null,
+            'headers'=>is_array($source['headers']??null)?$source['headers']:[],'qid'=>''];
+        $id=$this->holdRemote(['peer'=>$from,'queue'=>$sub['queue'],'delivery'=>(int)($payload['delivery_id']??0)]);
+        $this->protocolSubs[$session]['buffer'][]=[$msg,$id];
+        $this->protocolSubs[$session]['asked']=false;
+        $this->pumpRemoteProtocol();
+        return true;
+    }
+    /** Hands buffered remote deliveries to protocol consumers that can take them. */
+    private function pumpRemoteProtocol(): void
+    {
+        foreach(array_keys($this->protocolSubs) as $session){
+            while(($this->protocolSubs[$session]['buffer']??[])!==[]&&($this->protocolSubs[$session]['readyFn'])()){
+                [$msg,$id]=array_shift($this->protocolSubs[$session]['buffer']);
+                ($this->protocolSubs[$session]['deliverFn'])($msg,$id);
+                // At-most-once: the home already let it go.
+                if($this->protocolSubs[$session]['noAck']??false)unset($this->remoteHeld[$id]);
+            }
+            // The home sends one only when asked, and it is asked only when the
+            // consumer could take it, so an idle consumer holds nothing back.
+            $sub=$this->protocolSubs[$session]??null;
+            if($sub!==null&&$sub['buffer']===[]&&!$sub['asked']&&($sub['readyFn'])()){
+                $this->protocolSubs[$session]['asked']=true;
+                $this->cluster?->request($sub['peer'],'credit',['vhost'=>$this->vhost,'queue'=>$sub['queue'],'session'=>$session,'credit'=>1]);
+            }
+        }
+    }
     public function unregisterProtocolConsumer(string $queue,int $conn,string $tag):void
     {
+        foreach($this->protocolSubs as $session=>$sub){
+            if($sub['queue']!==$queue||$sub['conn']!==$conn||$sub['tag']!==$tag)continue;
+            unset($this->protocolSubs[$session]);
+            $this->cluster?->request($sub['peer'],'unsub',['vhost'=>$this->vhost,'queue'=>$queue,'session'=>$session]);
+            // What was pushed here but never handed on goes back, in order.
+            foreach(array_reverse($sub['buffer']) as [$msg,$id])$this->requeue($id);
+        }
         if(!isset($this->queues[$queue]))return;
         $before=count($this->queues[$queue]['consumers']);
         $this->queues[$queue]['consumers']=array_values(array_filter($this->queues[$queue]['consumers'],static fn($c)=>$c['conn']!==$conn||$c['tag']!==$tag));
@@ -743,6 +821,7 @@ final class Broker
     }
     public function pumpConsumers():void
     {
+        if($this->protocolSubs!==[])$this->pumpRemoteProtocol();
         $remaining=128;
         // By name, so a removal does not copy the ready list (see Server::pump).
         foreach(array_keys($this->queues) as $name) {
@@ -935,6 +1014,17 @@ final class Broker
         return $identity;
     }
     private function isExternalIdentity(string $identity): bool { return str_starts_with($identity, '@external:'); }
+    /** The verified external principal behind an identity, as stored at login, for a connection moving to another process. */
+    public function exportPrincipal(string $identity): ?array
+    {
+        $principal = $this->root()->externalPrincipals[$identity] ?? null;
+        return is_array($principal) ? $principal : null;
+    }
+    /** Takes over the principal a sibling process verified for a connection it handed here. */
+    public function adoptPrincipal(string $identity, array $principal): void
+    {
+        if ($this->isExternalIdentity($identity)) $this->root()->externalPrincipals[$identity] = $principal;
+    }
     private function externalPrincipal(string $identity): ?array
     {
         $principal = $this->root()->externalPrincipals[$identity] ?? null;
@@ -1024,13 +1114,16 @@ final class Broker
             // means nothing in this queue can expire.
             'nextExpiry' => PHP_INT_MAX,
             // A quorum queue is homed where it was declared rather than
-            // by the classic hash, matching Bun.
-            'home' => $type === 'quorum' ? $this->nodeId : '',
+            // by the classic hash, matching Bun. So is an exclusive queue,
+            // which lives with its connection, and, on a cores child, a
+            // classic queue (RabbitMQ's default client-local locator).
+            'home' => $type === 'quorum' || (count($this->members) > 1 && ($exclusive || $this->root()->clientLocal)) ? $this->nodeId : '',
         ];
         $this->prom['queuesDeclared']++;
         $this->prom['queuesCreated']++;
         $this->saveTopology();
-        $this->emitEvent('queue.created', [['name', $name], ['durable', $durable], ['exclusive', $exclusive]]);
+        if (!$this->root()->quietEvents) $this->emitEvent('queue.created', [['name', $name], ['durable', $durable], ['exclusive', $exclusive]]);
+        $this->share('queue', ['name' => $name, 'durable' => $durable, 'exclusive' => $exclusive, 'autoDelete' => $autoDelete, 'auto_delete' => $autoDelete, 'args' => $rawArgs, 'home' => $this->queues[$name]['home']]);
         return ['messages' => 0, 'consumers' => 0];
     }
 
@@ -1087,6 +1180,7 @@ final class Broker
         if (str_starts_with($name, 'amq.')) {
             throw new RuntimeException("ACCESS_REFUSED - exchange name '$name' is reserved", 403);
         }
+        $new = !isset($this->exchanges[$name]);
         $this->exchanges[$name] = $kind === '' ? 'direct' : $kind;
         $this->exchangeRows[$name] = [
             'durable' => $durable,
@@ -1096,6 +1190,54 @@ final class Broker
             'arguments' => $arguments,
         ];
         $this->saveTopology();
+        if ($new) $this->share('exchange', ['name' => $name, 'type' => $this->exchanges[$name], 'kind' => $this->exchanges[$name], 'durable' => $durable, 'autoDelete' => $autoDelete, 'auto_delete' => $autoDelete, 'internal' => $internal, 'alternate' => $alternate, 'arguments' => $arguments]);
+    }
+
+    /**
+     * Set while a Raft apply recreates a queue declared on another node, so
+     * queue.created is published once, by the node that declared it.
+     */
+    public bool $quietEvents = false;
+
+    /**
+     * Set on a cores child (`QUEUEFORGE_CHILD`): classic queues are homed on
+     * the process that declared them, so a connection finds its own queues
+     * local. A cluster of separate nodes keeps the shared hash placement.
+     */
+    public bool $clientLocal = false;
+
+    /**
+     * Replicates a topology change made outside the Raft metadata path (MQTT,
+     * STOMP, AMQP 1.0, shovels, expiry, exclusive and auto-delete cleanup), so
+     * every member routes to and finds the same queues. The change is already
+     * applied here; applying it again from the log is a no-op. Nothing is
+     * proposed for a single node, while loading, or while applying the log.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function share(string $kind, array $data): void
+    {
+        $root = $this->root();
+        if ($root->raftApplying || $root->loadingTopology || $this->loadingTopology || $root->cluster === null || !$root->cluster->raftEnabled()) return;
+        $root->sharing++;
+        $root->cluster->proposeMeta($kind, ['vhost' => $this->vhost] + $data, static function () use ($root): void {
+            if (--$root->sharing > 0) return;
+            $waiting = $root->afterShared; $root->afterShared = [];
+            foreach ($waiting as $done) $done();
+        });
+    }
+
+    /** Topology changes proposed by `share` and not yet applied everywhere. */
+    private int $sharing = 0;
+    /** @var list<callable():void> */
+    private array $afterShared = [];
+
+    /** Runs `$done` once every member has applied the topology changes made so far. */
+    public function whenShared(callable $done): void
+    {
+        $root = $this->root();
+        if ($root->sharing === 0) { $done(); return; }
+        $root->afterShared[] = $done;
     }
 
     /**
@@ -1131,6 +1273,7 @@ final class Broker
         }
         $this->bindings[] = ['exchange' => $exchange, 'queue' => $queue, 'key' => $key, 'args' => $args];
         $this->saveTopology();
+        $this->share('binding', ['exchange' => $exchange, 'queue' => $queue, 'routingKey' => $key, 'routing_key' => $key, 'args' => $args]);
     }
 
     /**
@@ -1320,14 +1463,24 @@ final class Broker
             throw new RuntimeException("NOT_FOUND - no queue '$key'", 404);
         }
         
-        // Enforce topic write permission for non-empty exchanges.
-        if ($exchange !== '') {
+        // Enforce topic write permission for non-empty exchanges. A due
+        // delayed message was checked when it was published.
+        if ($exchange !== '' && !$this->releasingDelayed) {
             $user = $this->userByConn[$conn] ?? $this->currentUsers[$conn] ?? 'guest';
             if (!$this->topicWriteAllowed($user, $this->vhost, $exchange, $key)) {
                 throw new RuntimeException(
                     "ACCESS_REFUSED - topic permission denied for '$exchange' key '$key'",
                     403
                 );
+            }
+            // x-delayed-message holds the message unrouted until it is due, so
+            // bindings made or removed meanwhile apply, as in RabbitMQ's plugin.
+            if (($this->exchanges[$exchange] ?? '') === 'x-delayed-message') {
+                $delay = (int) (array_column($headers, 1, 0)['x-delay'] ?? 0);
+                if ($delay > 0) return $this->holdDelayed($conn, $ch, $tag, [
+                    'due' => (int) (microtime(true) * 1000) + $delay, 'exchange' => $exchange, 'key' => $key, 'body' => $body,
+                    'mode' => $mode, 'priority' => $priority, 'headers' => $headers, 'expiration' => $expirationMs, 'propRaw' => $propRaw,
+                ]);
             }
         }
         
@@ -1461,12 +1614,7 @@ final class Broker
             $qid = $isQuorum
                 ? 'q-' . $this->nodeId . '-' . $now . '-' . bin2hex(random_bytes(4))
                 : (string) $id;
-            $notBefore = ($this->exchanges[$exchange] ?? '') === 'x-delayed-message' ? $now + max(0, (int) (array_column($headers, 1, 0)['x-delay'] ?? 0)) : null;
-            // A pending delayed message is stored even when transient, as the
-            // RabbitMQ plugin keeps its delay table on disk, so it is still
-            // delivered after a restart. The raw properties keep the client's
-            // delivery mode.
-            $stored = $mode === 2 || ($notBefore !== null && ($this->queues[$queue]['durable'] ?? false) && $propRaw !== null);
+            $stored = $mode === 2;
             $this->msgs[$id] = [
                 'queue' => $queue,
                 'body' => $body,
@@ -1476,7 +1624,6 @@ final class Broker
                 'key' => $key,
                 'priority' => $priority,
                 'expires' => $expires,
-                'notBefore' => $notBefore,
                 'headers' => $headers,
                 'propRaw' => $propRaw,
                 'qid' => $qid,
@@ -1522,6 +1669,76 @@ final class Broker
             'copies' => $copies,
         ];
         return 'wait';
+    }
+
+    /**
+     * Stores a delayed message (exchange, routing key, properties, body) in
+     * this vhost's delay log, fsynced like RabbitMQ's on-disk delay table so
+     * it survives a restart whatever its delivery mode. The publish confirm
+     * follows with the next flush.
+     */
+    private function holdDelayed(int $conn, int $ch, int $tag, array $entry): string
+    {
+        $id = ++$this->delayedSeq;
+        $this->delayed[$id] = $entry;
+        $this->delayLog('+' . base64_encode(serialize([$id, $entry])) . "\n", true);
+        $this->waiting[] = ['conn' => $conn, 'ch' => $ch, 'tag' => $tag, 'end' => 0, 'ids' => [], 'qids' => [], 'quorumNeed' => 0, 'quorumHave' => 1,
+            'completion' => (object) ['pending' => 0, 'failed' => false], 'copies' => ['durable']];
+        return 'wait';
+    }
+    /** Routes every delayed message that is due through its exchange's current bindings. */
+    public function releaseDelayed(): void
+    {
+        if ($this->delayed === []) return;
+        $now = (int) (microtime(true) * 1000);
+        foreach ($this->delayed as $id => $e) {
+            if ($e['due'] > $now) continue;
+            unset($this->delayed[$id]);
+            $this->releasingDelayed = true;
+            try { $this->publish(0, 0, 0, $e['exchange'], $e['key'], $e['body'], $e['mode'], $e['priority'], $e['headers'], $e['expiration'], $e['propRaw']); }
+            catch (Throwable) {}
+            finally { $this->releasingDelayed = false; }
+            // Logged after the routing, so a crash in between repeats rather than loses it.
+            $this->delayDead++;
+            $this->delayLog('-' . $id . "\n", false);
+        }
+        if ($this->delayed === [] || ($this->delayDead > 256 && $this->delayDead > 4 * count($this->delayed))) $this->rewriteDelayLog();
+    }
+    private function delayPath(): string { return $this->dataDir() . '/delayed.log'; }
+    private function delayLog(string $line, bool $sync): void
+    {
+        if ($this->delayFp === null) {
+            $dir = $this->dataDir(); if (!is_dir($dir)) @mkdir($dir, 0777, true);
+            $fp = fopen($this->delayPath(), 'ab'); if ($fp === false) throw new RuntimeException('cannot open delay log');
+            $this->delayFp = $fp;
+        }
+        if (fwrite($this->delayFp, $line) !== strlen($line)) throw new RuntimeException('delay log write failed');
+        fflush($this->delayFp);
+        if ($sync) fsync($this->delayFp);
+    }
+    private function rewriteDelayLog(): void
+    {
+        $data = '';
+        foreach ($this->delayed as $id => $e) $data .= '+' . base64_encode(serialize([$id, $e])) . "\n";
+        $temp = $this->delayPath() . '.tmp';
+        if (@file_put_contents($temp, $data) === false) return;
+        $fp = fopen($temp, 'rb'); if ($fp !== false) { fsync($fp); fclose($fp); }
+        if ($this->delayFp !== null) { fclose($this->delayFp); $this->delayFp = null; }
+        if (!@rename($temp, $this->delayPath())) { @unlink($temp); return; }
+        $this->delayDead = 0;
+    }
+    private function loadDelayed(): void
+    {
+        $path = $this->delayPath();
+        if (!is_file($path)) return;
+        foreach (explode("\n", (string) file_get_contents($path)) as $line) {
+            if ($line === '') continue;
+            if ($line[0] === '-') { unset($this->delayed[(int) substr($line, 1)]); $this->delayDead++; continue; }
+            $row = @unserialize((string) base64_decode(substr($line, 1), true), ['allowed_classes' => false]);
+            if (!is_array($row) || !is_int($row[0] ?? null) || !is_array($row[1] ?? null)) continue;
+            $this->delayed[$row[0]] = $row[1];
+            $this->delayedSeq = max($this->delayedSeq, $row[0]);
+        }
     }
 
     /**
@@ -2338,7 +2555,7 @@ final class Broker
      */
     public function deadLetter(int $id, string $reason = 'rejected'): bool
     {
-        if ($id < 0) { $this->settleRemote($id, false, false); return true; }
+        if ($id < 0) { $this->settleRemote($id, false, false, $reason); return true; }
         if (!isset($this->msgs[$id])) return false;
         if($this->msgs[$id]['dlxPending']??false)return true;
         $this->loadBody($id);
@@ -2461,6 +2678,7 @@ final class Broker
      */
     public function sweep(): void
     {
+        if ($this->delayed !== []) $this->releaseDelayed();
         $now = microtime(true);
         foreach ($this->queues as $name => $queue) {
             $this->expire($name);
@@ -2469,7 +2687,8 @@ final class Broker
                 continue;
             }
             $idleMs = ($now - (float) ($queue['lastUsed'] ?? $now)) * 1000;
-            if ($idleMs >= $expiresMs) {
+            // Only the home sees the queue used, so only the home expires it.
+            if ($idleMs >= $expiresMs && $this->ownsQueue((string) $name)) {
                 $this->deleteQueue($name);
             }
         }
@@ -2654,6 +2873,7 @@ final class Broker
             static fn (array $row): bool => $row['queue'] !== $name,
         ));
         $this->saveTopology();
+        $this->share('delete_queue', ['name' => $name, 'queue' => $name]);
         return $n;
     }
 
@@ -2670,6 +2890,7 @@ final class Broker
             ),
         ));
         $this->saveTopology();
+        $this->share('unbind', ['exchange' => $exchange, 'queue' => $queue, 'routingKey' => $key, 'routing_key' => $key, 'args' => $args]);
     }
 
     /**
@@ -2691,6 +2912,7 @@ final class Broker
             static fn (array $row): bool => $row['source'] !== $name && $row['destination'] !== $name,
         ));
         $this->saveTopology();
+        $this->share('delete_exchange', ['name' => $name]);
         return true;
     }
 
@@ -2704,6 +2926,7 @@ final class Broker
         }
         $this->e2e[] = ['source' => $source, 'destination' => $destination, 'key' => $key];
         $this->saveTopology();
+        $this->share('binding', ['source' => $source, 'destination' => $destination, 'destinationType' => 'exchange', 'routingKey' => $key, 'routing_key' => $key, 'args' => []]);
     }
 
     public function unbindExchange(string $destination, string $source, string $key): void
@@ -2717,6 +2940,7 @@ final class Broker
             ),
         ));
         $this->saveTopology();
+        $this->share('unbind', ['source' => $source, 'destination' => $destination, 'destinationType' => 'exchange', 'routingKey' => $key, 'routing_key' => $key, 'args' => []]);
     }
 
     /**
@@ -2781,7 +3005,7 @@ final class Broker
      * Registers a consumer that lives on another node. The pump sends it a
      * cluster deliver frame instead of an AMQP frame.
      */
-    public function addRemoteConsumer(string $queue, string $peer, int $session, bool $noAck, ?int $credit): void
+    public function addRemoteConsumer(string $queue, string $peer, int $session, bool $noAck, ?int $credit, bool $window = false, bool $pull = false): void
     {
         $this->declareQueue($queue);
         foreach ($this->queues[$queue]['consumers'] as $existing) {
@@ -2797,7 +3021,22 @@ final class Broker
             'peer' => $peer,
             'session' => $session,
             'noAck' => $noAck,
+            // Credit is a window of unsettled deliveries, as a prefetch is,
+            // or (pull) deliveries the subscriber asked for one at a time.
+            'window' => $window,
+            'pull' => $pull,
         ];
+    }
+
+    /** One more delivery for a windowed remote subscriber that settled one. */
+    public function replenishRemote(string $queue, string $peer, int $session): void
+    {
+        foreach ($this->queues[$queue]['consumers'] ?? [] as $i => $c) {
+            if (($c['peer'] ?? '') === $peer && ($c['session'] ?? 0) === $session && ($c['window'] ?? false) && !($c['pull'] ?? false)) {
+                $this->queues[$queue]['consumers'][$i]['credit']++;
+                return;
+            }
+        }
     }
 
     public function removeRemoteConsumer(string $queue, string $peer, int $session): void

@@ -680,7 +680,8 @@ final class Protocols
         if($key===21){$vhost=self::string($r,$at);if(!$s['authed']||!$b->hasVhostAccess($s['user'],$vhost)){$this->streamClosing=true;return self::streamResp($key,$corr,12);}$s['vhost']=$vhost;$s['opened']=true;
             $advertised=$s['advertised']??['host'=>'localhost','port'=>'5552'];return self::streamResp($key,$corr,1,self::encodeMap(['advertised_host'=>$advertised['host'],'advertised_port'=>$advertised['port']]));}
         if($key===22){$this->streamClosing=true;return self::streamResp($key,$corr);}
-        if($key===27){$commands=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,29,30];$extra=pack('N',count($commands));foreach($commands as$k)$extra.=pack('nnn',$k,1,$k===2?2:1);return self::streamResp($key,$corr,1,$extra);}
+        if($key===27){// PublishV2 (max version 2) is how clients detect stream filtering, as on RabbitMQ 3.13+.
+            $commands=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30];$extra=pack('N',count($commands));foreach($commands as$k)$extra.=pack('nnn',$k,1,$k===2?2:1);return self::streamResp($key,$corr,1,$extra);}
         if($key===13){
             $name=self::string($r,$at);$args=self::streamMap($r,$at);
             if($b->cluster?->raftEnabled()) {
@@ -711,6 +712,9 @@ final class Protocols
             if($code!==1)return self::streamResp($key,$corr,$code);
             $group=$single?$s['vhost']."\0".$name."\0".$props['name']:null;
             $s['subs'][$id]=['stream'=>$name,'offset'=>$offset,'credit'=>$credit,'group'=>$group,'super'=>$props['super-stream']??null,'active'=>!$single,'selected'=>!$single];
+            // filter.0, filter.1, ... and match-unfiltered, as RabbitMQ 3.13+; filtered exactly per message.
+            $filters=[];foreach($props as$k=>$v)if(preg_match('/^filter\.\d+$/',(string)$k))$filters[$v]=true;
+            if($filters!==[]){$s['subs'][$id]['filter']=$filters;$s['subs'][$id]['matchUnfiltered']=($props['match-unfiltered']??'')==='true';}
             if($single)$this->rebalanceStreams($group);return self::streamResp($key,$corr);}
         if($key===12){$id=self::u8($r,$at);if(!isset($s['subs'][$id]))return self::streamResp($key,$corr,4);$group=$s['subs'][$id]['group'];unset($s['subs'][$id]);if($group)$this->rebalanceStreams($group);return self::streamResp($key,$corr);}
         if($key===11){$ref=self::string($r,$at);$name=self::string($r,$at);if(!$this->isStream($name,$s['vhost']))return self::streamResp($key,$corr,2,pack('J',0));$offset=$b->streamStoredOffset($name,$ref);return self::streamResp($key,$corr,$offset===null?19:1,pack('J',$offset??0));}
@@ -806,12 +810,12 @@ final class Protocols
         for ($i = 0; $i < $count; $i++) {
             $rawId = self::take($bytes, $at, 8);
             $sequence = unpack('J', $rawId)[1];
-            if ($version >= 2) self::string($bytes, $at);
+            $filterValue = $version >= 2 ? self::string($bytes, $at) : '';
             $payload = self::take($bytes, $at, self::u32($bytes, $at));
             $code = !$publisher ? 18 : (!$this->isStream($publisher['stream'], $session['vhost']) ? 2 : (!$this->streamAllowed($session, 'write', $publisher['stream']) ? 16 : 1));
             $message = null;
             if ($code === 1) {
-                try { $message = $this->streamInbound($payload); }
+                try { $message = $this->streamInbound($payload, $filterValue); }
                 catch (Throwable $error) { $code = 15; }
             }
             $jobs[] = [$rawId, $sequence, $message, $code];
@@ -843,11 +847,16 @@ final class Protocols
         $out=$s['out'];$s['out']='';if(!$s['opened'])return$out;
         if($s['heartbeat']>0&&microtime(true)-$s['beat']>=$s['heartbeat']){$out.=self::streamFrame(23,'');$s['beat']=microtime(true);}
         foreach($s['subs']as$id=>&$sub){if(!$sub['active']||$sub['credit']<=0||!$this->isStream($sub['stream'],$s['vhost']))continue;
-            $messages=$b->streamRead($sub['stream'],$sub['offset'],min(128,$sub['credit']));foreach($messages as$m){$entry=$this->streamOutbound($m);$data=pack('N',strlen($entry)).$entry;
+            $messages=$b->streamRead($sub['stream'],$sub['offset'],min(128,$sub['credit']));foreach($messages as$m){if(isset($sub['filter'])&&!self::streamFilterMatch($sub,$m['headers']??[])){$sub['offset']=$m['offset']+1;continue;}$entry=$this->streamOutbound($m);$data=pack('N',strlen($entry)).$entry;
                 $chunk="\x50\0".pack('nN',1,1).pack('J',$m['time']).pack('J',0).pack('J',$m['offset']).pack('N',crc32($data)).pack('NNN',strlen($data),0,0).$data;
                 $out.=self::streamFrame(8,chr($id).$chunk);$sub['credit']--;$sub['offset']=$m['offset']+1;
             }
         }unset($sub);return$out;
+    }
+    private static function streamFilterMatch(array $sub,array $headers):bool
+    {
+        foreach($headers as$pair)if(is_array($pair)&&($pair[0]??null)==='x-stream-filter-value')return isset($sub['filter'][(string)$pair[1]]);
+        return $sub['matchUnfiltered'];
     }
     private function rebalanceStreams(string $group):void
     {
@@ -860,9 +869,14 @@ final class Protocols
         $id=$state['protocolId']??null;if($id===null||!isset($this->streamClients[$id]))return;$groups=[];foreach($this->streamClients[$id]['subs']as$sub)if($sub['group'])$groups[]=$sub['group'];unset($this->streamClients[$id]);foreach(array_unique($groups)as$g)$this->rebalanceStreams($g);
     }
 
-    private function streamInbound(string $payload): array
+    private function streamInbound(string $payload, string $filterValue = ''): array
     {
         $message = Amqp10::inbound($payload);
+        // A PublishV2 filter value is stored like AMQP's x-stream-filter-value, so filters on either protocol see it.
+        if ($filterValue !== '') {
+            $message['headers'] = array_values(array_filter($message['headers'], static fn (array $h): bool => $h[0] !== 'x-stream-filter-value'));
+            $message['headers'][] = ['x-stream-filter-value', $filterValue];
+        }
         return [
             'body' => $message['body'],
             'headers' => $message['headers'],

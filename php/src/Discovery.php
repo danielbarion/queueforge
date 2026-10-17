@@ -355,16 +355,25 @@ final class Discovery
 /**
  * Runtime half of cloud discovery: keeps a Consul TTL check or an etcd lease
  * alive, re-lists the members periodically and hands new ones to the
- * membership path, and deregisters on shutdown. Each HTTP call is bounded by
- * Discovery::HTTP_TIMEOUT and runs on a coarse timer, never per message.
+ * membership path, and deregisters on shutdown. The HTTP calls run in a
+ * helper process the event loop polls without waiting, so a slow Consul,
+ * etcd, Kubernetes or AWS endpoint never stalls message traffic.
  */
 final class DiscoveryAgent
 {
+    /** A helper that has not finished by then is killed. */
+    private const HELPER_LIMIT = 30.0;
     private float $nextBeat = 0.0;
     private float $nextList = 0.0;
     private ?string $lease = null;
     private ?array $consul = null;
     public string $error = '';
+    /** @var resource|null the running helper process */
+    private $helper = null;
+    /** @var resource|null its stdout */
+    private $helperOut = null;
+    private string $helperBytes = '';
+    private float $helperDeadline = 0.0;
     /** @param callable(list<string>):void $onMembers */
     public function __construct(private array $config, private $onMembers)
     {
@@ -383,31 +392,76 @@ final class DiscoveryAgent
         return max(1, (int) ($this->config['discovery'] === 'etcd' ? ($opts['etcd_node_ttl'] ?? 30) : ($opts['consul_svc_ttl'] ?? 30)));
     }
     private function interval(): float { return max(1.0, (float) ($this->opts()['discovery_interval'] ?? 30)); }
+    /** Called from the event loop: polls a running helper, or starts one when a beat or list is due. */
     public function tick(): void
     {
+        if ($this->helper !== null) { $this->poll(); return; }
         $now = microtime(true);
         $kind = (string) $this->config['discovery'];
+        $beat = $now >= $this->nextBeat && ($kind === 'consul' || $kind === 'etcd');
+        $list = $now >= $this->nextList;
+        if (!$beat && !$list) return;
+        if ($beat) $this->nextBeat = $now + $this->ttl() / 2;
+        if ($list) $this->nextList = $now + $this->interval();
+        $this->start(['config' => $this->config, 'consul' => $this->consul, 'lease' => $this->lease, 'beat' => $beat, 'list' => $list]);
+    }
+    /** @param array<string, mixed> $job */
+    private function start(array $job): void
+    {
+        $code = 'require ' . var_export(__FILE__, true) . '; exit(DiscoveryAgent::helperMain());';
+        $proc = @proc_open([PHP_BINARY, '-d', 'display_errors=stderr', '-r', $code], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        if (!is_resource($proc)) { $this->error = 'cannot start the discovery helper'; return; }
+        fwrite($pipes[0], serialize($job)); fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        $this->helper = $proc; $this->helperOut = $pipes[1]; $this->helperBytes = '';
+        $this->helperDeadline = microtime(true) + self::HELPER_LIMIT;
+    }
+    private function poll(): void
+    {
+        $chunk = @fread($this->helperOut, 65536);
+        if (is_string($chunk)) $this->helperBytes .= $chunk;
+        $running = proc_get_status($this->helper)['running'] ?? false;
+        if ($running && microtime(true) < $this->helperDeadline) return;
+        if ($running) { proc_terminate($this->helper, 9); $this->error = 'discovery helper timed out'; }
+        else $this->helperBytes .= (string) stream_get_contents($this->helperOut);
+        fclose($this->helperOut); proc_close($this->helper);
+        $this->helper = null; $this->helperOut = null;
+        if ($running) return;
+        $result = @unserialize($this->helperBytes, ['allowed_classes' => false]);
+        if (!is_array($result)) { $this->error = 'discovery helper failed'; return; }
+        if (array_key_exists('lease', $result)) $this->lease = $result['lease'];
+        $this->error = (string) ($result['error'] ?? '');
+        if (is_array($result['members'] ?? null)) {
+            try { ($this->onMembers)($result['members']); } catch (Throwable $e) { $this->error = $e->getMessage(); }
+        }
+    }
+    /** The helper process: one beat and/or list job from stdin, the result serialized on stdout. */
+    public static function helperMain(): int
+    {
+        $job = @unserialize((string) stream_get_contents(STDIN), ['allowed_classes' => false]);
+        if (!is_array($job)) return 1;
+        $config = $job['config']; $lease = $job['lease'];
+        $opts = is_array($config['discovery_opts'] ?? null) ? $config['discovery_opts'] : [];
+        $kind = (string) $config['discovery']; $out = ['error' => ''];
         try {
-            if ($now >= $this->nextBeat && ($kind === 'consul' || $kind === 'etcd')) {
-                $this->nextBeat = $now + $this->ttl() / 2;
-                if ($kind === 'consul' && $this->consul !== null) Discovery::consulPass($this->consul);
+            if ($job['beat']) {
+                if ($kind === 'consul' && is_array($job['consul'])) Discovery::consulPass($job['consul']);
                 if ($kind === 'etcd') {
                     // The first keepalive also writes the key: a node that
                     // resolved before etcd was reachable registers late.
-                    if ($this->lease === null) Discovery::etcd($this->opts(), (string) $this->config['cluster'], true, $this->lease);
-                    else Discovery::etcdKeepalive($this->opts(), (string) $this->config['cluster'], $this->lease);
+                    if ($lease === null) Discovery::etcd($opts, (string) $config['cluster'], true, $lease);
+                    else Discovery::etcdKeepalive($opts, (string) $config['cluster'], $lease);
+                    $out['lease'] = $lease;
                 }
             }
-            if ($now >= $this->nextList) {
-                $this->nextList = $now + $this->interval();
-                $resolved = Discovery::resolve(['discovery_register' => false, 'discovery_opts' => $this->opts()] + $this->config + ['members' => []]);
-                ($this->onMembers)($resolved['members']);
-            }
-            $this->error = '';
-        } catch (Throwable $e) { $this->error = $e->getMessage(); }
+            if ($job['list']) $out['members'] = Discovery::resolve(['discovery_register' => false, 'discovery_opts' => $opts] + $config + ['members' => []])['members'];
+        } catch (Throwable $e) { $out['error'] = $e->getMessage(); }
+        echo serialize($out);
+        return 0;
     }
     public function shutdown(): void
     {
+        if ($this->helper !== null) { proc_terminate($this->helper, 9); fclose($this->helperOut); proc_close($this->helper); $this->helper = null; }
         try { if ($this->consul !== null) Discovery::consulDeregister($this->consul); } catch (Throwable) {}
     }
 }

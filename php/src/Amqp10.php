@@ -122,7 +122,56 @@ final class Amqp10
     private const CREDIT = 256;
     private const SECTIONS = 'message/vnd.rabbitmq.amqp';
     private static int $seq = 0;
+    /** Server hooks for the management node: fn(string $op, Broker $broker, string $queue, array $args). */
+    public ?Closure $topology = null;
     public function __construct(private Broker $broker) {}
+    /**
+     * Cores mode: fn(array $state, ?string $queue): ?string names the sibling
+     * process a connection should move to before an attach on that queue.
+     */
+    public ?Closure $moveFor = null;
+    private static int $gates = 0;
+    /** @var array<int, true> management replies whose topology change is still being replicated */
+    private array $unshared = [];
+    /** The queue an attach frame names as its source (receiver) or target (sender), if any. */
+    private function attachQueue(array $f): ?string
+    {
+        $receiver = $f[2] ?? null; $terminus = $receiver === true ? ($f[5] ?? null) : ($f[6] ?? null);
+        if (!$terminus instanceof Amqp10Described) return null;
+        $address = self::field($terminus->value, 0);
+        $parsed = is_string($address) ? self::parseAddress($address) : null;
+        return isset($parsed['queue']) ? (string) $parsed['queue'] : null;
+    }
+    /** Nothing in flight that the state cannot carry: no deliveries, confirms, held frames, consumers or partial transfers. */
+    private function movable(array $state): bool
+    {
+        if (($state['noMove'] ?? false) || ($state['pending'] ?? []) !== [] || ($state['exclusive'] ?? []) !== []) return false;
+        foreach ($state['sessions'] ?? [] as $session) {
+            if ($session['unsettled'] !== [] || $session['held'] !== [] || ($session['replies'] ?? []) !== [] || ($session['ended'] ?? false)) return false;
+            foreach ($session['links'] as $link) if ($link['dir'] === 'out' || ($link['partial'] ?? null) !== null) return false;
+        }
+        return true;
+    }
+    /** The connection state as bytes another process can adopt. */
+    public function export(array $state): string
+    {
+        unset($state['move']);
+        foreach ($state['sessions'] as $channel => $session) $state['sessions'][$channel]['broker'] = null;
+        $state['principal'] = $this->broker->exportPrincipal((string) ($state['user'] ?? ''));
+        return serialize($state);
+    }
+    /** Takes over a connection a sibling process moved here; null when the bytes are not a state. */
+    public function adopt(string $bytes, int $conn): ?array
+    {
+        $state = @unserialize($bytes, ['allowed_classes' => [Amqp10Value::class, Amqp10Described::class]]);
+        if (!is_array($state) || !isset($state['phase'], $state['vhost'], $state['sessions'])) return null;
+        $state['conn'] = $conn; $state['settled'] = true;
+        if (is_array($state['principal'] ?? null)) $this->broker->adoptPrincipal((string) ($state['user'] ?? ''), $state['principal']);
+        unset($state['principal']);
+        foreach ($state['sessions'] as $channel => $session) $state['sessions'][$channel]['broker'] = $this->broker->forVhost((string) $state['vhost']);
+        if (($state['user'] ?? '') !== '') $this->broker->currentUsers[$state['conn']] = $state['user'];
+        return $state;
+    }
     private static function u(int $n): Amqp10Value { return Amqp10Codec::uint($n); }
     private static function sym(string $s): Amqp10Value { return Amqp10Codec::symbol($s); }
     private static function bin(string $s): Amqp10Value { return Amqp10Codec::binary($s); }
@@ -154,12 +203,20 @@ final class Amqp10
                 $size = unpack('N', substr($buf, 0, 4))[1]; $doff = ord($buf[4]) * 4; $type = ord($buf[5]); $channel = unpack('n', substr($buf, 6, 2))[1];
                 if ($size < 8 || $size > self::FRAME_MAX || $doff < 8 || $doff > $size) throw new Amqp10Refuse('amqp:connection:framing-error', 'invalid frame size or data offset');
                 if (strlen($buf) < $size) break;
+                $raw = substr($buf, 0, $size);
                 $body = substr($buf, $doff, $size - $doff); $buf = substr($buf, $size); if ($body === '') continue;
                 $decoder = new Amqp10Codec($body); $perf = $decoder->value();
                 if (!$perf instanceof Amqp10Described || !is_int($perf->descriptor) || !is_array($perf->value)) throw new Amqp10Refuse('amqp:decode-error', 'expected performative');
+                // An attach naming a queue that lives in a sibling process moves
+                // the connection there, attach included, before it is answered.
+                if ($perf->descriptor === 0x12 && $type === 0 && $this->moveFor !== null && !($state['settled'] ?? false) && ($state['phase'] ?? '') === 'open') {
+                    $home = $this->movable($state) ? ($this->moveFor)($state, $this->attachQueue($perf->value)) : null;
+                    if ($home !== null) { $buf = $raw . $buf; $state['move'] = $home; break; }
+                    if ($this->attachQueue($perf->value) !== null) $state['settled'] = true;
+                }
                 $out .= $this->onFrame($type, $channel, $perf->descriptor, $perf->value, substr($body, $decoder->at), $state);
             }
-            if (!($state['closing'] ?? false)) $out .= $this->tick($state);
+            if (!($state['closing'] ?? false) && !isset($state['move'])) $out .= $this->tick($state);
         } catch (Throwable $error) {
             if (($state['phase'] ?? '') === 'open') $out .= self::send(0, 0x18, [self::error($error instanceof Amqp10Refuse ? $error->condition : 'amqp:decode-error', $error->getMessage())]);
             $this->closed($state);
@@ -168,8 +225,7 @@ final class Amqp10
     }
     private function allowed(array $s, string $kind, string $resource): bool
     {
-        $pattern = $this->broker->permissions[$s['user']][$s['vhost']][$kind] ?? null;
-        return is_string($pattern) && @preg_match('~' . str_replace('~', '\\~', $pattern) . '~', $resource) === 1;
+        return $this->broker->resourceAllowed($s['user'], $s['vhost'], $kind, $resource);
     }
     public static function parseAddress(string $address): ?array
     {
@@ -206,7 +262,7 @@ final class Amqp10
                 $identity = null;
                 if (count($parts) === 3 && ($parts[0] === '' || $parts[0] === $parts[1])) $identity = $this->broker->authenticate($parts[1], $parts[2]);
                 $ok = $identity !== null;
-                if ($ok) { $s['user'] = $identity; $this->broker->currentUsers[$s['conn']] = $identity; }
+                if ($ok) { $s['user'] = $identity; $s['login'] = $parts[1]; $this->broker->currentUsers[$s['conn']] = $identity; }
             }
             // SASL EXTERNAL: the verified TLS client certificate's CN, which must name an existing user.
             if ($mechanism instanceof Amqp10Value && $mechanism->type === 'symbol' && $mechanism->value === 'EXTERNAL') {
@@ -228,18 +284,20 @@ final class Amqp10
             if (!is_int($max) || $max < 512) throw new Amqp10Refuse('amqp:invalid-field', 'max-frame-size below minimum');
             $s['remoteMax'] = min($max, self::FRAME_MAX); $s['idle'] = is_int($f[4] ?? null) ? $f[4] : 0; $s['heartbeat'] = microtime(true);
             $out = self::send(0, 0x10, ['queueforge-php-' . abs($s['conn']), null, self::u(self::FRAME_MAX), new Amqp10Value('ushort', 65535), null, null, null, null, null, new Amqp10Value('map', [[self::sym('product'), 'QueueForge'], [self::sym('platform'), 'PHP']])]);
-            if (!in_array($s['vhost'], $this->broker->vhosts, true) || !isset($this->broker->permissions[$s['user']][$s['vhost']])) { $out .= self::send(0, 0x18, [self::error('amqp:not-allowed', 'vhost access refused')]); $this->closed($s); }
+            if (!$this->broker->hasVhostAccess($s['user'], $s['vhost'])) { $out .= self::send(0, 0x18, [self::error('amqp:not-allowed', 'vhost access refused')]); $this->closed($s); }
             return $out;
         }
         if ($code === 0x18) { $this->closed($s); return self::send(0, 0x18); }
         if ($code === 0x11) {
             if (isset($s['sessions'][$channel])) throw new Amqp10Refuse('amqp:illegal-state', 'duplicate begin');
             if (!$this->broker->channelAllowed($s['user'], count($s['sessions']))) throw new Amqp10Refuse('amqp:resource-limit-exceeded', 'session limit');
-            $s['sessions'][$channel] = ['broker' => $this->broker->forVhost($s['vhost']), 'links' => [], 'incoming' => $f[1] ?? 0, 'outgoing' => 0, 'limit' => $f[2] ?? self::WINDOW, 'delivery' => 0, 'unsettled' => [], 'held' => []];
+            $s['sessions'][$channel] = ['broker' => $this->broker->forVhost($s['vhost']), 'links' => [], 'incoming' => $f[1] ?? 0, 'outgoing' => 0, 'limit' => $f[2] ?? self::WINDOW, 'delivery' => 0, 'unsettled' => [], 'held' => [], 'replies' => []];
             return self::send($channel, 0x11, [new Amqp10Value('ushort', $channel), self::u(0), self::u(self::WINDOW), self::u(self::WINDOW), self::u(255)]);
         }
         if (!isset($s['sessions'][$channel])) throw new Amqp10Refuse('amqp:not-found', 'no session on channel');
         $session =& $s['sessions'][$channel];
+        // A session the management node ended waits only for the peer's end.
+        if ($session['ended'] ?? false) { if ($code === 0x17) unset($s['sessions'][$channel]); return ''; }
         if ($code === 0x17) { $this->dropSession($session); unset($s['sessions'][$channel]); return self::send($channel, 0x17); }
         if ($code === 0x12) {
             $name = $f[0] ?? null; $handle = $f[1] ?? null; $receiver = $f[2] ?? null;
@@ -248,6 +306,15 @@ final class Amqp10
             if (!in_array($snd, [0, 1, 2], true) || !in_array($rcv, [0, 1], true)) throw new Amqp10Refuse('amqp:invalid-field', 'invalid settlement mode');
             if (($source !== null && (!$source instanceof Amqp10Described || $source->descriptor !== 0x28)) || ($target !== null && (!$target instanceof Amqp10Described || $target->descriptor !== 0x29))) throw new Amqp10Refuse('amqp:invalid-field', 'invalid source or target terminus');
             $reply = fn ($src, $tgt) => self::send($channel, 0x12, [$name, self::u($handle), !$receiver, new Amqp10Value('ubyte', $snd), new Amqp10Value('ubyte', $rcv), $src, $tgt, null, null, $receiver ? self::u(0) : null]);
+            // RabbitMQ 4's management node: a paired sender and receiver on /management.
+            $terminus = $receiver ? $source : $target;
+            if ($terminus instanceof Amqp10Described && self::text(self::field($terminus->value, 0)) === '/management') {
+                $session['links'][$handle] = $receiver
+                    ? ['handle' => $handle, 'name' => $name, 'dir' => 'out', 'mgmt' => true, 'presettled' => true, 'credit' => 0, 'count' => 0, 'drain' => false]
+                    : ['handle' => $handle, 'name' => $name, 'dir' => 'in', 'mgmt' => true, 'target' => null, 'credit' => self::CREDIT, 'count' => $f[9] ?? 0, 'partial' => null];
+                $out = self::send($channel, 0x12, [$name, self::u($handle), !$receiver, new Amqp10Value('ubyte', $snd), new Amqp10Value('ubyte', $rcv), $source, $target, null, null, $receiver ? self::u(0) : null, null, null, null, $f[13] ?? null]);
+                return $receiver ? $out : $out . $this->flow($channel, $session, $session['links'][$handle]);
+            }
             try {
                 if ($receiver) {
                     $address = $source instanceof Amqp10Described ? self::field($source->value, 0) : null;
@@ -306,7 +373,8 @@ final class Amqp10
             if (strlen($link['partial']['body']) > Amqp10Codec::MAX_VALUE) throw new Amqp10Refuse('amqp:link:message-size-exceeded', 'message size limit');
             if (($f[5] ?? false) === true) return '';
             $partial = $link['partial']; $link['partial'] = null; $link['credit']--; $link['count']++;
-            $out = $this->publish($channel, $link, $partial, $s);
+            if ($link['mgmt'] ?? false) { $out = $this->manage($channel, $session, $partial, $s); if ($session['ended'] ?? false) return $out; }
+            else $out = $this->publish($channel, $link, $partial, $s);
             if ($link['credit'] < self::CREDIT / 2) { $link['credit'] = self::CREDIT; $out .= $this->flow($channel, $session, $link); }
             return $out;
         }
@@ -346,6 +414,171 @@ final class Amqp10
         } catch (Throwable $e) { $outcome = self::desc(0x25, [self::error($e instanceof Amqp10Refuse ? $e->condition : ($e->getCode() === 403 ? 'amqp:unauthorized-access' : ($e->getCode() === 404 ? 'amqp:not-found' : 'amqp:decode-error')), $e->getMessage())]); }
         return $partial['settled'] ? '' : self::send($channel, 0x15, [true, self::u($partial['id']), null, true, $outcome]);
     }
+    /**
+     * One management request ("HTTP over AMQP", RabbitMQ 4 v2 addresses). The
+     * reply is queued for the paired receiver link and leaves once it has
+     * credit. A refused operation ends the session, as RabbitMQ does.
+     */
+    private function manage(int $channel, array &$session, array $partial, array &$s): string
+    {
+        $d = new Amqp10Codec($partial['body']); $id = null; $to = ''; $method = ''; $body = null;
+        while ($d->at < strlen($partial['body'])) {
+            $section = $d->value(); if (!$section instanceof Amqp10Described) throw new Amqp10Refuse('amqp:decode-error', 'message section must be described');
+            $code = Amqp10Codec::scalar($section->descriptor);
+            if ($code === 0x73) { $id = self::field($section->value, 0); $to = self::text(self::field($section->value, 2)) ?? ''; $method = strtoupper(self::text(self::field($section->value, 3)) ?? ''); }
+            elseif ($code === 0x77 || $code === 0x75) $body = $section->value;
+        }
+        try { [$status, $result] = $this->request($session['broker'], $s, $method, $to, $body); }
+        catch (Amqp10Refuse $e) {
+            if ($e->condition !== 'amqp:unauthorized-access') throw $e;
+            $this->dropSession($session); $session['links'] = []; $session['replies'] = []; $session['held'] = []; $session['ended'] = true;
+            return self::send($channel, 0x17, [self::error($e->condition, $e->getMessage())]);
+        }
+        $gate = ++self::$gates; $this->unshared[$gate] = true;
+        $session['broker']->whenShared(function () use ($gate): void { unset($this->unshared[$gate]); });
+        $session['replies'][] = [Amqp10Codec::encode(self::desc(0x73, [null, null, null, $status, null, $id])) . Amqp10Codec::encode(self::desc(0x77, self::typed($result))), $gate];
+        return $partial['settled'] ? '' : self::send($channel, 0x15, [true, self::u($partial['id']), null, true, self::desc(0x24)]);
+    }
+    /** @return array{0:string,1:mixed} status code and reply body */
+    private function request(Broker $b, array &$s, string $method, string $to, mixed $body): array
+    {
+        [$path, $query] = array_pad(explode('?', $to, 2), 2, '');
+        $raw = explode('/', $path); if (array_shift($raw) !== '' || $raw === []) return ['400', "invalid path '$to'"];
+        $seg = array_map('rawurldecode', $raw); $n = count($seg);
+        $plain = self::plain($body); $args = is_array($plain) ? $plain : [];
+        $topology = $this->topology ?? static function (): void {};
+        try {
+            if ($seg[0] === 'auth' && ($seg[1] ?? '') === 'tokens' && $n === 2 && $method === 'PUT') {
+                $token = is_string($plain) ? $plain : '';
+                $identity = ($s['login'] ?? '') === '' || $token === '' ? null : $this->broker->authenticate($s['login'], $token);
+                if ($identity === null || !$this->broker->hasVhostAccess($identity, $s['vhost'])) throw new Amqp10Refuse('amqp:not-allowed', 'update-secret failed');
+                $s['user'] = $identity; $this->broker->currentUsers[$s['conn']] = $identity;
+                return ['204', null];
+            }
+            if ($seg[0] === 'queues' && $n === 2 && $seg[1] !== '') {
+                $q = $seg[1];
+                if ($method === 'GET') {
+                    $this->permit($s, 'configure', 'queue', $q);
+                    return isset($b->queues[$q]) ? ['200', $this->queueInfo($b, $q)] : ['404', "queue '$q' in vhost '{$s['vhost']}' not found"];
+                }
+                if ($method === 'PUT') {
+                    $this->permit($s, 'configure', 'queue', $q);
+                    $isNew = !isset($b->queues[$q]);
+                    $owner = $b->queues[$q]['owner'] ?? null;
+                    if ($owner !== null && $owner !== $s['conn']) return ['409', "queue '$q' in vhost '{$s['vhost']}' is exclusive to another connection"];
+                    if ($isNew && !$b->queueAllowed($s['vhost'])) return ['403', 'queue limit'];
+                    $declared = is_array($args['arguments'] ?? null) ? $args['arguments'] : [];
+                    $exclusive = (bool) ($args['exclusive'] ?? false);
+                    $b->declareQueue($q, $declared, (bool) ($args['durable'] ?? true), $exclusive, false, (bool) ($args['auto_delete'] ?? false));
+                    if ($isNew && $exclusive) { $b->queues[$q]['owner'] = $s['conn']; $s['exclusive'][$q] = $s['vhost']; }
+                    $topology('declare', $b, $q, $declared);
+                    return [$isNew ? '201' : '200', $this->queueInfo($b, $q)];
+                }
+                if ($method === 'DELETE') {
+                    $this->permit($s, 'configure', 'queue', $q);
+                    if (isset($b->queues[$q])) $topology('delete', $b, $q, []);
+                    return ['200', ['message_count' => $b->deleteQueue($q)]];
+                }
+            }
+            if ($seg[0] === 'queues' && $n === 3 && $seg[2] === 'messages' && $method === 'DELETE') {
+                $q = $seg[1]; $this->permit($s, 'read', 'queue', $q);
+                if (!isset($b->queues[$q])) return ['404', "queue '$q' in vhost '{$s['vhost']}' not found"];
+                $topology('purge', $b, $q, []);
+                return ['200', ['message_count' => $b->purge($q)]];
+            }
+            if ($seg[0] === 'exchanges' && $n === 2 && $seg[1] !== '') {
+                $x = $seg[1]; $this->permit($s, 'configure', 'exchange', $x);
+                if ($method === 'PUT') {
+                    $type = is_string($args['type'] ?? null) ? $args['type'] : 'direct';
+                    if (isset($b->exchanges[$x]) && $b->exchanges[$x] !== $type) return ['409', "inequivalent arg 'type' for exchange '$x' in vhost '{$s['vhost']}'"];
+                    $arguments = is_array($args['arguments'] ?? null) ? $args['arguments'] : [];
+                    $alternate = $arguments['alternate-exchange'] ?? null;
+                    $b->declareExchange($x, $type, (bool) ($args['durable'] ?? true), (bool) ($args['auto_delete'] ?? false), (bool) ($args['internal'] ?? false), is_string($alternate) ? $alternate : null, false, $arguments);
+                    return ['204', null];
+                }
+                if ($method === 'DELETE') { $b->deleteExchange($x); return ['204', null]; }
+            }
+            if ($seg[0] === 'bindings' && $n === 1 && $method === 'POST') {
+                $source = (string) ($args['source'] ?? ''); $key = (string) ($args['binding_key'] ?? '');
+                $pairs = []; foreach (is_array($args['arguments'] ?? null) ? $args['arguments'] : [] as $k => $v) $pairs[] = [(string) $k, $v];
+                $this->bindingChange($b, $s, $source, $args['destination_queue'] ?? null, $args['destination_exchange'] ?? null, $key, $pairs, true);
+                return ['204', null];
+            }
+            if ($seg[0] === 'bindings' && $n === 2 && $method === 'DELETE') {
+                $parts = [];
+                foreach (explode(';', $raw[1]) as $part) { [$k, $v] = array_pad(explode('=', $part, 2), 2, ''); $parts[$k] = rawurldecode($v); }
+                $this->bindingChange($b, $s, $parts['src'] ?? '', $parts['dstq'] ?? null, $parts['dste'] ?? null, $parts['key'] ?? '', [], false);
+                return ['204', null];
+            }
+            if ($seg[0] === 'bindings' && $n === 1 && $method === 'GET') {
+                parse_str($query, $filter); $rows = [];
+                foreach ($b->bindings as $row) {
+                    if (isset($filter['src']) && $row['exchange'] !== $filter['src']) continue;
+                    if (isset($filter['dstq']) && $row['queue'] !== $filter['dstq']) continue;
+                    if (isset($filter['dste']) || (isset($filter['key']) && $row['key'] !== $filter['key'])) continue;
+                    $rows[] = ['source' => $row['exchange'], 'vhost' => $s['vhost'], 'destination_queue' => $row['queue'], 'binding_key' => $row['key'], 'arguments' => self::pairsToMap($row['args'] ?? [])];
+                }
+                foreach ($b->e2e as $row) {
+                    if (isset($filter['src']) && $row['source'] !== $filter['src']) continue;
+                    if (isset($filter['dstq']) || (isset($filter['dste']) && $row['destination'] !== $filter['dste']) || (isset($filter['key']) && $row['key'] !== $filter['key'])) continue;
+                    $rows[] = ['source' => $row['source'], 'vhost' => $s['vhost'], 'destination_exchange' => $row['destination'], 'binding_key' => $row['key'], 'arguments' => []];
+                }
+                return ['200', $rows];
+            }
+        } catch (Amqp10Refuse $e) { throw $e; }
+        catch (RuntimeException $e) {
+            $code = (int) $e->getCode();
+            if ($code === 403) throw new Amqp10Refuse('amqp:unauthorized-access', $e->getMessage());
+            return [$code === 404 ? '404' : (in_array($code, [405, 406], true) ? '409' : '400'), $e->getMessage()];
+        }
+        return ['400', "unsupported request $method $path"];
+    }
+    private function bindingChange(Broker $b, array $s, string $source, mixed $queue, mixed $exchange, string $key, array $pairs, bool $add): void
+    {
+        $user = $this->broker->identityName($s['user']);
+        if (is_string($queue)) {
+            $this->permit($s, 'write', 'queue', $queue); $this->permit($s, 'read', 'exchange', $source ?: 'amq.default');
+            if ($add) $b->bind($queue, $source, $key, $pairs, $s['user'], $s['vhost']); else $b->unbind($queue, $source, $key);
+            return;
+        }
+        if (!is_string($exchange)) throw new RuntimeException('binding needs destination_queue or destination_exchange', 400);
+        $this->permit($s, 'write', 'exchange', $exchange); $this->permit($s, 'read', 'exchange', $source);
+        if (!$add) { $b->unbindExchange($exchange, $source, $key); return; }
+        foreach ([$source, $exchange] as $x) if (!isset($b->exchanges[$x])) throw new RuntimeException("NOT_FOUND - no exchange '$x' in vhost '{$s['vhost']}' for user '$user'", 404);
+        $b->bindExchange($exchange, $source, $key);
+    }
+    private function permit(array $s, string $kind, string $type, string $name): void
+    {
+        if ($this->broker->resourceAllowed($s['user'], $s['vhost'], $kind, $name)) return;
+        throw new Amqp10Refuse('amqp:unauthorized-access', "$kind access to $type '$name' in vhost '{$s['vhost']}' refused for user '" . $this->broker->identityName($s['user']) . "'");
+    }
+    private function queueInfo(Broker $b, string $q): array
+    {
+        $row = $b->queues[$q]; $type = $row['args']['queueType'] ?? 'classic';
+        return ['name' => $q, 'vhost' => $b->vhost, 'durable' => (bool) ($row['durable'] ?? true), 'auto_delete' => (bool) ($row['autoDelete'] ?? false), 'exclusive' => (bool) ($row['exclusive'] ?? false),
+            'type' => in_array($type, ['quorum', 'stream'], true) ? $type : 'classic', 'arguments' => is_array($row['declaredArgs'] ?? null) ? $row['declaredArgs'] : [],
+            'message_count' => $b->readyCount($q), 'consumer_count' => $b->consumerCount($q), 'leader' => $this->broker->nodeId, 'replicas' => [$this->broker->nodeId]];
+    }
+    private static function pairsToMap(array $pairs): array { $out = []; foreach ($pairs as $pair) if (is_array($pair) && count($pair) === 2) $out[(string) $pair[0]] = $pair[1]; return $out; }
+    /** AMQP 1.0 decoded values as plain PHP: maps become string-keyed arrays. */
+    private static function plain(mixed $v): mixed
+    {
+        if ($v instanceof Amqp10Described) return self::plain($v->value);
+        if ($v instanceof Amqp10Value) {
+            if ($v->type === 'map') { $out = []; foreach ($v->value as [$k, $x]) $out[(string) Amqp10Codec::scalar($k)] = self::plain($x); return $out; }
+            if ($v->type === 'array') return array_map(self::plain(...), $v->value);
+            return $v->value;
+        }
+        return is_array($v) ? array_map(self::plain(...), $v) : $v;
+    }
+    /** Plain PHP back into AMQP values: string-keyed (and empty) arrays become maps. */
+    private static function typed(mixed $v): mixed
+    {
+        if (!is_array($v)) return $v;
+        if ($v !== [] && array_is_list($v)) return array_map(self::typed(...), $v);
+        $pairs = []; foreach ($v as $k => $x) $pairs[] = [(string) $k, self::typed($x)];
+        return new Amqp10Value('map', $pairs);
+    }
     /** Server::commit routes the broker's actual durability confirmation here. */
     public function confirmed(array &$state, int $tag, bool $nack): string
     {
@@ -362,7 +595,15 @@ final class Amqp10
             foreach ($session['links'] as &$link) {
                 if ($link['dir'] !== 'out') continue;
                 $sent = 0;
-                while ($link['credit'] > 0 && $session['held'] === [] && $session['outgoing'] < $session['limit'] && $sent++ < 256 && strlen($out) < 4 * self::FRAME_MAX) {
+                if ($link['mgmt'] ?? false) {
+                    // Replies wait for credit: RabbitMQ never sends on the management link without it.
+                    // A reply also waits until its topology change reached every member.
+                    while ($link['credit'] > 0 && $session['replies'] !== [] && $session['outgoing'] < $session['limit'] && !isset($this->unshared[$session['replies'][0][1]])) {
+                        $delivery = $session['delivery']++; $link['credit']--; $link['count']++; $session['outgoing']++;
+                        $out .= self::frame(0, $channel, self::perf(0x14, [self::u($link['handle']), self::u($delivery), self::bin(pack('N', $delivery)), self::u(0), true, false]) . array_shift($session['replies'])[0]);
+                    }
+                }
+                else while ($link['credit'] > 0 && $session['held'] === [] && $session['outgoing'] < $session['limit'] && $sent++ < 256 && strlen($out) < 4 * self::FRAME_MAX) {
                     if (!isset($session['broker']->queues[$link['queue']])) break;
                     $q = $session['broker']->queues[$link['queue']];
                     if (($q['args']['singleActive'] ?? false) && ($q['consumers'][0]['tag'] ?? null) !== $link['tag']) break;
@@ -398,7 +639,7 @@ final class Amqp10
     {
         foreach (array_reverse(array_keys($session['unsettled'])) as $id) { $held = $session['unsettled'][$id]; if ($held['handle'] === $handle) { if (!($held['stream'] ?? false)) $session['broker']->requeue($held['msg']); unset($session['unsettled'][$id]); } }
         $link = $session['links'][$handle] ?? null;
-        if ($link && $link['dir'] === 'out' && isset($session['broker']->queues[$link['queue']])) {
+        if ($link && $link['dir'] === 'out' && isset($link['queue'], $session['broker']->queues[$link['queue']])) {
             $q =& $session['broker']->queues[$link['queue']]; $before = count($q['consumers']);
             $q['consumers'] = array_values(array_filter($q['consumers'], static fn (array $consumer): bool => $consumer['tag'] !== $link['tag']));
             $session['broker']->prom['consumers'] -= $before - count($q['consumers']);
@@ -411,6 +652,13 @@ final class Amqp10
     public function closed(array &$state): void
     {
         foreach ($state['sessions'] ?? [] as &$session) $this->dropSession($session);
+        unset($session);
+        // Exclusive queues the management node declared go with their connection.
+        if (isset($state['conn'])) foreach ($state['exclusive'] ?? [] as $queue => $vhost) {
+            $broker = $this->broker->forVhost($vhost);
+            if (($broker->queues[$queue]['owner'] ?? null) === $state['conn']) $broker->deleteQueue($queue);
+        }
+        $state['exclusive'] = [];
         $state['sessions'] = []; $state['pending'] = []; $state['closing'] = true;
         if (isset($state['conn'])) unset($this->broker->currentUsers[$state['conn']]);
     }

@@ -192,6 +192,8 @@ final class Cluster
      */
     private array $remoteGets = [];
     private int $nextDelivery = 1;
+    /** @var array<string, int> subscriber session of each pushed delivery awaiting its settlement */
+    private array $deliverySessions = [];
     /** @var list<string> correlation ids whose request timed out */
     public array $timedOut = [];
 
@@ -273,7 +275,7 @@ final class Cluster
 
     public function detach(string $id): void
     {
-        unset($this->peers[$id]);
+        unset($this->peers[$id], $this->peerConns[$id]);
         foreach ($this->broker->allBrokers() as $broker) $broker->dropPeerConsumers($id);
         foreach ($this->pending as $correlation => $row) {
             if ($row['peer'] === $id) {
@@ -420,6 +422,7 @@ final class Cluster
     {
         $delivery = $this->nextDelivery++;
         $this->remoteDeliveries[$vhost . "\0" . $queue . "\0" . $peer . "\0" . $delivery] = $localId;
+        if (!$settlesOnWrite) $this->deliverySessions[$vhost . "\0" . $queue . "\0" . $peer . "\0" . $delivery] = $session;
         $body = base64_encode((string) ($msg['body'] ?? ''));
         $this->send($peer, [
             'v' => 1,
@@ -547,6 +550,13 @@ final class Cluster
             $this->barriers[] = ['id' => (int) ($msg['id'] ?? 0), 'from' => $from, 'index' => $index, 'until' => microtime(true) + self::BARRIER_SECONDS];
             return null;
         }
+        if ($op === 'http' && $this->onHttp !== null) {
+            $id = (int) ($msg['id'] ?? 0);
+            ($this->onHttp)((string) base64_decode((string) ($payload['raw_b64'] ?? '')), function (string $response) use ($id, $from): void {
+                $this->sendLine($from, $this->reply($id, true, ['response_b64' => base64_encode($response)]));
+            });
+            return null;
+        }
         try {
             if ($op === 'enqueue' && $this->deferEnqueue($msg, $payload, $from)) return null;
             $body = $this->handle($op, $payload, $from);
@@ -586,7 +596,9 @@ final class Cluster
         if ($op === 'declare_queue' || $op === 'declare') {
             $name = $queueOf($payload);
             $args = is_array($payload['args'] ?? null) ? $payload['args'] : [];
+            $isNew = !isset($broker->queues[$name]);
             $broker->declareQueue($name, $args);
+            if ($isNew && is_string($payload['home'] ?? null) && $payload['home'] !== '') $broker->queues[$name]['home'] = $payload['home'];
             return ['queue' => ['vhost' => $vhost, 'name' => $name, 'home' => $broker->home($name)]];
         }
         if ($op === 'delete_queue') {
@@ -607,7 +619,10 @@ final class Cluster
             $delivery = (int) ($payload['delivery_id'] ?? $payload['id'] ?? 0);
             $key = $vhost . "\0" . $queue . "\0" . $from . "\0" . $delivery;
             $local = $this->remoteDeliveries[$key] ?? null;
-            unset($this->remoteDeliveries[$key]);
+            $session = $this->deliverySessions[$key] ?? null;
+            unset($this->remoteDeliveries[$key], $this->deliverySessions[$key]);
+            // A windowed subscriber may take one more for each it settled.
+            if ($session !== null) $broker->replenishRemote($queue, $from, $session);
             if ($local === null) {
                 // Bun settles a quorum get by the message id it was handed.
                 $qid = is_string($payload['id'] ?? null) ? $payload['id'] : '';
@@ -623,6 +638,9 @@ final class Cluster
             $requeue = $op === 'nack' && ($payload['requeue'] ?? true) !== false;
             if ($requeue) {
                 $broker->requeue($local);
+            } elseif ($op === 'nack' && is_string($payload['dead'] ?? null)) {
+                // Rejected without requeue: dead-lettered here, where the message is.
+                $broker->deadLetter($local, $payload['dead']);
             } else {
                 $broker->noteConsumed($queue, (string) ($broker->msgs[$local]['qid'] ?? ''));
                 $broker->ack($local);
@@ -672,7 +690,9 @@ final class Cluster
                 $from,
                 (int) ($payload['session'] ?? 0),
                 ($payload['noAck'] ?? $payload['no_ack'] ?? false) !== false,
-                $credit,
+                ($payload['pull'] ?? false) === true ? 0 : (is_int($payload['window'] ?? null) && $payload['window'] > 0 ? $payload['window'] : $credit),
+                is_int($payload['window'] ?? null) && $payload['window'] > 0,
+                ($payload['pull'] ?? false) === true,
             );
             return true;
         }
@@ -717,6 +737,23 @@ final class Cluster
         if ($op === 'deliver') {
             if ($this->onRemoteDeliver === null || !($this->onRemoteDeliver)($payload, $from)) $this->onDeliver($payload);
             return null;
+        }
+        if ($op === 'conns') {
+            $users = is_array($payload['users'] ?? null) ? $payload['users'] : [];
+            $this->peerConns[$from] = array_map('intval', $users);
+            return true;
+        }
+        if ($op === 'reply') {
+            if ($this->onDirectReply !== null) ($this->onDirectReply)($payload);
+            return true;
+        }
+        if ($op === 'queue_stats') {
+            // The queues this member is home to, for a management listing elsewhere.
+            $rows = [];
+            foreach ($this->broker->allBrokers() as $scope) foreach ($scope->queues as $name => $q) {
+                if ($scope->ownsQueue((string) $name)) $rows[] = ['vhost' => $scope->vhost, 'name' => (string) $name, 'ready' => count($q['ready']), 'consumers' => count($q['consumers'])];
+            }
+            return ['queues' => $rows];
         }
         if ($op === 'stats') {
             $name = $queueOf($payload);
@@ -763,6 +800,33 @@ final class Cluster
      * @var ?\Closure(array<string, mixed>, string): bool
      */
     public ?\Closure $onRemoteDeliver = null;
+
+    /** Delivers a direct reply-to message published on another member. */
+    public ?\Closure $onDirectReply = null;
+    /** Answers a management request another member forwarded to this queue home: fn(string $raw, callable $done). */
+    public ?\Closure $onHttp = null;
+
+    /**
+     * Open connections per user on each peer, as last announced with the
+     * `conns` op, so connection limits count the whole cluster.
+     *
+     * @var array<string, array<string, int>>
+     */
+    public array $peerConns = [];
+
+    /** Connections a user holds on the other members. */
+    public function remoteConnections(string $user): int
+    {
+        $n = 0;
+        foreach ($this->peerConns as $users) $n += $users[$user] ?? 0;
+        return $n;
+    }
+
+    /** @param array<string, int> $users */
+    public function announceConnections(array $users): void
+    {
+        foreach ($this->peerIds() as $peer) $this->request($peer, 'conns', ['users' => $users]);
+    }
 
     private function onDeliver(array $payload): void
     {

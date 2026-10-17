@@ -82,8 +82,42 @@ final class Cores
         return self::fromCgroup(is_string($max) ? $max : null, is_string($set) ? $set : null);
     }
 
+    /** First internal cluster port, unless `QUEUEFORGE_CORES_PORT` names another. */
+    public const PORT_BASE = 25672;
+
     /**
-     * One plan per core. Cluster ports start at 25672.
+     * Internal cluster ports for the children: `QUEUEFORGE_CORES_PORT` + i,
+     * else 25672 + i. A port already taken (RabbitMQ's inter-node port is
+     * 25672) is skipped for the next free one below the ephemeral range, so
+     * the broker neither fails to start nor talks to someone else's listener.
+     *
+     * @return list<int>
+     */
+    public static function ports(int $cores): array
+    {
+        $env = getenv('QUEUEFORGE_CORES_PORT');
+        $base = is_string($env) && preg_match('/^[1-9]\d*$/', $env) === 1 && (int) $env < 65536 ? (int) $env : self::PORT_BASE;
+        $ports = [];
+        $scan = $base < 49152 ? [[$base, 49151], [20000, $base - 1]] : [[$base, 65535]];
+        foreach ($scan as [$from, $to]) {
+            for ($port = $from; $port <= $to && count($ports) < $cores; $port++) {
+                if (self::portFree($port)) $ports[] = $port;
+            }
+        }
+        if (count($ports) < $cores) throw new RuntimeException('no free ports for the cores cluster');
+        return $ports;
+    }
+
+    private static function portFree(int $port): bool
+    {
+        $probe = @stream_socket_server('tcp://127.0.0.1:' . $port, $errno, $errstr);
+        if ($probe === false) return false;
+        fclose($probe);
+        return true;
+    }
+
+    /**
+     * One plan per core. Cluster ports come from `ports()`.
      *
      * @return list<array{id:string,dir:string,cluster:string,up:string,down:string,mgmt:bool}>
      */
@@ -91,12 +125,13 @@ final class Cores
     {
         $root = rtrim($dataDir, '/');
         $plans = [];
+        $ports = self::ports($cores);
         for ($i = 0; $i < $cores; $i++) {
             $id = 'n' . $i;
             $plans[] = [
                 'id' => $id,
                 'dir' => $root . '/' . $id,
-                'cluster' => '127.0.0.1:' . (25672 + $i),
+                'cluster' => '127.0.0.1:' . $ports[$i],
                 'up' => $root . '/handoff/' . $id . '.up',
                 'down' => $root . '/handoff/' . $id . '.down',
                 'mgmt' => $i === 0,

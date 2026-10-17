@@ -156,6 +156,30 @@ final class Extras
         };
         // A membership change committed through the meta log is kept for a restart.
         $this->cluster->onMembersApplied = function (): void { $this->saveMembers(); };
+        if (count($broker->members) > 1) {
+            // Queue depth and consumers come from each queue's home.
+            $this->http->peerQueueStats = function (callable $done): void {
+                $peers = $this->cluster->peerIds();
+                $counts = [];
+                $left = count($peers);
+                if ($left === 0) { $done($counts); return; }
+                foreach ($peers as $peer) $this->cluster->request($peer, 'queue_stats', [], '', static function (?array $reply) use (&$counts, &$left, $done): void {
+                    foreach ((array) ($reply['queues'] ?? []) as $row) if (is_array($row)) $counts[(string) ($row['vhost'] ?? '/') . "\0" . (string) ($row['name'] ?? '')] = ['ready' => (int) ($row['ready'] ?? 0), 'consumers' => (int) ($row['consumers'] ?? 0)];
+                    if (--$left === 0) $done($counts);
+                });
+            };
+            // Purge, get and delete of a queue run where the queue is.
+            $this->http->forwardHttp = function (string $home, string $raw, callable $onReply): void {
+                $this->cluster->request($home, 'http', ['raw_b64' => base64_encode($raw)], '', function (?array $reply) use ($onReply): void {
+                    $body = '{"error":"node_unavailable"}';
+                    $onReply(is_string($reply['response_b64'] ?? null) ? (string) base64_decode($reply['response_b64']) : "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+                });
+            };
+            $this->cluster->onHttp = function (string $raw, callable $done): void {
+                $response = $this->http->handle($raw, $done);
+                if ($response !== '') $done($response);
+            };
+        }
         // Cloud discovery keeps its registration alive and adds members it
         // finds later through the same path as POST /api/nodes. Only the
         // process that serves management runs it in cores mode.

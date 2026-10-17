@@ -80,6 +80,16 @@ final class Integrations
         $set = $this->broker->parameters['federation-upstream-set'][$vhost][(string) $definition['federation-upstream-set']] ?? [];
         return array_intersect_key($upstreams, array_fill_keys(array_column(is_array($set) ? $set : [], 'upstream'), true));
     }
+    /** Upstream ack-mode, prefetch-count, reconnect-delay and trust-user-id, with RabbitMQ's defaults. */
+    private static function linkOptions(array $value): array
+    {
+        $mode = $value['ack-mode'] ?? 'on-confirm';
+        $delay = $value['reconnect-delay'] ?? 5;
+        return ['ack-mode' => in_array($mode, ['on-confirm', 'on-publish', 'no-ack'], true) ? $mode : 'on-confirm',
+            'prefetch-count' => max(1, is_int($value['prefetch-count'] ?? null) ? $value['prefetch-count'] : 1000),
+            'reconnect-delay' => is_int($delay) || is_float($delay) ? max(0.0, (float) $delay) : 5.0,
+            'trust-user-id' => ($value['trust-user-id'] ?? false) === true];
+    }
     private function scan(): array
     {
         $wanted = [];
@@ -96,7 +106,7 @@ final class Integrations
                 $definition = Policy::match($policies, (string) $exchange, 'exchanges')['definition'] ?? [];
                 foreach ($this->upstreamsFor($vhost, is_array($definition) ? $definition : []) as $name => $value) {
                     $uri = is_array($value['uri'] ?? null) ? ($value['uri'][0] ?? '') : ($value['uri'] ?? '');
-                    $wanted['federation'."\0".$vhost."\0".$name."\0".$exchange] = ['type'=>'federation','kind'=>'exchange','upstream'=>(string) $name,'vhost'=>$vhost,'name'=>$name.':'.$exchange,'src-uri'=>$uri,'dest-uri'=>'amqp://','src-queue'=>'qf-fed-'.substr(hash('sha256',$vhost."\0".$name."\0".$exchange),0,24),'dest-exchange'=>(string) $exchange,'src-exchange'=>(string) ($value['exchange'] ?? $exchange),'exchange-type'=>is_array($properties) ? ($properties['type'] ?? 'topic') : $properties,'max-hops'=>(int)($value['max-hops'] ?? 1),'queue-args'=>array_filter(['x-expires'=>is_int($value['expires'] ?? null) ? $value['expires'] : null,'x-message-ttl'=>is_int($value['message-ttl'] ?? null) ? $value['message-ttl'] : null], static fn ($v) => $v !== null)];
+                    $wanted['federation'."\0".$vhost."\0".$name."\0".$exchange] = ['type'=>'federation','kind'=>'exchange','upstream'=>(string) $name,'vhost'=>$vhost,'name'=>$name.':'.$exchange,'src-uri'=>$uri,'dest-uri'=>'amqp://','src-queue'=>'qf-fed-'.substr(hash('sha256',$vhost."\0".$name."\0".$exchange),0,24),'dest-exchange'=>(string) $exchange,'src-exchange'=>(string) ($value['exchange'] ?? $exchange),'exchange-type'=>is_array($properties) ? ($properties['type'] ?? 'topic') : $properties,'max-hops'=>(int)($value['max-hops'] ?? 1)]+self::linkOptions($value)+['queue-args'=>array_filter(['x-expires'=>is_int($value['expires'] ?? null) ? $value['expires'] : null,'x-message-ttl'=>is_int($value['message-ttl'] ?? null) ? $value['message-ttl'] : null], static fn ($v) => $v !== null)];
                 }
             }
             foreach ($scope->queues as $queue => $row) {
@@ -104,7 +114,7 @@ final class Integrations
                 $definition = Policy::match($policies, (string) $queue, 'queues')['definition'] ?? [];
                 foreach ($this->upstreamsFor($vhost, is_array($definition) ? $definition : []) as $name => $value) {
                     $uri = is_array($value['uri'] ?? null) ? ($value['uri'][0] ?? '') : ($value['uri'] ?? '');
-                    $wanted['federation-queue'."\0".$vhost."\0".$name."\0".$queue] = ['type'=>'federation','kind'=>'queue','upstream'=>(string) $name,'vhost'=>$vhost,'name'=>$name.':'.$queue,'src-uri'=>$uri,'dest-uri'=>'amqp://','src-queue'=>(string) ($value['queue'] ?? $queue),'dest-queue'=>(string) $queue,'max-hops'=>(int)($value['max-hops'] ?? 1)];
+                    $wanted['federation-queue'."\0".$vhost."\0".$name."\0".$queue] = ['type'=>'federation','kind'=>'queue','upstream'=>(string) $name,'vhost'=>$vhost,'name'=>$name.':'.$queue,'src-uri'=>$uri,'dest-uri'=>'amqp://','src-queue'=>(string) ($value['queue'] ?? $queue),'dest-queue'=>(string) $queue,'max-hops'=>(int)($value['max-hops'] ?? 1)]+self::linkOptions($value);
                 }
             }
         }
@@ -131,15 +141,24 @@ final class Integrations
     public function close(): void { foreach ($this->links as $link) $link->close(); $this->links = []; }
 }
 
-/** One in-flight message per bridge also limits retry duplication after lost confirmations. */
+/**
+ * A shovel keeps one message in flight, which also limits retry duplication
+ * after lost confirmations; a federation link allows its upstream's
+ * prefetch-count and settles upstream as its ack-mode says.
+ */
 final class IntegrationLink
 {
+    /** Deliveries forwarded but not yet settled, and how many may be. */
+    private int $inflight = 0;
+    private int $limit = 1;
+    /** Seconds before a failed link retries (federation reconnect-delay). */
+    private float $delay = 1.0;
+    private string $ackMode = 'on-confirm';
     private ?Broker $source = null;
     private ?Broker $destination = null;
     private IntegrationPeer|Amqp10Peer|null $srcPeer = null;
     private IntegrationPeer|Amqp10Peer|null $destPeer = null;
     private bool $registered = false;
-    private bool $busy = false;
     private bool $closed = false;
     private float $retry = 0;
     private string $tag;
@@ -158,6 +177,11 @@ final class IntegrationLink
     {
         $this->tag = 'bridge-'.$conn;
         $this->started = gmdate('Y-m-d H:i:s');
+        if ($definition['type'] === 'federation') {
+            $this->limit = (int) ($definition['prefetch-count'] ?? 1000);
+            $this->delay = (float) ($definition['reconnect-delay'] ?? 5);
+            $this->ackMode = (string) ($definition['ack-mode'] ?? 'on-confirm');
+        }
         try {
             $this->srcQueue = (string) ($definition['src-queue'] ?? '');
             $this->destQueue = (string) ($definition['dest-queue'] ?? '');
@@ -178,7 +202,8 @@ final class IntegrationLink
                     if ($side === 'src') $this->srcPeer = $peer; else $this->destPeer = $peer;
                 } else {
                     $consumerArgs = $side === 'src' && is_array($definition['src-consumer-args'] ?? null) ? $definition['src-consumer-args'] : null;
-                    $peer = new IntegrationPeer((string)$uri, $side === 'src' ? $this->srcQueue : $this->destQueue, $side === 'dest', $side === 'src' && $definition['type'] === 'federation' && ($definition['kind'] ?? 'exchange') === 'exchange' ? $definition : null, $consumerArgs);
+                    $federated = $side === 'src' && $definition['type'] === 'federation';
+                    $peer = new IntegrationPeer((string)$uri, $side === 'src' ? $this->srcQueue : $this->destQueue, $side === 'dest', $federated && ($definition['kind'] ?? 'exchange') === 'exchange' ? $definition : null, $consumerArgs, $federated ? $this->limit : 0, $federated && $this->ackMode === 'no-ack', $this->delay);
                     if ($side === 'src') $this->srcPeer = $peer; else $this->destPeer = $peer;
                 }
             }
@@ -270,13 +295,20 @@ final class IntegrationLink
             if (!$this->registered && isset($this->source->queues[$queue])) {
                 try {
                     $this->source->registerProtocolConsumer($queue, $this->conn, $this->tag,
-                        fn()=>!$this->closed && !$this->busy && microtime(true)>=$this->retry && $this->destinationReady() && $this->demand(),
-                        function(array $message, int $id):void { $this->move($message, function(bool $ok)use($id):void { if ($ok) {$this->source->ack($id);} else $this->source->requeue($id); }); });
+                        fn()=>!$this->closed && $this->inflight < $this->limit && microtime(true)>=$this->retry && $this->destinationReady() && $this->demand(),
+                        $this->ackMode === 'no-ack'
+                            ? function(array $message, int $id):void { $this->move($message, static function(bool $ok):void {}); }
+                            : function(array $message, int $id):void { $this->move($message, function(bool $ok)use($id):void { if ($ok) {$this->source->ack($id);} else $this->source->requeue($id); }); },
+                        $this->ackMode === 'no-ack');
                     $this->registered = true;
                 } catch (Throwable $e) { $this->error = $e->getMessage(); }
             }
-        } elseif (!$this->busy && microtime(true)>=$this->retry && $this->destinationReady() && $this->srcPeer?->ready() && $this->demand()) {
-            $this->srcPeer->get(function(?array $message):void { if ($message !== null) $this->move($message, fn(bool $ok)=>$this->srcPeer->settle($message['tag'],$ok)); });
+        } elseif ($this->inflight < $this->limit && microtime(true)>=$this->retry && $this->destinationReady() && $this->srcPeer?->ready() && $this->demand()) {
+            $settle = $this->ackMode === 'no-ack' ? static fn (array $message): Closure => static function (bool $ok): void {} : fn (array $message): Closure => fn (bool $ok) => $this->srcPeer->settle($message['tag'], $ok);
+            if ($this->srcPeer instanceof IntegrationPeer && $this->srcPeer->consuming()) {
+                // A consuming federation peer hands over up to prefetch-count deliveries at once.
+                while ($this->inflight < $this->limit && ($message = $this->srcPeer->take()) !== null) $this->move($message, $settle($message));
+            } else $this->srcPeer->get(function(?array $message) use ($settle):void { if ($message !== null) $this->move($message, $settle($message)); });
         }
     }
     /** A local stream source is read from an offset (src-consumer-args x-stream-offset, default next). */
@@ -287,7 +319,7 @@ final class IntegrationLink
             $first = $this->source->streamFirst($queue); $next = $this->source->streamNext($queue);
             $this->streamCursor = is_int($offset) ? max($first, $offset) : match ($offset) { 'first' => $first, 'last' => max($first, $next - 1), default => $next };
         }
-        for ($budget = 64; $budget > 0 && !$this->busy && microtime(true) >= $this->retry && $this->destinationReady(); $budget--) {
+        for ($budget = 64; $budget > 0 && $this->inflight === 0 && microtime(true) >= $this->retry && $this->destinationReady(); $budget--) {
             $records = $this->source->streamRead($queue, $this->streamCursor, 1);
             if ($records === []) return;
             $record = $records[0]; $offset = (int) $record['offset'];
@@ -297,11 +329,14 @@ final class IntegrationLink
     }
     private function move(array $message, callable $settle): void
     {
-        $this->busy = true;
-        $done = function(bool $ok)use($settle):void {
-            $settle($ok); $this->busy = false;
+        $this->inflight++;
+        // on-publish settles upstream once the publish is handed on; on-confirm waits for the confirm.
+        $early = $this->ackMode === 'on-publish';
+        $done = function(bool $ok)use($settle,$early):void {
+            if (!$early) $settle($ok);
+            $this->inflight--;
             if ($ok) { $this->transferred++; $this->error = ''; }
-            else { $this->error = 'Destination publish failed; source requeued'; $this->retry = microtime(true)+1; }
+            else { $this->error = 'Destination publish failed; source requeued'; $this->retry = microtime(true)+$this->delay; }
         };
         $headers = $message['headers'] ?? [];
         $raw = $message['propRaw'] ?? null;
@@ -311,12 +346,15 @@ final class IntegrationLink
                 if ($key === 'x-qf-federation-hops') $hops = max($hops, (int)$value);
                 if ($key === 'x-received-from' && is_array($value)) { $received = array_values($value); $hops = max($hops, count($received)); }
             }
-            if ($hops >= $this->definition['max-hops']) { $done(true); return; }
+            if ($hops >= $this->definition['max-hops']) { $settle(true); $this->inflight--; return; }
             $headers = array_values(array_filter($headers, static fn($pair)=>$pair[0] !== 'x-qf-federation-hops' && $pair[0] !== 'x-received-from'));
             $received[] = ['uri' => Integrations::redact((string) $this->definition['src-uri']), (($this->definition['kind'] ?? 'exchange') === 'queue' ? 'queue' : 'exchange') => (string) ($this->definition['src-exchange'] ?? $this->srcQueue), 'redelivered' => false];
             $headers[] = ['x-qf-federation-hops',$hops+1];
             $headers[] = ['x-received-from',$received];
-            $props = Amqp10::readProps($raw); $raw = Amqp10::writeProps($props,$headers);
+            $props = Amqp10::readProps($raw);
+            // Without trust-user-id the user-id is dropped, so the downstream validated user-id check passes.
+            if (!($this->definition['trust-user-id'] ?? false)) unset($props['userId']);
+            $raw = Amqp10::writeProps($props,$headers);
         }
         $exchange = $this->destExchange ?? '';
         $key = $this->destExchange !== null ? ($this->destKey ?? $message['key'] ?? '') : $this->destQueue;
@@ -325,6 +363,7 @@ final class IntegrationLink
             if (!$this->destinationReady()) { $done(false); return; }
             $this->destination->publishAsync($this->conn,0,$exchange,$key,$message['body'],$message['mode'] ?? 2,$message['priority'] ?? 0,$headers,null,$raw,$done);
         } else $this->destPeer->publish($exchange,$key,$message,$headers,$raw,$done);
+        if ($early) $settle(true);
     }
     public function close(): void
     {
@@ -360,13 +399,16 @@ final class IntegrationPeer
      * @param ?array<string, mixed> $consumerArgs basic.consume arguments; set
      * for a stream source (x-stream-offset), which cannot be read with basic.get
      */
-    public function __construct(string $uri, private string $queue, private bool $publisher, private ?array $federation = null, private ?array $consumerArgs = null)
+    public function __construct(string $uri, private string $queue, private bool $publisher, private ?array $federation = null, private ?array $consumerArgs = null, private int $prefetch = 0, private bool $noAck = false, private float $delay = 1.0)
     {
         $parts = parse_url($uri);
         if (!is_array($parts) || !in_array($parts['scheme'] ?? '',['amqp','amqps'],true) || empty($parts['host'])) throw new RuntimeException('Invalid AMQP endpoint URI');
         $this->uri = $parts;
     }
     public function ready(): bool { return $this->phase === 'ready'; }
+    /** A consuming source (stream offset or federation prefetch) instead of basic.get. */
+    public function consuming(): bool { return $this->consumerArgs !== null || $this->prefetch > 0; }
+    public function take(): ?array { return $this->ready() && $this->getter === null ? array_shift($this->buffered) : null; }
     private function method(int $class,int $method,string $args='',int $channel=1):void { $this->output .= Codec::method($channel,$class,$method,$args); }
     public function tick(): void
     {
@@ -414,9 +456,9 @@ final class IntegrationPeer
         if($class===10&&$method===41){$this->method(20,10,"\0");return;}
         if($class===20&&$method===11){if($this->federation!==null){$this->method(40,10,pack('n',0).Codec::shortstr($this->federation['src-exchange']).Codec::shortstr($this->federation['exchange-type']).chr(2).pack('N',0));}else $this->declareQueue();return;}
         if($class===40&&$method===11){$this->declareQueue();return;}
-        if($class===50&&$method===11){if($this->federation!==null)$this->method(50,20,pack('n',0).Codec::shortstr($this->queue).Codec::shortstr($this->federation['src-exchange']).Codec::shortstr($this->federation['exchange-type']==='topic'?'#':'')."\0".pack('N',0));elseif($this->consumerArgs!==null){$this->method(60,10,pack('NnC',0,100,0));}else $this->finishHandshake();return;}
-        if($class===50&&$method===21){$this->finishHandshake();return;}
-        if($class===60&&$method===11){$args=[];foreach($this->consumerArgs??[] as $k=>$v)$args[]=[(string)$k,$v];$this->method(60,20,pack('n',0).Codec::shortstr($this->queue).Codec::shortstr('qf-shovel')."\0".Codec::writeTable($args));return;}
+        if($class===50&&$method===11){if($this->federation!==null)$this->method(50,20,pack('n',0).Codec::shortstr($this->queue).Codec::shortstr($this->federation['src-exchange']).Codec::shortstr($this->federation['exchange-type']==='topic'?'#':'')."\0".pack('N',0));else $this->startConsuming();return;}
+        if($class===50&&$method===21){$this->startConsuming();return;}
+        if($class===60&&$method===11){$args=[];foreach($this->consumerArgs??[] as $k=>$v)$args[]=[(string)$k,$v];$this->method(60,20,pack('n',0).Codec::shortstr($this->queue).Codec::shortstr('qf-shovel').chr($this->noAck?2:0).Codec::writeTable($args));return;}
         if($class===60&&$method===21){$this->phase='ready';$this->error='';return;}
         if($class===85&&$method===11){$this->phase='ready';$this->error='';return;}
         if(($class===10&&$method===50)||($class===20&&$method===40))throw new RuntimeException('AMQP peer closed: '.bin2hex(substr($p,0,2)).' '.substr($p,3,ord($p[2]??"\0")));
@@ -426,11 +468,12 @@ final class IntegrationPeer
         if($class===60&&$method===50){$this->returned=true;$this->incoming=['return'=>true,'body'=>''];return;}
         if($class===60&&($method===80||$method===120)&&$this->confirm!==null){$tag=Codec::readU64($p,0);$multiple=(ord($p[8]??"\0")&1)!==0;if($tag===$this->publishTag||($multiple&&$tag>=$this->publishTag)){$done=$this->confirm;$this->confirm=null;$done($method===80&&!$this->returned);}return;}
     }
+    private function startConsuming():void {if(!$this->consuming()){$this->finishHandshake();return;}$this->method(60,10,pack('NnC',0,$this->prefetch>0?min(65535,$this->prefetch):100,0));}
     private function declareQueue():void {if($this->publisher&&$this->queue===''){$this->finishHandshake();return;}$this->method(50,10,pack('n',0).Codec::shortstr($this->queue).chr($this->consumerArgs!==null?1:2).pack('N',0));}
     private function finishHandshake():void {if($this->publisher)$this->method(85,10,"\0");else{$this->phase='ready';$this->error='';}}
     private function contentDone():void {$message=$this->incoming;$this->incoming=null;if(isset($message['return']))return;if($message['consumed']??false){$this->buffered[]=$message;return;}$getter=$this->getter;$this->getter=null;if($getter)$getter($message);}
     public function get(callable $done):void {if(!$this->ready()||$this->getter!==null)return;if($this->consumerArgs!==null){if($this->buffered!==[])$done(array_shift($this->buffered));else $this->getter=$done;return;}$this->getter=$done;$this->method(60,70,pack('n',0).Codec::shortstr($this->queue)."\0");}
-    public function settle(int $tag,bool $ok):void {if($this->ready())$this->method(60,$ok?80:120,Codec::u64($tag).chr($ok?0:2));}
+    public function settle(int $tag,bool $ok):void {if($this->ready()&&!$this->noAck)$this->method(60,$ok?80:120,Codec::u64($tag).chr($ok?0:2));}
     public function publish(string $exchange,string $key,array $message,array $headers,?string $raw,callable $done):void
     {
         if(!$this->ready()||$this->confirm!==null){$done(false);return;}$this->confirm=$done;$this->publishTag++;$this->returned=false;
@@ -440,7 +483,7 @@ final class IntegrationPeer
     }
     private function fail(string $error):void
     {
-        if(is_resource($this->socket))fclose($this->socket);$this->socket=null;$this->phase='disconnected';$this->retry=microtime(true)+1;$this->error=$error;$this->input=$this->output='';$this->incoming=null;$this->getter=null;$this->buffered=[];$this->publishTag=0;$done=$this->confirm;$this->confirm=null;if($done)$done(false);
+        if(is_resource($this->socket))fclose($this->socket);$this->socket=null;$this->phase='disconnected';$this->retry=microtime(true)+$this->delay;$this->error=$error;$this->input=$this->output='';$this->incoming=null;$this->getter=null;$this->buffered=[];$this->publishTag=0;$done=$this->confirm;$this->confirm=null;if($done)$done(false);
     }
     public function close():void {$this->stopped=true;$this->fail('Bridge stopped');}
 }

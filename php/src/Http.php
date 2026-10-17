@@ -34,6 +34,30 @@ final class Http
     public $queueRaft = null;
     /** Shovel and federation link status, set by Extras. */
     public ?Integrations $integrations = null;
+    /**
+     * In a cluster, fetches the depth and consumers of the queues the other
+     * members are home to, keyed by vhost and name. Set by Extras.
+     *
+     * @var ?callable(callable(array<string, array{ready:int,consumers:int}>):void):void
+     */
+    public $peerQueueStats = null;
+    /**
+     * In a cluster, sends a request about one queue to the member that is its
+     * home and answers with that member's response. Set by Extras.
+     *
+     * @var ?callable(string, string, callable(string):void):void
+     */
+    public $forwardHttp = null;
+    /** @var ?array<string, array{ready:int,consumers:int}> counts from `peerQueueStats` while a request is answered */
+    private ?array $remoteCounts = null;
+
+    /** Depth and consumers of a queue, from its home when that is another member. */
+    private function queueCounts(Broker $broker, string $name, array $queue): array
+    {
+        $remote = $this->remoteCounts[$broker->vhost . "\0" . $name] ?? null;
+        if ($remote !== null && !$broker->ownsQueue($name)) return [(int) $remote['ready'], (int) $remote['consumers']];
+        return [count($queue['ready']), count($queue['consumers'])];
+    }
 
     public function __construct(public Broker $broker, public string $uiRoot, public int $port, public bool $secure)
     {
@@ -41,6 +65,24 @@ final class Http
 
     public function handle(string $raw, ?callable $onReply = null): string
     {
+        // Queue counts live at each queue's home: gather the other members' first.
+        if ($onReply !== null && $this->peerQueueStats !== null && $this->remoteCounts === null && preg_match('#^GET /api/(queues|overview)[/? ]#', $raw) === 1) {
+            ($this->peerQueueStats)(function (array $counts) use ($raw, $onReply): void {
+                $this->remoteCounts = $counts;
+                try { $response = $this->handle($raw); } finally { $this->remoteCounts = null; }
+                $onReply($response);
+            });
+            return '';
+        }
+        // Delete, purge and get act on the messages, which only the home holds.
+        // A console session cookie is known only here, so only Basic auth travels.
+        if ($onReply !== null && $this->forwardHttp !== null && stripos($raw, "\r\nauthorization:") !== false && preg_match('#^(DELETE|POST) /api/queues/([^/ ?]+)/([^/ ?]+)(/purge|/contents|/get)?[ ?]#', $raw, $q) === 1
+            && ($q[1] === 'DELETE') === (($q[4] ?? '') !== '/purge' && ($q[4] ?? '') !== '/get')) {
+            $vhost = rawurldecode($q[2]);
+            $scope = in_array($vhost, $this->broker->vhosts, true) ? $this->broker->forVhost($vhost) : null;
+            $home = isset($scope?->queues[rawurldecode($q[3])]) ? $scope->remoteHomeOf(rawurldecode($q[3])) : null;
+            if ($home !== null) { ($this->forwardHttp)($home, $raw, $onReply); return ''; }
+        }
         $head = strstr($raw, "\r\n\r\n", true);
         if ($head === false) {
             return $this->status(400, 'bad request');
@@ -669,7 +711,11 @@ final class Http
                 return $this->json(403, ['error' => 'forbidden']);
             }
             $name = rawurldecode($m[1]);
-            if (array_key_exists('tracing', $json) && in_array($name, $broker->vhosts, true)) $broker->forVhost($name)->tracing = $json['tracing'] === true;
+            if (array_key_exists('tracing', $json) && in_array($name, $broker->vhosts, true)) {
+                $broker->forVhost($name)->tracing = $json['tracing'] === true;
+                // Every member traces the publishes it routes.
+                if ($broker->cluster?->raftEnabled()) $broker->cluster->proposeMeta('vhost', ['name' => $name, 'tracing' => $json['tracing'] === true], static function (): void {});
+            }
             if (!in_array($name, $broker->vhosts, true)) {
                 $broker->vhosts[] = $name;
             }
@@ -1033,7 +1079,7 @@ final class Http
         $broker = $scope ?? $this->broker;
         $items = [];
         foreach ($broker->queues as $name => $queue) {
-            $ready = count($queue['ready']);
+            [$ready, $consumers] = $this->queueCounts($broker, (string) $name, $queue);
             $type = $queue['args']['queueType'] ?? 'classic';
             $row = [
                 'name' => $name,
@@ -1045,7 +1091,7 @@ final class Http
                 'messages' => $ready,
                 'messages_ready' => $ready,
                 'messages_unacknowledged' => 0,
-                'consumers' => count($queue['consumers']),
+                'consumers' => $consumers,
                 'type' => $type,
                 'arguments' => (object) ($queue['declaredArgs'] ?? []),
             ];
@@ -1064,9 +1110,10 @@ final class Http
     {
         $ready = 0;
         $consumers = 0;
-        foreach ($this->broker->queues as $queue) {
-            $ready += count($queue['ready']);
-            $consumers += count($queue['consumers']);
+        foreach ($this->broker->queues as $name => $queue) {
+            [$depth, $count] = $this->queueCounts($this->broker, (string) $name, $queue);
+            $ready += $depth;
+            $consumers += $count;
         }
         return [
             'product_name' => 'QueueForge',

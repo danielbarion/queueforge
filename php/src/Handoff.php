@@ -109,9 +109,22 @@ final class Handoff
      * The queue a method frame names, or null when this frame does not decide a home.
      *
      * A publish on the default exchange names its queue in the routing key.
-     * A consume names it directly. Any other frame stays on this process.
+     * A queue declare, delete, purge, bind or unbind, a get, and a consume name
+     * it directly. Any other frame stays on this process, and so does a name
+     * for direct reply-to, which is not a queue.
      */
     public static function namedQueue(string $buf, int $at): ?string
+    {
+        return self::naming($buf, $at)[0] ?? null;
+    }
+
+    /**
+     * The queue a method frame names, and whether the frame needs the queue to
+     * exist already: everything except a declare that may create it.
+     *
+     * @return array{0:string,1:bool}|null
+     */
+    public static function naming(string $buf, int $at): ?array
     {
         if (strlen($buf) - $at < 11 || ($buf[$at] ?? '') !== "\x01") {
             return null;
@@ -123,6 +136,8 @@ final class Handoff
         $class = unpack('n', substr($buf, $at + 7, 2))[1];
         $method = unpack('n', substr($buf, $at + 9, 2))[1];
         $o = $at + 11;
+        $queue = null;
+        $needs = true;
         if ($class === 60 && $method === 40) {
             $o += 2;
             $exchange = self::short($buf, $o);
@@ -130,14 +145,17 @@ final class Handoff
                 return null;
             }
             $queue = self::short($buf, $o);
-            return $queue === null || $queue === '' ? null : $queue;
-        }
-        if ($class === 60 && $method === 20) {
+        } elseif (($class === 60 && ($method === 20 || $method === 70)) || ($class === 50 && in_array($method, [10, 20, 30, 40, 50], true))) {
             $o += 2;
             $queue = self::short($buf, $o);
-            return $queue === null || $queue === '' ? null : $queue;
+            if ($class === 50 && $method === 10) {
+                $needs = isset($buf[$o]) && (ord($buf[$o]) & 1) === 1;
+            }
         }
-        return null;
+        if ($queue === null || $queue === '' || str_starts_with($queue, 'amq.rabbitmq.reply-to')) {
+            return null;
+        }
+        return [$queue, $needs];
     }
 
     private static function short(string $buf, int &$o): ?string
