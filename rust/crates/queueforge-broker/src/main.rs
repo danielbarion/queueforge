@@ -157,6 +157,7 @@ async fn run() -> Result<()> {
 
     let store = Arc::new(store);
     queueforge_mgmt::bridge::mqtt::set_store(Arc::clone(&store));
+    queueforge_mgmt::bridge::set_node_name(if config.cluster.node_id.is_empty() { "queueforge" } else { &config.cluster.node_id });
 
     // Durability: WAL factory + group-commit policy from config.
     let durability_policy = DurabilityPolicy::from_parts(
@@ -638,6 +639,10 @@ async fn run() -> Result<()> {
 
     ready.set_ready(false);
     info!("readyz=503; beginning graceful shutdown");
+
+    // MQTT 5 clients hear DISCONNECT 0x8B (server shutting down) while the
+    // loopback AMQP connections their sessions use are still up.
+    queueforge_mgmt::bridge::mqtt::shutdown(Duration::from_secs(2)).await;
 
     // Stop accept + broadcast connection.close; wait for connection tasks.
     let conns_drained = amqp_listener.graceful_stop(CONNECTION_DRAIN_TIMEOUT).await;

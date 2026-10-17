@@ -130,7 +130,7 @@ where
 
         // RabbitMQ validates user-id against the login.
         if let Some(uid) = properties.user_id.as_deref() {
-            if uid != user.as_str() {
+            if uid != user.as_str() && !self.impersonator {
                 self.server_channel_close(
                     channel,
                     REPLY_PRECONDITION_FAILED,

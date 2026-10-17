@@ -89,6 +89,59 @@ impl Retained {
 
 /// Live sessions by vhost and client id. Sending on the channel ends a session.
 static LIVE: LazyLock<Mutex<HashMap<(String, String), oneshot::Sender<()>>>> = LazyLock::new(Default::default);
+/// Set when the broker shuts down: MQTT 5 sessions get DISCONNECT 0x8B.
+static SHUTDOWN: LazyLock<tokio::sync::watch::Sender<bool>> = LazyLock::new(|| tokio::sync::watch::channel(false).0);
+/// Sessions past CONNACK, so shutdown can wait for their DISCONNECTs.
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// MQTT 5 DISCONNECT reason codes the server sends.
+const RC_MALFORMED: u8 = 0x81;
+const RC_PROTOCOL_ERROR: u8 = 0x82;
+const RC_UNSPECIFIED: u8 = 0x80;
+const RC_NOT_AUTHORIZED: u8 = 0x87;
+const RC_SHUTTING_DOWN: u8 = 0x8B;
+const RC_KEEP_ALIVE_TIMEOUT: u8 = 0x8D;
+const RC_SESSION_TAKEN_OVER: u8 = 0x8E;
+const RC_TOPIC_NAME_INVALID: u8 = 0x90;
+const RC_TOPIC_ALIAS_INVALID: u8 = 0x94;
+
+/// Tell every MQTT 5 client the server is going down (DISCONNECT 0x8B) and
+/// wait up to `within` for the sessions to end.
+pub async fn shutdown(within: Duration) {
+    SHUTDOWN.send_replace(true);
+    let deadline = Instant::now() + within;
+    while ACTIVE.load(std::sync::atomic::Ordering::Acquire) > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Resolves once the broker starts shutting down.
+async fn stopping(down: &mut tokio::sync::watch::Receiver<bool>) {
+    let _ = down.wait_for(|stopping| *stopping).await;
+}
+
+/// Counts a session in [`ACTIVE`] while it lives.
+struct Active;
+
+impl Active {
+    fn new() -> Self {
+        ACTIVE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Active
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// A server DISCONNECT (MQTT 5 only; 3.x just closes the connection).
+async fn disconnect<S: AsyncWrite + Unpin>(io: &mut S, version: u8, reason: u8) {
+    if version == 5 {
+        let _ = send(io, &packet(0xe0, &[reason, 0])).await;
+    }
+}
 /// Wills waiting out their delay interval. Sending cancels one (the client came back).
 static PENDING_WILLS: LazyLock<Mutex<HashMap<(String, String), oneshot::Sender<()>>>> = LazyLock::new(Default::default);
 /// Where retained messages are stored. Set once at startup.
@@ -130,6 +183,11 @@ static RETAINED_WRITER: LazyLock<std::sync::mpsc::Sender<(String, String, Option
 /// The first call wins.
 pub fn set_store(store: Arc<MetadataStore>) {
     let _ = STORE.set(store);
+}
+
+/// The metadata store the bridges read, once the broker has set it.
+pub(crate) fn store() -> Option<&'static Arc<MetadataStore>> {
+    STORE.get()
 }
 
 fn now_ms() -> u64 {
@@ -385,6 +443,8 @@ struct Session {
     next_id: u16,
     /// Client-to-server topic aliases.
     aliases: HashMap<u16, String>,
+    /// Why the last packet failed, for the DISCONNECT; `None` is a malformed packet.
+    reason: Option<u8>,
 }
 
 impl Session {
@@ -418,6 +478,8 @@ where
         None => return,
     };
     let mut kicked = kicked;
+    let _active = Active::new();
+    let mut down = SHUTDOWN.subscribe();
     let mut last_seen = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut tmp = vec![0u8; 16 * 1024];
@@ -433,13 +495,21 @@ where
                     abnormal = false;
                     return finish(session, abnormal).await;
                 }
-                Err(()) => return finish(session, abnormal).await,
+                Err(()) => {
+                    disconnect(&mut io, session.version, session.reason.unwrap_or(RC_MALFORMED)).await;
+                    return finish(session, abnormal).await;
+                }
             }
         }
         tokio::select! {
             _ = &mut kicked => {
+                disconnect(&mut io, session.version, RC_SESSION_TAKEN_OVER).await;
                 session.will = None;
                 return finish(session, false).await;
+            }
+            _ = stopping(&mut down) => {
+                disconnect(&mut io, session.version, RC_SHUTTING_DOWN).await;
+                return finish(session, abnormal).await;
             }
             read = io.read(&mut tmp) => {
                 match read {
@@ -459,6 +529,7 @@ where
             }
             _ = tick.tick() => {
                 if keepalive > 0 && last_seen.elapsed() > Duration::from_millis(u64::from(keepalive) * 1500) {
+                    disconnect(&mut io, session.version, RC_KEEP_ALIVE_TIMEOUT).await;
                     return finish(session, true).await;
                 }
             }
@@ -604,8 +675,10 @@ where
     let persistent = if version == 5 { expiry > 0 } else { !clean_start };
     let conn = match Connection::connect(&amqp_uri(amqp_port, &user, &password, &vhost), ConnectionProperties::default()).await {
         Ok(c) => c,
-        Err(_) => {
-            connack(io, version, false, bad_login).await;
+        Err(e) => {
+            // A good login refused the vhost: not authorized, as RabbitMQ answers.
+            let refused_vhost = format!("{e:?}").contains("access to vhost");
+            connack(io, version, false, if version == 5 && refused_vhost { RC_NOT_AUTHORIZED } else { bad_login }).await;
             return None;
         }
     };
@@ -649,6 +722,7 @@ where
         inflight: HashMap::new(),
         next_id: 1,
         aliases: HashMap::new(),
+        reason: None,
     };
     let mut props = vec![(P_ALIAS_MAX, Prop::U16(TOPIC_ALIAS_MAX))];
     if let Some(id) = assigned {
@@ -698,8 +772,10 @@ async fn declare_and_consume(s: &mut Session) -> Result<(), ()> {
     Ok(())
 }
 
-/// Handle one packet. `Ok(false)` is a clean DISCONNECT.
+/// Handle one packet. `Ok(false)` is a clean DISCONNECT. On `Err`,
+/// `s.reason` says why (unset: a malformed packet).
 async fn handle<S: AsyncWrite + Unpin>(s: &mut Session, io: &mut S, first: u8, body: &[u8]) -> Result<bool, ()> {
+    s.reason = None;
     match first >> 4 {
         3 => publish_from_client(s, io, first, body).await.map(|_| true),
         4 => {
@@ -721,7 +797,11 @@ async fn handle<S: AsyncWrite + Unpin>(s: &mut Session, io: &mut S, first: u8, b
             }
             Ok(false)
         }
-        _ => Err(()),
+        // A second CONNECT, AUTH (no enhanced authentication) or a reserved type.
+        _ => {
+            s.reason = Some(RC_PROTOCOL_ERROR);
+            Err(())
+        }
     }
 }
 
@@ -737,16 +817,23 @@ async fn publish_from_client<S: AsyncWrite + Unpin>(s: &mut Session, io: &mut S,
     if let Some(alias) = prop_u32(&props, P_ALIAS) {
         let alias = alias as u16;
         if alias == 0 || alias > TOPIC_ALIAS_MAX {
+            s.reason = Some(RC_TOPIC_ALIAS_INVALID);
             return Err(());
         }
         if topic.is_empty() {
-            topic = s.aliases.get(&alias).cloned().ok_or(())?;
+            // An alias the client never set.
+            topic = s.aliases.get(&alias).cloned().ok_or_else(|| s.reason = Some(RC_PROTOCOL_ERROR))?;
         } else {
             s.aliases.insert(alias, topic.clone());
         }
         props.retain(|(id, _)| *id != P_ALIAS);
     }
-    if topic.is_empty() || topic.contains('+') || topic.contains('#') {
+    if topic.is_empty() {
+        s.reason = Some(RC_PROTOCOL_ERROR);
+        return Err(());
+    }
+    if topic.contains('+') || topic.contains('#') {
+        s.reason = Some(RC_TOPIC_NAME_INVALID);
         return Err(());
     }
     let origin = s.origin();
@@ -755,6 +842,8 @@ async fn publish_from_client<S: AsyncWrite + Unpin>(s: &mut Session, io: &mut S,
         if s.version == 5 && real_qos > 0 {
             return send(io, &packet(0x40, &[(id >> 8) as u8, id as u8, 0x87, 0])).await;
         }
+        // A refused QoS 0 publish has no PUBACK to carry the refusal.
+        s.reason = Some(RC_NOT_AUTHORIZED);
         return Err(());
     }
     match real_qos {
@@ -914,7 +1003,10 @@ async fn subscribe<S: AsyncWrite + Unpin>(s: &mut Session, io: &mut S, body: &[u
     let mut codes = Vec::new();
     // (filter, retain handling, was already subscribed)
     let mut added: Vec<(String, u8, bool)> = Vec::new();
-    declare_and_consume(s).await?;
+    if declare_and_consume(s).await.is_err() {
+        s.reason = Some(RC_UNSPECIFIED);
+        return Err(());
+    }
     while r.left() > 0 {
         let filter = r.string().ok_or(())?;
         let options = r.u8().ok_or(())?;

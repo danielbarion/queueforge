@@ -2371,13 +2371,17 @@ dependencies = [
  "regex",
  "rust-embed",
  "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

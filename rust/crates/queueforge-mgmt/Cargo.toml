@@ -27,6 +27,10 @@ rand_core = { workspace = true }
 regex = { workspace = true }
 rust-embed = { workspace = true }
 rustls = { workspace = true }
+rustls-native-certs = "0.7"
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

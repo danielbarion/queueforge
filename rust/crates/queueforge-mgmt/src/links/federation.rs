@@ -29,7 +29,7 @@ use lapin::options::{
     ConfirmSelectOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions,
 };
 use lapin::types::{AMQPValue, FieldArray, FieldTable, LongString, ShortString};
-use lapin::{Channel, Connection, ConnectionProperties};
+use lapin::{BasicProperties, Channel, Connection};
 use queueforge_core::{HeaderArg, PolicyTarget, QueueKey};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
@@ -72,6 +72,9 @@ struct Upstream {
     ack_mode: String,
     expires: Option<u64>,
     message_ttl: Option<u64>,
+    /// Keep `user-id` on forwarded messages (and have the downstream trust
+    /// it); otherwise it is cleared, as RabbitMQ does.
+    trust_user_id: bool,
 }
 
 impl Upstream {
@@ -93,6 +96,7 @@ impl Upstream {
             ack_mode,
             expires: v.get("expires").and_then(Value::as_u64),
             message_ttl: v.get("message-ttl").and_then(Value::as_u64),
+            trust_user_id: v.get("trust-user-id").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 }
@@ -239,15 +243,19 @@ async fn supervise(key: LinkKey, upstream: Upstream, status: SharedStatus) {
 }
 
 async fn connect(uri: &str) -> Result<(Connection, Channel, super::Endpoint), String> {
-    let ep = resolve(uri).await?;
-    let conn = Connection::connect(&ep.amqp_uri(), ConnectionProperties::default()).await.map_err(|e| format!("{}: {e}", ep.shown))?;
+    connect_as(uri, false).await
+}
+
+async fn connect_as(uri: &str, trusted: bool) -> Result<(Connection, Channel, super::Endpoint), String> {
+    let ep = super::resolve_as(uri, trusted).await?;
+    let conn = ep.connect().await?;
     let ch = conn.create_channel().await.map_err(|e| e.to_string())?;
     Ok((conn, ch, ep))
 }
 
 /// This broker's downstream vhost, over loopback.
-async fn downstream(vhost: &str) -> Result<(Connection, Channel), String> {
-    let (conn, ch, _) = connect(&format!("amqp:///{}", super::pct(vhost))).await?;
+async fn downstream(vhost: &str, trusted: bool) -> Result<(Connection, Channel), String> {
+    let (conn, ch, _) = connect_as(&format!("amqp:///{}", super::pct(vhost)), trusted).await?;
     ch.confirm_select(ConfirmSelectOptions::default()).await.map_err(|e| e.to_string())?;
     Ok((conn, ch))
 }
@@ -330,6 +338,27 @@ async fn sync_bindings(
     Ok(())
 }
 
+/// The properties a link republishes with: `user-id` is cleared unless the
+/// upstream is trusted with it.
+fn forwarded(props: &BasicProperties, trust_user_id: bool) -> BasicProperties {
+    if trust_user_id || props.user_id().is_none() {
+        return props.clone();
+    }
+    let mut out = BasicProperties::default();
+    macro_rules! copy {
+        ($($get:ident => $with:ident),*) => {
+            $(if let Some(v) = props.$get().clone() {
+                out = out.$with(v);
+            })*
+        };
+    }
+    copy!(content_type => with_content_type, content_encoding => with_content_encoding, headers => with_headers,
+        delivery_mode => with_delivery_mode, priority => with_priority, correlation_id => with_correlation_id,
+        reply_to => with_reply_to, expiration => with_expiration, message_id => with_message_id,
+        timestamp => with_timestamp, kind => with_kind, app_id => with_app_id, cluster_id => with_cluster_id);
+    out
+}
+
 /// Hops a message has made, from its `x-received-from` header.
 fn hops(headers: &FieldTable) -> usize {
     match headers.inner().get("x-received-from") {
@@ -365,7 +394,7 @@ async fn exchange_link(key: &LinkKey, upstream: &Upstream, status: &SharedStatus
         .basic_consume(&queue, "federation-link", BasicConsumeOptions { no_ack, ..Default::default() }, FieldTable::default())
         .await
         .map_err(|e| format!("consume upstream: {e}"))?;
-    let (_down_conn, down) = downstream(&key.vhost).await?;
+    let (_down_conn, down) = downstream(&key.vhost, upstream.trust_user_id).await?;
     set_status(status, "running", None);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -390,7 +419,7 @@ async fn exchange_link(key: &LinkKey, upstream: &Upstream, status: &SharedStatus
                 hop.insert("cluster-name".into(), AMQPValue::LongString(LongString::from(node_name().into_bytes())));
                 trail.push(AMQPValue::FieldTable(hop));
                 headers.insert("x-received-from".into(), AMQPValue::FieldArray(FieldArray::from(trail)));
-                let props = d.properties.clone().with_headers(headers);
+                let props = forwarded(&d.properties, upstream.trust_user_id).with_headers(headers);
                 let confirm = down
                     .basic_publish(&key.name, d.routing_key.as_str(), BasicPublishOptions::default(), &d.data, props)
                     .await
@@ -414,7 +443,7 @@ async fn queue_link(key: &LinkKey, upstream: &Upstream, status: &SharedStatus) -
     up.queue_declare(&up_queue, passive, FieldTable::default())
         .await
         .map_err(|e| format!("upstream queue {up_queue}: {e}"))?;
-    let (_down_conn, down) = downstream(&key.vhost).await?;
+    let (_down_conn, down) = downstream(&key.vhost, upstream.trust_user_id).await?;
     set_status(status, "running", None);
     let state = super::state().ok_or("links not started")?;
     let local = QueueKey::new(key.vhost.as_str(), key.name.as_str());
@@ -439,7 +468,7 @@ async fn queue_link(key: &LinkKey, upstream: &Upstream, status: &SharedStatus) -
         };
         let d = got.delivery;
         let confirm = down
-            .basic_publish("", &key.name, BasicPublishOptions::default(), &d.data, d.properties.clone())
+            .basic_publish("", &key.name, BasicPublishOptions::default(), &d.data, forwarded(&d.properties, upstream.trust_user_id))
             .await
             .map_err(|e| e.to_string())?;
         if upstream.ack_mode == "on-confirm" {

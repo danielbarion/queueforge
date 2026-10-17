@@ -219,6 +219,7 @@ pub async fn handle_connection<S>(
         last_send: Instant::now(),
         channels: FxHashMap::default(),
         user: None,
+        impersonator: false,
         vhost: None,
         // True after connection.open-ok increments queueforge_connections.
         gauges_held: false,
@@ -471,6 +472,9 @@ struct Connection<'a, S> {
     last_send: Instant,
     channels: FxHashMap<u16, ChannelState>,
     user: Option<String>,
+    /// Logged in with a trusted ticket (a federation link with
+    /// `trust-user-id`): any `user-id` is accepted on publish.
+    impersonator: bool,
     vhost: Option<String>,
     /// Whether `queueforge_connections` has been incremented for this connection.
     gauges_held: bool,

@@ -14,7 +14,7 @@ use lapin::options::{
     QueueBindOptions, QueueDeclareOptions,
 };
 use lapin::types::FieldTable;
-use lapin::{BasicProperties, Channel, Connection, ConnectionProperties};
+use lapin::{BasicProperties, Channel, Connection};
 use serde_json::{json, Value};
 
 use super::amqp10_client::{self, Client};
@@ -69,6 +69,16 @@ struct DestSpec {
     address: Option<String>,
 }
 
+/// `src-delete-after`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeleteAfter {
+    Never,
+    /// Move this many messages, then delete the shovel.
+    Count(u64),
+    /// Move the messages in the source queue when the shovel starts, then delete it.
+    QueueLength,
+}
+
 /// A validated shovel definition.
 #[derive(Clone, Debug)]
 pub(crate) struct Spec {
@@ -76,8 +86,7 @@ pub(crate) struct Spec {
     dest: DestSpec,
     ack_mode: AckMode,
     prefetch: u16,
-    /// `src-delete-after` as a message count; `None` runs forever.
-    delete_after: Option<u64>,
+    delete_after: DeleteAfter,
     reconnect_delay: Duration,
 }
 
@@ -137,9 +146,15 @@ impl Spec {
         };
         let prefetch = v.get("src-prefetch-count").and_then(Value::as_u64).unwrap_or(1000).clamp(1, u64::from(u16::MAX)) as u16;
         let delete_after = match v.get("src-delete-after") {
-            Some(Value::Number(n)) => n.as_u64(),
-            _ => None,
+            None | Some(Value::Null) => DeleteAfter::Never,
+            Some(Value::String(s)) if s == "never" => DeleteAfter::Never,
+            Some(Value::String(s)) if s == "queue-length" => DeleteAfter::QueueLength,
+            Some(Value::Number(n)) if n.as_u64().is_some() => DeleteAfter::Count(n.as_u64().unwrap_or(0)),
+            Some(other) => return Err(format!("src-delete-after must be never, queue-length or a count (got {other})")),
         };
+        if delete_after == DeleteAfter::QueueLength && (src.protocol != Proto::Amqp091 || src.queue.is_none()) {
+            return Err("src-delete-after queue-length needs an amqp091 src-queue".into());
+        }
         let reconnect_delay = Duration::from_secs(v.get("reconnect-delay").and_then(Value::as_u64).unwrap_or(5));
         Ok(Spec { src, dest, ack_mode, prefetch, delete_after, reconnect_delay })
     }
@@ -285,9 +300,14 @@ pub async fn list_shovels(
 async fn supervise(spec: Spec, status: SharedStatus, vhost: String, name: String) {
     let mut moved = 0u64;
     let mut attempts = 0u32;
+    // How many to move in all; for queue-length, fixed by the first connection.
+    let mut limit = match spec.delete_after {
+        DeleteAfter::Count(n) => Some(n),
+        DeleteAfter::Never | DeleteAfter::QueueLength => None,
+    };
     loop {
         set_status(&status, "starting", None);
-        match run_once(&spec, &status, &mut moved).await {
+        match run_once(&spec, &status, &mut moved, &mut limit).await {
             Ok(()) => {
                 // src-delete-after reached: the shovel removes itself, as in RabbitMQ.
                 set_status(&status, "terminated", None);
@@ -335,31 +355,34 @@ enum Dest {
 
 async fn amqp091(uri: &str) -> Result<(Connection, Channel, String), String> {
     let ep = resolve(uri).await?;
-    let conn = Connection::connect(&ep.amqp_uri(), ConnectionProperties::default()).await.map_err(|e| format!("{}: {e}", ep.shown))?;
+    let conn = ep.connect().await?;
     let ch = conn.create_channel().await.map_err(|e| e.to_string())?;
     Ok((conn, ch, ep.vhost))
 }
 
 async fn amqp10(uri: &str) -> Result<Client, String> {
     let ep = resolve(uri).await?;
-    Client::connect(&ep.host, ep.port, &ep.user, &ep.pass, &ep.vhost).await
+    Client::connect(&ep.host, ep.port, &ep.user, &ep.pass, &ep.vhost, ep.tls.as_ref()).await
 }
 
 /// Declare `queue` unless it exists (a passive declare first, so a stream or
 /// a queue with arguments is used as it is).
-async fn ensure_queue(conn: &Connection, ch: Channel, queue: &str) -> Result<Channel, String> {
+/// Also returns the messages ready in it.
+async fn ensure_queue(conn: &Connection, ch: Channel, queue: &str) -> Result<(Channel, u32), String> {
     let passive = QueueDeclareOptions { passive: true, ..Default::default() };
-    if ch.queue_declare(queue, passive, FieldTable::default()).await.is_ok() {
-        return Ok(ch);
+    if let Ok(q) = ch.queue_declare(queue, passive, FieldTable::default()).await {
+        return Ok((ch, q.message_count()));
     }
     let ch = conn.create_channel().await.map_err(|e| e.to_string())?;
     let durable = QueueDeclareOptions { durable: true, ..Default::default() };
-    ch.queue_declare(queue, durable, FieldTable::default()).await.map_err(|e| format!("declare {queue}: {e}"))?;
-    Ok(ch)
+    let q = ch.queue_declare(queue, durable, FieldTable::default()).await.map_err(|e| format!("declare {queue}: {e}"))?;
+    Ok((ch, q.message_count()))
 }
 
 impl Source {
-    async fn open(spec: &Spec) -> Result<Self, String> {
+    /// Open the source. `limit` is how many messages are still to move, if
+    /// bounded; queue-length sets it from the source queue first.
+    async fn open(spec: &Spec, moved: u64, limit: &mut Option<u64>) -> Result<Self, String> {
         let s = &spec.src;
         match s.protocol {
             Proto::Amqp10 => {
@@ -372,8 +395,12 @@ impl Source {
                 let (conn, ch, _) = amqp091(&s.uri).await?;
                 let queue = match (&s.queue, &s.exchange) {
                     (Some(q), _) => {
-                        let ch2 = ensure_queue(&conn, ch, q).await?;
-                        return Self::consume(conn, ch2, q, spec).await;
+                        let (ch2, ready) = ensure_queue(&conn, ch, q).await?;
+                        if limit.is_none() && spec.delete_after == DeleteAfter::QueueLength {
+                            *limit = Some(u64::from(ready));
+                        }
+                        let left = limit.map(|n| n.saturating_sub(moved));
+                        return Self::consume(conn, ch2, q, spec, left).await;
                     }
                     (None, Some(x)) => {
                         let opts = QueueDeclareOptions { exclusive: true, auto_delete: true, ..Default::default() };
@@ -386,14 +413,17 @@ impl Source {
                     }
                     (None, None) => return Err("no source".into()),
                 };
-                Self::consume(conn, ch, &queue, spec).await
+                let left = limit.map(|n| n.saturating_sub(moved));
+                Self::consume(conn, ch, &queue, spec, left).await
             }
         }
     }
 
-    async fn consume(conn: Connection, ch: Channel, queue: &str, spec: &Spec) -> Result<Self, String> {
+    async fn consume(conn: Connection, ch: Channel, queue: &str, spec: &Spec, left: Option<u64>) -> Result<Self, String> {
         let no_ack = spec.ack_mode == AckMode::NoAck;
-        ch.basic_qos(spec.prefetch, BasicQosOptions::default()).await.map_err(|e| e.to_string())?;
+        // A bounded shovel takes no more than it still has to move.
+        let prefetch = left.map_or(spec.prefetch, |n| n.clamp(1, u64::from(spec.prefetch)) as u16);
+        ch.basic_qos(prefetch, BasicQosOptions::default()).await.map_err(|e| e.to_string())?;
         let consumer = ch
             .basic_consume(
                 queue,
@@ -453,7 +483,7 @@ impl Dest {
             Proto::Amqp091 => {
                 let (conn, ch, _) = amqp091(&d.uri).await?;
                 let (ch, exchange, key) = match (&d.queue, &d.exchange) {
-                    (Some(q), _) => (ensure_queue(&conn, ch, q).await?, String::new(), Some(q.clone())),
+                    (Some(q), _) => (ensure_queue(&conn, ch, q).await?.0, String::new(), Some(q.clone())),
                     (None, Some(x)) => (ch, x.clone(), d.exchange_key.clone()),
                     (None, None) => return Err("no destination".into()),
                 };
@@ -486,12 +516,15 @@ impl Dest {
     }
 }
 
-async fn run_once(spec: &Spec, status: &SharedStatus, moved: &mut u64) -> Result<(), String> {
-    let mut src = Source::open(spec).await?;
+async fn run_once(spec: &Spec, status: &SharedStatus, moved: &mut u64, limit: &mut Option<u64>) -> Result<(), String> {
+    let mut src = Source::open(spec, *moved, limit).await?;
+    if limit.is_some_and(|n| *moved >= n) {
+        return Ok(());
+    }
     let mut dest = Dest::open(spec).await?;
     set_status(status, "running", None);
     loop {
-        if spec.delete_after.is_some_and(|n| *moved >= n) {
+        if limit.is_some_and(|n| *moved >= n) {
             return Ok(());
         }
         let mut msg = src.next().await?;
@@ -518,7 +551,12 @@ mod tests {
         assert_eq!(spec.src.address.as_deref(), Some("/queues/in"));
         assert_eq!(spec.dest.exchange_key.as_deref(), Some("k"));
         assert_eq!(spec.ack_mode, AckMode::OnPublish);
-        assert_eq!(spec.delete_after, Some(5));
+        assert_eq!(spec.delete_after, DeleteAfter::Count(5));
+        let spec = Spec::parse(&json!({"src-queue": "a", "dest-queue": "b", "src-delete-after": "queue-length"})).unwrap();
+        assert_eq!(spec.delete_after, DeleteAfter::QueueLength);
+        assert_eq!(Spec::parse(&json!({"src-queue": "a", "dest-queue": "b", "src-delete-after": "never"})).unwrap().delete_after, DeleteAfter::Never);
+        assert!(Spec::parse(&json!({"src-exchange": "x", "dest-queue": "b", "src-delete-after": "queue-length"})).is_err());
+        assert!(Spec::parse(&json!({"src-queue": "a", "dest-queue": "b", "src-delete-after": "sometimes"})).is_err());
         assert!(Spec::parse(&json!({"src-queue": "a"})).is_err());
         assert!(Spec::parse(&json!({"src-queue": "a", "dest-queue": "b", "src-protocol": "mqtt"})).is_err());
     }

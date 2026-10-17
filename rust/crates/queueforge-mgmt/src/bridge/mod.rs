@@ -15,6 +15,17 @@ pub mod stomp;
 pub mod stream;
 
 static LOOPBACK_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+static NODE_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record this node's name, as management reports it. The first call wins.
+pub fn set_node_name(name: &str) {
+    let _ = NODE_NAME.set(name.to_string());
+}
+
+/// This node's name, for replies that name a queue's leader.
+pub(crate) fn node_name() -> String {
+    NODE_NAME.get().cloned().unwrap_or_else(|| "queueforge".into())
+}
 
 tokio::task_local! {
     /// Common name of the verified client certificate of the TLS session a

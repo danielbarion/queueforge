@@ -10,6 +10,7 @@
 pub mod amqp10_client;
 pub mod federation;
 pub mod shovel;
+pub(crate) mod tls;
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +49,8 @@ pub(crate) struct Endpoint {
     pub local: bool,
     /// The URI as reported, without the password.
     pub shown: String,
+    /// TLS for an `amqps://` URI.
+    pub tls: Option<tls::Tls>,
 }
 
 impl Endpoint {
@@ -61,6 +64,15 @@ impl Endpoint {
             self.port,
             pct(&self.vhost)
         )
+    }
+
+    /// Open an AMQP 0-9-1 connection, over TLS for `amqps://`.
+    pub async fn connect(&self) -> Result<lapin::Connection, String> {
+        let out = match &self.tls {
+            None => lapin::Connection::connect(&self.amqp_uri(), lapin::ConnectionProperties::default()).await,
+            Some(t) => tls::connect_091(&self.amqp_uri(), &self.host, self.port, t).await,
+        };
+        out.map_err(|e| format!("{}: {e}", self.shown))
     }
 }
 
@@ -140,11 +152,19 @@ pub(crate) fn shown_uri(uri: &str) -> String {
 
 /// Resolve a link URI. A local one logs in as an administrator with a ticket.
 pub(crate) async fn resolve(uri: &str) -> Result<Endpoint, String> {
+    resolve_as(uri, false).await
+}
+
+/// [`resolve`]; a `trusted` local endpoint may publish any `user-id`
+/// (federation's `trust-user-id`).
+pub(crate) async fn resolve_as(uri: &str, trusted: bool) -> Result<Endpoint, String> {
     let (user, pass, host, port, vhost) = parse_uri(uri)?;
     if !host.is_empty() {
+        let tls = if uri.starts_with("amqps://") { Some(tls::from_uri(uri, &host)?) } else { None };
         return Ok(Endpoint {
+            port: port.unwrap_or(if tls.is_some() { 5671 } else { 5672 }),
+            tls,
             host,
-            port: port.unwrap_or(5672),
             user: if user.is_empty() { "guest".into() } else { user },
             pass: if pass.is_empty() { "guest".into() } else { pass },
             vhost,
@@ -168,8 +188,8 @@ pub(crate) async fn resolve(uri: &str) -> Result<Endpoint, String> {
         .ok_or("no user to run a local link as")?
         .name
         .to_string();
-    let pass = queueforge_auth::external::issue_ticket(&admin);
-    Ok(Endpoint { host: "127.0.0.1".into(), port, user: admin, pass, vhost, local: true, shown: shown_uri(uri) })
+    let pass = if trusted { queueforge_auth::external::issue_trusted_ticket(&admin) } else { queueforge_auth::external::issue_ticket(&admin) };
+    Ok(Endpoint { host: "127.0.0.1".into(), port, user: admin, pass, vhost, local: true, shown: shown_uri(uri), tls: None })
 }
 
 /// The first URI of a `uri` field that may be a string or a list.

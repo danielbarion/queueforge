@@ -170,10 +170,27 @@ const TICKET_TTL_MS: u64 = 30_000;
 /// the next 30 s. The protocol bridges use it after a client certificate
 /// named `user`, as RabbitMQ's `ssl_cert_login` does.
 pub fn issue_ticket(user: &str) -> String {
+    ticket(user, "qf-ticket-")
+}
+
+const TRUSTED_PREFIX: &str = "qf-ticket-t-";
+
+/// A ticket whose connection may publish messages with any `user-id`, the
+/// way RabbitMQ's federation trusts forwarded user-ids (`trust-user-id`).
+pub fn issue_trusted_ticket(user: &str) -> String {
+    ticket(user, TRUSTED_PREFIX)
+}
+
+/// Whether a password that [`ticket_valid`] accepted is a trusted ticket.
+pub fn ticket_trusted(password: &str) -> bool {
+    password.starts_with(TRUSTED_PREFIX)
+}
+
+fn ticket(user: &str, prefix: &str) -> String {
     use rand_core::{OsRng, RngCore};
     let mut raw = [0u8; 24];
     OsRng.fill_bytes(&mut raw);
-    let token = format!("qf-ticket-{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw));
+    let token = format!("{prefix}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw));
     let now = now_ms();
     if let Ok(mut t) = tickets().lock() {
         t.retain(|_, (_, at)| now.saturating_sub(*at) < TICKET_TTL_MS);

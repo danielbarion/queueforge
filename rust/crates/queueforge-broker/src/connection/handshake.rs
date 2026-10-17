@@ -150,7 +150,10 @@ where
             .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?;
 
         let authed = match looked_up {
-            Some(user) if queueforge_auth::external::ticket_valid(&username, &password) => Some(user),
+            Some(user) if queueforge_auth::external::ticket_valid(&username, &password) => {
+                self.impersonator = queueforge_auth::external::ticket_trusted(&password);
+                Some(user)
+            }
             Some(user) => match verify_password(&password, &user.password_hash) {
                 Ok(true) => Some(user),
                 Ok(false) => None,

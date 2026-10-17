@@ -9,12 +9,14 @@
 //! with drain honoured. Each receiving link has its own channel and
 //! consumer; deliveries beyond the credit wait in the bridge. Dispositions
 //! map to ack (accepted), requeue (released, modified) and dead-letter
-//! (rejected, modified undeliverable-here).
+//! (rejected, modified undeliverable-here). A link pair on `/management` is
+//! RabbitMQ 4's management node (see [`management`]).
 
+mod management;
 pub(crate) mod map;
 pub(crate) mod types;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use futures_lite::StreamExt;
@@ -140,6 +142,8 @@ enum Ev {
 
 struct InLink {
     target: Option<Target>,
+    /// The link name, when this is the request side of the management pair.
+    management: Option<V>,
     credit: u32,
     delivery_count: u32,
     /// The frames of a transfer whose last frame has not come yet.
@@ -158,9 +162,18 @@ struct OutLink {
     buffer: VecDeque<Delivery>,
 }
 
+/// The reply side of the management pair: replies wait here for credit.
+struct MgmtLink {
+    name: V,
+    credit: u32,
+    delivery_count: u32,
+    pending: VecDeque<Vec<u8>>,
+}
+
 enum Link {
     In(InLink),
     Out(OutLink),
+    Mgmt(MgmtLink),
 }
 
 struct Session {
@@ -185,6 +198,11 @@ struct Conn {
     gen: u64,
     id: String,
     closing: bool,
+    vhost: String,
+    /// The channel management requests run on, reopened after a refusal.
+    mgmt_ch: Option<Channel>,
+    /// Sessions this side ended; the peer's end is not answered.
+    ended: HashSet<u16>,
 }
 
 struct Refuse(&'static str, String);
@@ -237,7 +255,20 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(mut io: S, amqp_por
     };
     let Some(publish) = confirm_channel(&amqp).await else { return };
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut c = Conn { amqp, publish, sessions: HashMap::new(), out: Vec::new(), remote_max_frame, tx, gen: 0, id, closing: false };
+    let mut c = Conn {
+        amqp,
+        publish,
+        sessions: HashMap::new(),
+        out: Vec::new(),
+        remote_max_frame,
+        tx,
+        gen: 0,
+        id,
+        closing: false,
+        vhost,
+        mgmt_ch: None,
+        ended: HashSet::new(),
+    };
     let mut beat = tokio::time::interval(Duration::from_millis(if idle > 0 { (idle / 2).max(500) } else { 3_600_000 }));
     beat.tick().await;
     let mut chunk = vec![0u8; 64 * 1024];
@@ -437,7 +468,9 @@ impl Conn {
             }
             Some(END) => {
                 self.end_session(channel).await;
-                self.send(channel, performative(END, vec![]));
+                if !self.ended.remove(&channel) {
+                    self.send(channel, performative(END, vec![]));
+                }
             }
             Some(CLOSE) => {
                 self.send(0, performative(CLOSE, vec![]));
@@ -449,6 +482,7 @@ impl Conn {
     }
 
     fn on_begin(&mut self, channel: u16, f: &V) {
+        self.ended.remove(&channel);
         let session = Session {
             links: HashMap::new(),
             next_outgoing_id: 0,
@@ -482,7 +516,18 @@ impl Conn {
             }
             performative(ATTACH, fields)
         };
-        let result = if client_receives {
+        let management = if client_receives { source.field(0).as_str() } else { target.field(0).as_str() } == Some(management::ADDRESS);
+        let result = if management {
+            let link = if client_receives {
+                Link::Mgmt(MgmtLink { name: name.clone(), credit: 0, delivery_count: 0, pending: VecDeque::new() })
+            } else {
+                Link::In(InLink { target: None, management: Some(name.clone()), credit: LINK_CREDIT, delivery_count: f.field(9).as_u32().unwrap_or(0), partial: None })
+            };
+            if let Some(s) = self.sessions.get_mut(&channel) {
+                s.links.insert(handle, link);
+            }
+            Ok(())
+        } else if client_receives {
             self.attach_out(channel, handle, &source, snd_settle == 1).await
         } else {
             self.attach_in(channel, handle, &target, f.field(9).as_u32().unwrap_or(0)).await
@@ -555,7 +600,7 @@ impl Conn {
                 }
             }
         };
-        let link = InLink { target: resolved, credit: LINK_CREDIT, delivery_count: initial, partial: None };
+        let link = InLink { target: resolved, management: None, credit: LINK_CREDIT, delivery_count: initial, partial: None };
         if let Some(s) = self.sessions.get_mut(&channel) {
             s.links.insert(handle, Link::In(link));
         }
@@ -591,6 +636,7 @@ impl Conn {
         let (count, credit, drain) = match s.links.get(&handle) {
             Some(Link::In(l)) => (l.delivery_count, l.credit, V::Null),
             Some(Link::Out(l)) => (l.delivery_count, l.credit, V::Bool(l.drain)),
+            Some(Link::Mgmt(l)) => (l.delivery_count, l.credit, V::Bool(false)),
             None => return,
         };
         let body = performative(
@@ -625,6 +671,23 @@ impl Conn {
         let echo = f.field(9).as_bool();
         let out_link = match s.links.get_mut(&handle) {
             Some(Link::In(_)) => None,
+            Some(Link::Mgmt(l)) => {
+                let seen = i64::from(f.field(5).as_u32().unwrap_or(0));
+                let credit = i64::from(f.field(6).as_u32().unwrap_or(0));
+                l.credit = (seen + credit - i64::from(l.delivery_count)).clamp(0, i64::from(u32::MAX)) as u32;
+                let drain = f.field(8).as_bool();
+                self.pump_mgmt(channel, handle);
+                if drain {
+                    if let Some(Link::Mgmt(l)) = self.sessions.get_mut(&channel).and_then(|s| s.links.get_mut(&handle)) {
+                        l.delivery_count = l.delivery_count.wrapping_add(l.credit);
+                        l.credit = 0;
+                    }
+                }
+                if drain || echo {
+                    self.link_flow(channel, handle);
+                }
+                return;
+            }
             Some(Link::Out(l)) => {
                 // The receiver's credit is relative to the delivery count it has seen.
                 let seen = i64::from(f.field(5).as_u32().unwrap_or(0));
@@ -773,12 +836,91 @@ impl Conn {
             l.credit = LINK_CREDIT;
         }
         let target = l.target.clone();
+        let management = l.management.clone();
         if refill {
             self.link_flow(channel, handle);
+        }
+        if let Some(name) = management {
+            if !settled {
+                self.send(channel, performative(DISPOSITION, vec![V::Bool(true), V::Uint(id), V::Null, V::Bool(true), V::described(ACCEPTED, V::List(vec![]))]));
+            }
+            return self.on_management(channel, &name, &message).await;
         }
         let outcome = self.publish(target, &message).await;
         if !settled {
             self.send(channel, performative(DISPOSITION, vec![V::Bool(true), V::Uint(id), V::Null, V::Bool(true), outcome]));
+        }
+    }
+
+    /// Answer one management request on the receiver paired with link `name`.
+    async fn on_management(&mut self, channel: u16, name: &V, message: &[u8]) {
+        let (id, outcome) = match management::parse(message) {
+            Ok(req) => {
+                let outcome = management::handle(&self.amqp, &mut self.mgmt_ch, &self.vhost, &req).await;
+                (req.id, outcome)
+            }
+            Err(e) => (V::Null, management::Outcome::Reply("400", V::Str(e))),
+        };
+        match outcome {
+            management::Outcome::Reply(status, body) => {
+                let payload = management::reply(&id, status, &body);
+                let Some(s) = self.sessions.get_mut(&channel) else { return };
+                let pair = s.links.iter_mut().find_map(|(h, l)| match l {
+                    Link::Mgmt(m) if &m.name == name => Some((*h, m)),
+                    _ => None,
+                });
+                if let Some((handle, m)) = pair {
+                    m.pending.push_back(payload);
+                    self.pump_mgmt(channel, handle);
+                }
+            }
+            management::Outcome::Refused(description) => {
+                // RabbitMQ ends the session rather than replying 403.
+                self.end_session(channel).await;
+                self.ended.insert(channel);
+                self.send(channel, performative(END, vec![error("amqp:unauthorized-access", &description)]));
+            }
+            management::Outcome::Fail(condition, description) => self.fail(condition, &description),
+        }
+    }
+
+    /// Send waiting management replies while the receiver has credit. Replies go presettled.
+    fn pump_mgmt(&mut self, channel: u16, handle: u32) {
+        let max_frame = self.remote_max_frame;
+        let Some(s) = self.sessions.get_mut(&channel) else { return };
+        let Some(Link::Mgmt(l)) = s.links.get_mut(&handle) else { return };
+        while l.credit > 0 {
+            let Some(payload) = l.pending.pop_front() else { break };
+            l.credit -= 1;
+            l.delivery_count = l.delivery_count.wrapping_add(1);
+            let id = s.next_delivery_id;
+            s.next_delivery_id = s.next_delivery_id.wrapping_add(1);
+            let head = |more: bool| {
+                performative(TRANSFER, vec![V::Uint(handle), V::Uint(id), V::Binary(id.to_be_bytes().to_vec()), V::Uint(0), V::Bool(true), V::Bool(more)])
+            };
+            let room = max_frame - 8 - head(true).len() - 8;
+            let mut at = 0;
+            loop {
+                let end = (at + room).min(payload.len());
+                let more = end < payload.len();
+                let mut body = if at == 0 {
+                    head(more)
+                } else {
+                    performative(TRANSFER, vec![V::Uint(handle), V::Null, V::Null, V::Null, V::Bool(true), V::Bool(more)])
+                };
+                body.extend_from_slice(&payload[at..end]);
+                let f = frame(0, channel, &body);
+                if s.held.is_empty() && u64::from(s.next_outgoing_id) < s.remote_limit {
+                    s.next_outgoing_id = s.next_outgoing_id.wrapping_add(1);
+                    self.out.extend(f);
+                } else {
+                    s.held.push_back(f);
+                }
+                at = end;
+                if !more {
+                    break;
+                }
+            }
         }
     }
 

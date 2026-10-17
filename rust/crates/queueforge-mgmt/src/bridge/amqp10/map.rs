@@ -47,9 +47,20 @@ fn text(v: &V) -> Option<String> {
     }
 }
 
-/// One application property or annotation as a 0-9-1 field.
-fn to_field(v: &V) -> AMQPValue {
+/// One application property, annotation or management argument as a 0-9-1 field.
+pub(crate) fn to_field(v: &V) -> AMQPValue {
     match v {
+        V::Map(pairs) => {
+            let mut t = BTreeMap::new();
+            for (k, val) in pairs {
+                if let Some(key) = k.as_str() {
+                    t.insert(ShortString::from(key), to_field(val));
+                }
+            }
+            AMQPValue::FieldTable(FieldTable::from(t))
+        }
+        V::List(items) | V::Array(items) => AMQPValue::FieldArray(items.iter().map(to_field).collect::<Vec<_>>().into()),
+        V::Described(_, inner) => to_field(inner),
         V::Str(s) | V::Sym(s) => AMQPValue::LongString(LongString::from(s.as_bytes().to_vec())),
         V::Bool(b) => AMQPValue::Boolean(*b),
         V::Binary(b) => AMQPValue::ByteArray(b.clone().into()),

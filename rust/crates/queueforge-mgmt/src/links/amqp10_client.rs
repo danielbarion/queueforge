@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use lapin::BasicProperties;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::bridge::amqp10::map;
@@ -56,9 +56,13 @@ pub struct Received {
     pub subject: Option<String>,
 }
 
+/// A plain or TLS byte stream.
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
 /// One AMQP 1.0 connection with one session and one link.
 pub struct Client {
-    io: TcpStream,
+    io: Box<dyn Io>,
     buf: Vec<u8>,
     /// Credit still granted to the peer (receiver) or by the peer (sender).
     credit: u32,
@@ -81,13 +85,20 @@ pub fn address(raw: &str) -> String {
 }
 
 impl Client {
-    /// Connect, authenticate with PLAIN, open `vhost` and begin a session.
-    pub async fn connect(host: &str, port: u16, user: &str, pass: &str, vhost: &str) -> Result<Self, String> {
-        let io = tokio::time::timeout(IO_TIMEOUT, TcpStream::connect((host, port)))
-            .await
-            .map_err(|_| "amqp10 connect timed out".to_string())?
-            .map_err(|e| format!("amqp10 connect: {e}"))?;
-        let _ = io.set_nodelay(true);
+    /// Connect (over TLS when `tls` is set), authenticate with PLAIN, open
+    /// `vhost` and begin a session.
+    pub(crate) async fn connect(host: &str, port: u16, user: &str, pass: &str, vhost: &str, tls: Option<&super::tls::Tls>) -> Result<Self, String> {
+        let io: Box<dyn Io> = match tls {
+            Some(t) => Box::new(super::tls::connect_stream(host, port, t).await.map_err(|e| format!("amqp10 {e}"))?),
+            None => {
+                let tcp = tokio::time::timeout(IO_TIMEOUT, TcpStream::connect((host, port)))
+                    .await
+                    .map_err(|_| "amqp10 connect timed out".to_string())?
+                    .map_err(|e| format!("amqp10 connect: {e}"))?;
+                let _ = tcp.set_nodelay(true);
+                Box::new(tcp)
+            }
+        };
         let mut c = Client {
             io,
             buf: Vec::new(),
@@ -139,7 +150,9 @@ impl Client {
     }
 
     async fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.io.write_all(bytes).await.map_err(|e| format!("amqp10 write: {e}"))
+        self.io.write_all(bytes).await.map_err(|e| format!("amqp10 write: {e}"))?;
+        // A TLS stream holds written bytes until flushed.
+        self.io.flush().await.map_err(|e| format!("amqp10 write: {e}"))
     }
 
     async fn fill(&mut self) -> Result<(), String> {
