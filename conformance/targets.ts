@@ -18,7 +18,7 @@ export const PASS = "devpassword12";
 export const TARGETS = ["rabbitmq", "rust", "bun", "php"] as const;
 export type Target = (typeof TARGETS)[number];
 
-export type Ports = { amqp: number; amqps: number; mgmt: number; metrics: number; mqtt: number; stomp: number; stream: number; mqttWs: number; stompWs: number };
+export type Ports = { amqp: number; amqps: number; mgmt: number; metrics: number; mqtt: number; stomp: number; stream: number; mqttWs: number; stompWs: number; mqtts: number; stomps: number };
 
 export type Running = {
   target: Target;
@@ -39,6 +39,8 @@ const RABBIT_PLUGINS = [
   "rabbitmq_event_exchange",
   "rabbitmq_shovel",
   "rabbitmq_federation",
+  "rabbitmq_federation_management",
+  "rabbitmq_shovel_management",
   "rabbitmq_auth_mechanism_ssl",
   "rabbitmq_auth_backend_oauth2",
   "rabbitmq_auth_backend_ldap",
@@ -67,6 +69,8 @@ async function ports(): Promise<Ports> {
     stream: await freePort(),
     mqttWs: await freePort(),
     stompWs: await freePort(),
+    mqtts: await freePort(),
+    stomps: await freePort(),
   };
 }
 
@@ -126,6 +130,8 @@ function envFor(target: Target, p: Ports, fx: Fixtures): Record<string, string> 
     QF_STOMP_PORT: String(p.stomp),
     QF_STREAM_PORT: String(p.stream),
     QF_AMQPS_PORT: String(p.amqps),
+    QF_MQTTS_PORT: String(p.mqtts),
+    QF_STOMPS_PORT: String(p.stomps),
     QF_PKI: fx.pki,
     QF_OAUTH_KEY: fx.oauthKey,
     QF_OAUTH_KID: fx.oauthKid,
@@ -144,6 +150,8 @@ mqtt = "127.0.0.1:${p.mqtt}"
 stomp = "127.0.0.1:${p.stomp}"
 stream = "127.0.0.1:${p.stream}"
 amqps = "127.0.0.1:${p.amqps}"
+mqtts = "127.0.0.1:${p.mqtts}"
+stomps = "127.0.0.1:${p.stomps}"
 
 [data]
 dir = "${join(dir, "data")}"
@@ -171,6 +179,12 @@ user_dn_pattern = "${LDAP_USER_DN}"
 admin_group = "${LDAP_ADMIN_GROUP}"
 bind_dn = "${LDAP_BIND_DN}"
 bind_password = "${LDAP_BIND_PASSWORD}"
+
+# RabbitMQ's resource_access_query: only qf-admins may configure.
+[auth.ldap.resource_access]
+configure = { in_group = "${LDAP_ADMIN_GROUP}" }
+write = { constant = true }
+read = { constant = true }
 `,
   );
   return path;
@@ -230,6 +244,10 @@ auth_mechanisms.1 = PLAIN
 auth_mechanisms.2 = AMQPLAIN
 auth_mechanisms.3 = EXTERNAL
 ssl_cert_login_from = common_name
+mqtt.listeners.ssl.default = 8883
+mqtt.ssl_cert_login = true
+stomp.listeners.ssl.1 = 61614
+stomp.ssl_cert_login = true
 auth_backends.1 = internal
 auth_backends.2 = rabbit_auth_backend_oauth2
 auth_backends.3 = ldap
@@ -246,7 +264,7 @@ auth_ldap.other_bind.password = ${LDAP_BIND_PASSWORD}
   );
   writeFileSync(
     join(dir, "advanced.config"),
-    `[{rabbitmq_auth_backend_ldap, [{tag_queries, [{administrator, {in_group, "${LDAP_ADMIN_GROUP}"}}, {management, {constant, true}}]}]}].\n`,
+    `[{rabbitmq_auth_backend_ldap, [{tag_queries, [{administrator, {in_group, "${LDAP_ADMIN_GROUP}"}}, {management, {constant, true}}]}, {resource_access_query, {for, [{permission, configure, {in_group, "${LDAP_ADMIN_GROUP}"}}, {permission, write, {constant, true}}, {permission, read, {constant, true}}]}}]}].\n`,
   );
   spawnSync("chmod", ["-R", "a+rX", dir]);
   return dir;
@@ -270,6 +288,8 @@ async function startRabbit(): Promise<Running> {
       "-e", `RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbitmq_stream advertised_host "127.0.0.1" advertised_port ${p.stream}`,
       "-p", `127.0.0.1:${p.amqp}:5672`,
       "-p", `127.0.0.1:${p.amqps}:5671`,
+      "-p", `127.0.0.1:${p.mqtts}:8883`,
+      "-p", `127.0.0.1:${p.stomps}:61614`,
       "-v", `${fx.pki}:/pki:ro`,
       "-v", `${etc}/20-conformance.conf:/etc/rabbitmq/conf.d/20-conformance.conf:ro`,
       "-v", `${etc}/advanced.config:/etc/rabbitmq/advanced.config:ro`,
