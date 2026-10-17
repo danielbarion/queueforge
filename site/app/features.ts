@@ -1,4 +1,4 @@
-// Feature support audited from source and focused tests through 2026-10-12.
+// Feature support audited from source and focused tests through 2026-10-17.
 // "p" means partial; each note identifies a remaining limitation. RabbitMQ
 // notes identify plugins; core features have no plugin note.
 //
@@ -39,7 +39,7 @@ export const BROKERS: { key: Broker; name: string }[] = [
   { key: "php", name: "PHP" },
 ];
 
-export const AUDITED = "2026-10-12";
+export const AUDITED = "2026-10-17";
 
 export const featureGroups: FeatureGroup[] = [
   {
@@ -218,6 +218,12 @@ export const featureGroups: FeatureGroup[] = [
         cells: { mq: "y", rust: ["y", "Raft-replicated; shared with Bun and PHP"], bun: ["y", "Raft-replicated; shared with Rust and PHP"], php: ["y", "Raft-replicated; shared with Rust and Bun"] },
       },
       {
+        name: "Stream filtering",
+        detail: "A consumer reads only the records whose filter matches",
+        code: ["x-stream-filter"],
+        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+      },
+      {
         name: "Super streams",
         detail: "A stream partitioned across several logs",
         cells: { mq: "y", rust: "y", bun: "y", php: "y" },
@@ -315,6 +321,29 @@ export const featureGroups: FeatureGroup[] = [
           bun: "y",
           php: "y",
         },
+      },
+      {
+        name: "Quorum strict priorities",
+        detail: "32 strict levels on a quorum queue. Higher priority is delivered first",
+        code: ["x-max-priority"],
+        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+      },
+      {
+        name: "Delayed retries",
+        detail: "A quorum queue holds a returned message and redelivers it after a delay",
+        code: ["x-delayed-retry-type"],
+        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+      },
+      {
+        name: "Unlimited returns",
+        detail: "A basic.nack requeue does not count toward the delivery limit",
+        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+      },
+      {
+        name: "Quorum consumer timeout",
+        detail: "Return unacked messages and cancel only that consumer",
+        code: ["x-consumer-timeout"],
+        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
       },
       {
         name: "Queue leader locator",
@@ -439,7 +468,7 @@ export const featureGroups: FeatureGroup[] = [
       },
       {
         name: "Password hashing",
-        detail: "Salted SHA-256, RabbitMQ compatible",
+        detail: "Salted SHA-256, SHA-512, and MD5, the modules RabbitMQ ships",
         cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
@@ -487,9 +516,9 @@ export const featureGroups: FeatureGroup[] = [
         detail: "RabbitMQ-style /api routes",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["y", "a subset"],
-          bun: ["y", "a subset"],
-          php: ["y", "a subset, including connection and channel lists"],
+          rust: ["p", "a subset"],
+          bun: ["p", "a subset"],
+          php: ["p", "a subset, including connection and channel lists"],
         },
       },
       {
@@ -643,8 +672,8 @@ export const featureGroups: FeatureGroup[] = [
         cells: {
           mq: "y",
           rust: "y",
-          bun: ["y", "one child per core"],
-          php: ["y", "one child per core"],
+          bun: ["p", "one child per core; the parent only hands the socket"],
+          php: ["p", "one process unless QUEUEFORGE_CORES is set"],
         },
       },
     ],

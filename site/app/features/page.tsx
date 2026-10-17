@@ -18,9 +18,10 @@ export default function FeaturesPage() {
           <h1>Next to RabbitMQ, line by line.</h1>
           <p className="lede">
             {count} RabbitMQ features, checked against each broker&apos;s source. This is not every
-            RabbitMQ 4.3 feature. Quorum priorities, delayed retry, consumer timeouts, and stream
-            filters have no row here. Partial means the feature works with a gap, and the note names
-            the gap.
+            RabbitMQ 4.3 feature. Strict quorum priorities, delayed retries, unlimited returns,
+            quorum consumer timeouts, and stream filtering are rows, and none of the three brokers
+            implement them. The 4.3 AMQP 1.0 additions are not rows here. Partial means the feature
+            works with a gap, and the note names the gap.
           </p>
         </div>
       </section>

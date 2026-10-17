@@ -54,7 +54,8 @@ export default function Page() {
               </ul>
               <p className="note">
                 Versus RabbitMQ 4.3, on one core. QueueForge&apos;s durable confirm returns after
-                the covering fsync. RabbitMQ 4.3 classic confirms before its flush.
+                the covering fsync. A RabbitMQ 4.3 classic confirm follows the batch write, or a
+                consumer ack if that happens first, and classic does not fsync before the confirm.
               </p>
             </div>
             <div className="chart">

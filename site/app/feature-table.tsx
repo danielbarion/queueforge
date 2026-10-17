@@ -81,13 +81,11 @@ export function FeatureTable() {
       </div>
     </div>
     <p className="caption" id="process-note">
-      <sup>*</sup> Bun and PHP are not one process that uses every core. When the process is allowed
-      more than one core, a parent starts one child per core. The parent accepts the connection and
-      hands the socket to a child. It does not read messages. The child keeps the messages from the
-      connections it was given. PHP does not start those children when TLS is on. One connection
-      then confirms and delivers nothing, because the publisher and the consumer are handed to
-      different children. Sixteen publishers opened before sixteen consumers still deliver, because
-      both ends of a queue land on the same child.
+      <sup>*</sup> Bun and PHP are not one process that uses every core. Bun starts one child per
+      core the container allows. PHP stays one process unless <code>QUEUEFORGE_CORES</code> is
+      set, and then does the same. The parent accepts the connection and hands the socket to the
+      child that owns the queue. It does not read messages. One classic queue stays on one child.
+      A publisher and a consumer that land on different children still deliver.
     </p>
     </>
   );
@@ -130,8 +128,9 @@ export function FeatureTease() {
         <h2>What it does, and what it does not.</h2>
         <p className="section-lead">
           A checked list of RabbitMQ features, read from each broker&apos;s source. Not every
-          RabbitMQ 4.3 feature. Bun covers every core row; Rust has gaps in replication and
-          storage. LDAP, OAuth, MQTT 5 and the other plugin rows are partial on both.
+          RabbitMQ 4.3 feature. Strict quorum priorities, delayed retries, unlimited returns, and
+          quorum consumer timeouts are missing on all three. Bun starts one child per core. PHP
+          stays one process unless told otherwise. LDAP, OAuth, and MQTT 5 stay partial.
         </p>
         <Tallies />
         <p>
