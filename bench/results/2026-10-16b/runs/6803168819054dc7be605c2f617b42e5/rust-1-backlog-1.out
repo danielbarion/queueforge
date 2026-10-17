@@ -1,0 +1,15 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-231415-690, starting consumer #0
+id: test-231415-690, starting consumer #0, channel #0
+id: test-231415-690, starting consumer #1
+id: test-231415-690, starting consumer #1, channel #0
+id: test-231415-690, starting consumer #2
+id: test-231415-690, starting consumer #2, channel #0
+id: test-231415-690, starting consumer #3
+id: test-231415-690, starting consumer #3, channel #0
+id: test-231415-690, time 1.000 s, received: 279517 msg/s, min/median/75th/95th/99th/max consumer latency: 1790639/2037036/2298915/3910788/3918151/3922945 µs
+id: test-231415-690, time 2.005 s, received: 20401 msg/s, min/median/75th/95th/99th/max consumer latency: 1762062/1775938/1781760/1785532/1792117/1792900 µs
+test stopped (Reached time limit)
+id: test-231415-690, sending rate avg: 0 msg/s
+id: test-231415-690, receiving rate avg: 3331 msg/s
+id: test-231415-690, consumer latency min/median/75th/95th/99th/max 1762065/2017192/2294896/3908150/3917583/3922826 µs

@@ -1,0 +1,9 @@
+queueforge-bun: every voter supports raft; enabling it
+queueforge-bun child=n3 peers=3/3 amqp=adopted management=off metrics=127.0.0.1:25679
+queueforge-bun: every voter supports raft; enabling it
+queueforge-bun: every voter supports raft; enabling it
+queueforge-bun: every voter supports raft; enabling it
+queueforge-bun child=n1 peers=3/3 amqp=adopted management=off metrics=127.0.0.1:25677
+queueforge-bun child=n2 peers=3/3 amqp=adopted management=off metrics=127.0.0.1:25678
+queueforge-bun child=n0 peers=3/3 amqp=adopted management=0.0.0.0:15672 metrics=127.0.0.1:25676
+queueforge-bun parent cores=4

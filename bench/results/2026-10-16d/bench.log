@@ -1,0 +1,33 @@
+22:22:00 BASELINE copied from /private/tmp/qf-ab/coco/wt-bun/bench/results/2026-10-16c
+22:22:00 STEP build start
+22:22:02 STEP build done in 2s
+22:22:02 PROGRESS vm before ncpu=2 mem=8320565248
+22:22:02 PROGRESS docker quit
+22:22:06 PROGRESS docker start
+22:22:09 PROGRESS vm large ncpu=8 mem=25159827456
+22:22:09 STEP scenarios start
+22:22:39 CELL rust 1 CPU / 1 GiB large-64k ok=1 err= sent=19204.3 recv=19203.6 mb=1258.5 p50=0.58 p99=1.66 mib=203 anon=35 cpu=93 client=82 kept=yes disk=1259.8 fsyncs=1144.3 fsync_ms=0.44
+22:23:08 CELL rust 1 CPU / 1 GiB large-64k ok=1 err= sent=17719.9 recv=17719.0 mb=1161.2 p50=0.52 p99=1.62 mib=178 anon=36 cpu=88 client=77 kept=yes disk=1170.3 fsyncs=1008.9 fsync_ms=0.58
+22:23:38 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=16056.3 recv=16056.4 mb=1052.3 p50=0.24 p99=1.73 mib=320 anon=131 cpu=88 client=70 kept=yes disk=1054.9 fsyncs=2287.8 fsync_ms=0.37
+22:24:08 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=15909.5 recv=15909.7 mb=1042.7 p50=0.24 p99=1.87 mib=235 anon=133 cpu=87 client=70 kept=yes disk=1046.3 fsyncs=2270.1 fsync_ms=0.37
+22:24:37 CELL rust 1 CPU / 1 GiB large-1m ok=1 err= sent=1293.0 recv=1293.0 mb=1355.9 p50=1.01 p99=3.73 mib=196 anon=46 cpu=84 client=56 kept=yes disk=1353.5 fsyncs=823.4 fsync_ms=0.79
+22:25:06 CELL rust 1 CPU / 1 GiB large-1m ok=1 err= sent=1234.1 recv=1234.0 mb=1293.9 p50=0.92 p99=4.55 mib=197 anon=48 cpu=81 client=52 kept=yes disk=1292.8 fsyncs=758.1 fsync_ms=0.87
+22:25:36 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=1490.8 recv=1490.8 mb=1563.3 p50=0.78 p99=2.33 mib=231 anon=128 cpu=86 client=63 kept=yes disk=1561.7 fsyncs=1453.1 fsync_ms=0.55
+22:26:05 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=1340.9 recv=1340.9 mb=1406.1 p50=0.92 p99=3.65 mib=230 anon=128 cpu=80 client=59 kept=yes disk=1349.3 fsyncs=1248.7 fsync_ms=0.62
+22:26:34 CELL rust 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=12719.3 recv=12719.3 mb=833.6 p50=0.57 p99=1.77 mib=176 anon=34 cpu=60 client=54 kept=yes disk=795.9 fsyncs=714.6 fsync_ms=0.94
+22:27:03 CELL rust 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=9922.3 recv=9922.9 mb=650.3 p50=0.50 p99=1.61 mib=176 anon=34 cpu=48 client=43 kept=yes disk=627.8 fsyncs=558.5 fsync_ms=1.33
+22:27:33 CELL bun 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=8881.0 recv=8881.2 mb=582.0 p50=1.61 p99=22.05 mib=327 anon=225 cpu=51 client=40 kept=yes disk=602.3 fsyncs=1242.8 fsync_ms=0.70
+22:28:03 CELL bun 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=10297.6 recv=10297.7 mb=674.9 p50=1.57 p99=5.09 mib=290 anon=188 cpu=59 client=45 kept=yes disk=701.4 fsyncs=1431.9 fsync_ms=0.59
+22:28:32 CELL rust 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=911.8 recv=911.9 mb=956.2 p50=0.90 p99=3.14 mib=195 anon=44 cpu=58 client=39 kept=yes disk=905.1 fsyncs=537.7 fsync_ms=1.39
+22:29:01 CELL rust 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=917.5 recv=917.4 mb=962.0 p50=0.92 p99=3.09 mib=189 anon=44 cpu=61 client=42 kept=yes disk=940.7 fsyncs=564.1 fsync_ms=1.31
+22:29:31 CELL bun 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=711.1 recv=711.1 mb=745.6 p50=1.75 p99=28.10 mib=248 anon=146 cpu=49 client=34 kept=yes disk=787.4 fsyncs=672.6 fsync_ms=1.28
+22:30:01 CELL bun 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=809.4 recv=809.5 mb=848.8 p50=1.73 p99=16.13 mib=252 anon=150 cpu=59 client=43 kept=yes disk=909.4 fsyncs=787.4 fsync_ms=1.04
+22:30:01 DONE scenarios
+22:30:01 STEP scenarios done in 472s
+22:30:01 PROGRESS restore docker to 2 cpu 8192 MiB
+22:30:01 PROGRESS docker quit
+22:30:05 PROGRESS docker start
+22:30:08 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+22:30:08 STEP report start
+22:30:09 STEP report done in 0s
+22:30:09 RUN done: /private/tmp/qf-ab/coco/wt-bun/bench/last-run.json

@@ -1,0 +1,16 @@
+22:00:47 BASELINE copied from /private/tmp/qf-ab/coco/wt-bun/bench/results/2026-10-16b
+22:00:47 STEP build start
+22:00:49 STEP build done in 2s
+22:00:49 PROGRESS vm before ncpu=2 mem=8320565248
+22:00:49 PROGRESS docker quit
+22:00:53 PROGRESS docker start
+22:00:56 PROGRESS vm large ncpu=8 mem=25159827456
+22:00:56 STEP load start
+22:18:40 STEP load done in 1064s
+22:18:40 PROGRESS restore docker to 2 cpu 8192 MiB
+22:18:40 PROGRESS docker quit
+22:18:44 PROGRESS docker start
+22:18:47 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+22:18:47 STEP report start
+22:18:47 STEP report done in 0s
+22:18:47 RUN done: /private/tmp/qf-ab/coco/wt-bun/bench/last-run.json

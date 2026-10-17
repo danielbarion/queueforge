@@ -1,0 +1,86 @@
+[2m2026-10-16T23:43:02.211169Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m QueueForge starting [3mversion[0m[2m=[0m"0.1.0" [3mamqp[0m[2m=[0m0.0.0.0:5672 [3mmanagement[0m[2m=[0m0.0.0.0:15672 [3mmetrics[0m[2m=[0m0.0.0.0:15692 [3mdata_dir[0m[2m=[0m/var/lib/queueforge [3mtotal_ram_bytes[0m[2m=[0m1073741824 [3msoft_watermark[0m[2m=[0m0.5 [3mhigh_watermark[0m[2m=[0m0.6 [3mdisk_free_limit[0m[2m=[0m2147483648 [3mmax_connections[0m[2m=[0m100000 [3mmax_message_bytes[0m[2m=[0m16777216 [3mtls[0m[2m=[0mfalse
+[2m2026-10-16T23:43:02.233046Z[0m [32m INFO[0m [2mqueueforge_store::metadata::schema[0m[2m:[0m bootstrapped metadata schema v1 with default vhost and builtin exchanges [3mdata_dir[0m[2m=[0m/var/lib/queueforge
+[2m2026-10-16T23:43:02.240554Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m metadata store ready [3mdata_dir[0m[2m=[0m/var/lib/queueforge [3mschema_version[0m[2m=[0m1 [3mvhosts[0m[2m=[0m1
+[2m2026-10-16T23:43:02.247955Z[0m [32m INFO[0m [2mqueueforge_auth::service[0m[2m:[0m bootstrapped administrator from environment [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m"/"
+[2m2026-10-16T23:43:02.247968Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m auth ready [3musers[0m[2m=[0m1 [3mbootstrapped[0m[2m=[0mtrue
+[2m2026-10-16T23:43:02.248009Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m memory tracker ready [3msoft_limit_bytes[0m[2m=[0m536870912 [3mhard_limit_bytes[0m[2m=[0m644245094
+[2m2026-10-16T23:43:02.248023Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m disk budget ready [3mdisk_free_bytes[0m[2m=[0m1711691153408 [3mdisk_free_limit[0m[2m=[0m2147483648
+[2m2026-10-16T23:43:02.248112Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m exchange router ready (user bindings loaded) [3mexchanges[0m[2m=[0m8 [3mbindings[0m[2m=[0m0
+[2m2026-10-16T23:43:02.248742Z[0m [32m INFO[0m [2mqueueforge_metrics[0m[2m:[0m metrics and health listener started [3mlocal_addr[0m[2m=[0m0.0.0.0:15692
+[2m2026-10-16T23:43:02.248756Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m metrics/health listening (readyz=503 during recovery) [3mlocal_addr[0m[2m=[0m0.0.0.0:15692
+[2m2026-10-16T23:43:02.248766Z[0m [32m INFO[0m [2mqueueforge_store::recovery[0m[2m:[0m durable recovery complete [3mexclusive_purged[0m[2m=[0m0 [3mqueues_restored[0m[2m=[0m0 [3mqueues_corrupt[0m[2m=[0m0 [3mmessages_recovered[0m[2m=[0m0
+[2m2026-10-16T23:43:02.248771Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m recovery finished [3mexclusive_purged[0m[2m=[0m0 [3mqueues_restored[0m[2m=[0m0 [3mmessages_recovered[0m[2m=[0m0 [3mquorum_messages_recovered[0m[2m=[0m0 [3mqueues_corrupt[0m[2m=[0m0
+[2m2026-10-16T23:43:02.248772Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m broker ready (recovery complete)
+[2m2026-10-16T23:43:02.248895Z[0m [32m INFO[0m [2mqueueforge_mgmt[0m[2m:[0m management HTTP listener started [3mlocal_addr[0m[2m=[0m0.0.0.0:15672 [3mtls[0m[2m=[0mfalse
+[2m2026-10-16T23:43:02.248915Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m management HTTP listening [3mlocal_addr[0m[2m=[0m0.0.0.0:15672 [3mtls[0m[2m=[0mfalse
+[2m2026-10-16T23:43:02.248926Z[0m [32m INFO[0m [2mqueueforge_broker::listener[0m[2m:[0m AMQP listening [3mlocal_addr[0m[2m=[0m0.0.0.0:5672 [3mtls[0m[2m=[0mfalse
+[2m2026-10-16T23:43:02.248961Z[0m [32m INFO[0m [2mqueueforge[0m[2m:[0m AMQP listener ready [3mlocal_addr[0m[2m=[0m0.0.0.0:5672 [3mtls[0m[2m=[0mfalse
+[2m2026-10-16T23:43:02.297784Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38900 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.297952Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38900 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.329533Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39106 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329614Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39152 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329688Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38904 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329708Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38918 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329723Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38934 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329744Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38942 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329759Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38954 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329778Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38958 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329802Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38960 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329818Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38974 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329835Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38976 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329852Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:38988 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329869Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39002 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329885Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39130 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329901Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39016 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329917Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39032 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329932Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39048 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329951Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39060 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329964Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39066 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329984Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39074 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.329999Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39084 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330018Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39096 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330033Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39098 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330053Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39100 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330070Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39114 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330099Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39134 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330117Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39144 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330136Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39106 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330170Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39144 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330188Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39166 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330212Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39152 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330232Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39170 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330248Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39178 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330266Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39186 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330280Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39198 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330297Z[0m [32m INFO[0m [2mqueueforge_broker::connection::handshake[0m[2m:[0m authenticated [3mpeer[0m[2m=[0m172.29.0.2:39208 [3muser[0m[2m=[0madmin
+[2m2026-10-16T23:43:02.330316Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38904 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330341Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38918 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330364Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38934 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330389Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38942 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330425Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38958 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330447Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38960 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330472Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38974 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330494Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38976 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.330622Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38954 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331101Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39002 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331133Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39130 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331184Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39016 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331228Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39032 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331254Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39048 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331282Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39060 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331311Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39066 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331336Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39074 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331360Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39084 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331383Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39096 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331397Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:38988 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331421Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39098 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331447Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39100 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331475Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39114 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331501Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39134 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331528Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39166 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331551Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39170 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331582Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39178 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331610Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39186 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331630Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39198 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.331645Z[0m [32m INFO[0m [2mqueueforge_broker::connection::open[0m[2m:[0m connection open [3mpeer[0m[2m=[0m172.29.0.2:39208 [3muser[0m[2m=[0madmin [3mvhost[0m[2m=[0m/
+[2m2026-10-16T23:43:02.336066Z[0m [32m INFO[0m [2mqueueforge_core::queue::registry::declare[0m[2m:[0m queue declared [3mvhost[0m[2m=[0m/ [3mqueue[0m[2m=[0mq0 [3mdurable[0m[2m=[0mtrue

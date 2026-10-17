@@ -1,0 +1,41 @@
+{
+  "broker": "php",
+  "broker_image": "sha256:e7187362eea2598d9817cabf8546c0f5a4afe10830eb0506bbb993a79cc87fe5",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "0154e49021ff4b6ab1c9ba31bdf03543",
+  "expected_repeats": 2,
+  "harness_sha256": "7ccec3ca0f2c73cd06ed640f1cbca7856d1274b01e0f0b237b3e52909c2fd406",
+  "image_source_revision": null,
+  "image_source_sha256": null,
+  "invocation_source_commit": "bc7ccfa06de0e04c6126ac388601cf2ca015ce23",
+  "invocation_source_content_sha256": "269e84f39455f81bff66dda0fb6f0c979e7aacb9371b186faa2258959ceb1016",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-16/"
+  ],
+  "repeat_ordinal": 2,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "d7667a9cd17a432aa9f6be5a61adbcdd",
+  "scenario": {
+    "args": "-x 2 -y 2 -u blobs-qq -qq -f persistent -s 65536 -c 20 -q 20",
+    "bytes": 65536,
+    "id": "large-64k-quorum",
+    "real": "The 64 KiB cell on a quorum queue, which RabbitMQ also fsyncs before the confirm.",
+    "title": "64 KiB messages, quorum queue"
+  },
+  "scenario_sha256": "8a8c2572649cdeb9949fecb8d22f852ce43ce662d4ae4012dd06b4831687769b",
+  "started_utc": "2026-10-16T14:01:59Z"
+}

@@ -1,0 +1,32 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-142956-344, starting consumer #0
+id: test-142956-344, starting consumer #0, channel #0
+id: test-142956-344, starting consumer #1
+id: test-142956-344, starting consumer #1, channel #0
+id: test-142956-344, starting producer #0
+id: test-142956-344, starting producer #0, channel #0
+id: test-142956-344, starting producer #1
+id: test-142956-344, starting producer #1, channel #0
+id: test-142956-344, time 1.001 s, sent: 31336 msg/s, received: 31338 msg/s, min/median/75th/95th/99th/max consumer latency: 55/147/251/1486/3996/9904 µs
+id: test-142956-344, time 2.000 s, sent: 43619 msg/s, received: 43613 msg/s, min/median/75th/95th/99th/max consumer latency: 50/105/136/270/1094/4019 µs
+id: test-142956-344, time 3.007 s, sent: 14268 msg/s, received: 14274 msg/s, min/median/75th/95th/99th/max consumer latency: 51/100/132/202/1096/2009 µs
+id: test-142956-344, time 7.000 s, sent: 16962 msg/s, received: 16962 msg/s, min/median/75th/95th/99th/max consumer latency: 47/100/131/196/1062/1887 µs
+id: test-142956-344, time 8.000 s, sent: 71210 msg/s, received: 71190 msg/s, min/median/75th/95th/99th/max consumer latency: 49/102/134/233/1081/2708 µs
+id: test-142956-344, time 9.000 s, sent: 67610 msg/s, received: 67630 msg/s, min/median/75th/95th/99th/max consumer latency: 51/106/143/216/1177/11731 µs
+id: test-142956-344, time 10.000 s, sent: 69289 msg/s, received: 69282 msg/s, min/median/75th/95th/99th/max consumer latency: 58/110/146/208/1061/2003 µs
+id: test-142956-344, time 11.000 s, sent: 68800 msg/s, received: 68797 msg/s, min/median/75th/95th/99th/max consumer latency: 52/103/136/211/1139/2390 µs
+id: test-142956-344, time 12.000 s, sent: 54578 msg/s, received: 54580 msg/s, min/median/75th/95th/99th/max consumer latency: 50/105/133/196/1026/4533 µs
+id: test-142956-344, time 13.000 s, sent: 68780 msg/s, received: 68788 msg/s, min/median/75th/95th/99th/max consumer latency: 50/95/123/176/592/9824 µs
+id: test-142956-344, time 14.001 s, sent: 46760 msg/s, received: 46760 msg/s, min/median/75th/95th/99th/max consumer latency: 53/97/127/187/1118/1700 µs
+id: test-142956-344, time 15.001 s, sent: 8360 msg/s, received: 8360 msg/s, min/median/75th/95th/99th/max consumer latency: 55/131/183/297/520/1031 µs
+id: test-142956-344, time 16.001 s, sent: 8120 msg/s, received: 8120 msg/s, min/median/75th/95th/99th/max consumer latency: 53/117/160/261/511/1336 µs
+id: test-142956-344, time 17.000 s, sent: 8318 msg/s, received: 8318 msg/s, min/median/75th/95th/99th/max consumer latency: 55/119/153/252/1109/1831 µs
+id: test-142956-344, time 18.000 s, sent: 28188 msg/s, received: 28183 msg/s, min/median/75th/95th/99th/max consumer latency: 54/109/142/218/1116/2272 µs
+id: test-142956-344, time 19.000 s, sent: 46286 msg/s, received: 46276 msg/s, min/median/75th/95th/99th/max consumer latency: 54/107/140/205/1085/2107 µs
+id: test-142956-344, time 20.000 s, sent: 60155 msg/s, received: 60155 msg/s, min/median/75th/95th/99th/max consumer latency: 54/96/129/212/1101/2089 µs
+id: test-142956-344, time 21.001 s, sent: 11855 msg/s, received: 11870 msg/s, min/median/75th/95th/99th/max consumer latency: 54/115/153/244/1156/3642 µs
+id: test-142956-344, time 22.005 s, sent: 2978 msg/s, received: 2978 msg/s, min/median/75th/95th/99th/max consumer latency: 54/103/140/186/272/913 µs
+test stopped (Reached time limit)
+id: test-142956-344, sending rate avg: 28851 msg/s
+id: test-142956-344, receiving rate avg: 28851 msg/s
+id: test-142956-344, consumer latency min/median/75th/95th/99th/max 50/106/136/196/417/12041 µs

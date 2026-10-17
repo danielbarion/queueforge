@@ -1,0 +1,40 @@
+{
+  "broker": "php",
+  "broker_image": "sha256:e32ff26dacaf6d5bc2470f79bd49f3ce8a574b0fed0b2e274c15c252b72c6ad0",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "9f86cf1356a3491b94981b4b886d94bd",
+  "expected_repeats": 2,
+  "harness_sha256": "423ecfa998080536f6ce0861019ed0b2e38f788b3425c13dd2b6e2ddc5018618",
+  "image_source_revision": null,
+  "image_source_sha256": null,
+  "invocation_source_commit": "01556960baf917a582c0aac3052bb77a436b7f86",
+  "invocation_source_content_sha256": "7f8a2fd5354eeb1d55a81b922383073a1588a839fc9060c36f170bc1c5a319d8",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-15/"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "7fed063cec674a2c8729a476a130ae4f",
+  "scenario": {
+    "args": "-qp heavy-%d -qpf 1 -qpt 16 -x 64 -y 64 -f persistent -s 1024 -c 200 -q 200",
+    "id": "heavy",
+    "real": "64 producers and 64 consumers across 16 durable queues, 200 confirms in flight each.",
+    "title": "Heavy mixed load"
+  },
+  "scenario_sha256": "307027787db9a764a435320f3e6c63440505afe6b0f7ee61c8909c8d7937549e",
+  "started_utc": "2026-10-15T14:31:38Z"
+}

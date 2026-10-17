@@ -1,0 +1,88 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-120031-934, starting consumer #0
+id: test-120031-934, starting consumer #0, channel #0
+id: test-120031-934, starting consumer #1
+id: test-120031-934, starting consumer #1, channel #0
+id: test-120031-934, starting producer #0
+id: test-120031-934, starting producer #0, channel #0
+id: test-120031-934, starting producer #1
+id: test-120031-934, starting producer #1, channel #0
+id: test-120031-934, time 1.000 s, sent: 29398 msg/s, received: 29240 msg/s, min/median/75th/95th/99th/max consumer latency: 3059/4705/5370/7500/10744/14536 µs
+id: test-120031-934, time 2.000 s, sent: 29599 msg/s, received: 29629 msg/s, min/median/75th/95th/99th/max consumer latency: 2260/4112/5248/6231/11718/59587 µs
+id: test-120031-934, time 3.000 s, sent: 15380 msg/s, received: 15350 msg/s, min/median/75th/95th/99th/max consumer latency: 3120/5823/7539/31205/209072/264462 µs
+id: test-120031-934, time 4.000 s, sent: 31556 msg/s, received: 31520 msg/s, min/median/75th/95th/99th/max consumer latency: 4207/5679/5862/6913/11957/54165 µs
+id: test-120031-934, time 5.000 s, sent: 31685 msg/s, received: 31671 msg/s, min/median/75th/95th/99th/max consumer latency: 5116/6485/6681/9674/12883/14056 µs
+id: test-120031-934, time 6.000 s, sent: 17910 msg/s, received: 17840 msg/s, min/median/75th/95th/99th/max consumer latency: 7226/8418/9504/56487/157942/161717 µs
+id: test-120031-934, time 7.000 s, sent: 29860 msg/s, received: 29860 msg/s, min/median/75th/95th/99th/max consumer latency: 8270/9208/9763/12072/15852/16308 µs
+id: test-120031-934, time 8.000 s, sent: 28934 msg/s, received: 28918 msg/s, min/median/75th/95th/99th/max consumer latency: 8688/9654/10386/15075/53458/61605 µs
+id: test-120031-934, time 9.000 s, sent: 28594 msg/s, received: 28590 msg/s, min/median/75th/95th/99th/max consumer latency: 8323/9400/11563/14518/15740/18130 µs
+id: test-120031-934, time 10.000 s, sent: 28818 msg/s, received: 28928 msg/s, min/median/75th/95th/99th/max consumer latency: 4961/6000/6446/11082/17795/60112 µs
+id: test-120031-934, time 11.002 s, sent: 22597 msg/s, received: 22537 msg/s, min/median/75th/95th/99th/max consumer latency: 6742/7430/7944/11155/14439/15332 µs
+id: test-120031-934, time 12.000 s, sent: 25270 msg/s, received: 25290 msg/s, min/median/75th/95th/99th/max consumer latency: 5944/6934/7467/12584/95951/345217 µs
+id: test-120031-934, time 13.000 s, sent: 27450 msg/s, received: 27400 msg/s, min/median/75th/95th/99th/max consumer latency: 7778/9614/11869/14746/18618/20023 µs
+id: test-120031-934, time 14.000 s, sent: 19310 msg/s, received: 19300 msg/s, min/median/75th/95th/99th/max consumer latency: 8482/9552/9988/16818/241117/295476 µs
+id: test-120031-934, time 15.000 s, sent: 29899 msg/s, received: 29919 msg/s, min/median/75th/95th/99th/max consumer latency: 8355/9232/9567/10646/15770/16290 µs
+id: test-120031-934, time 16.000 s, sent: 27480 msg/s, received: 27480 msg/s, min/median/75th/95th/99th/max consumer latency: 8048/9457/9957/13406/49170/58614 µs
+id: test-120031-934, time 17.000 s, sent: 28308 msg/s, received: 28208 msg/s, min/median/75th/95th/99th/max consumer latency: 10243/12911/13671/17041/22110/23809 µs
+id: test-120031-934, time 18.001 s, sent: 27902 msg/s, received: 27822 msg/s, min/median/75th/95th/99th/max consumer latency: 12874/14073/14391/20501/61506/61757 µs
+id: test-120031-934, time 19.000 s, sent: 22985 msg/s, received: 23016 msg/s, min/median/75th/95th/99th/max consumer latency: 12313/13119/13555/20849/278596/337063 µs
+id: test-120031-934, time 20.000 s, sent: 31120 msg/s, received: 31120 msg/s, min/median/75th/95th/99th/max consumer latency: 12031/12843/13037/15144/61198/62363 µs
+id: test-120031-934, time 21.000 s, sent: 32602 msg/s, received: 32612 msg/s, min/median/75th/95th/99th/max consumer latency: 11448/12364/12542/13412/19035/19286 µs
+id: test-120031-934, time 22.000 s, sent: 28818 msg/s, received: 28808 msg/s, min/median/75th/95th/99th/max consumer latency: 12089/13112/14401/19751/58891/66977 µs
+id: test-120031-934, time 23.000 s, sent: 28485 msg/s, received: 28500 msg/s, min/median/75th/95th/99th/max consumer latency: 12693/14055/14495/18165/21076/21340 µs
+id: test-120031-934, time 24.000 s, sent: 26965 msg/s, received: 26960 msg/s, min/median/75th/95th/99th/max consumer latency: 12252/14356/15231/18001/67795/69013 µs
+id: test-120031-934, time 25.000 s, sent: 29130 msg/s, received: 29120 msg/s, min/median/75th/95th/99th/max consumer latency: 11933/13102/15378/18638/21580/26184 µs
+12:00:57.026 [perf-test-consumer-0-worker-0] ERROR c.r.perf.RelaxedExceptionHandler - Consumer com.rabbitmq.perf.Consumer$ConsumerImpl@61423d1a (amq.ctag-ffa40ac33b6604bd) method handleDelivery for channel AMQChannel(amqp://admin@172.26.0.2:5672/,1) threw an exception for channel AMQChannel(amqp://admin@172.26.0.2:5672/,1)
+java.io.IOException: null
+	at com.rabbitmq.client.impl.AMQChannel.wrap(AMQChannel.java:140)
+	at com.rabbitmq.client.impl.AMQChannel.wrap(AMQChannel.java:136)
+	at com.rabbitmq.client.impl.AMQChannel.exnWrappingRpc(AMQChannel.java:158)
+	at com.rabbitmq.client.impl.ChannelN.txCommit(ChannelN.java:1588)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.txCommit(AutorecoveringChannel.java:677)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$commitTransactionIfNecessary$1(Consumer.java:369)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.commitTransactionIfNecessary(Consumer.java:369)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:321)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: com.rabbitmq.client.ShutdownSignalException: clean connection shutdown; protocol method: #method<connection.close>(reply-code=200, reply-text=Closed by PerfTest, class-id=0, method-id=0)
+	at com.rabbitmq.utility.ValueOrException.getValue(ValueOrException.java:66)
+	at com.rabbitmq.utility.BlockingValueOrException.uninterruptibleGetValue(BlockingValueOrException.java:36)
+	at com.rabbitmq.client.impl.AMQChannel$BlockingRpcContinuation.getReply(AMQChannel.java:552)
+	at com.rabbitmq.client.impl.AMQChannel.privateRpc(AMQChannel.java:316)
+	at com.rabbitmq.client.impl.AMQChannel.exnWrappingRpc(AMQChannel.java:152)
+	... 13 common frames omitted
+12:00:57.027 [perf-test-consumer-1-worker-0] ERROR c.r.perf.RelaxedExceptionHandler - Consumer com.rabbitmq.perf.Consumer$ConsumerImpl@45ce8959 (amq.ctag-c2d32a615a0e9949) method handleDelivery for channel AMQChannel(amqp://admin@172.26.0.2:5672/,1) threw an exception for channel AMQChannel(amqp://admin@172.26.0.2:5672/,1)
+java.io.IOException: null
+	at com.rabbitmq.client.impl.AMQChannel.wrap(AMQChannel.java:140)
+	at com.rabbitmq.client.impl.AMQChannel.wrap(AMQChannel.java:136)
+	at com.rabbitmq.client.impl.AMQChannel.exnWrappingRpc(AMQChannel.java:158)
+	at com.rabbitmq.client.impl.ChannelN.txCommit(ChannelN.java:1588)
+	at com.rabbitmq.client.impl.recovery.AutorecoveringChannel.txCommit(AutorecoveringChannel.java:677)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.lambda$commitTransactionIfNecessary$1(Consumer.java:369)
+	at com.rabbitmq.perf.AgentBase.dealWithWriteOperation(AgentBase.java:90)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.commitTransactionIfNecessary(Consumer.java:369)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleMessage(Consumer.java:321)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.maybeHandleMessage(Consumer.java:301)
+	at com.rabbitmq.perf.Consumer$ConsumerImpl.handleDelivery(Consumer.java:295)
+	at com.rabbitmq.client.impl.ConsumerDispatcher$5.run(ConsumerDispatcher.java:149)
+	at com.rabbitmq.client.impl.ConsumerWorkService$WorkPoolRunnable.run(ConsumerWorkService.java:111)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: com.rabbitmq.client.ShutdownSignalException: clean connection shutdown; protocol method: #method<connection.close>(reply-code=200, reply-text=Closed by PerfTest, class-id=0, method-id=0)
+	at com.rabbitmq.utility.ValueOrException.getValue(ValueOrException.java:66)
+	at com.rabbitmq.utility.BlockingValueOrException.uninterruptibleGetValue(BlockingValueOrException.java:36)
+	at com.rabbitmq.client.impl.AMQChannel$BlockingRpcContinuation.getReply(AMQChannel.java:552)
+	at com.rabbitmq.client.impl.AMQChannel.privateRpc(AMQChannel.java:316)
+	at com.rabbitmq.client.impl.AMQChannel.exnWrappingRpc(AMQChannel.java:152)
+	... 13 common frames omitted
+test stopped (Reached time limit)
+id: test-120031-934, sending rate avg: 27179 msg/s
+id: test-120031-934, receiving rate avg: 27166 msg/s
+id: test-120031-934, consumer latency min/median/75th/95th/99th/max 2386/11691/13168/16886/25773/65948 µs
