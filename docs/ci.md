@@ -17,14 +17,31 @@ Woodpecker reads the seven workflows in `.woodpecker/`. They run on pushes to
 
 Activate the repository on your Woodpecker server. Use the default configuration
 path (`.woodpecker/`) and a Linux Docker agent. Have a Woodpecker server admin
-enable privileged execution via the repository's **Trusted** setting for
-`check` and `conformance`: these steps start private
+enable **Trusted → Security** in the repository settings (Woodpecker 3.x;
+older versions use a single **Trusted** toggle). Both `check` and
+`conformance` need this repository-wide permission: these steps start private
 Docker daemons to run their fixtures. They do not mount the agent's Docker socket
 or use host networking. Each workflow has its own workspace and fixture ports.
 
 See Woodpecker's [project settings](https://woodpecker-ci.org/docs/usage/project-settings)
-and [privileged mode](https://woodpecker-ci.org/docs/usage/workflow-syntax#privileged)
+and [privileged mode](https://woodpecker-ci.org/docs/usage/workflow-syntax#privileged-mode)
 documentation for the server-side setting.
+
+If parsing fails with `Insufficient trust level to use privileged mode`, open
+the repository in Woodpecker, go to **Settings → General → Trusted**, enable
+**Security**, save, and restart the failed pipeline. Only Woodpecker server
+admins can change this setting; repository admin access on GitHub is not enough.
+The Network and Volumes trust options are not required by these workflows.
+
+An authenticated Woodpecker 3.x server admin can also apply the setting with:
+
+```sh
+woodpecker-cli repo update --trusted-security danielbarion/queueforge
+```
+
+The local configuration linter checks YAML and workflow rules but does not
+validate the repository's trust permissions on your Woodpecker server. Removing
+`privileged: true` alone would prevent the private Docker daemons from starting.
 
 The conformance workflow exposes its temporary LDAP and HTTPS fixtures to its
 private Docker bridge with `QF_FIXTURE_BIND_HOST=0.0.0.0`; local runs continue
