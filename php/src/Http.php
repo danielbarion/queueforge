@@ -293,7 +293,7 @@ final class Http
     private function definitions(): array
     {
         $root = $this->broker; $data = ['users'=>[], 'vhosts'=>array_map(static fn($name)=>['name'=>$name],$root->vhosts), 'queues'=>[], 'exchanges'=>[], 'bindings'=>[], 'permissions'=>[], 'policies'=>[], 'operator_policies'=>[], 'parameters'=>[]];
-        foreach ($root->users as $name=>$hash) $data['users'][] = ['name'=>$name,'password_hash'=>$hash,'hashing_algorithm'=>strlen(base64_decode($hash, true) ?: '') === 68 ? 'rabbit_password_hashing_sha512' : 'rabbit_password_hashing_sha256','tags'=>$root->tags[$name] ?? []];
+        foreach ($root->users as $name=>$hash) $data['users'][] = ['name'=>$name,'password_hash'=>$hash,'hashing_algorithm'=>Auth::algorithm($hash) ?? 'rabbit_password_hashing_sha256','tags'=>$root->tags[$name] ?? []];
         foreach ($root->allBrokers() as $vhost=>$scope) {
             foreach ($this->queueItems($scope) as $row) $data['queues'][]=$row;
             foreach ($scope->exchanges as $name=>$type) $data['exchanges'][]=['name'=>$name,'vhost'=>$vhost,'type'=>$type,'durable'=>$scope->exchangeRows[$name]['durable'] ?? true,'auto_delete'=>$scope->exchangeRows[$name]['autoDelete'] ?? false,'internal'=>$scope->exchangeRows[$name]['internal'] ?? false];

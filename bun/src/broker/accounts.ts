@@ -10,7 +10,7 @@ import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
-import { hashRabbitPassword, passwordPolicyError } from "./auth.ts";
+import { hashRabbitPassword, passwordPolicyError, rabbitHashingAlgorithm } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
@@ -107,7 +107,7 @@ export function exportDefinitions(this: Broker) {
       return {
         name,
         password_hash: u.hash,
-        hashing_algorithm: "rabbit_password_hashing_sha256",
+        hashing_algorithm: rabbitHashingAlgorithm(u.hash),
         tags: u.tags.join(","),
         limits,
       };

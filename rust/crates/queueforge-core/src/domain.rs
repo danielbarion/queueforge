@@ -413,14 +413,14 @@ impl UserTag {
 /// Stored user credentials and tags.
 ///
 /// `password_hash` is a RabbitMQ hash: base64 of a 4-byte salt plus
-/// SHA-256 or SHA-512 of `salt || password`.
+/// MD5, SHA-256, or SHA-512 of `salt || password`.
 ///
 /// [`Debug`] redacts `password_hash` so logs/spans do not leak credential material.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     /// Unique username.
     pub name: CompactString,
-    /// RabbitMQ SHA-256 or SHA-512 password hash.
+    /// RabbitMQ MD5, SHA-256, or SHA-512 password hash.
     pub password_hash: String,
     /// Capability tags (see [`UserTag`]).
     pub tags: Vec<UserTag>,

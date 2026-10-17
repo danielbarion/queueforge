@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** RabbitMQ SHA-256 password hash: base64(salt || SHA-256(salt || password)). */
+/** RabbitMQ password hash: base64(salt || digest(salt || password)). New hashes are SHA-256. MD5 and SHA-512 still verify. */
 final class Auth
 {
     public static function hash(string $password): string
@@ -25,13 +25,32 @@ final class Auth
     public static function matches(string $password, string $encoded): bool
     {
         $raw = base64_decode($encoded, true);
-        if ($raw === false || (strlen($raw) !== 36 && strlen($raw) !== 68)) {
+        if ($raw === false || !in_array(strlen($raw), [20, 36, 68], true)) {
             return false;
         }
         $salt = substr($raw, 0, 4);
         $digest = substr($raw, 4);
-        $algo = strlen($digest) === 32 ? 'sha256' : 'sha512';
+        $algo = match (strlen($digest)) {
+            16 => 'md5',
+            32 => 'sha256',
+            default => 'sha512',
+        };
         return hash_equals($digest, hash($algo, $salt . $password, true));
+    }
+
+    /** RabbitMQ `hashing_algorithm` for a stored hash, or null when the length is not one RabbitMQ ships. */
+    public static function algorithm(string $encoded): ?string
+    {
+        $raw = base64_decode($encoded, true);
+        if ($raw === false) {
+            return null;
+        }
+        return match (strlen($raw)) {
+            20 => 'rabbit_password_hashing_md5',
+            36 => 'rabbit_password_hashing_sha256',
+            68 => 'rabbit_password_hashing_sha512',
+            default => null,
+        };
     }
 
     /**

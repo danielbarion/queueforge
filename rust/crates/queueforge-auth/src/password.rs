@@ -1,11 +1,12 @@
 //! Password hashing.
 //!
 //! Passwords are the RabbitMQ SHA-256 form: base64(4-byte salt || SHA-256).
-//! A SHA-512 password-hash still verifies. An argon2 PHC string does not.
+//! A SHA-512 or MD5 password-hash still verifies. An argon2 PHC string does not.
 
 use std::sync::OnceLock;
 
 use base64::Engine;
+use md5::Md5;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256, Sha512};
 
@@ -71,7 +72,7 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
 }
 
 /// RabbitMQ definitions store `password_hash` as base64(salt[4] || digest).
-/// SHA-256 digests are 32 bytes and SHA-512 digests are 64 bytes.
+/// MD5 digests are 16 bytes, SHA-256 digests are 32, and SHA-512 digests are 64.
 fn rabbit_password_hash_matches(password: &str, encoded: &str) -> bool {
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
         return false;
@@ -81,6 +82,7 @@ fn rabbit_password_hash_matches(password: &str, encoded: &str) -> bool {
     }
     let (salt, digest) = raw.split_at(4);
     let computed: Vec<u8> = match digest.len() {
+        16 => Md5::digest([salt, password.as_bytes()].concat()).to_vec(),
         32 => Sha256::digest([salt, password.as_bytes()].concat()).to_vec(),
         64 => Sha512::digest([salt, password.as_bytes()].concat()).to_vec(),
         _ => return false,
@@ -114,6 +116,8 @@ mod tests {
     /// Fixed salt shared with the Bun verifier tests.
     const CROSS_SALT: [u8; 4] = [0x10, 0x22, 0x33, 0x44];
     const CROSS_HASH: &str = "ECIzRClc/+1u2ev0HwDpqq+CC4ixd405UlwH0cCTvqGs8avG";
+    /// salt 10 22 33 44 and password devpassword12, MD5. Same bytes Bun and PHP store.
+    const MD5_HASH: &str = "ECIzRESoADPcANX6IspwMziR8qY=";
     /// Old argon2id PHC. QueueForge does not verify this form.
     const ARGON2_FIXTURE: &str = "$argon2id$v=19$m=19456,t=2,p=1$WbkrTzkiA7IX96DqFx4oyqY4ycwq51Qc2ernvzYq2H8$E44EIl5HVbAgkCuygMc0dOWT79GeatS2lEh4vIWdbvQ";
 
@@ -142,6 +146,12 @@ mod tests {
     #[test]
     fn argon2id_phc_does_not_verify() {
         assert!(!verify_password("argon-fixture-pw", ARGON2_FIXTURE).unwrap());
+    }
+
+    #[test]
+    fn verifies_rabbitmq_md5_password_hash() {
+        assert!(verify_password("devpassword12", MD5_HASH).unwrap());
+        assert!(!verify_password("wrong-password", MD5_HASH).unwrap());
     }
 
     #[test]

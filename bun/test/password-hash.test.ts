@@ -9,6 +9,7 @@ import {
   hashRabbitPassword,
   passwordPolicyError,
   rabbitPasswordHashMatches,
+  rabbitHashingAlgorithm,
 } from "../src/broker/auth.ts";
 import type { Config } from "../src/config.ts";
 import { Store } from "../src/store.ts";
@@ -16,6 +17,8 @@ import { Store } from "../src/store.ts";
 /** salt 10 22 33 44 and password devpassword12. Same bytes Rust stores. */
 const CROSS_SALT = new Uint8Array([0x10, 0x22, 0x33, 0x44]);
 const CROSS_HASH = "ECIzRClc/+1u2ev0HwDpqq+CC4ixd405UlwH0cCTvqGs8avG";
+/** Same salt and password, MD5. RabbitMQ's rabbit_password_hashing_md5. */
+const MD5_HASH = "ECIzRESoADPcANX6IspwMziR8qY=";
 const ARGON2_FIXTURE =
   "$argon2id$v=19$m=19456,t=2,p=1$WbkrTzkiA7IX96DqFx4oyqY4ycwq51Qc2ernvzYq2H8$E44EIl5HVbAgkCuygMc0dOWT79GeatS2lEh4vIWdbvQ";
 
@@ -51,6 +54,10 @@ test("new hashes are the rabbitmq sha256 form and an argon2id phc does not verif
   expect(Buffer.from(hashed, "base64").length).toBe(36);
   expect(rabbitPasswordHashMatches("devpassword12", CROSS_HASH)).toBe(true);
   expect(rabbitPasswordHashMatches("wrong-password", CROSS_HASH)).toBe(false);
+  expect(rabbitPasswordHashMatches("devpassword12", MD5_HASH)).toBe(true);
+  expect(rabbitPasswordHashMatches("wrong-password", MD5_HASH)).toBe(false);
+  expect(rabbitHashingAlgorithm(MD5_HASH)).toBe("rabbit_password_hashing_md5");
+  expect(rabbitHashingAlgorithm(CROSS_HASH)).toBe("rabbit_password_hashing_sha256");
 
   const fresh = hashRabbitPassword("exactly12chr");
   expect(fresh.startsWith("$argon2")).toBe(false);

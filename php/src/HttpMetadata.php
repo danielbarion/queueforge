@@ -51,7 +51,7 @@ final class HttpMetadata
             if($method==='PUT'){
                 $tags=$j['tags']??'';if(!is_string($tags)&&!is_array($tags))self::fail('tags must be a string or array');$tags=is_array($tags)?$tags:explode(',',$tags);foreach($tags as$tag)if(!is_string($tag))self::fail('tags must contain strings');$tags=array_values(array_filter(array_map('trim',$tags),static fn($v)=>$v!==''));
                 $hash=$j['password_hash']??'';if(!is_string($hash))self::fail('password_hash must be a string');
-                if($hash!==''){$raw=base64_decode($hash,true);if($raw===false||!in_array(strlen($raw),[36,68],true))self::fail('invalid RabbitMQ password hash');$algorithm=$j['hashing_algorithm']??null;if($algorithm!==null&&$algorithm!== (strlen($raw)===36?'rabbit_password_hashing_sha256':'rabbit_password_hashing_sha512'))self::fail('password hash algorithm mismatch');}
+                if($hash!==''){$algorithm=Auth::algorithm($hash);if($algorithm===null)self::fail('invalid RabbitMQ password hash');$named=$j['hashing_algorithm']??null;if($named!==null&&$named!==$algorithm)self::fail('password hash algorithm mismatch');}
                 else {if(isset($j['password'])&&!is_string($j['password']))self::fail('password must be a string');Auth::check($j['password']??'');$hash=Auth::hash($j['password']);}
                 self::emit($b,'user',['name'=>$name,'hash'=>$hash,'tags'=>$tags===[]?['management']:$tags],$commands);return true;
             }

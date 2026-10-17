@@ -1,7 +1,7 @@
 /**
  * RabbitMQ password-hash create and check used by broker login.
  *
- * New passwords are base64(4-byte salt || SHA-256). SHA-512 hashes still verify.
+ * New passwords are base64(4-byte salt || SHA-256). SHA-512 and MD5 hashes still verify.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
@@ -46,15 +46,23 @@ export function hashRabbitPassword(password: string, salt?: Uint8Array): string 
  * Compare a plaintext password with a RabbitMQ password_hash value.
  *
  * @param password Password the client sent.
- * @param encoded Base64 of salt plus SHA-256 or SHA-512. Any other length returns false.
+ * @param encoded Base64 of salt plus MD5, SHA-256, or SHA-512. Any other length returns false.
  * @returns True when the digest matches.
  */
 export function rabbitPasswordHashMatches(password: string, encoded: string): boolean {
   const raw = Buffer.from(encoded, "base64");
-  if (raw.length !== 36 && raw.length !== 68) return false;
+  if (raw.length !== 20 && raw.length !== 36 && raw.length !== 68) return false;
   const salt = raw.subarray(0, 4);
   const digest = raw.subarray(4);
-  const algo = digest.length === 32 ? "sha256" : "sha512";
+  const algo = digest.length === 16 ? "md5" : digest.length === 32 ? "sha256" : "sha512";
   const computed = createHash(algo).update(salt).update(password, "utf8").digest();
   return timingSafeEqual(computed, digest);
+}
+
+/** The RabbitMQ hashing_algorithm name for a stored password_hash. */
+export function rabbitHashingAlgorithm(encoded: string): string {
+  const n = Buffer.from(encoded, "base64").length;
+  if (n === 20) return "rabbit_password_hashing_md5";
+  if (n === 68) return "rabbit_password_hashing_sha512";
+  return "rabbit_password_hashing_sha256";
 }

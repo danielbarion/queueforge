@@ -28,6 +28,10 @@ Harness::guard('password hash fixture', static function (): void {
     Harness::eq('the cross-language fixture matches', $expected, Auth::hashWithSalt('devpassword12', $salt));
     Harness::eq('and it verifies', true, Auth::matches('devpassword12', $expected));
     Harness::eq('a wrong password does not', false, Auth::matches('devpassword13', $expected));
+    $md5 = 'ECIzRESoADPcANX6IspwMziR8qY=';
+    Harness::eq('an md5 hash verifies', true, Auth::matches('devpassword12', $md5));
+    Harness::eq('an md5 hash rejects the wrong password', false, Auth::matches('devpassword13', $md5));
+    Harness::eq('md5 names its algorithm', 'rabbit_password_hashing_md5', Auth::algorithm($md5));
 
     // A random salt still round-trips.
     Harness::eq('a fresh hash verifies', true, Auth::matches('devpassword12', Auth::hash('devpassword12')));
