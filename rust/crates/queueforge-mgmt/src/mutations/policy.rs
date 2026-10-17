@@ -114,6 +114,15 @@ pub(super) fn policy_item(p: &Policy) -> serde_json::Value {
     if let Some(v) = &p.alternate_exchange {
         definition.insert("alternate-exchange".into(), serde_json::json!(v.as_str()));
     }
+    if let Some(v) = p.consumer_timeout_ms {
+        definition.insert("consumer-timeout".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &p.federation_upstream {
+        definition.insert("federation-upstream".into(), serde_json::json!(v.as_str()));
+    }
+    if let Some(v) = &p.federation_upstream_set {
+        definition.insert("federation-upstream-set".into(), serde_json::json!(v.as_str()));
+    }
     if let Some(v) = p.dead_letter_strategy {
         definition.insert(
             "dead-letter-strategy".into(),
@@ -157,6 +166,8 @@ pub(crate) fn policy_from_body(
         "delivery-limit",
         "alternate-exchange",
         "dead-letter-strategy",
+        "consumer-timeout",
+        "federation-upstream",
         "federation-upstream-set",
     ];
     let unknown: Vec<&str> = body
@@ -198,6 +209,9 @@ pub(crate) fn policy_from_body(
             }
         },
         delivery_limit: policy_u64(&body.definition, "delivery-limit")?.map(|n| n as u32),
+        consumer_timeout_ms: policy_u64(&body.definition, "consumer-timeout")?,
+        federation_upstream: policy_str(&body.definition, "federation-upstream")?,
+        federation_upstream_set: policy_str(&body.definition, "federation-upstream-set")?,
         alternate_exchange: policy_str(&body.definition, "alternate-exchange")?,
         dead_letter_strategy: match policy_str(&body.definition, "dead-letter-strategy")? {
             None => None,
@@ -269,29 +283,6 @@ pub async fn put_policy(
         .list_policies(Some(&vhost))
         .iter()
         .any(|p| p.name.as_str() == name);
-    if body.definition.get("federation-upstream-set").is_some() {
-        let guard = queueforge_core::federation::upstreams_of(&vhost);
-        for upstream in guard {
-            queueforge_core::federation::add_federation_link(
-                upstream,
-                vhost.clone(),
-                body.pattern.clone(),
-            );
-        }
-        for uri in queueforge_core::federation::federation_uris(&vhost) {
-            let downstream = vhost.clone();
-            let pattern = body.pattern.clone();
-            let queues = std::sync::Arc::clone(&state.queues);
-            let router = std::sync::Arc::clone(&state.router);
-            tokio::spawn(async move {
-                if let Err(err) =
-                    super::shovel::federation_link(uri, downstream, pattern, queues, router).await
-                {
-                    tracing::warn!(error = %err, "federation link stopped");
-                }
-            });
-        }
-    }
     let policy = policy_from_body(&vhost, &name, body)?;
     state
         .router
@@ -300,6 +291,7 @@ pub async fn put_policy(
     let stored = policy.clone();
     db(&state, move |s| s.put_policy(&stored)).await?;
     apply_policies_live(&state).await;
+    crate::links::federation::poke();
     replicate(
         &state,
         "policy",
@@ -329,6 +321,7 @@ pub async fn delete_policy(
     let name_owned = name.clone();
     let _ = db(&state, move |s| s.delete_policy(&vhost_owned, &name_owned)).await;
     apply_policies_live(&state).await;
+    crate::links::federation::poke();
     replicate(
         &state,
         "delete_policy",

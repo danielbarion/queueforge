@@ -270,7 +270,9 @@ async fn accept_loop(
                                         let tls_stream = Prefixed { head, at: 0, len: n, inner: tls_stream };
                                         if n == 8 && (head == *b"AMQP\x00\x01\x00\x00" || head == *b"AMQP\x03\x01\x00\x00") {
                                             let port = queueforge_mgmt::bridge::loopback_port().unwrap_or(local_port);
-                                            queueforge_mgmt::bridge::amqp10::serve(tls_stream, port).await;
+                                            queueforge_mgmt::bridge::PEER_CN
+                                                .scope(peer_cn, queueforge_mgmt::bridge::amqp10::serve(tls_stream, port))
+                                                .await;
                                             drop(guard);
                                             drop(permit);
                                             return;

@@ -134,6 +134,20 @@ impl BindingIndex {
         routing_key: &str,
         headers: &[(CompactString, crate::domain::HeaderArg)],
     ) -> Vec<CompactString> {
+        self.route_named_hashed(vhost, exchange, kind, routing_key, headers, None)
+    }
+
+    /// [`Self::route_named`] for a consistent-hash exchange that hashes a
+    /// header or property (`hash_on`) instead of the routing key.
+    pub fn route_named_hashed(
+        &self,
+        vhost: &str,
+        exchange: &str,
+        kind: ExchangeType,
+        routing_key: &str,
+        headers: &[(CompactString, crate::domain::HeaderArg)],
+        hash_on: Option<&crate::domain::HashOn>,
+    ) -> Vec<CompactString> {
         let mut out: HashSet<CompactString> = HashSet::new();
         match kind {
             ExchangeType::Default => {
@@ -185,8 +199,21 @@ impl BindingIndex {
                             buckets.push(queue);
                         }
                     }
-                    if !buckets.is_empty() {
-                        let at = jump_hash(fnv1a(routing_key.as_bytes()), buckets.len());
+                    let header_name = match hash_on {
+                        None => None,
+                        Some(crate::domain::HashOn::Header(name)) => Some(name.as_str()),
+                        Some(crate::domain::HashOn::Property(_)) => Some(crate::domain::HASH_PROPERTY_HEADER),
+                    };
+                    let key: Option<std::borrow::Cow<'_, str>> = match header_name {
+                        None => Some(std::borrow::Cow::Borrowed(routing_key)),
+                        // A missing header or property leaves the message unroutable.
+                        Some(name) => headers.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| match v {
+                            crate::domain::HeaderArg::Str(s) => std::borrow::Cow::Borrowed(s.as_str()),
+                            crate::domain::HeaderArg::Int(n) => std::borrow::Cow::Owned(n.to_string()),
+                        }),
+                    };
+                    if let (false, Some(key)) = (buckets.is_empty(), key) {
+                        let at = jump_hash(fnv1a(key.as_bytes()), buckets.len());
                         out.insert(buckets[at].clone());
                     }
                 }

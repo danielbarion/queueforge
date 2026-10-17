@@ -46,6 +46,9 @@ pub const DEFAULT_QUEUE_ENQUEUE_BOUND: usize = 1024;
 /// consumer pull a whole queue into the connection task.
 pub const DEFAULT_PREFETCH: u16 = 256;
 
+/// Default delivery acknowledgement timeout (30 minutes), as RabbitMQ's `consumer_timeout`.
+pub const DEFAULT_CONSUMER_TIMEOUT_MS: u64 = 1_800_000;
+
 /// Top-level QueueForge configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -119,6 +122,37 @@ pub struct LdapConfig {
     /// Password for `bind_dn`.
     #[serde(default)]
     pub bind_password: Option<String>,
+    /// RabbitMQ's `vhost_access_query` / `resource_access_query`.
+    #[serde(default)]
+    pub resource_access: LdapResourceAccess,
+}
+
+/// Per-permission LDAP queries. A missing key allows (constant true).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LdapResourceAccess {
+    /// Whether the user may open a vhost.
+    pub vhost: Option<LdapQuery>,
+    /// Declare / delete / bind.
+    pub configure: Option<LdapQuery>,
+    /// Publish.
+    pub write: Option<LdapQuery>,
+    /// Consume / get / bind source.
+    pub read: Option<LdapQuery>,
+    /// Topic authorisation.
+    pub topic: Option<LdapQuery>,
+}
+
+/// One LDAP access query: `{ constant = bool }` or `{ in_group = dn }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LdapQuery {
+    /// `{constant, Bool}`.
+    pub constant: Option<bool>,
+    /// `{in_group, Dn}` (group's `member` attribute names the user DN).
+    pub in_group: Option<String>,
+    /// Member attribute for `in_group` (default `member`).
+    pub attribute: Option<String>,
 }
 
 fn default_ldap_port() -> u16 {
@@ -156,6 +190,63 @@ pub struct ClusterConfig {
     pub dns_name: Option<String>,
     /// Cluster port of every discovered member (default: this node's `listen` port).
     pub dns_port: Option<u16>,
+    /// `discovery = "k8s"`: API server host (default `KUBERNETES_SERVICE_HOST`
+    /// or `kubernetes.default.svc`).
+    pub k8s_host: Option<String>,
+    /// API server port (default `KUBERNETES_SERVICE_PORT` or 443).
+    pub k8s_port: Option<u16>,
+    /// `https` (default) or `http`.
+    pub k8s_scheme: Option<String>,
+    /// Service account token file.
+    pub k8s_token_path: Option<String>,
+    /// CA the API server's certificate chains to.
+    pub k8s_ca_path: Option<String>,
+    /// File holding this pod's namespace.
+    pub k8s_namespace_path: Option<String>,
+    /// Service whose endpoints are the members (default `queueforge`).
+    pub k8s_service_name: Option<String>,
+    /// `ip` (default) or `hostname`.
+    pub k8s_address_type: Option<String>,
+    /// Appended to each endpoint hostname with `k8s_address_type = "hostname"`.
+    pub k8s_hostname_suffix: Option<String>,
+    /// `discovery = "consul"`: agent host (default `localhost`).
+    pub consul_host: Option<String>,
+    /// Agent port (default 8500).
+    pub consul_port: Option<u16>,
+    /// `http` (default) or `https`.
+    pub consul_scheme: Option<String>,
+    /// Sent as `X-Consul-Token`.
+    pub consul_acl_token: Option<String>,
+    /// Service name (default `queueforge`).
+    pub consul_svc: Option<String>,
+    /// Address this node registers (default: its listen host).
+    pub consul_svc_addr: Option<String>,
+    /// TTL check interval in seconds (default 30).
+    pub consul_svc_ttl: Option<u64>,
+    /// `discovery = "etcd"`: v3 JSON gateway endpoints.
+    pub etcd_endpoints: Vec<String>,
+    /// Key prefix (default `queueforge`).
+    pub etcd_key_prefix: Option<String>,
+    /// Cluster name in the key (default `default`).
+    pub etcd_cluster_name: Option<String>,
+    /// Lease TTL in seconds (default 30).
+    pub etcd_node_ttl: Option<u64>,
+    /// etcd user, with [`Self::etcd_password`].
+    pub etcd_username: Option<String>,
+    /// etcd password.
+    pub etcd_password: Option<String>,
+    /// `discovery = "aws"`: region (default `AWS_REGION`, then the instance's).
+    pub aws_region: Option<String>,
+    /// Access key (default `AWS_ACCESS_KEY_ID`, then the instance role).
+    pub aws_access_key_id: Option<String>,
+    /// Secret key (default `AWS_SECRET_ACCESS_KEY`).
+    pub aws_secret_access_key: Option<String>,
+    /// Instances carrying all of these tags are the members.
+    pub aws_ec2_tags: std::collections::BTreeMap<String, String>,
+    /// Use private addresses (default true).
+    pub aws_use_private_ip: Option<bool>,
+    /// EC2 endpoint override, such as a test server.
+    pub aws_endpoint: Option<String>,
 }
 
 impl ClusterConfig {
@@ -337,6 +428,9 @@ pub struct LimitsConfig {
     /// Queue type used when a durable non-exclusive declare omits `x-queue-type`.
     /// `classic` or `quorum`.
     pub default_queue_type: String,
+    /// Delivery acknowledgement timeout for quorum consumers, in ms
+    /// (RabbitMQ's `consumer_timeout`).
+    pub consumer_timeout: u64,
 }
 
 /// Management API settings.
@@ -436,6 +530,7 @@ impl Default for LimitsConfig {
             queue_enqueue_bound: DEFAULT_QUEUE_ENQUEUE_BOUND,
             default_prefetch: DEFAULT_PREFETCH,
             default_queue_type: "classic".into(),
+            consumer_timeout: DEFAULT_CONSUMER_TIMEOUT_MS,
         }
     }
 }
@@ -833,6 +928,40 @@ enabled = true
         assert_eq!(c.node_id, "127.0.0.1:25999");
         assert!(c.members.iter().any(|m| m.id == "127.0.0.1:25999"));
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn rabbitmq_4_3_settings_parse() {
+        let text = r#"
+[limits]
+consumer_timeout = 60000
+
+[auth.ldap]
+server = "127.0.0.1"
+user_dn_pattern = "cn=${username},ou=people,dc=example"
+[auth.ldap.resource_access]
+configure = { in_group = "cn=admins,dc=example", attribute = "uniqueMember" }
+write = { constant = true }
+read = { constant = false }
+
+[cluster]
+discovery = "aws"
+aws_region = "eu-west-1"
+aws_ec2_tags = { service = "queueforge", env = "prod" }
+etcd_endpoints = ["http://127.0.0.1:2379"]
+consul_svc_ttl = 10
+k8s_address_type = "hostname"
+"#;
+        let cfg = Config::parse_toml(text).unwrap();
+        assert_eq!(cfg.limits.consumer_timeout, 60_000);
+        let ra = cfg.auth.ldap.unwrap().resource_access;
+        assert_eq!(ra.configure.as_ref().and_then(|q| q.in_group.as_deref()), Some("cn=admins,dc=example"));
+        assert_eq!(ra.configure.and_then(|q| q.attribute), Some("uniqueMember".into()));
+        assert_eq!(ra.read.and_then(|q| q.constant), Some(false));
+        assert!(ra.vhost.is_none());
+        assert_eq!(cfg.cluster.aws_ec2_tags.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(cfg.cluster.consul_svc_ttl, Some(10));
+        assert!(Config::parse_toml("[auth.ldap]\nserver = \"x\"\nuser_dn_pattern = \"y\"\n[auth.ldap.resource_access]\nconfigure = { group = \"z\" }").is_err());
     }
 
     #[test]

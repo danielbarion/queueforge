@@ -25,7 +25,7 @@ use tracing::warn;
 use super::cmd::{
     AppHeaderValue, ConsumerDeliveryId, ConsumerSessionId, EnqueueCompletion, Message, QueueCmd,
     QueueDelivery, QueueMessage, QueueOffset, QueueStats, StreamCopy, StreamEntryCopy,
-    StreamReplicator, StreamStart,
+    StreamFilter, StreamReplicator, StreamStart,
 };
 use super::durable::{DurableQueueLog, LogPosition, QueueActorBootstrap, STREAM_RESIDENT_BYTES};
 use super::registry::{QueueInfo, QueueKey};
@@ -96,6 +96,8 @@ struct Reader {
     cursor: u64,
     credit: Option<u32>,
     tx: mpsc::Sender<QueueDelivery>,
+    /// `x-stream-filter`; `None` delivers everything.
+    filter: Option<Box<StreamFilter>>,
 }
 
 fn now_ms() -> u64 {
@@ -118,7 +120,7 @@ struct Stream {
     /// Entries below this offset have been paged out, where they could be.
     paged: u64,
     readers: HashMap<ConsumerSessionId, Reader>,
-    starts: HashMap<ConsumerSessionId, StreamStart>,
+    starts: HashMap<ConsumerSessionId, (StreamStart, Option<Box<StreamFilter>>)>,
     wal: Option<Box<dyn DurableQueueLog>>,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
@@ -385,6 +387,10 @@ impl Stream {
                         break;
                     }
                 };
+                if reader.filter.as_ref().is_some_and(|f| !f.accepts(&stored)) {
+                    reader.cursor += 1;
+                    continue;
+                }
                 let mut message = (*stored).clone();
                 message
                     .headers
@@ -577,8 +583,8 @@ pub async fn run_stream(
                 let _ = reply.send(s.sync());
                 s.pump();
             }
-            QueueCmd::StreamStart { session, start } => {
-                s.starts.insert(session, start);
+            QueueCmd::StreamStart { session, start, filter } => {
+                s.starts.insert(session, (start, filter));
             }
             QueueCmd::StreamApply {
                 index,
@@ -603,7 +609,7 @@ pub async fn run_stream(
                 reply,
                 ..
             } => {
-                let start = s.starts.remove(&session).unwrap_or(StreamStart::Next);
+                let (start, filter) = s.starts.remove(&session).unwrap_or((StreamStart::Next, None));
                 let cursor = s.start_at(start);
                 s.readers.insert(
                     session,
@@ -611,6 +617,7 @@ pub async fn run_stream(
                         cursor,
                         credit: initial_credit,
                         tx: deliver_tx,
+                        filter,
                     },
                 );
                 let _ = reply.send(Ok(()));
@@ -840,6 +847,7 @@ mod tests {
                 cursor: 1,
                 credit: None,
                 tx,
+                filter: None,
             },
         );
         let mut confirms = Vec::new();
@@ -941,6 +949,7 @@ mod tests {
                 cursor: 1,
                 credit: None,
                 tx,
+                filter: None,
             },
         );
         s.pump();

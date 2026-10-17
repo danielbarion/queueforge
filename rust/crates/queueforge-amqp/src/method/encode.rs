@@ -28,6 +28,8 @@ impl Method {
             Self::ConnectionCloseOk(m) => m.encode_args(enc),
             Self::ConnectionBlocked(m) => m.encode_args(enc),
             Self::ConnectionUnblocked(m) => m.encode_args(enc),
+            Self::ConnectionUpdateSecret(m) => m.encode_args(enc),
+            Self::ConnectionUpdateSecretOk(m) => m.encode_args(enc),
 
             Self::ChannelOpen(m) => m.encode_args(enc),
             Self::ChannelOpenOk(m) => m.encode_args(enc),

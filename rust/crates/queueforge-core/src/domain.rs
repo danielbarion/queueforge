@@ -135,7 +135,23 @@ pub struct Exchange {
     /// `x-delayed-type` of an `x-delayed-message` exchange.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delayed_type: Option<ExchangeType>,
+    /// `hash-header` / `hash-property` of an `x-consistent-hash` exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_on: Option<HashOn>,
 }
+
+/// What an `x-consistent-hash` exchange hashes instead of the routing key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HashOn {
+    /// The string form of this message header.
+    Header(CompactString),
+    /// `message_id`, `correlation_id` or `timestamp`.
+    Property(CompactString),
+}
+
+/// Header name the publish path uses to hand a `hash-property` value to routing.
+pub const HASH_PROPERTY_HEADER: &str = "\0qf-hash-property";
 
 impl Exchange {
     /// The type bindings and routing use: a delayed exchange routes as its
@@ -164,6 +180,7 @@ impl Exchange {
             internal: false,
             alternate: None,
             delayed_type: None,
+            hash_on: None,
         }
     }
 
@@ -184,6 +201,7 @@ impl Exchange {
                 internal: true,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -194,6 +212,7 @@ impl Exchange {
                 internal: false,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -204,6 +223,7 @@ impl Exchange {
                 internal: false,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -214,6 +234,7 @@ impl Exchange {
                 internal: false,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -224,6 +245,7 @@ impl Exchange {
                 internal: false,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -234,6 +256,7 @@ impl Exchange {
                 internal: false,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost: vhost.clone(),
@@ -244,6 +267,7 @@ impl Exchange {
                 internal: true,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
             Exchange {
                 vhost,
@@ -254,6 +278,7 @@ impl Exchange {
                 internal: true,
                 alternate: None,
                 delayed_type: None,
+                hash_on: None,
             },
         ]
     }

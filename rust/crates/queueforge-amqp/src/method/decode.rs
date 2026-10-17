@@ -45,6 +45,12 @@ impl Method {
             (connection::CLASS_ID, connection::Blocked::METHOD_ID) => {
                 Ok(Self::ConnectionBlocked(connection::Blocked::decode_args(dec)?))
             }
+            (connection::CLASS_ID, connection::UpdateSecret::METHOD_ID) => {
+                Ok(Self::ConnectionUpdateSecret(connection::UpdateSecret::decode_args(dec)?))
+            }
+            (connection::CLASS_ID, connection::UpdateSecretOk::METHOD_ID) => {
+                Ok(Self::ConnectionUpdateSecretOk(connection::UpdateSecretOk::decode_args(dec)?))
+            }
             (connection::CLASS_ID, connection::Unblocked::METHOD_ID) => {
                 Ok(Self::ConnectionUnblocked(connection::Unblocked::decode_args(dec)?))
             }

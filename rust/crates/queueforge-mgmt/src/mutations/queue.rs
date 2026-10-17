@@ -114,6 +114,12 @@ fn is_known_arg(key: &str) -> bool {
             | "x-dead-letter-strategy"
             | "x-max-age"
             | "x-queue-leader-locator"
+            | "x-consumer-timeout"
+            | "x-queue-version"
+            | "x-stream-max-segment-size-bytes"
+            | "x-initial-cluster-size"
+            | "x-stream-filter-size-bytes"
+            | "x-quorum-initial-group-size"
     )
 }
 

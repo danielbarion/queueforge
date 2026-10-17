@@ -16,6 +16,25 @@ pub mod stream;
 
 static LOOPBACK_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
+tokio::task_local! {
+    /// Common name of the verified client certificate of the TLS session a
+    /// bridge serves. Set by the TLS listeners around `serve`.
+    pub static PEER_CN: Option<String>;
+}
+
+/// The verified client certificate's common name for this session, if any.
+pub(crate) fn peer_cn() -> Option<String> {
+    PEER_CN.try_with(Clone::clone).ok().flatten()
+}
+
+/// Credentials for a certificate login (RabbitMQ's `ssl_cert_login`): the
+/// common name and a short-lived ticket in place of the password.
+pub(crate) fn cert_login() -> Option<(String, String)> {
+    let cn = peer_cn()?;
+    let ticket = queueforge_auth::external::issue_ticket(&cn);
+    Some((cn, ticket))
+}
+
 /// Record the plain AMQP port bridges log in through. The first call wins.
 pub fn set_loopback_port(port: u16) {
     let _ = LOOPBACK_PORT.set(port);

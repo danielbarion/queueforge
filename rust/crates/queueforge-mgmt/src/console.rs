@@ -105,10 +105,17 @@ pub async fn get_queue(
     let traffic = traffic_totals();
     let consumers = state.connections.list_consumers(Some(&vhost), Some(&name));
     let raft = queueforge_core::flags::queue_raft(&vhost, &name);
+    let mut arguments = crate::definitions::queue_args_map(&handle.info.declared_args);
+    if let Some(kind) = handle.info.args.lock().unwrap_or_else(|err| err.into_inner()).queue_type {
+        arguments.insert("x-queue-type".into(), json!(kind.as_str()));
+    }
     let mut body = json!({
         "name": name,
         "vhost": vhost,
         "durable": handle.info.durable,
+        "auto_delete": handle.info.auto_delete,
+        "exclusive": handle.info.exclusive,
+        "arguments": arguments,
         "state": "running",
         "messages": (stats.messages_ready as u64) + (stats.messages_unacked as u64),
         "messages_ready": stats.messages_ready,

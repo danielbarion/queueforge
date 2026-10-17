@@ -145,7 +145,7 @@ fn default_queue_type() -> String {
     "classic".into()
 }
 
-fn queue_args_map(args: &queueforge_core::QueueArgs) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn queue_args_map(args: &queueforge_core::QueueArgs) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     if let Some(v) = args.message_ttl_ms {
         map.insert("x-message-ttl".into(), serde_json::json!(v));
@@ -182,6 +182,28 @@ fn queue_args_map(args: &queueforge_core::QueueArgs) -> serde_json::Map<String, 
     }
     if let Some(kind) = args.queue_type {
         map.insert("x-queue-type".into(), serde_json::json!(kind.as_str()));
+    }
+    if let Some(v) = args.consumer_timeout_ms {
+        map.insert("x-consumer-timeout".into(), serde_json::json!(v));
+    }
+    if args.overflow != queueforge_core::OverflowPolicy::DropHead {
+        map.insert(
+            "x-overflow".into(),
+            serde_json::json!(match args.overflow {
+                queueforge_core::OverflowPolicy::RejectPublish => "reject-publish",
+                queueforge_core::OverflowPolicy::RejectPublishDlx => "reject-publish-dlx",
+                queueforge_core::OverflowPolicy::DropHead => "drop-head",
+            }),
+        );
+    }
+    if args.dead_letter_strategy == queueforge_core::DeadLetterStrategy::AtLeastOnce {
+        map.insert("x-dead-letter-strategy".into(), serde_json::json!("at-least-once"));
+    }
+    if let Some(v) = args.leader_locator.as_ref() {
+        map.insert("x-queue-leader-locator".into(), serde_json::json!(v.as_str()));
+    }
+    for (k, v) in &args.echo {
+        map.insert(k.clone(), v.clone());
     }
     map
 }
@@ -635,6 +657,7 @@ pub async fn import_definitions(
             internal: ex.internal,
             alternate: None,
             delayed_type: None,
+            hash_on: None,
         };
         if exchange.durable {
             let stored = exchange.clone();

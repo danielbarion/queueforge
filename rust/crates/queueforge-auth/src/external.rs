@@ -46,6 +46,29 @@ pub struct Principal {
     pub scopes: Option<Vec<Scope>>,
     /// Epoch milliseconds after which the login no longer grants anything.
     pub expires_at_ms: Option<u64>,
+    /// LDAP `resource_access` answers, evaluated once at login.
+    pub ldap: Option<LdapGrants>,
+}
+
+/// Outcome of each LDAP access query for one user (true = allowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LdapGrants {
+    /// `vhost_access_query`.
+    pub vhost: bool,
+    /// `resource_access_query` for configure.
+    pub configure: bool,
+    /// `resource_access_query` for write.
+    pub write: bool,
+    /// `resource_access_query` for read.
+    pub read: bool,
+    /// `topic_access_query`.
+    pub topic: bool,
+}
+
+impl Default for LdapGrants {
+    fn default() -> Self {
+        Self { vhost: true, configure: true, write: true, read: true, topic: true }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -63,6 +86,16 @@ impl Principal {
         if !self.live() {
             return false;
         }
+        if let Some(g) = &self.ldap {
+            let granted = match kind {
+                PermissionKind::Configure => g.configure,
+                PermissionKind::Write => g.write,
+                PermissionKind::Read => g.read,
+            };
+            if !g.vhost || !granted || (routing_key.is_some() && !g.topic) {
+                return false;
+            }
+        }
         let Some(scopes) = &self.scopes else { return true };
         scopes.iter().any(|s| {
             s.kind == kind
@@ -77,7 +110,9 @@ impl Principal {
 
     /// Whether any scope names `vhost`.
     pub fn has_vhost(&self, vhost: &str) -> bool {
-        self.live() && self.scopes.as_ref().is_none_or(|s| s.iter().any(|x| x.vhost.is_match(vhost)))
+        self.live()
+            && self.ldap.is_none_or(|g| g.vhost)
+            && self.scopes.as_ref().is_none_or(|s| s.iter().any(|x| x.vhost.is_match(vhost)))
     }
 }
 
@@ -120,6 +155,44 @@ pub async fn login(user: &str, password: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Short-lived passwords the protocol bridges log in with on behalf of a
+/// client whose TLS certificate was verified (x.509 login): token -> (user, issued).
+fn tickets() -> &'static Mutex<HashMap<String, (String, u64)>> {
+    static T: OnceLock<Mutex<HashMap<String, (String, u64)>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const TICKET_TTL_MS: u64 = 30_000;
+
+/// A one-off password that logs `user` in over the local AMQP listener for
+/// the next 30 s. The protocol bridges use it after a client certificate
+/// named `user`, as RabbitMQ's `ssl_cert_login` does.
+pub fn issue_ticket(user: &str) -> String {
+    use rand_core::{OsRng, RngCore};
+    let mut raw = [0u8; 24];
+    OsRng.fill_bytes(&mut raw);
+    let token = format!("qf-ticket-{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw));
+    let now = now_ms();
+    if let Ok(mut t) = tickets().lock() {
+        t.retain(|_, (_, at)| now.saturating_sub(*at) < TICKET_TTL_MS);
+        t.insert(token.clone(), (user.to_string(), now));
+    }
+    token
+}
+
+/// Whether `password` is a live ticket issued for `user`.
+pub fn ticket_valid(user: &str, password: &str) -> bool {
+    if !password.starts_with("qf-ticket-") {
+        return false;
+    }
+    let now = now_ms();
+    tickets()
+        .lock()
+        .ok()
+        .and_then(|t| t.get(password).cloned())
+        .is_some_and(|(u, at)| u == user && now.saturating_sub(at) < TICKET_TTL_MS)
 }
 
 /// A RabbitMQ scope wildcard as an anchored regex.
@@ -262,7 +335,7 @@ async fn oauth_login(cfg: &OAuth2Config, token: &str) -> Option<(Principal, Stri
     };
     let (scopes, tags) = parse_scopes(&scope, &cfg.resource_server_id);
     let sub = claims.get("sub").or(claims.get("client_id")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    Some((Principal { tags, scopes: Some(scopes), expires_at_ms: Some(exp * 1000) }, sub))
+    Some((Principal { tags, scopes: Some(scopes), expires_at_ms: Some(exp * 1000), ldap: None }, sub))
 }
 
 /// GET a small document over http or https. HTTPS trusts only `ca_path`.
@@ -349,17 +422,42 @@ async fn ldap_login(cfg: &LdapConfig, user: &str, password: &str) -> Option<Prin
         return None;
     }
     let mut tags = vec!["management".to_string()];
-    if let Some(group) = &cfg.admin_group {
-        let bound = match &cfg.bind_dn {
+    let ra = &cfg.resource_access;
+    let needs_groups = cfg.admin_group.is_some()
+        || [&ra.vhost, &ra.configure, &ra.write, &ra.read, &ra.topic]
+            .iter()
+            .any(|q| q.as_ref().is_some_and(|q| q.in_group.is_some()));
+    // Group lookups bind as bind_dn (RabbitMQ's other_bind), else as the user.
+    let bound = !needs_groups
+        || match &cfg.bind_dn {
             Some(admin) => c.bind(admin, cfg.bind_password.as_deref().unwrap_or_default()).await == Some(0),
             None => true,
         };
+    if let Some(group) = &cfg.admin_group {
         if bound && c.base_has(group, "member", &dn).await == Some(true) {
             tags.insert(0, "administrator".to_string());
         }
     }
+    let mut grants = LdapGrants::default();
+    for (query, slot) in [
+        (&ra.vhost, &mut grants.vhost),
+        (&ra.configure, &mut grants.configure),
+        (&ra.write, &mut grants.write),
+        (&ra.read, &mut grants.read),
+        (&ra.topic, &mut grants.topic),
+    ] {
+        let Some(q) = query else { continue };
+        *slot = match (&q.in_group, q.constant) {
+            (Some(group), _) => {
+                bound && c.base_has(group, q.attribute.as_deref().unwrap_or("member"), &dn).await == Some(true)
+            }
+            (None, Some(constant)) => constant,
+            (None, None) => true,
+        };
+    }
     c.unbind().await;
-    Some(Principal { tags, scopes: None, expires_at_ms: None })
+    let ldap = (grants != LdapGrants::default()).then_some(grants);
+    Some(Principal { tags, scopes: None, expires_at_ms: None, ldap })
 }
 
 /// The few LDAPv3 operations the backend needs, BER-encoded by hand.
@@ -507,7 +605,7 @@ mod tests {
     fn scopes_follow_rabbitmq_format() {
         let raw = ["rabbitmq.read:*/*".to_string(), "rabbitmq.configure:prod/app-*".to_string(), "other.write:*/*".to_string(), "rabbitmq.tag:management".to_string()];
         let (scopes, tags) = parse_scopes(&raw, "rabbitmq");
-        let p = Principal { tags, scopes: Some(scopes), expires_at_ms: None };
+        let p = Principal { tags, scopes: Some(scopes), expires_at_ms: None, ldap: None };
         assert!(p.allows("/", PermissionKind::Read, "anything", None));
         assert!(p.allows("prod", PermissionKind::Configure, "app-1", None));
         assert!(!p.allows("dev", PermissionKind::Configure, "app-1", None));

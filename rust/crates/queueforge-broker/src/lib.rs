@@ -9,6 +9,10 @@
 pub mod cluster;
 /// Per-connection AMQP 0-9-1 state machine.
 pub mod connection;
+/// Delayed-message exchange holds, kept in the metadata store.
+pub mod delayed;
+/// Peer discovery through Kubernetes, Consul, etcd and AWS EC2.
+pub mod discovery;
 /// Connection and resource limit helpers.
 pub mod limits;
 /// AMQP TCP accept loop.

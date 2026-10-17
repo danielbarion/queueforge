@@ -40,6 +40,10 @@ pub enum Method {
     ConnectionBlocked(connection::Blocked),
     /// connection.unblocked (RabbitMQ extension)
     ConnectionUnblocked(connection::Unblocked),
+    /// connection.update-secret (RabbitMQ extension)
+    ConnectionUpdateSecret(connection::UpdateSecret),
+    /// connection.update-secret-ok (RabbitMQ extension)
+    ConnectionUpdateSecretOk(connection::UpdateSecretOk),
 
     // --- channel (20) ---
     /// channel.open

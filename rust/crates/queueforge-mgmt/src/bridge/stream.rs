@@ -296,6 +296,8 @@ struct Sub {
     gen: u64,
     credit: u32,
     spec: AMQPValue,
+    /// `filter.N` values and `match-unfiltered`, as AMQP consume arguments.
+    filter: Option<(Vec<String>, bool)>,
     ch: Option<Channel>,
     tag: String,
     buffer: VecDeque<Delivery>,
@@ -921,9 +923,8 @@ impl Session {
         let stream_ok = self.publishers.get(&id).map(|p| self.is_stream(&p.stream));
         for _ in 0..count {
             let publishing_id = r.u64()?;
-            if version >= 2 {
-                r.str()?;
-            }
+            // Publish v2 carries a filter value per message.
+            let filter_value = if version >= 2 { r.str()? } else { String::new() };
             let payload = r.bytes()?;
             let (Some(publisher), Some(ch)) = (self.publishers.get_mut(&id), self.publish.as_ref()) else {
                 failed.push((publishing_id, PUBLISHER_DOES_NOT_EXIST));
@@ -938,10 +939,15 @@ impl Session {
                 confirmed.push(publishing_id);
                 continue;
             }
-            let Ok(msg) = map::inbound(payload) else {
+            let Ok(mut msg) = map::inbound(payload) else {
                 failed.push((publishing_id, INTERNAL_ERROR));
                 continue;
             };
+            if !filter_value.is_empty() {
+                let mut headers = msg.props.headers().clone().unwrap_or_default();
+                headers.insert("x-stream-filter-value".into(), AMQPValue::LongString(filter_value.into_bytes().into()));
+                msg.props = msg.props.with_headers(headers);
+            }
             match ch.basic_publish("", &publisher.stream, BasicPublishOptions::default(), &msg.body, msg.props).await {
                 Ok(confirm) => waiting.push((publishing_id, confirm)),
                 Err(_) => failed.push((publishing_id, INTERNAL_ERROR)),
@@ -1010,11 +1016,19 @@ impl Session {
         self.gen += 1;
         let gen = self.gen;
         let group = single.then(|| format!("{}\0{stream}\0{name}", self.vhost));
+        let mut values: Vec<(usize, String)> = props
+            .iter()
+            .filter_map(|(k, v)| Some((k.strip_prefix("filter.")?.parse::<usize>().ok()?, v.clone())))
+            .collect();
+        values.sort();
+        let filter = (!values.is_empty())
+            .then(|| (values.into_iter().map(|(_, v)| v).collect(), props.get("match-unfiltered").map(String::as_str) == Some("true")));
         let sub = Sub {
             stream: stream.clone(),
             gen,
             credit: u32::from(credit),
             spec,
+            filter,
             ch: None,
             tag: format!("stream-{}-{id}-{gen}", self.id),
             buffer: VecDeque::new(),
@@ -1047,6 +1061,11 @@ impl Session {
         let _ = ch.basic_qos(PREFETCH, BasicQosOptions::default()).await;
         let mut args = FieldTable::default();
         args.insert("x-stream-offset".into(), spec.unwrap_or_else(|| sub.spec.clone()));
+        if let Some((values, match_unfiltered)) = &sub.filter {
+            let values = values.iter().map(|v| AMQPValue::LongString(v.as_bytes().to_vec().into())).collect::<Vec<_>>();
+            args.insert("x-stream-filter".into(), AMQPValue::FieldArray(values.into()));
+            args.insert("x-stream-match-unfiltered".into(), AMQPValue::Boolean(*match_unfiltered));
+        }
         let Ok(consumer) = ch.basic_consume(&sub.stream, &sub.tag, BasicConsumeOptions::default(), args).await else { return };
         let tx = self.tx.clone();
         tokio::spawn(async move {

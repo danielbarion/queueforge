@@ -80,6 +80,15 @@ pub struct Policy {
     /// `dead-letter-strategy` when set.
     #[serde(default)]
     pub dead_letter_strategy: Option<crate::queue::DeadLetterStrategy>,
+    /// Quorum `consumer-timeout` in milliseconds.
+    #[serde(default)]
+    pub consumer_timeout_ms: Option<u64>,
+    /// `federation-upstream`: one upstream by name.
+    #[serde(default)]
+    pub federation_upstream: Option<CompactString>,
+    /// `federation-upstream-set`: a set name, or `all`.
+    #[serde(default)]
+    pub federation_upstream_set: Option<CompactString>,
 }
 
 impl Policy {
@@ -155,6 +164,7 @@ pub fn apply_user_and_operator(
         }
     }
     out.delivery_limit = cap(out.delivery_limit, op.delivery_limit);
+    out.consumer_timeout_ms = cap(out.consumer_timeout_ms, op.consumer_timeout_ms);
     if declared.dead_letter_strategy == crate::queue::DeadLetterStrategy::AtMostOnce {
         if let Some(strategy) = op.dead_letter_strategy {
             out.dead_letter_strategy = strategy;
@@ -193,6 +203,11 @@ pub fn apply_queue_policy(declared: &QueueArgs, policy: Option<&Policy>) -> Queu
     if out.delivery_limit.is_none() {
         out.delivery_limit = policy.delivery_limit;
     }
+    // RabbitMQ takes the lower of the queue argument and the policy key.
+    out.consumer_timeout_ms = match (out.consumer_timeout_ms, policy.consumer_timeout_ms) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     if out.dead_letter_strategy == crate::queue::DeadLetterStrategy::AtMostOnce {
         if let Some(strategy) = policy.dead_letter_strategy {
             out.dead_letter_strategy = strategy;
@@ -233,6 +248,9 @@ mod tests {
             delivery_limit: None,
             alternate_exchange: Some("ae".into()),
             dead_letter_strategy: None,
+            consumer_timeout_ms: None,
+            federation_upstream: None,
+            federation_upstream_set: None,
         }
     }
 

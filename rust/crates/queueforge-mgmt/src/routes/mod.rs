@@ -184,12 +184,20 @@ pub fn router(state: MgmtState) -> Router {
         )
         .route(
             "/api/parameters/shovel/{vhost}/{name}",
-            put(crate::mutations::put_shovel).delete(crate::mutations::delete_shovel),
+            put(crate::links::shovel::put_shovel).delete(crate::links::shovel::delete_shovel),
         )
+        .route("/api/shovels", get(crate::links::shovel::list_shovels))
+        .route("/api/shovels/{vhost}", get(crate::links::shovel::list_shovels))
         .route(
             "/api/parameters/federation-upstream/{vhost}/{name}",
-            put(crate::mutations::put_federation_upstream),
+            put(crate::links::federation::put_upstream).delete(crate::links::federation::delete_upstream),
         )
+        .route(
+            "/api/parameters/federation-upstream-set/{vhost}/{name}",
+            put(crate::links::federation::put_upstream_set).delete(crate::links::federation::delete_upstream_set),
+        )
+        .route("/api/federation-links", get(crate::links::federation::list_links))
+        .route("/api/federation-links/{vhost}", get(crate::links::federation::list_links))
         .fallback(crate::spa::static_handler)
         .layer(axum::middleware::from_fn(crate::compat::unwrap_items))
         .with_state(state)

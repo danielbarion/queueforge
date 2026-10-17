@@ -226,6 +226,23 @@ pub(super) fn parse_queue_declare_args(table: &FieldTable) -> Result<QueueArgs, 
     QueueArgs::parse(pairs).map_err(|e| e.to_string().replace("precondition failed: ", ""))
 }
 
+/// RabbitMQ 4.3 enforces `x-consumer-timeout` on quorum queues only; the
+/// other types refuse the argument.
+pub(super) fn check_consumer_timeout_arg(
+    declared: &queueforge_core::QueueArgs,
+    resolved: Option<queueforge_core::QueueType>,
+    queue: &str,
+) -> Result<(), String> {
+    let kind = resolved.unwrap_or_default();
+    if declared.consumer_timeout_ms.is_none() || kind == queueforge_core::QueueType::Quorum {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid arg 'x-consumer-timeout' for queue '{queue}' in vhost of queue type {}",
+        if kind == queueforge_core::QueueType::Stream { "rabbit_stream_queue" } else { "rabbit_classic_queue" }
+    ))
+}
+
 /// Resolve omitted `x-queue-type` and reject an illegal quorum declare.
 pub(super) fn finalize_queue_type(
     args: &mut queueforge_core::QueueArgs,

@@ -18,7 +18,7 @@ pub use args::{
 pub use cmd::{
     AppHeaderValue, ConsumerDeliveryId, ConsumerSessionId, DlxFailAction, EnqueueCompletion,
     Message, MessageHeaders, QueueCmd, QueueDelivery, QueueMessage, QueueOffset, QueueStats,
-    ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart,
+    ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamFilter, StreamReplicator, StreamStart,
 };
 pub use dlx::{
     death_hop_count, is_cycle_destination, prepare_dead_letter, should_drop_for_cycle, DeathEntry,

@@ -78,6 +78,11 @@ async fn run() -> Result<()> {
         .apply_env_overrides()
         .context("applying environment overrides")?;
     config.cluster.resolve_discovery().context("resolving cluster discovery")?;
+    // k8s, consul, etcd and aws: register this node and list the members.
+    let discovery_registration = queueforge_broker::discovery::resolve(&mut config.cluster)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("resolving cluster discovery")?;
     config.validate().context("validating configuration")?;
     config.tls.validate().context("invalid TLS configuration")?;
 
@@ -151,6 +156,7 @@ async fn run() -> Result<()> {
     );
 
     let store = Arc::new(store);
+    queueforge_mgmt::bridge::mqtt::set_store(Arc::clone(&store));
 
     // Durability: WAL factory + group-commit policy from config.
     let durability_policy = DurabilityPolicy::from_parts(
@@ -316,6 +322,10 @@ async fn run() -> Result<()> {
         queues_corrupt = recovery_report.queues_corrupt,
         "recovery finished"
     );
+    let delayed = queueforge_broker::delayed::init(Arc::clone(&store), Arc::clone(&router), Arc::clone(&queues));
+    if delayed > 0 {
+        info!(delayed, "delayed messages rescheduled");
+    }
 
     // Recovered quorum bodies stay unservable until every peer hello has
     // applied its consumed set. An empty data dir still becomes ready here.
@@ -414,6 +424,7 @@ async fn run() -> Result<()> {
         } else {
             config.limits.default_prefetch
         },
+        consumer_timeout_ms: config.limits.consumer_timeout,
         default_queue_type: if config.limits.default_queue_type == "quorum" {
             queueforge_core::QueueType::Quorum
         } else {
@@ -450,6 +461,15 @@ async fn run() -> Result<()> {
                 }
             }
         });
+    }
+    // Cloud discovery: keep the registration alive and re-check the members.
+    if queueforge_broker::discovery::is_cloud(config.cluster.discovery.as_deref()) {
+        queueforge_broker::discovery::spawn_upkeep(
+            config.cluster.clone(),
+            &discovery_registration,
+            config.data.dir.join("members.json"),
+            std::time::Duration::from_secs(5),
+        );
     }
     let cluster = if config.cluster.is_enabled() {
         let listen = config.cluster.listen.context("cluster.listen")?;
@@ -607,6 +627,7 @@ async fn run() -> Result<()> {
     }
 
     wait_for_shutdown().await?;
+    discovery_registration.remove().await;
 
     // ── Ordered graceful shutdown (design Operability section) ─────────
     // 1. /readyz → 503; stop accepting new TCP connections.

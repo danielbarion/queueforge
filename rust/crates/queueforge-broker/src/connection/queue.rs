@@ -110,7 +110,9 @@ where
                 self.params.default_queue_type,
                 declare.durable,
                 declare.exclusive,
-            ) {
+            )
+            .and_then(|()| check_consumer_timeout_arg(&declared_args, queue_args.queue_type, &queue_name))
+            {
                 self.server_channel_close(
                     channel,
                     REPLY_PRECONDITION_FAILED,
@@ -355,6 +357,40 @@ where
     #[allow(clippy::too_many_arguments)]
 
     /// `on_open_connection_method` on the open connection.
+    /// connection.update-secret: check the new secret with the backend that
+    /// logged this connection in. A valid OAuth token replaces the user's
+    /// scopes for every channel; a refused one closes the connection with 530.
+    async fn handle_update_secret(&mut self, update: conn_method::UpdateSecret) -> Result<Step, ConnError> {
+        let user = self.user.clone().unwrap_or_default();
+        let secret = String::from_utf8_lossy(&update.new_secret).into_owned();
+        let store = Arc::clone(&self.store);
+        let lookup = user.clone();
+        let internal = MetadataStore::blocking(store, move |s| s.get_user(&lookup))
+            .await
+            .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?;
+        let ok = match internal {
+            Some(row) => matches!(queueforge_auth::verify_password(&secret, &row.password_hash), Ok(true)),
+            None => queueforge_auth::external::login(&user, &secret).await.is_some(),
+        };
+        if !ok {
+            let _ = self
+                .send_connection_close(
+                    REPLY_NOT_ALLOWED,
+                    "NOT_ALLOWED - update-secret failed",
+                    conn_method::CLASS_ID,
+                    conn_method::UpdateSecret::METHOD_ID,
+                )
+                .await;
+            self.cleanup_on_close().await;
+            self.mark_closed();
+            return Ok(Step::Done);
+        }
+        // Permission answers cached under the old credential no longer hold.
+        self.exchange_write_ok.clear();
+        self.send_method(0, &Method::ConnectionUpdateSecretOk(conn_method::UpdateSecretOk)).await?;
+        Ok(Step::Continue)
+    }
+
     pub(in crate::connection) async fn on_open_connection_method(
         &mut self,
         method: Method,
@@ -378,6 +414,7 @@ where
                 self.mark_closed();
                 Ok(Step::Done)
             }
+            Method::ConnectionUpdateSecret(update) => self.handle_update_secret(update).await,
             other => {
                 let _ = self
                     .send_connection_close(

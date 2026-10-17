@@ -131,6 +131,7 @@ where
                         consumer_delivery_id: delivery.delivery_id,
                         consumer_tag: Some(info.consumer_tag.clone()),
                         session: Some(delivery.session),
+                        delivered_at: info.timeout.map(|_| Instant::now()),
                     },
                 );
             }
@@ -406,6 +407,80 @@ where
                 .await;
         }
     }
+    /// Time out consumers holding a delivery past their acknowledgement
+    /// timeout. Runs on the connection's periodic tick, never per message.
+    pub(in crate::connection) async fn check_consumer_timeouts(&mut self) -> Result<(), ConnError> {
+        let now = Instant::now();
+        let mut expired: Vec<ConsumerSessionId> = Vec::new();
+        // One pass over the unacked deliveries; only timed consumers stamp them.
+        for ch in self.channels.values() {
+            for (_, e) in ch.delivery_ledger.iter() {
+                let (Some(at), Some(session)) = (e.delivered_at, e.session) else { continue };
+                if expired.contains(&session) {
+                    continue;
+                }
+                let limit = self.sessions.get(&session).and_then(|info| info.timeout);
+                if limit.is_some_and(|limit| now.duration_since(at) >= limit) {
+                    expired.push(session);
+                }
+            }
+        }
+        let any = self.sessions.values().any(|info| info.timeout.is_some());
+        self.next_timeout_check = any.then(|| now + super::consume::TIMEOUT_TICK);
+        for session in expired {
+            self.time_out_consumer(session).await?;
+        }
+        Ok(())
+    }
+
+    /// Return a timed-out consumer's unacked deliveries to its queue and stop
+    /// it: basic.cancel when the client takes server cancels, else close the
+    /// channel with 406, as RabbitMQ 4.3 does.
+    async fn time_out_consumer(&mut self, session: ConsumerSessionId) -> Result<(), ConnError> {
+        let Some(info) = self.sessions.get(&session).cloned() else {
+            return Ok(());
+        };
+        let limit = info.timeout.unwrap_or_default().as_millis();
+        self.cancel_session(session, true).await;
+        let tags: Vec<u64> = self
+            .channels
+            .get(&info.channel)
+            .map(|ch| {
+                ch.delivery_ledger
+                    .iter()
+                    .filter(|(_, e)| e.session == Some(session))
+                    .map(|(t, _)| *t)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for tag in tags {
+            self.ack_or_nack_tags(info.channel, tag, false, true, true).await?;
+        }
+        if self.wants_cancel_notify {
+            self.send_method(
+                info.channel,
+                &Method::BasicCancel(basic_method::Cancel {
+                    consumer_tag: info.consumer_tag,
+                    no_wait: true,
+                }),
+            )
+            .await?;
+        } else {
+            self.server_channel_close(
+                info.channel,
+                REPLY_PRECONDITION_FAILED,
+                &format!(
+                    "PRECONDITION_FAILED - delivery acknowledgement on channel {} timed out. Timeout value used: {limit} ms",
+                    info.channel
+                ),
+                0,
+                0,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// `teardown_channel` on the open connection.
     pub(in crate::connection) async fn teardown_channel(&mut self, channel: u16, requeue: bool) {
         let Some(mut ch_state) = self.channels.remove(&channel) else {

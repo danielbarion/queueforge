@@ -115,7 +115,7 @@ impl ExchangeRouter {
         let names = self
             .index
             .load()
-            .route_named(vhost, exchange, ex.routing_kind(), routing_key, headers);
+            .route_named_hashed(vhost, exchange, ex.routing_kind(), routing_key, headers, ex.hash_on.as_ref());
         let destinations = names.into_iter().map(|q| QueueKey::new(vhost, q)).collect();
         Ok(RouteResult {
             exchange_name: CompactString::from(exchange),

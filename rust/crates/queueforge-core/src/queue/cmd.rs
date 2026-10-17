@@ -296,6 +296,33 @@ pub enum StreamStart {
     AgeMs(u64),
 }
 
+/// `x-stream-filter` of a stream consumer: deliver only messages whose
+/// `x-stream-filter-value` header is one of `values`. Messages without a value
+/// pass only with `match_unfiltered`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StreamFilter {
+    /// Accepted filter values.
+    pub values: Vec<String>,
+    /// `x-stream-match-unfiltered`.
+    pub match_unfiltered: bool,
+}
+
+impl StreamFilter {
+    /// Header carrying a message's filter value.
+    pub const HEADER: &'static str = "x-stream-filter-value";
+
+    /// Whether `message` passes this filter.
+    pub fn accepts(&self, message: &crate::Message) -> bool {
+        let value = message.headers.app.iter().find(|(k, _)| k.as_str() == Self::HEADER).map(|(_, v)| v);
+        match value {
+            None => self.match_unfiltered,
+            Some(crate::AppHeaderValue::Str(s)) => self.values.iter().any(|v| v == s),
+            Some(crate::AppHeaderValue::Bytes(b)) => self.values.iter().any(|v| v.as_bytes() == b.as_slice()),
+            Some(_) => false,
+        }
+    }
+}
+
 /// One entry of a replicated stream, as its Raft snapshot carries it.
 #[derive(Debug, Clone)]
 pub struct StreamEntryCopy {
@@ -374,6 +401,8 @@ pub enum QueueCmd {
         session: ConsumerSessionId,
         /// Starting point.
         start: StreamStart,
+        /// `x-stream-filter`, when the consumer set one.
+        filter: Option<Box<StreamFilter>>,
     },
     /// Clear every ready and unacked local quorum replica before installing a snapshot.
     ResetReplicas {
@@ -581,4 +610,29 @@ pub struct QueueStats {
     pub max_priority: Option<u8>,
     /// Ready counts per priority band (`index = priority`); `None` for FIFO.
     pub ready_by_priority: Option<Vec<u32>>,
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn with_value(value: Option<AppHeaderValue>) -> Message {
+        let mut m = Message::blank();
+        if let Some(v) = value {
+            m.headers.app.push((StreamFilter::HEADER.into(), v));
+        }
+        m
+    }
+
+    #[test]
+    fn stream_filter_matches_values_and_unfiltered_only_on_request() {
+        let strict = StreamFilter { values: vec!["red".into(), "blue".into()], match_unfiltered: false };
+        assert!(strict.accepts(&with_value(Some(AppHeaderValue::Str("red".into())))));
+        assert!(strict.accepts(&with_value(Some(AppHeaderValue::Bytes(b"blue".to_vec())))));
+        assert!(!strict.accepts(&with_value(Some(AppHeaderValue::Str("green".into())))));
+        assert!(!strict.accepts(&with_value(None)));
+        let loose = StreamFilter { match_unfiltered: true, ..strict };
+        assert!(loose.accepts(&with_value(None)));
+        assert!(!loose.accepts(&with_value(Some(AppHeaderValue::I64(1)))));
+    }
 }

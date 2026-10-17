@@ -337,7 +337,9 @@ async fn sasl<S: AsyncRead + AsyncWrite + Unpin>(io: &mut S, buf: &mut Vec<u8>, 
     if header != HEADER_SASL {
         return None;
     }
-    let mechanisms = performative(0x40, vec![V::Array(vec![V::sym("PLAIN")])]);
+    let cert = super::peer_cn();
+    let offered = if cert.is_some() { vec![V::sym("EXTERNAL"), V::sym("PLAIN")] } else { vec![V::sym("PLAIN")] };
+    let mechanisms = performative(0x40, vec![V::Array(offered)]);
     io.write_all(&frame(1, 0, &mechanisms)).await.ok()?;
     let ((kind, _, body), _) = next_frame(io, buf).await?;
     let init = Decoder::new(&body).value().ok()?;
@@ -351,6 +353,8 @@ async fn sasl<S: AsyncRead + AsyncWrite + Unpin>(io: &mut S, buf: &mut Vec<u8>, 
             let _authzid = parts.next();
             Some((parts.next().unwrap_or_default().to_string(), parts.next().unwrap_or_default().to_string()))
         }
+        // SASL EXTERNAL: the verified certificate's common name.
+        (Some("EXTERNAL"), _) if cert.is_some() => super::cert_login(),
         _ => None,
     };
     let ok = match &creds {

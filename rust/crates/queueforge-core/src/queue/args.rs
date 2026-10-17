@@ -135,6 +135,13 @@ pub struct QueueArgs {
     /// the queue on the cluster's home hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_locator: Option<CompactString>,
+    /// `x-consumer-timeout` in milliseconds (quorum queues only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_timeout_ms: Option<u64>,
+    /// Accepted 4.x arguments the broker does not act on, kept as declared so
+    /// the management API echoes them (`x-max-age`, `x-queue-version`, ...).
+    #[serde(default, flatten, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub echo: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 fn default_max_death_hops() -> u32 {
@@ -159,6 +166,8 @@ impl Default for QueueArgs {
             dead_letter_strategy: DeadLetterStrategy::AtMostOnce,
             max_age_ms: None,
             leader_locator: None,
+            consumer_timeout_ms: None,
+            echo: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -261,6 +270,28 @@ impl QueueArgs {
                     args.max_age_ms = Some(parse_age(s).ok_or_else(|| {
                         Error::PreconditionFailed(format!("invalid x-max-age '{s}'"))
                     })?);
+                    args.echo.insert(key.into(), serde_json::Value::from(s));
+                }
+                "x-consumer-timeout" => {
+                    let n = positive_long(value, "x-consumer-timeout")?;
+                    args.consumer_timeout_ms = Some(n);
+                }
+                "x-queue-version" => match value {
+                    ArgValue::Long(n @ (1 | 2)) => {
+                        args.echo.insert(key.into(), serde_json::Value::from(n));
+                    }
+                    _ => {
+                        return Err(Error::PreconditionFailed(
+                            "invalid arg 'x-queue-version': expected 1 or 2".into(),
+                        ))
+                    }
+                },
+                "x-stream-max-segment-size-bytes"
+                | "x-initial-cluster-size"
+                | "x-stream-filter-size-bytes"
+                | "x-quorum-initial-group-size" => {
+                    let n = positive_long(value, key)?;
+                    args.echo.insert(key.into(), serde_json::Value::from(n));
                 }
                 "x-queue-leader-locator" => {
                     // RabbitMQ accepts these two and refuses anything else.
@@ -328,9 +359,12 @@ fn non_negative_long(value: ArgValue<'_>, name: &str) -> Result<u64> {
 
 /// RabbitMQ's age spelling: a number and a unit, Y M D h m s. Milliseconds.
 pub fn parse_age(s: &str) -> Option<u64> {
-    let s = s.trim();
     let unit = s.chars().last()?;
-    let n: u64 = s[..s.len() - unit.len_utf8()].parse().ok()?;
+    let digits = &s[..s.len() - unit.len_utf8()];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
     let per = match unit {
         'Y' => 365 * 86_400_000,
         'M' => 30 * 86_400_000,
@@ -468,6 +502,31 @@ mod tests {
     #[test]
     fn reject_bad_overflow() {
         assert!(QueueArgs::parse([("x-overflow", ArgValue::Str("drop-tail"))]).is_err());
+    }
+
+    #[test]
+    fn rabbitmq_4_arguments_are_accepted_and_echoed() {
+        let args = QueueArgs::parse([
+            ("x-max-age", ArgValue::Str("7D")),
+            ("x-stream-max-segment-size-bytes", ArgValue::Long(1_000_000)),
+            ("x-initial-cluster-size", ArgValue::Long(1)),
+            ("x-quorum-initial-group-size", ArgValue::Long(3)),
+            ("x-queue-version", ArgValue::Long(2)),
+            ("x-consumer-timeout", ArgValue::Long(1000)),
+        ])
+        .unwrap();
+        assert_eq!(args.max_age_ms, Some(7 * 86_400_000));
+        assert_eq!(args.consumer_timeout_ms, Some(1000));
+        assert_eq!(args.echo.get("x-max-age"), Some(&serde_json::json!("7D")));
+        assert_eq!(args.echo.get("x-quorum-initial-group-size"), Some(&serde_json::json!(3)));
+        // Stored rows keep the echoed arguments.
+        let back: QueueArgs = serde_json::from_value(serde_json::to_value(&args).unwrap()).unwrap();
+        assert_eq!(back, args);
+        for bad in ["forever", "7", "D", "+7D", "7 D"] {
+            assert!(QueueArgs::parse([("x-max-age", ArgValue::Str(bad))]).is_err(), "{bad}");
+        }
+        assert!(QueueArgs::parse([("x-queue-version", ArgValue::Long(3))]).is_err());
+        assert!(QueueArgs::parse([("x-consumer-timeout", ArgValue::Long(0))]).is_err());
     }
 
     #[test]

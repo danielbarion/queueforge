@@ -152,6 +152,7 @@ where
                                 consumer_delivery_id: delivery_id,
                                 consumer_tag: None,
                                 session: None,
+                                delivered_at: None,
                             },
                         );
                     }

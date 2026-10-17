@@ -47,7 +47,16 @@ where
                 Some(acceptor) => {
                     tokio::spawn(async move {
                         match acceptor.accept(socket).await {
-                            Ok(stream) => serve(Box::new(stream)).await,
+                            Ok(stream) => {
+                                // rustls has verified any certificate the client sent.
+                                let cn = stream
+                                    .get_ref()
+                                    .1
+                                    .peer_certificates()
+                                    .and_then(|c| c.first())
+                                    .and_then(|c| crate::tls::common_name(c.as_ref()));
+                                queueforge_mgmt::bridge::PEER_CN.scope(cn, serve(Box::new(stream))).await
+                            }
                             Err(err) => debug!(%peer, error = %err, "{name} TLS handshake failed"),
                         }
                     });

@@ -30,6 +30,7 @@ mod connections;
 mod console;
 mod definitions;
 mod error;
+pub mod links;
 mod mutations;
 mod pagination;
 mod routes;
@@ -99,6 +100,7 @@ pub async fn start_server(
     state: MgmtState,
     tls: Option<Arc<ServerConfig>>,
 ) -> std::io::Result<MgmtServer> {
+    links::start(&state);
     let app = router(state);
     let tls_enabled = tls.is_some();
 

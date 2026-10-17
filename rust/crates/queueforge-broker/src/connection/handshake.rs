@@ -77,6 +77,11 @@ where
             Some(queueforge_amqp::FieldValue::Table(caps))
                 if matches!(caps.get("connection.blocked"), Some(queueforge_amqp::FieldValue::Bool(true)))
         );
+        self.wants_cancel_notify = matches!(
+            start_ok.client_properties.get("capabilities"),
+            Some(queueforge_amqp::FieldValue::Table(caps))
+                if matches!(caps.get("consumer_cancel_notify"), Some(queueforge_amqp::FieldValue::Bool(true)))
+        );
         // EXTERNAL: the user is the verified client certificate's common name,
         // as RabbitMQ's ssl_cert_login_from = common_name. It must exist.
         if start_ok.mechanism.eq_ignore_ascii_case("EXTERNAL") {
@@ -145,6 +150,7 @@ where
             .map_err(|e| ConnError::Protocol(format!("auth task: {e}")))?;
 
         let authed = match looked_up {
+            Some(user) if queueforge_auth::external::ticket_valid(&username, &password) => Some(user),
             Some(user) => match verify_password(&password, &user.password_hash) {
                 Ok(true) => Some(user),
                 Ok(false) => None,

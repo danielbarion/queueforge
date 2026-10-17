@@ -328,3 +328,51 @@ impl Unblocked {
         Ok(Self)
     }
 }
+
+/// connection.update-secret (70), a RabbitMQ extension: replace the
+/// connection's credential (an OAuth 2.0 token refresh).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpdateSecret {
+    /// The new secret.
+    pub new_secret: Vec<u8>,
+    /// Why the client refreshed it.
+    pub reason: String,
+}
+
+impl UpdateSecret {
+    /// Method id.
+    pub const METHOD_ID: u16 = 70;
+
+    /// Encode arguments.
+    pub fn encode_args(&self, enc: &mut Encoder) -> Result<()> {
+        enc.write_longstr(&self.new_secret)?;
+        enc.write_shortstr(&self.reason)
+    }
+
+    /// Decode arguments.
+    pub fn decode_args(dec: &mut Decoder<'_>) -> Result<Self> {
+        Ok(Self {
+            new_secret: dec.read_longstr()?,
+            reason: dec.read_shortstr()?,
+        })
+    }
+}
+
+/// connection.update-secret-ok (71).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpdateSecretOk;
+
+impl UpdateSecretOk {
+    /// Method id.
+    pub const METHOD_ID: u16 = 71;
+
+    /// Encode arguments (empty).
+    pub fn encode_args(&self, _enc: &mut Encoder) -> Result<()> {
+        Ok(())
+    }
+
+    /// Decode arguments (empty).
+    pub fn decode_args(_dec: &mut Decoder<'_>) -> Result<Self> {
+        Ok(Self)
+    }
+}

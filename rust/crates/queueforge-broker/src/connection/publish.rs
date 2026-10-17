@@ -184,11 +184,17 @@ where
 
         // A client may not publish to an internal exchange. Routing hops from
         // other exchanges still reach it.
+        let mut hash_property = None;
         if !exchange_name.is_empty()
             && self
                 .router
                 .get_exchange(&vhost, &exchange_name)
-                .is_some_and(|ex| ex.internal)
+                .is_some_and(|ex| {
+                    if let Some(queueforge_core::HashOn::Property(p)) = &ex.hash_on {
+                        hash_property = Some(p.clone());
+                    }
+                    ex.internal
+                })
         {
             self.server_channel_close(
                 channel,
@@ -218,12 +224,23 @@ where
             }
         }
 
-        let header_args = field_table_to_header_args(
+        let mut header_args = field_table_to_header_args(
             properties
                 .headers
                 .as_ref()
                 .unwrap_or(&FieldTable::default()),
         );
+        // A consistent-hash exchange with hash-property routes on that property.
+        if let Some(prop) = hash_property {
+            let value = match prop.as_str() {
+                "message_id" => properties.message_id.as_deref().map(|v| queueforge_core::HeaderArg::Str(v.to_string())),
+                "correlation_id" => properties.correlation_id.as_deref().map(|v| queueforge_core::HeaderArg::Str(v.to_string())),
+                _ => properties.timestamp.map(|t| queueforge_core::HeaderArg::Int(t as i64)),
+            };
+            if let Some(value) = value {
+                header_args.push((CompactString::from(queueforge_core::HASH_PROPERTY_HEADER), value));
+            }
+        }
         let mut route = match self.router.route_publish(
             &vhost,
             &exchange_name,
@@ -272,22 +289,6 @@ where
                             route.destinations.push(dest);
                         }
                     }
-                }
-            }
-        }
-
-        for downstream in queueforge_core::federation::federation_targets(&vhost, &exchange_name) {
-            let Ok(extra) = self.router.route_publish(
-                &downstream,
-                &exchange_name,
-                publish.routing_key.as_str(),
-                &header_args,
-            ) else {
-                continue;
-            };
-            for dest in extra.destinations {
-                if !route.destinations.iter().any(|existing| existing == &dest) {
-                    route.destinations.push(dest);
                 }
             }
         }
@@ -430,26 +431,10 @@ where
         }
 
         // x-delayed-message: hold the message for its x-delay, then route it.
-        // The publish is confirmed now, as the RabbitMQ plugin does. Delays
-        // are held in memory, so a restart loses messages still waiting.
+        // The publish is confirmed once the held message is stored, as the
+        // RabbitMQ plugin does; a restart reschedules it.
         if let Some(delay) = self.delay_for(&vhost, exchange_name.as_str(), &properties) {
-            let router = Arc::clone(&self.router);
-            let queues = Arc::clone(&self.queues);
-            let (v, ex, rk) = (vhost.clone(), exchange_name.to_string(), publish.routing_key.to_string());
-            let msg = Arc::clone(&msg);
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let Ok(route) = router.route_publish(&v, &ex, &rk, &header_args) else {
-                    return;
-                };
-                for key in route.destinations {
-                    let Some(handle) = queues.get(&key) else { continue };
-                    let (reply, done) = oneshot::channel();
-                    if handle.tx.send(QueueCmd::Enqueue { msg: Arc::clone(&msg), reply }).await.is_ok() {
-                        let _ = done.await;
-                    }
-                }
-            });
+            crate::delayed::hold(&vhost, Arc::clone(&msg), delay).await;
             if let Some(seq) = confirm_seq {
                 self.send_publisher_confirm(channel, seq, true).await?;
             }

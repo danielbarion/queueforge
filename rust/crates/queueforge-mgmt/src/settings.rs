@@ -19,6 +19,11 @@ const GLOBAL: &str = "global";
 /// Runtime parameters of any other component, as `rt:<component>`.
 const GENERIC: &str = "rt:";
 
+/// Store component a runtime parameter of `component` is kept under.
+pub(crate) fn component_key(component: &str) -> String {
+    format!("{GENERIC}{component}")
+}
+
 /// The replicated kinds this module applies.
 pub const KINDS: &[&str] = &[
     "user_limits",

@@ -418,6 +418,7 @@ mod tests {
             .send(QueueCmd::StreamStart {
                 session,
                 start: StreamStart::First,
+                filter: None,
             })
             .await
             .unwrap();

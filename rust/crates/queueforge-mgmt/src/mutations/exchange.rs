@@ -83,6 +83,7 @@ pub async fn put_exchange(
         internal: body.internal,
         alternate: None,
         delayed_type: None,
+        hash_on: None,
     };
 
     let vhost_lookup = vhost.clone();

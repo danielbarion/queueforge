@@ -135,6 +135,8 @@ pub struct ConnectionParams {
     pub default_prefetch: u16,
     /// Queue type when a durable declare omits `x-queue-type`.
     pub default_queue_type: queueforge_core::QueueType,
+    /// Delivery acknowledgement timeout for quorum consumers (`consumer_timeout`, ms).
+    pub consumer_timeout_ms: u64,
 }
 
 impl Default for ConnectionParams {
@@ -146,6 +148,7 @@ impl Default for ConnectionParams {
             max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             default_prefetch: 256,
             default_queue_type: queueforge_core::QueueType::Classic,
+            consumer_timeout_ms: queueforge_core::config::DEFAULT_CONSUMER_TIMEOUT_MS,
         }
     }
 }
@@ -224,6 +227,8 @@ pub async fn handle_connection<S>(
         force_close_rx: None,
         alarm_rx,
         wants_blocked: false,
+        wants_cancel_notify: false,
+        next_timeout_check: None,
         has_published: false,
         reply_tx,
         reply_rx,
@@ -343,6 +348,8 @@ struct OutstandingDelivery {
     consumer_delivery_id: ConsumerDeliveryId,
     consumer_tag: Option<String>,
     session: Option<ConsumerSessionId>,
+    /// When it was sent, kept only for consumers with an acknowledgement timeout.
+    delivered_at: Option<Instant>,
 }
 
 /// In-flight content assembly after basic.publish.
@@ -438,6 +445,8 @@ struct SessionInfo {
     queue_key: QueueKey,
     handle: QueueHandle,
     no_ack: bool,
+    /// Acknowledgement timeout (quorum consumers only).
+    timeout: Option<Duration>,
 }
 
 struct Connection<'a, S> {
@@ -473,6 +482,11 @@ struct Connection<'a, S> {
     alarm_rx: watch::Receiver<Option<String>>,
     /// The client advertised the `connection.blocked` capability.
     wants_blocked: bool,
+    /// The client advertised `consumer_cancel_notify`.
+    wants_cancel_notify: bool,
+    /// Next acknowledgement-timeout scan. `None` while no consumer on this
+    /// connection has a timeout.
+    next_timeout_check: Option<Instant>,
     /// This connection has published. RabbitMQ stops reading only from
     /// publishers while an alarm lasts, so consumers can drain.
     has_published: bool,
@@ -848,6 +862,15 @@ where
                     self.stage_confirm(confirm.channel, confirm.delivery_tag, confirm.ok);
                     if let Err(e) = self.flush_confirms().await {
                         debug!(peer = %self.peer, error = %e, "confirm forward failed");
+                        self.cleanup_on_close().await;
+                        self.mark_closed();
+                        return Ok(());
+                    }
+                }
+
+                _ = sleep_until_opt(self.next_timeout_check), if open && self.next_timeout_check.is_some() => {
+                    if let Err(e) = self.check_consumer_timeouts().await {
+                        debug!(peer = %self.peer, error = %e, "consumer timeout handling failed");
                         self.cleanup_on_close().await;
                         self.mark_closed();
                         return Ok(());

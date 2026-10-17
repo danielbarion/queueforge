@@ -66,7 +66,12 @@ where
             .entries
             .iter()
             .map(|(k, _)| k.as_str())
-            .filter(|key| *key != "x-priority" && *key != "x-stream-offset")
+            .filter(|key| {
+                !matches!(
+                    *key,
+                    "x-priority" | "x-stream-offset" | "x-consumer-timeout" | "x-stream-filter" | "x-stream-match-unfiltered"
+                )
+            })
             .collect();
         if !unknown.is_empty() {
             let keys = unknown;
@@ -225,8 +230,40 @@ where
                     return Ok(Step::Continue);
                 }
             };
-            let _ = handle.tx.send(QueueCmd::StreamStart { session, start }).await;
+            let filter = stream_filter(&consume.arguments);
+            let _ = handle.tx.send(QueueCmd::StreamStart { session, start, filter }).await;
         }
+
+        // RabbitMQ 4.3: acknowledgement timeouts apply to quorum queues only.
+        let consume_timeout = consumer_timeout_arg(&consume.arguments);
+        if consume_timeout.is_some() && !quorum {
+            self.granted_credit.remove(&session);
+            self.server_channel_close(
+                channel,
+                REPLY_PRECONDITION_FAILED,
+                &format!(
+                    "PRECONDITION_FAILED - invalid arg 'x-consumer-timeout' for queue '{queue_name}' of queue type {}",
+                    if stream { "rabbit_stream_queue" } else { "rabbit_classic_queue" }
+                ),
+                basic_method::CLASS_ID,
+                basic_method::Consume::METHOD_ID,
+            )
+            .await?;
+            return Ok(Step::Continue);
+        }
+        let timeout = if quorum && !consume.no_ack {
+            let queue_timeout = handle
+                .info
+                .args
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .consumer_timeout_ms;
+            Some(Duration::from_millis(
+                consume_timeout.or(queue_timeout).unwrap_or(self.params.consumer_timeout_ms),
+            ))
+        } else {
+            None
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         if handle
@@ -292,8 +329,12 @@ where
                 queue_key: key,
                 handle: handle.clone(),
                 no_ack: consume.no_ack,
+                timeout,
             },
         );
+        if timeout.is_some() && self.next_timeout_check.is_none() {
+            self.next_timeout_check = Some(Instant::now() + TIMEOUT_TICK);
+        }
         if let Some(ch) = self.channels.get_mut(&channel) {
             ch.consumers.insert(consumer_tag.clone(), session);
         }
@@ -429,6 +470,42 @@ fn getrandom_fill(buf: &mut [u8]) {
         let v = h.finish().to_le_bytes();
         chunk.copy_from_slice(&v[..chunk.len()]);
     }
+}
+
+/// How often unacked deliveries of timed consumers are checked.
+pub(super) const TIMEOUT_TICK: Duration = Duration::from_millis(500);
+
+/// `x-consumer-timeout` from basic.consume arguments, in milliseconds.
+fn consumer_timeout_arg(args: &queueforge_amqp::FieldTable) -> Option<u64> {
+    use queueforge_amqp::FieldValue as F;
+    match args.get("x-consumer-timeout")? {
+        F::I8(v) => u64::try_from(*v).ok(),
+        F::U8(v) => Some(u64::from(*v)),
+        F::I16(v) => u64::try_from(*v).ok(),
+        F::U16(v) => Some(u64::from(*v)),
+        F::I32(v) => u64::try_from(*v).ok(),
+        F::U32(v) => Some(u64::from(*v)),
+        F::I64(v) => u64::try_from(*v).ok(),
+        F::U64(v) => Some(*v),
+        _ => None,
+    }
+}
+
+/// `x-stream-filter` (a string or an array of strings) and
+/// `x-stream-match-unfiltered` from basic.consume arguments.
+fn stream_filter(args: &queueforge_amqp::FieldTable) -> Option<Box<queueforge_core::StreamFilter>> {
+    use queueforge_amqp::FieldValue as F;
+    let text = |v: &F| match v {
+        F::LongString(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        F::ShortString(s) => Some(s.clone()),
+        _ => None,
+    };
+    let values: Vec<String> = match args.get("x-stream-filter")? {
+        F::Array(items) => items.iter().filter_map(text).collect(),
+        other => text(other).into_iter().collect(),
+    };
+    let match_unfiltered = matches!(args.get("x-stream-match-unfiltered"), Some(F::Bool(true)));
+    Some(Box::new(queueforge_core::StreamFilter { values, match_unfiltered }))
 }
 
 /// `x-stream-offset` from basic.consume arguments: first, last, next, an

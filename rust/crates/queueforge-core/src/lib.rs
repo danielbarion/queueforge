@@ -28,8 +28,6 @@ pub mod queue;
 /// Management policies (TTL, dead-letter, max-length, alternate-exchange).
 pub mod policy;
 
-/// Exchange federation between vhosts in one process.
-pub mod federation;
 
 /// Event exchange and firehose tracing.
 pub mod events;
@@ -55,7 +53,7 @@ pub use config::{
 };
 pub use disk::DiskBudget;
 pub use domain::{
-    binding_args_key, binding_properties_key, Binding, Exchange, ExchangeType, HeaderArg,
+    binding_args_key, binding_properties_key, Binding, Exchange, ExchangeType, HashOn, HeaderArg, HASH_PROPERTY_HEADER,
     Permission, Queue, User, UserTag, Vhost, BUILTIN_EXCHANGE_NAMES, DEFAULT_EXCHANGE_NAME,
     DEFAULT_VHOST,
 };
@@ -75,6 +73,6 @@ pub use queue::{
     SharedDurableLogFactory, ShutdownReport, DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_DEATH_HOPS,
     STREAM_RESIDENT_BYTES,
 };
-pub use queue::{ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamReplicator, StreamStart};
+pub use queue::{ReplicatorSlot, StreamCopy, StreamEntryCopy, StreamFilter, StreamReplicator, StreamStart};
 pub use router::{topic_matches, BindingIndex, BindingKey, ExchangeRouter, RouteResult};
 pub use sysinfo::{disk_free_bytes, system_total_memory_bytes};

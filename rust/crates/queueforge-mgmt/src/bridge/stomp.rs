@@ -237,6 +237,11 @@ async fn login<S: AsyncWrite + Unpin>(io: &mut S, f: Frame, amqp_port: u16) -> O
     let vhost = f.get("host").filter(|h| !h.is_empty() && *h != "localhost").unwrap_or("/").to_string();
     let user = f.get("login").unwrap_or_default().to_string();
     let pass = f.get("passcode").unwrap_or_default().to_string();
+    // stomp.ssl_cert_login: without a login, the certificate names the user.
+    let (user, pass) = match (user.is_empty(), super::cert_login()) {
+        (true, Some((cn, ticket))) => (cn, ticket),
+        _ => (user, pass),
+    };
     let conn = match Connection::connect(&amqp_uri(amqp_port, &user, &pass, &vhost), ConnectionProperties::default()).await {
         Ok(c) if !user.is_empty() => c,
         _ => {

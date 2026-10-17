@@ -94,7 +94,7 @@ where
             .entries
             .iter()
             .map(|(k, _)| k.as_str())
-            .filter(|k| *k != "alternate-exchange" && *k != "x-delayed-type")
+            .filter(|k| !matches!(*k, "alternate-exchange" | "x-delayed-type" | "hash-header" | "hash-property"))
             .collect();
         if !unknown.is_empty() {
             let keys = unknown;
@@ -205,9 +205,40 @@ where
             internal: declare.internal,
             alternate: alternate_exchange_arg(&declare.arguments),
             delayed_type: None,
+            hash_on: None,
         };
         // x-delayed-message routes as its x-delayed-type once a delay ends.
         let mut new_ex = new_ex;
+        if kind == ExchangeType::ConsistentHash {
+            let arg = |name: &str| match declare.arguments.get(name) {
+                Some(queueforge_amqp::FieldValue::LongString(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+                Some(queueforge_amqp::FieldValue::ShortString(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let hash_on = match (arg("hash-header"), arg("hash-property")) {
+                (Some(_), Some(_)) => Err("PRECONDITION_FAILED - hash-header and hash-property are mutually exclusive"),
+                (Some(h), None) => Ok(Some(queueforge_core::HashOn::Header(CompactString::from(h)))),
+                (None, Some(p)) if matches!(p.as_str(), "message_id" | "correlation_id" | "timestamp") => {
+                    Ok(Some(queueforge_core::HashOn::Property(CompactString::from(p))))
+                }
+                (None, Some(_)) => Err("PRECONDITION_FAILED - hash-property must be message_id, correlation_id or timestamp"),
+                (None, None) => Ok(None),
+            };
+            match hash_on {
+                Ok(h) => new_ex.hash_on = h,
+                Err(text) => {
+                    self.server_channel_close(
+                        channel,
+                        REPLY_PRECONDITION_FAILED,
+                        text,
+                        exchange_method::CLASS_ID,
+                        exchange_method::Declare::METHOD_ID,
+                    )
+                    .await?;
+                    return Ok(Step::Continue);
+                }
+            }
+        }
         if kind == ExchangeType::Delayed {
             let delayed = match declare.arguments.get("x-delayed-type") {
                 Some(queueforge_amqp::FieldValue::LongString(s)) => ExchangeType::parse(&String::from_utf8_lossy(s)),
