@@ -24,6 +24,7 @@ final class Policy
         'queue-mode',
         'federation-upstream',
         'federation-upstream-set',
+        'consumer-timeout',
     ];
 
     /** Policy definition key to the queue argument it fills. */
@@ -38,6 +39,7 @@ final class Policy
         'dead-letter-strategy' => 'x-dead-letter-strategy',
         'delivery-limit' => 'x-delivery-limit',
         'max-priority' => 'x-max-priority',
+        'consumer-timeout' => 'x-consumer-timeout',
     ];
 
     /**
@@ -95,6 +97,8 @@ final class Policy
                 if (!array_key_exists($key, $definition)) {
                     continue;
                 }
+                // The queue argument and the policy key combine as the lower of the two.
+                if ($arg === 'x-consumer-timeout' && isset($out[$arg]) && is_numeric($out[$arg]) && is_numeric($definition[$key])) { $out[$arg] = min((int) $out[$arg], (int) $definition[$key]); continue; }
                 if ($position === 0 && array_key_exists($arg, $declared) && $declared[$arg] !== '') continue;
                 if ($position === 1 && isset($out[$arg]) && is_numeric($out[$arg]) && is_numeric($definition[$key])) {
                     $out[$arg] = min($out[$arg], $definition[$key]);

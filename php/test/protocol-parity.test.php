@@ -30,7 +30,7 @@ function ppStompLogin(Protocols $p,int $conn,$fp):void {Harness::ok('STOMP authe
 Harness::guard('MQTT authentication and MQTT5 binary QoS1 cross protocol',static function():void{
     $b=ppBroker();$p=new Protocols($b);$fp=fopen('php://temp','w+');$buf=ppConnect(5,'bad',true,'admin','wrong');
     Harness::eq('MQTT5 rejects bad login',"\x20\x03\0\x86\0",$p->mqtt($buf,$fp,1));$p->mqttClosing=false;
-    $packet=ppConnect(5);$buf=substr($packet,0,7);Harness::eq('partial connect buffered','',$p->mqtt($buf,$fp,2));$buf.=substr($packet,7);Harness::eq('MQTT5 connack',"\x20\x03\0\0\0",$p->mqtt($buf,$fp,2));
+    $packet=ppConnect(5);$buf=substr($packet,0,7);Harness::eq('partial connect buffered','',$p->mqtt($buf,$fp,2));$buf.=substr($packet,7);Harness::eq('MQTT5 connack',"\x20\x06\0\0\x03\x22\x00\x10",$p->mqtt($buf,$fp,2));
     $b->declareQueue('amqp-observer');$b->bind('amqp-observer','amq.topic','a.b');
     $buf=ppMqtt(0x32,ppStr('a/b').pack('n',21)."\0"."binary\0body");Harness::eq('QoS1 publish ack',"\x40\x02\0\x15",$p->mqtt($buf,$fp,2));
     $id=$b->getReady('amqp-observer');Harness::eq('MQTT routes binary to AMQP','binary'."\0".'body',$b->msgs[$id]['body']);Harness::eq('MQTT QoS1 stored durable',2,$b->msgs[$id]['mode']);
@@ -143,8 +143,8 @@ Harness::guard('OAuth credential identities and empty-login protocol authenticat
     // Supply the JWKS cache fixture; signature verification and claims/scopes remain real.
     $url='http://jwks.fixture.invalid/'.bin2hex(random_bytes(6));$cache=new ReflectionProperty(Security::class,'jwks');$cache->setValue(null,[$url."\0"=>['at'=>microtime(true),'keys'=>['protocol-key'=>$public]]]);$b->authConfig=['oauth'=>['jwksUrl'=>$url,'resourceServerId'=>'rabbitmq']];
     $b64=static fn(string $s):string=>rtrim(strtr(base64_encode($s),'+/','-_'),'=');$token=static function(string $scope)use($key,$b64):string{$h=$b64(json_encode(['alg'=>'RS256','kid'=>'protocol-key']));$c=$b64(json_encode(['sub'=>'oauth-user','exp'=>time()+3600,'aud'=>'rabbitmq','scope'=>$scope]));openssl_sign($h.'.'.$c,$signature,$key,OPENSSL_ALGO_SHA256);return$h.'.'.$c.'.'.$b64($signature);};
-    $wide=$token('rabbitmq.configure:%2F/* rabbitmq.write:%2F/* rabbitmq.read:%2F/*');$read=$token('rabbitmq.read:%2F/*');$p=new Protocols($b);$fp=fopen('php://temp','w+');$buf=ppConnect(5,'oauth-wide',true,'',$wide);Harness::eq('MQTT empty username OAuth login',"\x20\x03\0\0\0",$p->mqtt($buf,$fp,1));
-    $buf=ppConnect(5,'oauth-read',true,'',$read);Harness::eq('second OAuth credential login',"\x20\x03\0\0\0",$p->mqtt($buf,$fp,2));$b->declareQueue('oauth-observer');$b->bind('oauth-observer','amq.topic','oauth.one');
+    $wide=$token('rabbitmq.configure:%2F/* rabbitmq.write:%2F/* rabbitmq.read:%2F/*');$read=$token('rabbitmq.read:%2F/*');$p=new Protocols($b);$fp=fopen('php://temp','w+');$buf=ppConnect(5,'oauth-wide',true,'',$wide);Harness::eq('MQTT empty username OAuth login',"\x20\x06\0\0\x03\x22\x00\x10",$p->mqtt($buf,$fp,1));
+    $buf=ppConnect(5,'oauth-read',true,'',$read);Harness::eq('second OAuth credential login',"\x20\x06\0\0\x03\x22\x00\x10",$p->mqtt($buf,$fp,2));$b->declareQueue('oauth-observer');$b->bind('oauth-observer','amq.topic','oauth.one');
     $buf=ppMqtt(0x32,ppStr('oauth/one').pack('n',1)."\0".'allowed');Harness::eq('first OAuth credential retains write',"\x40\x02\0\1",$p->mqtt($buf,$fp,1));Harness::eq('OAuth publication routes','allowed',$b->pullBody('oauth-observer'));
     $buf=ppMqtt(0x32,ppStr('oauth/one').pack('n',2)."\0".'blocked');Harness::eq('second credential retains restricted scope',"\x40\x04\0\2\x87\0",$p->mqtt($buf,$fp,2));Harness::eq('denied OAuth publish absent',null,$b->pullBody('oauth-observer'));
     $buf=ppConnect(5,'impersonation',true,'admin',$wide);Harness::eq('OAuth cannot impersonate internal admin',"\x20\x03\0\x86\0",$p->mqtt($buf,$fp,3));$p->mqttClosing=false;

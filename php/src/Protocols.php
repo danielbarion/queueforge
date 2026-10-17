@@ -10,6 +10,9 @@ final class Protocols
     public mixed $onWrite = null;
     public mixed $onClose = null;
     public bool $mqttClosing = false;
+    /** Verified client-certificate CN per MQTT/STOMP connection on a TLS listener. */
+    public array $peerCN = [];
+    public array $stompPeerCN = [];
     public bool $stompClosing = false;
     public bool $streamClosing = false;
     private int $mqttConn = 1;
@@ -19,12 +22,25 @@ final class Protocols
     private array $streamClients = [];
     private int $streamConn = 1;
     private array $retained = [];
+    /** MQTT 5 sessions kept after disconnect: "vhost\0client" => [deadline, queue, subscription options]. */
+    private array $mqttParked = [];
+    /** MQTT 5 wills waiting out their delay interval, by "vhost\0client". */
+    private array $mqttWills = [];
+    /** Live no-local subscriptions; publishes are tagged with their origin only while one exists. */
+    private int $mqttNoLocal = 0;
+    public const MQTT_TOPIC_ALIAS_MAX = 16;
 
     public function __construct(public Broker $broker)
     {
         $file = $this->broker->dataDir() . '/mqtt-retained.json';
         if (is_file($file)) {
             $this->retained = json_decode((string) file_get_contents($file), true) ?: [];
+        }
+        // Parked MQTT 5 sessions keep their expiry deadline and subscription
+        // options across a restart; 0 stores "never expires".
+        $file = $this->broker->dataDir() . '/mqtt-sessions.json';
+        if (is_file($file)) foreach ((array) json_decode((string) file_get_contents($file), true) as $key => $row) {
+            if (is_array($row)) $this->mqttParked[(string) $key] = ['at' => ($row['at'] ?? 0) == 0 ? INF : (float) $row['at']] + $row;
         }
     }
 
@@ -41,6 +57,7 @@ final class Protocols
     /** Invoked by the select loop so AMQP publications reach protocol subscribers. */
     public function tick(): void
     {
+        if ($this->mqttWills !== [] || $this->mqttParked !== []) $this->mqttTimers();
         foreach (array_keys($this->mqttClients) as $conn) {
             $s = $this->mqttClients[$conn];
             if ($s['keepalive'] > 0 && microtime(true) - $s['seen'] > $s['keepalive'] * 1.5) {
@@ -92,6 +109,53 @@ final class Protocols
         throw new RuntimeException('invalid MQTT remaining length');
     }
     private static function mqttProps(string $s, int &$at): string { return self::take($s, $at, self::varint($s, $at)); }
+    private const MQTT_PROP_BYTE = [0x01, 0x17, 0x19, 0x24, 0x25, 0x28, 0x29, 0x2A];
+    private const MQTT_PROP_U16 = [0x13, 0x21, 0x22, 0x23];
+    private const MQTT_PROP_U32 = [0x02, 0x11, 0x18, 0x27];
+    /** Splits MQTT 5 property bytes into [id, encoded value] pairs, in order. */
+    public static function mqttPropList(string $raw): array
+    {
+        $out = []; $at = 0; $n = strlen($raw);
+        while ($at < $n) {
+            $id = self::varint($raw, $at); $start = $at;
+            if (in_array($id, self::MQTT_PROP_BYTE, true)) $at += 1;
+            elseif (in_array($id, self::MQTT_PROP_U16, true)) $at += 2;
+            elseif (in_array($id, self::MQTT_PROP_U32, true)) $at += 4;
+            elseif ($id === 0x0B) self::varint($raw, $at);
+            elseif ($id === 0x26) { self::take($raw, $at, self::u16($raw, $at)); self::take($raw, $at, self::u16($raw, $at)); }
+            else self::take($raw, $at, self::u16($raw, $at));
+            if ($at > $n) throw new RuntimeException('short MQTT property');
+            $out[] = [$id, substr($raw, $start, $at - $start)];
+        }
+        return $out;
+    }
+    public static function mqttPropEncode(array $list): string
+    {
+        $out = '';
+        foreach ($list as [$id, $value]) $out .= self::mqttLen($id) . $value;
+        return $out;
+    }
+    /** The integer value of property `$id`, or null when absent. */
+    public static function mqttPropInt(array $list, int $id): ?int
+    {
+        foreach ($list as [$key, $value]) {
+            if ($key !== $id) continue;
+            $at = 0;
+            return match (strlen($value)) { 1 => ord($value), 2 => self::u16($value, $at), 4 => self::u32($value, $at), default => self::varint($value, $at) };
+        }
+        return null;
+    }
+    private static function mqttPropWithout(array $list, array $ids): array
+    {
+        return array_values(array_filter($list, static fn ($p) => !in_array($p[0], $ids, true)));
+    }
+    /** Seconds left before an absolute expiry in ms; null when there is none, 0 once expired. */
+    private static function mqttLeft(?int $at): ?int
+    {
+        if ($at === null) return null;
+        $left = $at - (int) (microtime(true) * 1000);
+        return $left <= 0 ? 0 : (int) ceil($left / 1000);
+    }
 
     public function mqtt(string &$buf, $fp, int $conn): string
     {
@@ -111,6 +175,20 @@ final class Protocols
                     $topic = self::string($body, $at); $qos = ($first >> 1) & 3;
                     $pid = $qos ? self::u16($body, $at) : 0;
                     $props = $s['version'] === 5 ? self::mqttProps($body, $at) : '';
+                    $expiresAt = null;
+                    if ($props !== '') {
+                        $list = self::mqttPropList($props);
+                        $alias = self::mqttPropInt($list, 0x23);
+                        if ($alias !== null) {
+                            if ($alias < 1 || $alias > self::MQTT_TOPIC_ALIAS_MAX) throw new RuntimeException('invalid MQTT topic alias');
+                            if ($topic !== '') $s['aliases'][$alias] = $topic;
+                            else $topic = $s['aliases'][$alias] ?? '';
+                            $list = self::mqttPropWithout($list, [0x23]);
+                            $props = self::mqttPropEncode($list);
+                        }
+                        $expiry = self::mqttPropInt($list, 0x02);
+                        if ($expiry !== null) $expiresAt = (int) (microtime(true) * 1000) + $expiry * 1000;
+                    }
                     if ($topic === '' || strpbrk($topic, '+#') !== false || $qos > 2) throw new RuntimeException('invalid MQTT topic');
                     $done = function(bool $ok) use ($conn, $pid, $qos): void {
                         if (!isset($this->mqttClients[$conn])) return;
@@ -122,7 +200,7 @@ final class Protocols
                             if (is_callable($this->onClose)) ($this->onClose)($socket); else $this->mqttClosing = true;
                         }
                     };
-                    if (!$this->mqttSend($s, $topic, substr($body, $at), min(1, $qos), (bool) ($first & 1), $props, $done)) $done(false);
+                    if (!$this->mqttSend($s, $topic, substr($body, $at), min(1, $qos), (bool) ($first & 1), $props, $done, $expiresAt)) $done(false);
                 } elseif ($type === 4) {
                     $pid = self::u16($body, $at);
                     if (isset($s['inflight'][$pid])) { $b->ack($s['inflight'][$pid]); unset($s['inflight'][$pid]); }
@@ -130,28 +208,51 @@ final class Protocols
                     $out .= self::mqttPacket($type === 5 ? 0x62 : 0x70, self::take($body, $at, 2));
                 } elseif ($type === 8 || $type === 10) {
                     if (($first & 15) !== 2) throw new RuntimeException('invalid MQTT flags');
-                    $pid = self::u16($body, $at); if ($s['version'] === 5) self::mqttProps($body, $at);
+                    $pid = self::u16($body, $at); $subId = null;
+                    if ($s['version'] === 5) { $subProps = self::mqttProps($body, $at); if ($subProps !== '') $subId = self::mqttPropInt(self::mqttPropList($subProps), 0x0B); }
                     $codes = ''; $added = [];
                     while ($at < strlen($body)) {
                         $filter = self::string($body, $at); $key = str_replace(['/', '+'], ['.', '*'], $filter);
                         if ($type === 10) {
                             $had = isset($s['subs'][$filter]); unset($s['subs'][$filter]);
+                            if ($s['opts'][$filter]['nl'] ?? false) $this->mqttNoLocal--;
+                            unset($s['opts'][$filter]);
                             $b->unbind($s['queue'], 'amq.topic', $key); $codes .= chr($had ? 0 : 0x11);
                             if (!$s['subs'] && $s['consumer']) { $b->unregisterProtocolConsumer($s['queue'], $s['owner'], 'mqtt-' . $conn); $s['consumer'] = false; }
                             continue;
                         }
-                        $qos = min(1, self::u8($body, $at) & 3);
+                        $options = self::u8($body, $at); $qos = min(1, $options & 3);
                         $allowed = !str_starts_with($filter, '$share/') && $this->broker->resourceAllowed($s['user'], $s['vhost'], 'read', 'amq.topic')
                             && $this->broker->resourceAllowed($s['user'], $s['vhost'], 'configure', $s['queue'])
                             && $this->broker->topicReadAllowed($s['user'], $s['vhost'], 'amq.topic', $key);
                         if (!$allowed) { $codes .= chr($s['version'] === 5 ? 0x87 : 0x80); continue; }
                         $this->ensureMqttQueue($s);
                         $b->bind($s['queue'], 'amq.topic', $key);
-                        $s['subs'][$filter] = $qos; $added[$filter] = $qos; $codes .= chr($qos);
+                        $existed = isset($s['subs'][$filter]);
+                        if ($s['opts'][$filter]['nl'] ?? false) $this->mqttNoLocal--;
+                        unset($s['opts'][$filter]);
+                        if ($s['version'] === 5) {
+                            $opt = ['nl' => (bool) ($options & 4), 'rap' => (bool) ($options & 8), 'id' => $subId];
+                            if ($opt['nl'] || $opt['rap'] || $opt['id'] !== null) $s['opts'][$filter] = $opt;
+                            if ($opt['nl']) $this->mqttNoLocal++;
+                        }
+                        $s['subs'][$filter] = $qos; $codes .= chr($qos);
+                        $handling = $s['version'] === 5 ? ($options >> 4) & 3 : 0;
+                        if ($handling === 0 || ($handling === 1 && !$existed)) $added[$filter] = $qos;
                     }
                     $out .= self::mqttPacket($type === 8 ? 0x90 : 0xb0, pack('n', $pid) . ($s['version'] === 5 ? "\0" . $codes : ($type === 8 ? $codes : '')));
                     foreach ($added as $filter => $qos) foreach ($this->retained[$s['vhost']] ?? [] as $topic => $m) {
-                        if (Features::mqttMatch($filter, $topic)) $out .= $this->mqttDelivery($s, $topic, base64_decode($m['body']), 0, true, false, 0, base64_decode($m['props']));
+                        if (!Features::mqttMatch($filter, $topic)) continue;
+                        $props = base64_decode($m['props']);
+                        if (isset($m['exp']) || isset($s['opts'][$filter]['id'])) {
+                            $left = self::mqttLeft(isset($m['exp']) ? (int) $m['exp'] : null);
+                            if ($left === 0) { $this->setRetained($s['vhost'], $topic, null); continue; }
+                            $list = self::mqttPropList($props);
+                            if ($left !== null) { $list = self::mqttPropWithout($list, [0x02]); $list[] = [0x02, pack('N', $left)]; }
+                            if (isset($s['opts'][$filter]['id'])) $list[] = [0x0B, self::mqttLen((int) $s['opts'][$filter]['id'])];
+                            $props = self::mqttPropEncode($list);
+                        }
+                        $out .= $this->mqttDelivery($s, $topic, base64_decode($m['body']), 0, true, false, 0, $props);
                     }
                 } elseif ($type === 12) $out .= "\xd0\0";
                 elseif ($type === 14) { $this->dropMqtt($conn, false); $this->mqttClosing = true; return $out; }
@@ -168,16 +269,26 @@ final class Protocols
         if (isset($this->mqttClients[$conn])) throw new RuntimeException('duplicate CONNECT');
         $at = 0; $name = self::string($body, $at); $version = self::u8($body, $at); $flags = self::u8($body, $at); $keepalive = self::u16($body, $at);
         if (!in_array($version, [3,4,5], true) || !in_array($name, ['MQTT','MQIsdp'], true) || ($flags & 1)) throw new RuntimeException('invalid CONNECT');
-        if ($version === 5) self::mqttProps($body, $at);
+        $expiry = 0;
+        if ($version === 5) { $connectProps = self::mqttProps($body, $at); if ($connectProps !== '') $expiry = self::mqttPropInt(self::mqttPropList($connectProps), 0x11) ?? 0; }
         $client = self::string($body, $at); $clean = (bool) ($flags & 2); $will = null;
         if ($flags & 4) {
             $props = $version === 5 ? self::mqttProps($body, $at) : '';
             $topic = self::string($body, $at); $payload = self::string($body, $at);
-            $will = ['topic'=>$topic,'body'=>$payload,'qos'=>min(1,($flags>>3)&3),'retain'=>(bool)($flags&32),'props'=>$props];
+            $delay = 0;
+            if ($props !== '') {
+                // The will delay is a CONNECT-only property; a PUBLISH must not carry it.
+                $list = self::mqttPropList($props); $delay = self::mqttPropInt($list, 0x18) ?? 0;
+                $props = self::mqttPropEncode(self::mqttPropWithout($list, [0x18]));
+            }
+            $will = ['topic'=>$topic,'body'=>$payload,'qos'=>min(1,($flags>>3)&3),'retain'=>(bool)($flags&32),'props'=>$props,'delay'=>$delay];
         }
         $user = $flags & 128 ? self::string($body, $at) : ''; $pass = $flags & 64 ? self::string($body, $at) : ''; $vhost = '/';
         if (str_contains($user, ':')) { [$vhost, $user] = explode(':', $user, 2); $vhost = $vhost ?: '/'; }
-        $identity = $this->broker->authenticate($user, $pass);
+        // mqtt.ssl_cert_login: a verified client certificate with no user name logs in as its CN.
+        $cn = $this->peerCN[$conn] ?? null;
+        if ($user === '' && $cn !== null) $identity = array_key_exists($cn, $this->broker->users) ? $cn : null;
+        else $identity = $this->broker->authenticate($user, $pass);
         $code = $identity === null ? ($version === 5 ? 0x86 : 4) : (!$this->broker->hasVhostAccess($identity, $vhost) ? ($version === 5 ? 0x87 : 5) : 0);
         if ($identity !== null) $user = $identity;
         if ($code) { $this->mqttClosing = true; return self::mqttPacket(0x20, "\0" . chr($code) . ($version === 5 ? "\0" : '')); }
@@ -185,14 +296,25 @@ final class Protocols
         foreach ($this->mqttClients as $id => $old) if ($old['client'] === $client && $old['vhost'] === $vhost) {
             $this->dropMqtt($id, false); if (is_callable($this->onClose)) ($this->onClose)($old['fp']);
         }
+        $parkKey = $vhost . "\0" . $client;
+        // Reconnecting in time cancels a delayed will and the session expiry.
+        unset($this->mqttWills[$parkKey]);
+        $parked = $this->mqttParked[$parkKey] ?? null;
+        if ($parked !== null) { unset($this->mqttParked[$parkKey]); $this->saveParked(); }
         $b=$this->broker->forVhost($vhost);
         $queue = 'mqtt-subscription-' . $client . 'qos1'; $exists = isset($b->queues[$queue]);
-        if ($clean && $exists) $b->deleteQueue($queue);
-        $subs = [];
+        if ($clean && $exists) { $b->deleteQueue($queue); $exists = false; $parked = null; }
+        $subs = []; $opts = [];
         if (!$clean && $exists) foreach ($b->bindings as $binding) if ($binding['queue'] === $queue && $binding['exchange'] === 'amq.topic') $subs[str_replace(['.','*'], ['/','+'], $binding['key'])] = 1;
+        if ($parked !== null) foreach ($parked['opts'] as $filter => $opt) if (isset($subs[$filter])) { $opts[$filter] = $opt; if ($opt['nl']) $this->mqttNoLocal++; }
+        // MQTT 5 separates clean start from session lifetime: the session
+        // outlives the connection while the expiry interval runs, and a
+        // clean=false session with no interval is kept as in MQTT 3.1.1.
+        $discard = $version === 5 ? $expiry === 0 && $clean : $clean;
         $owner = -(1000000 + $conn); $this->broker->userByConn[$owner] = $user;
-        $this->mqttClients[$conn] = ['owner'=>$owner,'fp'=>$fp,'version'=>$version,'client'=>$client,'user'=>$user,'vhost'=>$vhost,'queue'=>$queue,'clean'=>$clean,'will'=>$will,'subs'=>$subs,'inflight'=>[],'pid'=>1,'keepalive'=>$keepalive,'seen'=>microtime(true),'out'=>'','consumer'=>false];
-        return self::mqttPacket(0x20, chr(!$clean && $exists ? 1 : 0) . "\0" . ($version === 5 ? "\0" : '')) . $this->pumpMqtt($conn);
+        $this->mqttClients[$conn] = ['owner'=>$owner,'fp'=>$fp,'version'=>$version,'client'=>$client,'user'=>$user,'vhost'=>$vhost,'queue'=>$queue,'clean'=>$discard,'expiry'=>$expiry,'will'=>$will,'subs'=>$subs,'opts'=>$opts,'aliases'=>[],'inflight'=>[],'pid'=>1,'keepalive'=>$keepalive,'seen'=>microtime(true),'out'=>'','consumer'=>false];
+        $ack = $version === 5 ? "\x03\x22" . pack('n', self::MQTT_TOPIC_ALIAS_MAX) : '';
+        return self::mqttPacket(0x20, chr(!$clean && $exists ? 1 : 0) . "\0" . $ack) . $this->pumpMqtt($conn);
     }
 
     private function ensureMqttQueue(array $s): void
@@ -200,21 +322,28 @@ final class Protocols
         $b=$this->broker->forVhost($s['vhost']);
         if (!isset($b->queues[$s['queue']])) $b->declareQueue($s['queue'], [], !$s['clean'], $s['clean']);
     }
-    private function mqttSend(array $s, string $topic, string $body, int $qos, bool $retain, string $props, ?callable $done = null): bool
+    private function setRetained(string $vhost, string $topic, ?array $row): void
+    {
+        if ($row === null) unset($this->retained[$vhost][$topic]); else $this->retained[$vhost][$topic] = $row;
+        Broker::writeDurable($this->broker->dataDir() . '/mqtt-retained.json', json_encode($this->retained, JSON_THROW_ON_ERROR));
+    }
+    private function mqttSend(array $s, string $topic, string $body, int $qos, bool $retain, string $props, ?callable $done = null, ?int $expiresAt = null): bool
     {
         $b=$this->broker->forVhost($s['vhost']);
         $key = str_replace('/', '.', $topic);
         if (!$b->resourceAllowed($s['user'], $s['vhost'], 'write', 'amq.topic') || !$b->topicWriteAllowed($s['user'], $s['vhost'], 'amq.topic', $key)) return false;
         if ($retain) {
-            if ($body === '') unset($this->retained[$s['vhost']][$topic]);
-            else $this->retained[$s['vhost']][$topic] = ['body'=>base64_encode($body),'props'=>base64_encode($props),'qos'=>$qos];
-            $file = $this->broker->dataDir() . '/mqtt-retained.json';
-            Broker::writeDurable($file, json_encode($this->retained, JSON_THROW_ON_ERROR));
+            if ($body === '') $this->setRetained($s['vhost'], $topic, null);
+            else $this->setRetained($s['vhost'], $topic, ['body'=>base64_encode($body),'props'=>base64_encode($props),'qos'=>$qos] + ($expiresAt !== null ? ['exp' => $expiresAt] : []));
             if ($body === '') { if ($done) $done(true); return true; }
         }
         $headers = [['x-mqtt-publish-qos', $qos]]; if ($props !== '') $headers[] = ['x-mqtt-props', $props];
-        $propRaw = Amqp10::writeProps(['deliveryMode' => $qos ? 2 : 1], $headers);
-        $b->publishAsync($s['owner'], 0, 'amq.topic', $key, $body, $qos ? 2 : 1, 0, $headers, null, $propRaw, $done ?? static function(bool $ok): void {});
+        if ($retain) $headers[] = ['x-mqtt-retain', 1];
+        if ($expiresAt !== null) $headers[] = ['x-mqtt-expires-at', $expiresAt];
+        if ($this->mqttNoLocal > 0) $headers[] = ['x-mqtt-origin', $s['vhost'] . "\0" . $s['client']];
+        $propRaw = Amqp10::writeProps(['deliveryMode' => $qos ? 2 : 1] + ($expiresAt !== null ? ['expiration' => (string) max(0, $expiresAt - (int) (microtime(true) * 1000))] : []), $headers);
+        $expiration = $expiresAt === null ? null : max(0, $expiresAt - (int) (microtime(true) * 1000));
+        $b->publishAsync($s['owner'], 0, 'amq.topic', $key, $body, $qos ? 2 : 1, 0, $headers, $expiration, $propRaw, $done ?? static function(bool $ok): void {});
         return true;
     }
     private function mqttDelivery(array $s, string $topic, string $body, int $qos, bool $retain, bool $dup, int $pid, string $props = ''): string
@@ -243,29 +372,88 @@ final class Protocols
         if (!isset($this->mqttClients[$connection])) return;
         $session =& $this->mqttClients[$connection];
         $topic = str_replace('.', '/', $message['key']);
-        $subscriptionQos = 0;
-        foreach ($session['subs'] as $filter => $qos) if (Features::mqttMatch($filter, $topic)) $subscriptionQos = max($subscriptionQos, $qos);
-        $qos = $message['mode'] === 2 ? 1 : 0; $properties = '';
+        $qos = $message['mode'] === 2 ? 1 : 0; $properties = ''; $retained = false; $expiresAt = null; $origin = null;
         foreach ($message['headers'] ?? [] as [$key, $value]) {
             if ($key === 'x-mqtt-publish-qos') $qos = (int) $value;
-            if ($key === 'x-mqtt-props') $properties = (string) $value;
+            elseif ($key === 'x-mqtt-props') $properties = (string) $value;
+            elseif ($key === 'x-mqtt-retain') $retained = true;
+            elseif ($key === 'x-mqtt-expires-at') $expiresAt = (int) $value;
+            elseif ($key === 'x-mqtt-origin') $origin = (string) $value;
+        }
+        $subscriptionQos = 0; $ids = []; $rap = false; $local = $origin !== null && $origin === $session['vhost'] . "\0" . $session['client']; $wanted = false;
+        foreach ($session['subs'] as $filter => $subQos) {
+            if (!Features::mqttMatch($filter, $topic)) continue;
+            $opt = $session['opts'][$filter] ?? null;
+            if ($local && ($opt['nl'] ?? false)) continue;
+            $wanted = true;
+            $subscriptionQos = max($subscriptionQos, $subQos);
+            if ($opt !== null) { if ($opt['rap']) $rap = true; if ($opt['id'] !== null) $ids[] = (int) $opt['id']; }
+        }
+        $left = self::mqttLeft($expiresAt);
+        if ((!$wanted && $session['subs'] !== []) || $left === 0) { $this->broker->forVhost($session['vhost'])->ack($id); return; }
+        if ($session['version'] === 5 && ($left !== null || $ids !== [])) {
+            $list = self::mqttPropList($properties);
+            if ($left !== null) { $list = self::mqttPropWithout($list, [0x02]); $list[] = [0x02, pack('N', $left)]; }
+            foreach ($ids as $subId) $list[] = [0x0B, self::mqttLen($subId)];
+            $properties = self::mqttPropEncode($list);
         }
         $qos = min($qos, $subscriptionQos); $packetId = 0;
         if ($qos) {
             do { $packetId = $session['pid']; $session['pid'] = $packetId === 65535 ? 1 : $packetId + 1; } while (isset($session['inflight'][$packetId]));
             $session['inflight'][$packetId] = $id;
         }
-        $session['out'] .= $this->mqttDelivery($session, $topic, $message['body'], $qos, false, (bool) $message['redelivered'], $packetId, $properties);
+        $session['out'] .= $this->mqttDelivery($session, $topic, $message['body'], $qos, $rap && $retained, (bool) $message['redelivered'], $packetId, $properties);
         if (!$qos) $this->broker->forVhost($session['vhost'])->ack($id);
     }
     public function dropMqtt(int $conn, bool $abnormal = true): void
     {
         $s = $this->mqttClients[$conn] ?? null; if (!$s) return; $b=$this->broker->forVhost($s['vhost']); unset($this->mqttClients[$conn]);
+        unset($this->peerCN[$conn]);
+        foreach ($s['opts'] as $opt) if ($opt['nl']) $this->mqttNoLocal--;
         if ($s['consumer']) $b->unregisterProtocolConsumer($s['queue'], $s['owner'], 'mqtt-' . $conn);
         foreach (array_reverse($s['inflight']) as $id) $b->requeue($id);
+        $parkKey = $s['vhost'] . "\0" . $s['client'];
         if ($s['clean'] && isset($b->queues[$s['queue']])) $b->deleteQueue($s['queue']);
-        if ($abnormal && $s['will']) { $w = $s['will']; $this->mqttSend($s,$w['topic'],$w['body'],$w['qos'],$w['retain'],$w['props']); }
+        elseif ($s['version'] === 5 && !$s['clean']) {
+            // 0xFFFFFFFF never expires.
+            $this->mqttParked[$parkKey] = ['at' => $s['expiry'] >= 0xFFFFFFFF || $s['expiry'] === 0 ? INF : microtime(true) + $s['expiry'], 'vhost' => $s['vhost'], 'queue' => $s['queue'], 'opts' => $s['opts']];
+            $this->saveParked();
+        }
+        if ($abnormal && $s['will']) {
+            $w = $s['will'];
+            // A will waits out its delay, but never past the end of the session.
+            $delay = $s['version'] === 5 ? min((int) $w['delay'], $s['clean'] ? 0 : ($s['expiry'] === 0 ? PHP_INT_MAX : (int) $s['expiry'])) : 0;
+            if ($delay > 0) $this->mqttWills[$parkKey] = ['at' => microtime(true) + $delay, 's' => $s];
+            else $this->mqttSend($s,$w['topic'],$w['body'],$w['qos'],$w['retain'],$w['props']);
+        }
         unset($this->broker->userByConn[$s['owner']]);
+    }
+    /** Fires delayed wills and ends expired MQTT 5 sessions. */
+    private function mqttTimers(): void
+    {
+        $now = microtime(true);
+        foreach ($this->mqttWills as $key => $row) {
+            if ($row['at'] > $now) continue;
+            unset($this->mqttWills[$key]);
+            $s = $row['s']; $w = $s['will'];
+            $this->broker->userByConn[$s['owner']] = $s['user'];
+            try { $this->mqttSend($s, $w['topic'], $w['body'], $w['qos'], $w['retain'], $w['props']); }
+            finally { unset($this->broker->userByConn[$s['owner']]); }
+        }
+        $expired = false;
+        foreach ($this->mqttParked as $key => $row) {
+            if ($row['at'] > $now) continue;
+            unset($this->mqttParked[$key]); $expired = true;
+            $b = $this->broker->forVhost($row['vhost']);
+            if (isset($b->queues[$row['queue']])) $b->deleteQueue($row['queue']);
+        }
+        if ($expired) $this->saveParked();
+    }
+    private function saveParked(): void
+    {
+        $rows = [];
+        foreach ($this->mqttParked as $key => $row) $rows[$key] = ['at' => is_infinite($row['at']) ? 0 : $row['at']] + $row;
+        Broker::writeDurable($this->broker->dataDir() . '/mqtt-sessions.json', json_encode((object) $rows, JSON_THROW_ON_ERROR));
     }
 
     private static function stompEscape(string $s): string { return str_replace(['\\',"\r","\n",':'], ['\\\\','\\r','\\n','\\c'], $s); }
@@ -297,7 +485,10 @@ final class Protocols
                     if (isset($this->stompClients[$conn])) throw new RuntimeException('already connected');
                     $versions=explode(',',$h['accept-version']??'1.0');$version=in_array('1.2',$versions,true)?'1.2':(in_array('1.1',$versions,true)?'1.1':'1.0');
                     $user=$h['login']??'';$vhost=$h['host']??'/';
-                    $identity = $this->broker->authenticate($user, $h['passcode'] ?? '');
+                    // stomp.ssl_cert_login: no login header plus a verified client certificate logs in as its CN.
+                    $cn = $this->stompPeerCN[$conn] ?? null;
+                    if (!isset($h['login']) && $cn !== null) $identity = array_key_exists($cn, $this->broker->users) ? $cn : null;
+                    else $identity = $this->broker->authenticate($user, $h['passcode'] ?? '');
                     if ($identity === null || !$this->broker->hasVhostAccess($identity, $vhost)) throw new RuntimeException('Access refused');
                     $user = $identity;
                     $owner=-(2000000+$conn);$this->broker->userByConn[$owner]=$user;

@@ -16,7 +16,8 @@ final class Security
                 if ($principal !== null) return $principal;
             }
             $ldap = $cfg['ldap'] ?? $cfg['auth']['ldap'] ?? null;
-            return is_array($ldap) ? self::ldap($broker, $ldap, $username, $password) : null;
+            $access = $cfg['ldap.resource_access'] ?? $ldap['resource_access'] ?? [];
+            return is_array($ldap) ? self::ldap($broker, $ldap, $username, $password, is_array($access) ? $access : []) : null;
         } catch (Throwable) { return null; }
     }
 
@@ -152,7 +153,30 @@ final class Security
     }
     private static function rsaInt(string $bytes): string { $bytes = ltrim($bytes, "\0"); return self::ber(0x02, $bytes === '' ? "\0" : ((ord($bytes[0]) & 128) ? "\0" . $bytes : $bytes)); }
 
-    private static function ldap(Broker $broker, array $cfg, string $username, string $password): ?array
+    /**
+     * One resource_access entry: `{ constant = true|false }` or
+     * `{ in_group = "<dn>", attribute = "member" }`, given as a TOML inline
+     * table string or an already-decoded array.
+     *
+     * @return array{constant?:bool,in_group?:string,attribute?:string}
+     */
+    public static function accessQuery(mixed $raw): array
+    {
+        if (is_array($raw)) return $raw;
+        if (is_bool($raw)) return ['constant' => $raw];
+        $text = trim((string) $raw);
+        if ($text === 'true' || $text === 'false') return ['constant' => $text === 'true'];
+        $out = [];
+        if (preg_match_all('/([A-Za-z_]+)\s*=\s*(?:"((?:[^"\\\\]|\\\\.)*)"|\'([^\']*)\'|(true|false))/', $text, $m, PREG_SET_ORDER)) {
+            foreach ($m as $pair) {
+                $value = ($pair[4] ?? '') !== '' ? $pair[4] === 'true' : (($pair[2] ?? '') !== '' ? stripcslashes($pair[2]) : ($pair[3] ?? ''));
+                $out[$pair[1]] = $value;
+            }
+        }
+        return $out;
+    }
+
+    private static function ldap(Broker $broker, array $cfg, string $username, string $password, array $access = []): ?array
     {
         if ($username === '' || $password === '' || str_contains($username, "\0")) return null;
         $host = $cfg['server'] ?? '127.0.0.1'; $port = $cfg['port'] ?? 389;
@@ -166,27 +190,60 @@ final class Security
         $deadline = microtime(true) + 5; $id = 0;
         try {
             if (!self::bind($fp, ++$id, $dn, $password, $deadline)) return null;
-            $tags = ['management']; $group = self::option($cfg, 'adminGroup', 'admin_group');
-            if (is_string($group) && $group !== '') {
+            // Group lookups run as bind_dn when one is configured. Results are
+            // kept for this login, which the principal then carries for the
+            // connection's lifetime.
+            $bound = null; $groups = [];
+            $inGroup = static function (string $group, string $attribute) use ($fp, &$id, $dn, $cfg, $deadline, &$bound, &$groups): bool {
+                $cacheKey = $attribute . "\0" . $group;
+                if (isset($groups[$cacheKey])) return $groups[$cacheKey];
                 try {
-                    $bindDn = self::option($cfg, 'bindDn', 'bind_dn');
-                    $bound = $bindDn === null || self::bind($fp, ++$id, (string) $bindDn, (string) self::option($cfg, 'bindPassword', 'bind_password', ''), $deadline);
-                    if ($bound) {
-                        $search = self::ber(0x04, $group) . self::ber(0x0a, "\0") . self::ber(0x0a, "\0") . self::ber(0x02, "\1") . self::ber(0x02, "\5") . self::ber(0x01, "\0")
-                            . self::ber(0xa3, self::ber(0x04, 'member') . self::ber(0x04, $dn)) . self::ber(0x30, self::ber(0x04, '1.1'));
-                        self::sendLdap($fp, ++$id, self::ber(0x63, $search), $deadline); $found = false;
-                        for ($messages = 0; $messages < 64; $messages++) {
-                            [$tag, $body] = self::recvLdap($fp, $id, $deadline);
-                            if ($tag === 0x64) $found = true;
-                            elseif ($tag === 0x65) { if ($found && self::resultCode($body) === 0) array_unshift($tags, 'administrator'); break; }
-                            elseif ($tag !== 0x73) throw new RuntimeException('unexpected LDAP search reply');
-                        }
+                    if ($bound === null) {
+                        $bindDn = self::option($cfg, 'bindDn', 'bind_dn');
+                        $bound = $bindDn === null || self::bind($fp, ++$id, (string) $bindDn, (string) self::option($cfg, 'bindPassword', 'bind_password', ''), $deadline);
                     }
-                } catch (Throwable) { /* A failed group query never elevates the authenticated user. */ }
+                    if (!$bound) return $groups[$cacheKey] = false;
+                    return $groups[$cacheKey] = self::groupHas($fp, ++$id, $group, $attribute, $dn, $deadline);
+                } catch (Throwable) { return $groups[$cacheKey] = false; /* A failed group query never grants. */ }
+            };
+            $tags = ['management']; $group = self::option($cfg, 'adminGroup', 'admin_group');
+            if (is_string($group) && $group !== '' && $inGroup($group, 'member')) array_unshift($tags, 'administrator');
+            $scopes = null;
+            if ($access !== []) {
+                $grant = static function (string $key) use ($access, $inGroup): bool {
+                    if (!array_key_exists($key, $access)) return true;
+                    $q = self::accessQuery($access[$key]);
+                    if (isset($q['in_group']) && is_string($q['in_group'])) return $inGroup($q['in_group'], is_string($q['attribute'] ?? null) ? $q['attribute'] : 'member');
+                    return ($q['constant'] ?? true) === true;
+                };
+                $scopes = [];
+                if ($grant('vhost')) {
+                    foreach (['configure', 'write', 'read'] as $kind) {
+                        if ($grant($kind)) $scopes[] = ['kind' => $kind, 'vhost' => '^.*$', 'resource' => '^.*$', 'routingKey' => null];
+                    }
+                    // A refused topic query denies every routing key on topic exchanges.
+                    if (array_key_exists('topic', $access) && !$grant('topic')) $scopes = array_map(static fn ($s) => $s['kind'] === 'write' || $s['kind'] === 'read' ? ['routingKey' => '(?!)'] + $s : $s, $scopes);
+                    // Something must name the vhost for hasVhost() even if every kind is refused.
+                    if ($scopes === []) $scopes[] = ['kind' => 'vhost', 'vhost' => '^.*$', 'resource' => '(?!)', 'routingKey' => null];
+                }
             }
             try { self::sendLdap($fp, ++$id, self::ber(0x42, ''), $deadline); } catch (Throwable) {}
-            return self::principal($broker, $username, 'ldap', $tags, null, null);
+            return self::principal($broker, $username, 'ldap', $tags, $scopes, null);
         } finally { fclose($fp); }
+    }
+    /** Searches `group` (base scope) for `attribute=dn`; true when it matches. */
+    private static function groupHas($fp, int $id, string $group, string $attribute, string $dn, float $deadline): bool
+    {
+        $search = self::ber(0x04, $group) . self::ber(0x0a, "\0") . self::ber(0x0a, "\0") . self::ber(0x02, "\1") . self::ber(0x02, "\5") . self::ber(0x01, "\0")
+            . self::ber(0xa3, self::ber(0x04, $attribute) . self::ber(0x04, $dn)) . self::ber(0x30, self::ber(0x04, '1.1'));
+        self::sendLdap($fp, $id, self::ber(0x63, $search), $deadline); $found = false;
+        for ($messages = 0; $messages < 64; $messages++) {
+            [$tag, $body] = self::recvLdap($fp, $id, $deadline);
+            if ($tag === 0x64) $found = true;
+            elseif ($tag === 0x65) return $found && self::resultCode($body) === 0;
+            elseif ($tag !== 0x73) throw new RuntimeException('unexpected LDAP search reply');
+        }
+        return false;
     }
     private static function bind($fp, int $id, string $dn, string $password, float $deadline): bool
     {

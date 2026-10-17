@@ -69,9 +69,23 @@ Same as Rust and Bun:
   and binary message sections
 - direct reply-to, delayed and consistent-hash exchanges, durable topology,
   definition imports/exports, live connections/channels and tracing/events
-- verified JWKS authentication, LDAP binds and administrator-group lookup;
-  TLS client-certificate authentication with a configured trusted CA
-- AMQP 0-9-1 shovels and federation with remote authentication and confirmations
+- verified JWKS authentication with `connection.update-secret` token refresh,
+  LDAP binds, administrator-group lookup and `[auth.ldap.resource_access]`
+  queries; TLS client-certificate login (CN) on AMQP 0-9-1 and AMQP 1.0
+  (SASL EXTERNAL), MQTT and STOMP with a configured trusted CA
+- RabbitMQ 4.3 consumer acknowledgement timeouts on quorum queues
+  (`x-consumer-timeout`, the `consumer-timeout` policy key, `consumer_timeout`
+  in the config), stream filtering (`x-stream-filter`), and consistent-hash
+  `hash-header` / `hash-property`
+- MQTT 5 topic aliases, subscription options, subscription identifiers, message
+  and session expiry and will delay; retained messages and parked sessions are
+  stored on disk
+- dynamic shovels with AMQP 0-9-1 and AMQP 1.0 endpoints and stream sources,
+  and exchange and queue federation; upstreams, shovels and pending delayed
+  messages are stored and come back after a restart
+- feature flags enabled cluster-wide only when every member supports them
+- peer discovery through DNS, Kubernetes endpoints, Consul, etcd v3 and AWS EC2
+  tags (SigV4)
 
 Not the same:
 

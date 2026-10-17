@@ -90,7 +90,26 @@ final class Broker
         'quorum_queues' => true,
         'publisher_confirms' => true,
         'classic_queue_type' => true,
+        // A fresh node enables every flag it knows; a data directory from a
+        // build without this flag loads it disabled until it is enabled
+        // cluster-wide, as RabbitMQ treats flags on upgrade.
+        'stream_filtering' => true,
     ];
+    /** Every flag this build knows. */
+    public const FEATURE_FLAGS = ['quorum_queues', 'publisher_confirms', 'classic_queue_type', 'stream_filtering'];
+
+    /**
+     * The flags this node supports and advertises to its peers. An older
+     * build is simulated by naming flags in QUEUEFORGE_UNSUPPORTED_FLAGS,
+     * which is how the rolling-upgrade test runs a mixed-version cluster.
+     *
+     * @return list<string>
+     */
+    public static function supportedFlags(): array
+    {
+        $off = array_filter(array_map('trim', explode(',', (string) getenv('QUEUEFORGE_UNSUPPORTED_FLAGS'))));
+        return array_values(array_diff(self::FEATURE_FLAGS, $off));
+    }
     /** @var array<string, string> */
     public array $exchanges = [
         '' => 'direct',
@@ -146,6 +165,8 @@ final class Broker
     public array $members = [];
     public ?Cluster $cluster = null;
     public bool $ready = true;
+    /** Config `consumer_timeout`: the acknowledgement timeout for quorum consumers, in ms. */
+    public int $consumerTimeoutMs = 1800000;
     /** @var array<string, int> */
     public array $prom = [
         'connections' => 0,
@@ -248,8 +269,11 @@ final class Broker
             if (!is_array($state)) throw new RuntimeException('Invalid topology state');
             $this->savedTopology = $state; $this->vhosts = $state['vhosts'] ?? ['/'];
             foreach (['policies','operatorPolicies','topicPermissions','vhostLimits','userLimits','parameters','featureFlags'] as $field) if (isset($state[$field])) $this->$field = $state[$field];
+            // A flag this build added is off in a directory written before it.
+            foreach (self::FEATURE_FLAGS as $flag) $this->featureFlags[$flag] ??= false;
             $this->restoreTopology($state['states']['/'] ?? []);
         }
+        if ($this->registry === null) foreach (array_diff(self::FEATURE_FLAGS, self::supportedFlags()) as $flag) unset($this->featureFlags[$flag]);
         // Queue types are known now, so recovered bodies past the resident
         // limit can go back to the log. Other vhost scopes keep theirs.
         foreach ($this->msgs as $id => $msg) {
@@ -459,6 +483,7 @@ final class Broker
             foreach (['policies','operatorPolicies'] as $field) foreach ($root->$field as $vhost=>$rows) foreach ($rows as $name=>$row) $state['policies'][] = $this->raftPolicyWire($vhost, (string)$name, $row, $field === 'operatorPolicies');
             foreach (['userLimits'=>'user','vhostLimits'=>'vhost'] as $field=>$key) foreach ($root->$field as $name=>$value) $state[$field][] = [$key=>$name, ...$value];
             foreach ($root->topicPermissions as $user=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $exchange=>$row) if (is_array($row)) $state['topicPermissions'][] = ['user'=>$user, 'vhost'=>$vhost, 'exchange'=>$exchange, ...$row];
+            $state['featureFlags'] = $root->featureFlags;
             foreach ($root->parameters as $component=>$vhosts) foreach ($vhosts as $vhost=>$rows) foreach ($rows as $name=>$value) {
                 if ($component === 'global') $state['globalParameters'][] = ['name'=>$name, 'value'=>$value];
                 elseif ($component !== 'shovel') $state['parameters'][] = compact('component','vhost','name','value');
@@ -517,6 +542,7 @@ final class Broker
                     foreach ($state['exchangeBindings'] ?? [] as $row) $root->applyRaft('meta', 'binding', ['destinationType'=>'exchange', ...$row], 0);
                     foreach(array_keys($root->vhostBrokers) as $vhost)if(!in_array($vhost,$root->vhosts,true))unset($root->vhostBrokers[$vhost]);
                 } finally { $root->loadingTopology=false; }
+                if (is_array($state['featureFlags'] ?? null)) foreach ($state['featureFlags'] as $flag => $on) if (in_array($flag, self::supportedFlags(), true) && is_bool($on)) $root->featureFlags[$flag] = $on;
                 $root->saveUsers();$root->saveTopology();return;
             }
             if (array_key_exists('stream',$state)) {
@@ -547,6 +573,7 @@ final class Broker
         $root=$this->root();$previous=$root->raftApplying;$root->raftApplying=true;
         try {
             if($kind==='members'){$root->members=$data;$root->saveTopology();return;}
+            if($kind==='feature_flag'){$flag=(string)($data['name']??'');if(in_array($flag,self::supportedFlags(),true)){$root->featureFlags[$flag]=($data['enabled']??true)===true;$root->saveTopology();}return;}
             $vhost=(string)($data['vhost']??'/');$name=(string)($data['name']??$data['queue']??'');
             if($kind==='vhost'){$name=(string)($data['name']??$vhost);if(!in_array($name,$root->vhosts,true))$root->vhosts[]=$name;$root->forVhost($name);$root->saveTopology();return;}
             if($kind==='delete_vhost') { $root->deleteVhost((string)($data['name'] ?? $vhost)); return; }
@@ -1007,6 +1034,11 @@ final class Broker
         return ['messages' => 0, 'consumers' => 0];
     }
 
+    public static function consumerTimeoutRefusal(string $queue, string $vhost, string $type): string
+    {
+        return "PRECONDITION_FAILED - invalid arg 'x-consumer-timeout' for queue '$queue' in vhost '$vhost' of queue type rabbit_{$type}_queue";
+    }
+
     /**
      * Applies the matching user and operator policies to declared arguments.
      *
@@ -1127,9 +1159,9 @@ final class Broker
 
     /** @param list<array{0:string,1:string}> $headers
      *  @return list<string> */
-    public function route(string $exchange, string $key, array $headers = []): array
+    public function route(string $exchange, string $key, array $headers = [], ?string $propRaw = null): array
     {
-        return $this->routeFrom($exchange, $key, $headers, []);
+        return $this->routeFrom($exchange, $key, $headers, [], $propRaw);
     }
 
     /**
@@ -1142,7 +1174,7 @@ final class Broker
      * @return list<string>
      * @throws RuntimeException when the exchange is internal
      */
-    private function routeFrom(string $exchange, string $key, array $headers, array $seen): array
+    private function routeFrom(string $exchange, string $key, array $headers, array $seen, ?string $propRaw = null): array
     {
         if (isset($seen[$exchange])) {
             return [];
@@ -1153,7 +1185,7 @@ final class Broker
             throw new RuntimeException("ACCESS_REFUSED - internal exchange '$exchange'", 403);
         }
         $seen[$exchange] = true;
-        $out = $this->routeDirect($exchange, $key, $headers);
+        $out = $this->routeDirect($exchange, $key, $headers, $propRaw);
         foreach ($this->e2e as $link) {
             if ($link['source'] !== $exchange) {
                 continue;
@@ -1165,7 +1197,7 @@ final class Broker
                 default => $link['key'] === $key,
             };
             if ($matches) {
-                $out = array_merge($out, $this->routeFrom($link['destination'], $key, $headers, $seen));
+                $out = array_merge($out, $this->routeFrom($link['destination'], $key, $headers, $seen, $propRaw));
             }
         }
         // Nothing matched here, so try the alternate exchange.
@@ -1177,7 +1209,7 @@ final class Broker
                 $exchange,
             );
             if ($alternate !== null && isset($this->exchanges[$alternate])) {
-                $out = $this->routeFrom($alternate, $key, $headers, $seen);
+                $out = $this->routeFrom($alternate, $key, $headers, $seen, $propRaw);
             }
         }
         return array_values(array_unique($out));
@@ -1196,7 +1228,7 @@ final class Broker
 
     /** @param list<array{0:string,1:string}> $headers
      *  @return list<string> */
-    private function routeDirect(string $exchange, string $key, array $headers = []): array
+    private function routeDirect(string $exchange, string $key, array $headers = [], ?string $propRaw = null): array
     {
         if ($exchange === '') {
             return isset($this->queues[$key]) ? [$key] : [];
@@ -1209,6 +1241,20 @@ final class Broker
         if ($kind === 'x-delayed-message') $kind = $this->exchangeRows[$exchange]['arguments']['x-delayed-type'] ?? 'direct';
         if ($kind === 'x-local-random') return $rows === [] ? [] : [$rows[random_int(0, count($rows)-1)]['queue']];
         if ($kind === 'x-consistent-hash') {
+            // hash-header / hash-property pick what is hashed instead of the
+            // routing key; a message without it is unroutable, as in RabbitMQ.
+            $hashArgs = $this->exchangeRows[$exchange]['arguments'] ?? [];
+            if (isset($hashArgs['hash-header'])) {
+                $value = null;
+                foreach ($headers as $pair) if (($pair[0] ?? null) === (string) $hashArgs['hash-header']) { $value = $pair[1]; break; }
+                if ($value === null || is_array($value)) return [];
+                $key = is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+            } elseif (isset($hashArgs['hash-property'])) {
+                $props = Amqp10::readProps($propRaw);
+                $value = match ((string) $hashArgs['hash-property']) { 'message_id' => $props['messageId'] ?? null, 'correlation_id' => $props['correlationId'] ?? null, 'timestamp' => $props['timestamp'] ?? null, default => null };
+                if ($value === null) return [];
+                $key = (string) $value;
+            }
             $chosen = null; $best = null;
             foreach ($rows as $row) {
                 $weight = filter_var($row['key'], FILTER_VALIDATE_INT);
@@ -1285,7 +1331,7 @@ final class Broker
             }
         }
         
-        $dests = $this->route($exchange, $key, $headers);
+        $dests = $this->route($exchange, $key, $headers, $propRaw);
         foreach (['CC', 'BCC'] as $name) {
             foreach (self::headerList($headers, $name) as $extra) {
                 if ($extra === $key) {
@@ -1415,16 +1461,22 @@ final class Broker
             $qid = $isQuorum
                 ? 'q-' . $this->nodeId . '-' . $now . '-' . bin2hex(random_bytes(4))
                 : (string) $id;
+            $notBefore = ($this->exchanges[$exchange] ?? '') === 'x-delayed-message' ? $now + max(0, (int) (array_column($headers, 1, 0)['x-delay'] ?? 0)) : null;
+            // A pending delayed message is stored even when transient, as the
+            // RabbitMQ plugin keeps its delay table on disk, so it is still
+            // delivered after a restart. The raw properties keep the client's
+            // delivery mode.
+            $stored = $mode === 2 || ($notBefore !== null && ($this->queues[$queue]['durable'] ?? false) && $propRaw !== null);
             $this->msgs[$id] = [
                 'queue' => $queue,
                 'body' => $body,
-                'mode' => $mode,
+                'mode' => $stored ? 2 : $mode,
                 'redelivered' => false,
                 'exchange' => $exchange,
                 'key' => $key,
                 'priority' => $priority,
                 'expires' => $expires,
-                'notBefore' => ($this->exchanges[$exchange] ?? '') === 'x-delayed-message' ? $now + max(0, (int) (array_column($headers, 1, 0)['x-delay'] ?? 0)) : null,
+                'notBefore' => $notBefore,
                 'headers' => $headers,
                 'propRaw' => $propRaw,
                 'qid' => $qid,
@@ -1432,8 +1484,8 @@ final class Broker
             $this->indexQid($id);
             $ids[] = $id;
             $qids[] = $qid;
-            if ($mode === 2) {
-                $end = $this->store->appendPublish($id, $queue, $body, $mode, $propRaw, self::meta($this->msgs[$id]));
+            if ($stored) {
+                $end = $this->store->appendPublish($id, $queue, $body, 2, $propRaw, self::meta($this->msgs[$id]));
                 $this->residentOrPaged($id, $this->store->lastStart);
             } else {
                 $this->hold($queue, $id, true);
@@ -2702,6 +2754,11 @@ final class Broker
      */
     public function applySnapshot(array $snapshot): void
     {
+        // A peer's enabled flags reach a node that missed the change; a
+        // snapshot never turns one off.
+        $flagged = false;
+        foreach ((array) ($snapshot['featureFlags'] ?? []) as $flag => $on) if ($on === true && in_array($flag, self::supportedFlags(), true) && ($this->featureFlags[$flag] ?? false) !== true) { $this->featureFlags[$flag] = true; $flagged = true; }
+        if ($flagged) $this->saveTopology();
         foreach ($snapshot['vhosts'] ?? [] as $host) {
             $name = is_array($host) ? ($host['name'] ?? '') : $host;
             if (is_string($name) && !in_array($name, $this->vhosts, true)) $this->vhosts[] = $name;

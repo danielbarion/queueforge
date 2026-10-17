@@ -27,6 +27,9 @@ final class Metadata
             if(!$generated&&str_starts_with($name,'amq.'))self::fail(403,"queue name '$name' is reserved");
             if(!$broker->queueAllowed($vhost))self::fail(403,'queue limit');
             $type=(string)($args['x-queue-type']??'classic');
+            // RabbitMQ 4.3: only quorum queues take an acknowledgement timeout argument.
+            if(array_key_exists('x-consumer-timeout',$args)&&$type!=='quorum')throw new RuntimeException(Broker::consumerTimeoutRefusal($name,$vhost,$type==='stream'?'stream':'classic'),406);
+            if(array_key_exists('x-consumer-timeout',$args)&&(!is_int($args['x-consumer-timeout'])||$args['x-consumer-timeout']<1))self::fail(406,'invalid x-consumer-timeout');
             if(in_array($type,['quorum','stream'],true)&&!$durable)self::fail(406,'quorum and stream queues must be durable');
             if(!$durable&&!$broker->transientNonexcl)self::fail(541,'transient non-exclusive queues are disabled');
             $group=in_array($type,['quorum','stream'],true)?$broker->cluster?->queueGroup($vhost,$name):null;
@@ -45,6 +48,9 @@ final class Metadata
             $durable=($bits&2)!==0;$autoDelete=($bits&4)!==0;$internal=($bits&8)!==0;
             if(isset($args['alternate-exchange'])&&!is_string($args['alternate-exchange']))self::fail(406,'alternate-exchange must be a string');
             if($kind==='x-delayed-message'&&!in_array($args['x-delayed-type']??null,['direct','fanout','topic','headers'],true))self::fail(406,'x-delayed-type is required');
+            if($kind==='x-consistent-hash'&&isset($args['hash-header'],$args['hash-property']))self::fail(406,"Only one of hash-header or hash-property may be set for exchange '$name'");
+            if($kind==='x-consistent-hash'&&isset($args['hash-header'])&&(!is_string($args['hash-header'])||$args['hash-header']===''))self::fail(406,'hash-header must be a non-empty string');
+            if($kind==='x-consistent-hash'&&isset($args['hash-property'])&&!in_array($args['hash-property'],['message_id','correlation_id','timestamp'],true))self::fail(406,'hash-property must be message_id, correlation_id or timestamp');
             if(isset($broker->exchanges[$name])){
                 $row=$broker->exchangeRows[$name]??[];
                 foreach(['type'=>$kind,'durable'=>$durable,'autoDelete'=>$autoDelete,'internal'=>$internal,'alternate'=>$args['alternate-exchange']??null] as $field=>$value){$existing=$field==='type'?$broker->exchanges[$name]:($row[$field]??($field==='durable'?true:($field==='alternate'?null:false)));if($existing!==$value)self::fail(406,"inequivalent arg $field for exchange '$name'");}
@@ -96,7 +102,7 @@ final class Metadata
         if(array_key_exists('x-queue-type',$args)&&(!is_string($args['x-queue-type'])||!in_array($args['x-queue-type'],['classic','quorum','stream'],true)))self::fail(406,'invalid x-queue-type');
         if(!Features::knownQueueType((string)($args['x-queue-type']??'')))self::fail(406,'unsupported x-queue-type');
         foreach(['x-message-ttl','x-expires','x-max-length','x-max-length-bytes','x-max-priority','x-delivery-limit','x-max-age'] as $key)if(array_key_exists($key,$args)){
-            if($key==='x-max-age'){if(!is_string($args[$key])||preg_match('/^[1-9][0-9]*[smhDMY]$/D',$args[$key])!==1)self::fail(406,'invalid x-max-age');}
+            if($key==='x-max-age'){if(!is_string($args[$key])||preg_match('/^[0-9]+[YMDhms]$/D',$args[$key])!==1)self::fail(406,'invalid x-max-age');}
             elseif(!is_int($args[$key])||$args[$key]<0||($key==='x-expires'&&$args[$key]===0)||($key==='x-max-priority'&&($args[$key]<1||$args[$key]>255)))self::fail(406,"invalid $key");
         }
         foreach(['x-dead-letter-exchange','x-dead-letter-routing-key'] as $key)if(array_key_exists($key,$args)&&!is_string($args[$key]))self::fail(406,"invalid $key");

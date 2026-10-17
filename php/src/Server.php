@@ -38,6 +38,10 @@ final class Chan
     public array $txPub = [];
     /** @var list<array{0:string,1:int,2:bool}> acks and nacks held by the transaction */
     public array $txAcks = [];
+    /** @var array<string, int> acknowledgement timeout in ms per quorum consumer tag */
+    public array $timeouts = [];
+    /** @var array<int, float> delivery time of each unacked tag of a timed consumer */
+    public array $sentAt = [];
 
     /** Forget one unacked delivery. Returns its message id, or null. */
     public function settle(int $dtag): ?int
@@ -47,6 +51,7 @@ final class Chan
         }
         $msgId = $this->unacked[$dtag];
         unset($this->unacked[$dtag]);
+        if ($this->sentAt !== []) unset($this->sentAt[$dtag]);
         $tag = $this->tagOf[$dtag] ?? null;
         unset($this->tagOf[$dtag]);
         if ($tag !== null && isset($this->held[$tag])) {
@@ -89,6 +94,10 @@ final class Sock
     public array $metadataWaited = [];
     /** The client advertised the `connection.blocked` capability. */
     public bool $wantsBlocked = false;
+    /** The client advertised `consumer_cancel_notify`: a timed-out consumer gets basic.cancel. */
+    public bool $cancelNotify = false;
+    /** The user name the client logged in with, for connection.update-secret. */
+    public string $login = '';
     /** This connection has published, so an alarm stops reading it. */
     public bool $published = false;
     /** @var array<int, Chan> */
@@ -306,6 +315,7 @@ final class Server
             $this->pullHandoff();
             $this->announce();
             $this->beat();
+            $this->scanConsumerTimeouts();
             foreach ($this->broker->allBrokers() as $scope) $scope->maybeCompact();
             foreach ($this->conns as $sock) if ($sock->stage === 'amqp10' && !$sock->gone) { $sock->send($this->amqp10->tick($sock->amqp10)); $sock->flush(); }
             if ($this->extras !== null) {
@@ -326,6 +336,75 @@ final class Server
             }
             $this->flushDirty();
         }
+    }
+
+    private float $nextTimeoutScan = 0.0;
+
+    /**
+     * Once a second, finds quorum consumers holding a delivery past their
+     * acknowledgement timeout. Only channels with a timed consumer and an
+     * outstanding delivery are looked at; nothing runs per message.
+     */
+    private function scanConsumerTimeouts(): void
+    {
+        $now = microtime(true);
+        if ($now < $this->nextTimeoutScan) return;
+        $this->nextTimeoutScan = $now + 1.0;
+        foreach (array_keys($this->conns) as $id) {
+            $sock = $this->conns[$id] ?? null;
+            if ($sock === null || $sock->gone) continue;
+            foreach (array_keys($sock->channels) as $channel) {
+                $ch = $sock->channels[$channel] ?? null;
+                if ($ch === null || $ch->sentAt === []) continue;
+                $late = [];
+                foreach ($ch->sentAt as $dtag => $at) {
+                    $tag = $ch->tagOf[$dtag] ?? null;
+                    if ($tag !== null && isset($ch->timeouts[$tag]) && ($now - $at) * 1000 >= $ch->timeouts[$tag]) $late[$tag] = true;
+                }
+                foreach (array_keys($late) as $tag) {
+                    if (!isset($this->conns[$id]) || $this->conns[$id]->gone) break;
+                    $this->timeOutConsumer($id, $channel, (string) $tag);
+                }
+            }
+        }
+    }
+
+    /**
+     * A consumer held a delivery past its timeout: its unacked deliveries go
+     * back to the queue (redelivered) and it gets no more. A client that
+     * advertised consumer_cancel_notify gets basic.cancel and keeps the
+     * channel; any other client loses the channel with 406, as RabbitMQ does.
+     */
+    private function timeOutConsumer(int $id, int $channel, string $tag): void
+    {
+        $sock = $this->conns[$id];
+        $ch = $sock->channels[$channel];
+        $broker = $this->brokerFor($id);
+        $queueName = '';
+        foreach ($broker->queues as $name => $queue) {
+            $before = count($queue['consumers']);
+            $broker->queues[$name]['consumers'] = array_values(array_filter($queue['consumers'], static fn (array $c): bool => !($c['conn'] === $id && $c['ch'] === $channel && $c['tag'] === $tag)));
+            if (count($broker->queues[$name]['consumers']) !== $before) { $queueName = (string) $name; $broker->prom['consumers'] -= $before - count($broker->queues[$name]['consumers']); }
+        }
+        $timeout = $ch->timeouts[$tag] ?? 0;
+        unset($ch->timeouts[$tag]);
+        if ($ch->consumer === $tag) { $ch->consumer = null; $ch->queue = null; }
+        if (!$sock->cancelNotify) {
+            $sock->send(Codec::channelClose($channel, 406, "PRECONDITION_FAILED - delivery acknowledgement on channel $channel timed out. Timeout value used: $timeout ms", 60, 80));
+            $this->releaseChannel($id, $channel);
+            unset($sock->channels[$channel]);
+            $sock->flush();
+            return;
+        }
+        foreach (array_reverse(array_keys($ch->tagOf, $tag, true)) as $dtag) {
+            $msgId = $ch->settle((int) $dtag);
+            if ($msgId !== null) $broker->requeue($msgId);
+        }
+        // Server-initiated basic.cancel: consumer-tag, no-wait.
+        $sock->send(Codec::method($channel, 60, 30, Codec::shortstr($tag) . "\1"));
+        $sock->flush();
+        if ($queueName !== '') $this->autoDelete($queueName, $broker);
+        $this->pump();
     }
 
     /** Write the deliveries of this pass, one write per connection. */
@@ -361,7 +440,7 @@ final class Server
         $sock = new Sock($fp);
         $meta = stream_get_meta_data($fp);
         $sock->tls = isset($meta['crypto']);
-        $sock->peerCN = $this->verifiedPeerCN($fp);
+        $sock->peerCN = self::verifiedPeerCN($fp);
 
         if ($state !== null) {
             $sock->stage = 'frames';
@@ -423,7 +502,7 @@ final class Server
     }
 
     /** Context verification happened during accept; a captured certificate alone proves nothing. */
-    private function verifiedPeerCN($fp): ?string
+    public static function verifiedPeerCN($fp): ?string
     {
         $meta = stream_get_meta_data($fp);
         $ssl = stream_context_get_options($fp)['ssl'] ?? [];
@@ -849,7 +928,7 @@ final class Server
             // 1.0 shim rather than dropped.
             if ($head === "AMQP\x00\x01\x00\x00" || $head === "AMQP\x03\x01\x00\x00") {
                 $sock->stage = 'amqp10';
-                $sock->amqp10['conn'] = $id;
+                $sock->amqp10['conn'] = $id; $sock->amqp10['peerCN'] = $sock->peerCN;
                 $sock->send($this->amqp10->drive($sock->in, $sock->amqp10));
                 $sock->flush();
                 if (($sock->amqp10['closing'] ?? false) === true) {
@@ -1064,6 +1143,8 @@ final class Server
             $sock->send(Codec::connectionOpenOk());
             $alarms = $this->broker->alarms();
             if ($sock->wantsBlocked && $alarms->blocked()) $sock->send(Codec::method(0, 10, 60, Codec::shortstr($alarms->reason())));
+        } elseif ($class === 10 && $method === 70) {
+            $this->updateSecret($id, $payload, $o);
         } elseif ($class === 10 && $method === 50) {
             $sock->send(Codec::connectionCloseOk());
             $sock->flush();
@@ -1178,6 +1259,7 @@ final class Server
             $ch->consumer = null;
             $ch->queue = null;
         }
+        unset($ch->timeouts[$tag]);
         if (!$nowait) {
             $this->conns[$id]->send(Codec::cancelOk($channel, $tag));
         }
@@ -1498,6 +1580,29 @@ final class Server
         return false;
     }
 
+    /**
+     * connection.update-secret: the new secret is checked by the backend that
+     * authenticated the connection (for OAuth 2.0, the refreshed JWT). On
+     * success its identity replaces the old one for every channel, so new
+     * scopes apply to the next operation; on failure the connection closes.
+     */
+    private function updateSecret(int $id, string $payload, int $o): void
+    {
+        $sock = $this->conns[$id];
+        $broker = $this->brokerFor($id);
+        $secret = Codec::readLongstr($payload, $o);
+        $identity = $sock->login === '' ? null : $broker->authenticate($sock->login, $secret);
+        if ($identity === null || !$broker->hasVhostAccess($identity, $sock->vhost)) {
+            $sock->send(Codec::connectionClose(530, 'NOT_ALLOWED - update-secret failed', 10, 70));
+            $sock->flush();
+            $this->drop($id);
+            return;
+        }
+        $sock->user = $identity;
+        $broker->userByConn[$id] = $identity;
+        $sock->send(Codec::method(0, 10, 71));
+    }
+
     private function startOk(int $id, string $payload, int $o): void
     {
         $broker = $this->brokerFor($id);
@@ -1505,6 +1610,7 @@ final class Server
         $client = Codec::readTable($payload, $props);
         $caps = is_array($client['capabilities'] ?? null) ? $client['capabilities'] : [];
         $this->conns[$id]->wantsBlocked = ($caps['connection.blocked'] ?? 0) === 1;
+        $this->conns[$id]->cancelNotify = ($caps['consumer_cancel_notify'] ?? 0) === 1;
         $table = unpack('N', substr($payload, $o, 4))[1];
         $o += 4 + $table;
         $mech = Codec::readShortstr($payload, $o);
@@ -1522,6 +1628,7 @@ final class Server
             $parts = explode("\0", $resp);
             $user = count($parts) >= 3 ? $parts[1] : ($parts[0] ?? '');
             $pass = count($parts) >= 3 ? $parts[2] : ($parts[1] ?? '');
+            $this->conns[$id]->login = $user;
             $user = $broker->authenticate($user, $pass);
             if ($user === null) { $this->drop($id); return; }
         } else {
@@ -1704,11 +1811,16 @@ final class Server
         try {
             $stream = ($broker->queues[$queue]['args']['queueType'] ?? '') === 'stream';
             if ($stream && ($ch->prefetch === 0 || $noAck)) throw new RuntimeException('PRECONDITION_FAILED - stream consume requires prefetch and manual acknowledgements',406);
+            $queueType = $broker->queues[$queue]['args']['queueType'] ?? 'classic';
+            // RabbitMQ 4.3 enforces acknowledgement timeouts on quorum queues only.
+            if (array_key_exists('x-consumer-timeout', $args) && $queueType !== 'quorum') throw new RuntimeException(Broker::consumerTimeoutRefusal($queue, $broker->vhost, $queueType), 406);
             $broker->addConsumer($queue, $id, $channel, $tag, $noAck, $exclusive, $priority);
             $consumer = array_key_last($broker->queues[$queue]['consumers']);
             $broker->queues[$queue]['consumers'][$consumer]['readyFn'] = function()use($id,$channel,$tag):bool { $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;return $ch!==null&&!$sock->gone&&($ch->prefetch===0||($ch->held[$tag]??0)<$ch->prefetch); };
             $broker->queues[$queue]['consumers'][$consumer]['deliverFn'] = function(array $msg,int $msgId)use($id,$channel,$tag,$noAck,$broker):void { $this->deliverMessage($broker,$id,$channel,$tag,$noAck,$msg,$msgId); };
-            if($stream){$offset=$args['x-stream-offset']??'next';$cursor=is_int($offset)?max($broker->streamFirst($queue),$offset):match($offset){'first'=>$broker->streamFirst($queue),'last'=>max($broker->streamFirst($queue),$broker->streamNext($queue)-1),default=>$broker->streamNext($queue)};$broker->queues[$queue]['consumers'][$consumer]['streamOffset']=$cursor;}
+            if($stream){$offset=$args['x-stream-offset']??'next';$cursor=is_int($offset)?max($broker->streamFirst($queue),$offset):match($offset){'first'=>$broker->streamFirst($queue),'last'=>max($broker->streamFirst($queue),$broker->streamNext($queue)-1),default=>$broker->streamNext($queue)};$broker->queues[$queue]['consumers'][$consumer]['streamOffset']=$cursor;
+                // x-stream-filter: deliver only records whose x-stream-filter-value is in the set.
+                if(isset($args['x-stream-filter'])){$filter=is_array($args['x-stream-filter'])?$args['x-stream-filter']:[$args['x-stream-filter']];$broker->queues[$queue]['consumers'][$consumer]['streamFilter']=array_fill_keys(array_map('strval',$filter),true);$broker->queues[$queue]['consumers'][$consumer]['matchUnfiltered']=in_array($args['x-stream-match-unfiltered']??false,[1,true,'true'],true);}}
 
         } catch (RuntimeException $err) {
             $this->fail($id, $channel, $err, 60, 20);
@@ -1717,6 +1829,10 @@ final class Server
         $ch->consumer = $tag;
         $ch->queue = $queue;
         $ch->noAck[$tag] = $noAck;
+        if (!$noAck && ($broker->queues[$queue]['args']['queueType'] ?? '') === 'quorum') {
+            $ch->timeouts[$tag] = is_numeric($args['x-consumer-timeout'] ?? null) ? max(1, (int) $args['x-consumer-timeout'])
+                : (int) ($broker->queues[$queue]['args']['consumerTimeout'] ?? $this->broker->root()->consumerTimeoutMs);
+        }
         $broker->queues[$queue]['hadConsumer'] = true;
         if (!$nowait) {
             $this->conns[$id]->send(Codec::consumeOk($channel, $tag));
@@ -2071,9 +2187,15 @@ final class Server
     private function deliverMessage(Broker $broker,int $id,int $channel,string $tag,bool $noAck,array $msg,int $msgId):void
     {
         $sock=$this->conns[$id]??null;$ch=$sock?->channels[$channel]??null;if($ch===null){if($msgId!==-1)$broker->requeue($msgId);return;}
-        $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;}
+        $dtag=$ch->nextDel++;if(!$noAck){$ch->unacked[$dtag]=$msgId;$ch->tagOf[$dtag]=$tag;$ch->held[$tag]=($ch->held[$tag]??0)+1;if($ch->timeouts!==[]&&isset($ch->timeouts[$tag]))$ch->sentAt[$dtag]=microtime(true);}
         $sock->send(Codec::deliver($channel,$tag,$dtag,$msg['key']??$msg['queue']??'',$msg['mode']??2,$msg['body'],$msg['redelivered']??false,$msg['exchange']??'',$msg['propRaw']??null,$msg['headers']??[],$sock->frameMax));$this->dirty[$id]=true;
         $broker->prom['delivered']++;$broker->prom[$noAck?'deliveredConsumeAuto':'deliveredConsumeManual']++;if($msg['redelivered']??false)$broker->prom['redelivered']++;
+    }
+    /** Exact per-record stream filtering: a superset of RabbitMQ's chunk-level filter. */
+    private static function streamFilterMatch(array $consumer,array $headers):bool
+    {
+        foreach($headers as $pair){if(is_array($pair)&&($pair[0]??null)==='x-stream-filter-value')return isset($consumer['streamFilter'][(string)$pair[1]]);}
+        return $consumer['matchUnfiltered']??false;
     }
     private function pumpStream(Broker $broker,string $name):void
     {
@@ -2082,6 +2204,7 @@ final class Server
             if(!isset($consumer['streamOffset'],$consumer['readyFn'])||!isset($this->conns[$consumer['conn']]))continue;
             while($remaining>0 && ($consumer['readyFn'])()) {
                 $offset=$broker->queues[$name]['consumers'][$i]['streamOffset'];$messages=$broker->streamRead($name,$offset,1);if($messages===[])break;$record=$messages[0];
+                if(isset($consumer['streamFilter'])&&!self::streamFilterMatch($consumer,$record['headers']??[])){$broker->queues[$name]['consumers'][$i]['streamOffset']=$record['offset']+1;$remaining--;continue;}
                 $props=Amqp10::readProps($record['propRaw']);$headers=$props['headers'];$headers['x-stream-offset']=$record['offset'];$headers=array_map(static fn($key,$value)=>[$key,$value],array_keys($headers),array_values($headers));
                 $msg=['queue'=>$name,'key'=>$name,'body'=>$record['body'],'mode'=>2,'propRaw'=>Amqp10::writeProps($props,$headers),'headers'=>$headers];
                 $broker->queues[$name]['consumers'][$i]['streamOffset']=$record['offset']+1;$remaining--;

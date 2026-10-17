@@ -52,6 +52,7 @@ final class Cluster
         if ($this->raft !== null || is_file($this->raftDir() . '/enabled')) $out[] = 'raft_on';
         if (getenv('QUEUEFORGE_RAFT_QGROUPS') !== '0') $out[] = 'raft_qgroups';
         $out[] = 'meta_barrier';
+        foreach (Broker::supportedFlags() as $flag) $out[] = 'ff:' . $flag;
         return $out;
     }
     public function markFreshRaft(): void
@@ -63,7 +64,7 @@ final class Cluster
         $ids = array_map(static fn (array $m): string => (string) $m['id'], $this->broker->members);
         return $ids === [] ? [$this->nodeId] : $ids;
     }
-    private function allHave(string $feature): bool
+    public function allHave(string $feature): bool
     {
         foreach ($this->voters() as $id) if ($id !== $this->nodeId && !in_array($feature, $this->peerFeatures[$id] ?? [], true)) return false;
         return true;
@@ -244,7 +245,7 @@ final class Cluster
         foreach ($this->broker->users as $name => $hash) $users[] = ['name' => $name, 'hash' => $hash, 'tags' => $this->broker->tags[$name] ?? []];
         foreach ($this->broker->permissions as $user => $hosts) foreach ($hosts as $vhost => $rules) $permissions[] = ['user' => $user, 'vhost' => $vhost] + $rules;
         return ['users' => $users, 'vhosts' => $this->broker->vhosts, 'permissions' => $permissions,
-            'exchanges' => $exchanges, 'queues' => $queues, 'bindings' => $bindings, 'consumed' => $this->consumedList()];
+            'exchanges' => $exchanges, 'queues' => $queues, 'bindings' => $bindings, 'consumed' => $this->consumedList(), 'featureFlags' => $this->broker->featureFlags];
     }
     private function consumedList(): array
     {

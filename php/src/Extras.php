@@ -18,6 +18,7 @@ final class Extras
     public $onAmqp = null;
     private array $cfg = [];
     private float $nextDial = 0.0;
+    private ?DiscoveryAgent $discovery = null;
     private string $membersFile = '';
     /**
      * Failed dial attempts per member. After this many a peer is treated as
@@ -123,6 +124,7 @@ final class Extras
         $port = self::port((string) ($cfg['management'] ?? '127.0.0.1:15672'));
         $ui = dirname(__DIR__, 2) . '/rust/ui/dist';
         $this->http = new Http($broker, $ui, $port, !empty($cfg['tls']));
+        $this->http->integrations = $this->integrations;
         // A membership change made through the management API is persisted and
         // broadcast as an apply op, which is how Bun propagates it.
         $this->http->onMembers = function (): void {
@@ -154,15 +156,26 @@ final class Extras
         };
         // A membership change committed through the meta log is kept for a restart.
         $this->cluster->onMembersApplied = function (): void { $this->saveMembers(); };
+        // Cloud discovery keeps its registration alive and adds members it
+        // finds later through the same path as POST /api/nodes. Only the
+        // process that serves management runs it in cores mode.
+        if (in_array($cfg['discovery'] ?? '', ['k8s', 'consul', 'etcd', 'aws'], true) && getenv('QUEUEFORGE_BIND_MGMT') !== '0') {
+            $this->discovery = new DiscoveryAgent($cfg, function (array $found): void { $this->addDiscovered($found); });
+            $agent = $this->discovery;
+            if (function_exists('pcntl_signal')) {
+                pcntl_async_signals(true);
+                foreach ([SIGTERM, SIGINT] as $signal) pcntl_signal($signal, static function () use ($agent): never { $agent->shutdown(); exit(0); });
+            }
+        }
         $this->protocols = new Protocols($broker);
         $this->protocols->onWrite = function($fp,string $bytes):void { $this->send($fp,$bytes); };
         $this->protocols->onClose = function($fp):void { $this->close((int)$fp); };
-        foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream', 'amqps'] as $kind) {
+        foreach (['management', 'metrics', 'cluster', 'mqtt', 'stomp', 'stream', 'amqps', 'mqtts', 'stomps'] as $kind) {
             $addr = $cfg[$kind] ?? null;
             if (!is_string($addr) || $addr === '') {
                 continue;
             }
-            $secure = $kind === 'amqps' || ($kind !== 'metrics' && $kind !== 'cluster' && !empty($cfg['tls']));
+            $secure = in_array($kind, ['amqps', 'mqtts', 'stomps'], true) || ($kind !== 'metrics' && $kind !== 'cluster' && !empty($cfg['tls']));
             $scheme = 'tcp';
             // `verify_peer` stays unset with a CA, as for the AMQP listener in bin/queueforge.
             $context=stream_context_create($secure?['ssl'=>['local_cert'=>$cfg['cert'],'local_pk'=>$cfg['key'],'cafile'=>$cfg['ca']?:null,...(($cfg['ca']??'')!==''?['queueforge_peer_verified'=>true]:['verify_peer'=>false]),'verify_peer_name'=>false,'allow_self_signed'=>false,'capture_peer_cert'=>true,'capture_peer_cert_chain'=>true,'crypto_method'=>STREAM_CRYPTO_METHOD_TLS_SERVER,'queueforge_tls'=>true,'fail_if_no_peer_cert'=>false]]:[]);
@@ -207,7 +220,10 @@ final class Extras
             if (($ssl['queueforge_tls'] ?? false) && !Server::acceptTls($client)) { fclose($client); return; }
             stream_set_blocking($client, false);
             $kind = $this->listens[$id]['kind'];
+            $cn = null;
+            if ($kind === 'mqtts' || $kind === 'stomps') { $cn = Server::verifiedPeerCN($client); $kind = substr($kind, 0, -1); }
             $conn = $kind === 'mqtt' ? $this->protocols->nextMqtt() : ($kind === 'stomp' ? $this->protocols->nextStomp() : 0);
+            if ($cn !== null) { if ($kind === 'mqtt') $this->protocols->peerCN[$conn] = $cn; else $this->protocols->stompPeerCN[$conn] = $cn; }
             if ($kind === 'amqps' && $this->onAmqp !== null) { ($this->onAmqp)($client); return; }
             $this->conns[(int) $client] = ['kind' => $kind, 'fp' => $client, 'buf' => '', 'conn' => $conn, 'peer' => '', 'state' => ['fp'=>$client,'advertised'=>['host'=>'127.0.0.1','port'=>self::port($this->cfg['stream']??'')]], 'out'=>'', 'closing'=>false, 'tls'=>isset(stream_get_meta_data($client)['crypto'])];
             return;
@@ -234,8 +250,27 @@ final class Extras
         $this->dispatch($id);
     }
 
+    /**
+     * Members a discovery re-check found that the member list lacks. They are
+     * added, never removed, as RabbitMQ's peer discovery does; with Raft the
+     * change commits through the meta log like an /api/nodes POST.
+     *
+     * @param list<array{id:string,addr:string}> $found
+     */
+    private function addDiscovered(array $found): void
+    {
+        $known = array_column($this->broker->members, 'id');
+        $members = $this->broker->members;
+        foreach ($found as $row) if (!in_array($row['id'], $known, true)) $members[] = $row;
+        if (count($members) === count($this->broker->members)) return;
+        if ($this->cluster->raftEnabled()) { $this->cluster->proposeMeta('members', $members, static function (): void {}); return; }
+        $this->broker->members = $members;
+        ($this->http->onMembers)();
+    }
+
     public function tick(): void
     {
+        $this->discovery?->tick();
         $this->cluster->tick();
         $this->integrations->tick();
         $this->protocols->tick();
@@ -288,10 +323,12 @@ final class Extras
         // not leave entries pointing at a closed handle.
         if ($row['kind'] === 'mqtt') {
             $this->protocols->dropMqtt((int) ($row['conn'] ?? 0));
+            unset($this->protocols->peerCN[(int) ($row['conn'] ?? 0)]);
         }
         if ($row['kind'] === 'stream') $this->protocols->dropStream($row['state']);
         if ($row['kind'] === 'stomp') {
             $this->protocols->dropStomp((int) ($row['conn'] ?? 0));
+            unset($this->protocols->stompPeerCN[(int) ($row['conn'] ?? 0)]);
         }
         if (is_resource($row['fp'])) {
             fclose($row['fp']);

@@ -50,6 +50,8 @@ $cfg = [
     'mqtt' => '',
     'stomp' => '',
     'stream' => '',
+    'mqtts' => '',
+    'stomps' => '',
     'cluster' => '',
     'node_id' => 'queueforge',
     'node_id_explicit' => false,
@@ -73,10 +75,14 @@ foreach (file($configPath, FILE_IGNORE_NEW_LINES) as $line) {
         continue;
     }
     [$key, $value] = array_map(trim(...), explode('=', $line, 2));
+    // Cloud discovery keys keep their TOML type: lists, inline tables, numbers.
+    if ($section === 'cluster' && preg_match('/^(k8s|consul|etcd|aws)_|^discovery_interval$/', $key) === 1) $cfg['discovery_opts'][$key] = Discovery::tomlValue($value);
     $value = trim($value, "\"'");
     if ($section === 'listeners' && isset($cfg[$key]) && is_string($cfg[$key])) {
         $cfg[$key] = $value;
     }
+    // RabbitMQ's consumer_timeout, in ms: top level or under [limits].
+    if ($key === 'consumer_timeout' && ($section === '' || $section === 'limits') && is_numeric($value)) $cfg['consumer_timeout'] = max(1, (int) $value);
     if ($section === 'data' && $key === 'dir') {
         $cfg['dir'] = $value;
     }
@@ -141,7 +147,7 @@ if (getenv('QUEUEFORGE_MEMBERS')) {
         $cfg['members'] = $parsed;
     }
 }
-if (($cfg['discovery'] ?? '') === 'dns' && !$cfg['node_id_explicit']) $cfg['node_id'] = '';
+if (in_array($cfg['discovery'] ?? '', Discovery::BACKENDS, true) && !$cfg['node_id_explicit']) $cfg['node_id'] = '';
 if (getenv('QUEUEFORGE_CHILD') !== '1') {
     try { $cfg = Discovery::resolve($cfg); } catch (RuntimeException $error) { fwrite(STDERR, $error->getMessage()."\n"); exit(2); }
 }
@@ -149,7 +155,7 @@ if (getenv('QUEUEFORGE_BIND_MGMT') === '0') {
     $cfg['management'] = '';
     // The first child serves the other client listeners; the rest would only
     // fail to bind them. It reaches their queues over the cluster links.
-    foreach (['mqtt', 'stomp', 'stream', 'amqps'] as $kind) $cfg[$kind] = '';
+    foreach (['mqtt', 'stomp', 'stream', 'amqps', 'mqtts', 'stomps'] as $kind) $cfg[$kind] = '';
 }
 if (getenv('QUEUEFORGE_CHILD') !== '1' && Cores::granted() > 1) {
     Supervise::run(__FILE__, $configPath, $dev, $cfg);
@@ -165,6 +171,7 @@ $cfg['fresh']=!is_file($dir.'/messages.log')&&!is_file($dir.'/users.json')&&!is_
 $store = new Store($dir . '/messages.log');
 $broker = new Broker($store, $dir . '/users.json');
 $broker->authConfig=$cfg['auth'];
+if (isset($cfg['consumer_timeout'])) $broker->consumerTimeoutMs = $cfg['consumer_timeout'];
 if ($dev) {
     $broker->bootstrap('devpassword12');
 }

@@ -24,6 +24,8 @@ final class Amqp
         private bool $wantsBlocked = false,
         /** TLS client options; null connects in plain TCP. */
         private ?array $ssl = null,
+        /** @var list<string> extra client capabilities, e.g. consumer_cancel_notify */
+        private array $capabilities = [],
     ) {
         $fp = $this->ssl === null
             ? @stream_socket_client("tcp://$host:$port", $errno, $errstr, $this->timeout)
@@ -54,10 +56,10 @@ final class Amqp
         $this->expect(10, 10);
         $response = "\0" . $this->user . "\0" . $this->pass;
         $props = '';
-        if ($this->wantsBlocked) {
-            $caps = Codec::shortstr('connection.blocked') . 't' . chr(1);
-            $props = Codec::shortstr('capabilities') . 'F' . pack('N', strlen($caps)) . $caps;
-        }
+        $caps = '';
+        if ($this->wantsBlocked) $caps .= Codec::shortstr('connection.blocked') . 't' . chr(1);
+        foreach ($this->capabilities as $capability) $caps .= Codec::shortstr($capability) . 't' . chr(1);
+        if ($caps !== '') $props = Codec::shortstr('capabilities') . 'F' . pack('N', strlen($caps)) . $caps;
         $this->method(0, 10, 11, pack('N', strlen($props)) . $props . Codec::shortstr('PLAIN') . Codec::longstr($response) . Codec::shortstr('en_US'));
         $this->expect(10, 30);
         $this->method(0, 10, 31, pack('nNn', 0, 131072, 0));
@@ -150,10 +152,11 @@ final class Amqp
         return unpack('N', substr($frame['args'], 0, 4))[1];
     }
 
-    public function consume(string $queue, string $tag = '', bool $noAck = false, int $ch = 1, bool $exclusive = false, ?int $priority = null): string
+    /** @param array<string, mixed> $extra further consume arguments */
+    public function consume(string $queue, string $tag = '', bool $noAck = false, int $ch = 1, bool $exclusive = false, ?int $priority = null, array $extra = []): string
     {
         $bits = ($noAck ? 2 : 0) | ($exclusive ? 4 : 0);
-        $args = $priority === null ? [] : ['x-priority' => $priority];
+        $args = ($priority === null ? [] : ['x-priority' => $priority]) + $extra;
         $this->method($ch, 60, 20, pack('n', 0) . Codec::shortstr($queue) . Codec::shortstr($tag) . chr($bits) . self::table($args));
         $frame = $this->expect(60, 21);
         $o = 0;
@@ -469,6 +472,14 @@ final class Amqp
             $flags |= 0x0100;
             $out .= Codec::shortstr((string) $p['expiration']);
         }
+        if (isset($p['messageId'])) {
+            $flags |= 0x0080;
+            $out .= Codec::shortstr((string) $p['messageId']);
+        }
+        if (isset($p['timestamp'])) {
+            $flags |= 0x0040;
+            $out .= Codec::u64((int) $p['timestamp']);
+        }
         return pack('n', $flags) . $out;
     }
 
@@ -478,7 +489,9 @@ final class Amqp
         $inner = '';
         foreach ($fields as $name => $value) {
             $inner .= Codec::shortstr((string) $name);
-            if (is_int($value)) {
+            if (is_bool($value)) {
+                $inner .= 't' . chr($value ? 1 : 0);
+            } elseif (is_int($value)) {
                 $inner .= 'I' . pack('N', $value & 0xffffffff);
             } elseif (is_array($value)) {
                 // A field array, which is how a CC or BCC header carries

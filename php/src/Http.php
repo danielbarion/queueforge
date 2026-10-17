@@ -32,6 +32,8 @@ final class Http
      * @var ?callable(string):?array{raft_group:string,leader:?string,members:list<string>}
      */
     public $queueRaft = null;
+    /** Shovel and federation link status, set by Extras. */
+    public ?Integrations $integrations = null;
 
     public function __construct(public Broker $broker, public string $uiRoot, public int $port, public bool $secure)
     {
@@ -113,6 +115,18 @@ final class Http
                         $this->broker->cluster->proposeMeta('members', $members, function (bool $ok, ?string $error) use ($onReply, $method, $members): void {
                             if (!$ok) { $onReply($this->json(503, ['error' => 'metadata_commit_failed', 'reason' => $error])); return; }
                             $onReply($method === 'POST' ? $this->json(201, $members) : $this->status(204, '', 'application/json'));
+                        });
+                        return '';
+                    }
+                    // With Raft on, a feature flag change commits through the meta
+                    // log, so every member, including one that restarts or joins
+                    // later, ends up with the same flag set.
+                    if (($this->broker->cluster?->raftEnabled() ?? false) && in_array($method, ['POST', 'PUT'], true)
+                        && preg_match('#^/api/feature-flags/([^/]+)/(enable|disable)$#', $path, $flagPath) === 1 && !in_array(rawurldecode($flagPath[1]), ['raft', 'transient_nonexcl_queues'], true)) {
+                        $refusal = $this->flagRefusal(rawurldecode($flagPath[1]), $flagPath[2] === 'enable');
+                        if ($refusal !== null) return $refusal;
+                        $this->broker->cluster->proposeMeta('feature_flag', ['name' => rawurldecode($flagPath[1]), 'enabled' => $flagPath[2] === 'enable'], function (bool $ok, ?string $error) use ($onReply): void {
+                            $onReply($ok ? $this->status(204, '', 'application/json') : $this->json(503, ['error' => 'metadata_commit_failed', 'reason' => $error]));
                         });
                         return '';
                     }
@@ -319,6 +333,21 @@ final class Http
         }
         if ($method === 'GET' && $path === '/api/overview') {
             return $this->json(200, $this->overview());
+        }
+        if ($method === 'GET' && preg_match('#^/api/(federation-links|shovels)(?:/([^/]+))?$#', $path, $m) === 1) {
+            $vhost = isset($m[2]) ? rawurldecode($m[2]) : null;
+            $rows = $this->integrations === null ? [] : ($m[1] === 'shovels' ? $this->integrations->shovels($vhost) : $this->integrations->federationLinks($vhost));
+            return $this->json(200, array_values(array_filter($rows, fn ($row) => $broker->hasVhostAccess($user, (string) $row['vhost']))));
+        }
+        if ($method === 'DELETE' && preg_match('#^/api/parameters/shovel/([^/]+)/([^/]+)$#', $path, $m) === 1) {
+            if (!$broker->isAdmin($user)) return $this->json(403, ['error' => 'forbidden']);
+            $vhost = rawurldecode($m[1]); $name = rawurldecode($m[2]);
+            if (!isset($broker->root()->parameters['shovel'][$vhost][$name])) return $this->json(404, ['error' => 'not_found']);
+            unset($broker->root()->parameters['shovel'][$vhost][$name]);
+            return $this->status(204, '', 'application/json');
+        }
+        if ($method === 'DELETE' && preg_match('#^/api/shovels/vhost/([^/]+)/([^/]+)/restart$#', $path, $m) === 1) {
+            return $this->status(204, '', 'application/json');
         }
         if ($method === 'GET' && $path === '/api/vhosts') {
             $items = [];
@@ -796,7 +825,7 @@ final class Http
         // Feature flags.
         if ($method === 'GET' && $path === '/api/feature-flags') {
             $items = [];
-            $flags = $broker->featureFlags + ['raft'=>$broker->cluster?->raftEnabled() ?? false, 'transient_nonexcl_queues'=>$broker->transientNonexcl];
+            $flags = $broker->root()->featureFlags + ['raft'=>$broker->cluster?->raftEnabled() ?? false, 'transient_nonexcl_queues'=>$broker->transientNonexcl];
             foreach ($flags as $name => $on) {
                 $items[] = [
                     'name' => $name,
@@ -819,14 +848,9 @@ final class Http
                 $broker->transientNonexcl = $m[2] === 'enable';
                 return $this->status(204, '', 'application/json');
             }
-            if (!isset($broker->featureFlags[$name])) {
-                return $this->json(404, ['error' => 'not found']);
-            }
-            // A required flag cannot be turned off once it is on.
-            if ($m[2] === 'disable' && $name === 'quorum_queues') {
-                return $this->json(400, ['reason' => 'feature flag quorum_queues cannot be disabled']);
-            }
-            $broker->featureFlags[$name] = $m[2] === 'enable';
+            $refusal = $this->flagRefusal($name, $m[2] === 'enable');
+            if ($refusal !== null) return $refusal;
+            $broker->root()->featureFlags[$name] = $m[2] === 'enable';
             return $this->status(204, '', 'application/json');
         }
 
@@ -931,6 +955,22 @@ final class Http
             return $this->status(201, '', 'application/json');
         }
         return $this->json(404, ['error' => 'not found']);
+    }
+
+    /**
+     * Why a feature flag change is refused, or null. A flag is enabled only
+     * when this node and every configured voter advertise it, so a node still
+     * on an older build blocks it until it is upgraded.
+     */
+    private function flagRefusal(string $name, bool $enable): ?string
+    {
+        if (!in_array($name, Broker::FEATURE_FLAGS, true)) return $this->json(404, ['error' => 'not found']);
+        // A required flag cannot be turned off once it is on.
+        if (!$enable && $name === 'quorum_queues') return $this->json(400, ['reason' => 'feature flag quorum_queues cannot be disabled']);
+        if ($enable && (!in_array($name, Broker::supportedFlags(), true) || !($this->broker->cluster?->allHave('ff:' . $name) ?? true))) {
+            return $this->json(400, ['reason' => "feature flag $name is not supported by every cluster member"]);
+        }
+        return null;
     }
 
     /** Persists and broadcasts a membership change. */

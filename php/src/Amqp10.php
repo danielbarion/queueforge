@@ -144,7 +144,8 @@ final class Amqp10
                     if (strlen($buf) < 8) break;
                     $h = substr($buf, 0, 8); $buf = substr($buf, 8);
                     if ($state['phase'] === 'header' && $h === "AMQP\x03\x01\x00\x00") {
-                        $out .= $h . self::send(0, 0x40, [new Amqp10Value('array', [self::sym('PLAIN')])], 1); $state['phase'] = 'sasl'; continue;
+                        $mechanisms = [self::sym('PLAIN')]; if (($state['peerCN'] ?? null) !== null) array_unshift($mechanisms, self::sym('EXTERNAL'));
+                        $out .= $h . self::send(0, 0x40, [new Amqp10Value('array', $mechanisms)], 1); $state['phase'] = 'sasl'; continue;
                     }
                     if ($state['phase'] === 'header2' && $h === "AMQP\x00\x01\x00\x00") { $out .= $h; $state['phase'] = 'open'; continue; }
                     $out .= "AMQP\x03\x01\x00\x00"; $this->closed($state); break;
@@ -206,6 +207,12 @@ final class Amqp10
                 if (count($parts) === 3 && ($parts[0] === '' || $parts[0] === $parts[1])) $identity = $this->broker->authenticate($parts[1], $parts[2]);
                 $ok = $identity !== null;
                 if ($ok) { $s['user'] = $identity; $this->broker->currentUsers[$s['conn']] = $identity; }
+            }
+            // SASL EXTERNAL: the verified TLS client certificate's CN, which must name an existing user.
+            if ($mechanism instanceof Amqp10Value && $mechanism->type === 'symbol' && $mechanism->value === 'EXTERNAL') {
+                $cn = $s['peerCN'] ?? null;
+                $ok = is_string($cn) && array_key_exists($cn, $this->broker->users);
+                if ($ok) { $s['user'] = $cn; $this->broker->currentUsers[$s['conn']] = $cn; }
             }
             $out = self::send(0, 0x44, [new Amqp10Value('ubyte', $ok ? 0 : 1)], 1);
             if (!$ok) $this->closed($s); else $s['phase'] = 'header2';

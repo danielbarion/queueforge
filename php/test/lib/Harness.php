@@ -19,14 +19,16 @@ final class Harness
     /** Picks a free localhost port by binding one and letting it go. */
     public static function freePort(): int
     {
-        $fp = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
-        if ($fp === false) {
-            throw new RuntimeException("cannot reserve a port: $errstr");
+        // Below the ephemeral range (49152+), so a port handed out here is
+        // not also picked by the OS for an outgoing connection.
+        for ($try = 0; $try < 200; $try++) {
+            $port = random_int(20000, 48999);
+            $fp = @stream_socket_server("tcp://127.0.0.1:$port", $errno, $errstr);
+            if ($fp === false) continue;
+            fclose($fp);
+            return $port;
         }
-        $name = stream_socket_get_name($fp, false);
-        fclose($fp);
-        $pos = strrpos((string) $name, ':');
-        return $pos === false ? 0 : (int) substr((string) $name, $pos + 1);
+        throw new RuntimeException('cannot reserve a port below 49152');
     }
 
     /**
@@ -72,7 +74,18 @@ final class Harness
             }
         }
         file_put_contents("$dir/config.toml", implode("\n", $lines) . "\n");
+        return self::launch($dir, $port, $env);
+    }
 
+    /**
+     * Starts (or restarts) the broker whose config sits in `$dir`, keeping
+     * its data directory, and waits for its AMQP port.
+     *
+     * @param array<string, string> $env
+     * @return array{proc:mixed,dir:string,port:int}
+     */
+    public static function launch(string $dir, int $port, array $env = []): array
+    {
         $root = dirname(__DIR__, 2);
         $cmd = ['php', "$root/bin/queueforge", '--config', "$dir/config.toml", '--dev-bootstrap'];
         $procEnv = null;
@@ -80,7 +93,7 @@ final class Harness
             $base = getenv();
             $procEnv = is_array($base) ? array_merge($base, $env) : $env;
         }
-        $proc = proc_open($cmd, [1 => ['file', "$dir/out.log", 'w'], 2 => ['file', "$dir/err.log", 'w']], $pipes, null, $procEnv);
+        $proc = proc_open($cmd, [1 => ['file', "$dir/out.log", 'a'], 2 => ['file', "$dir/err.log", 'a']], $pipes, null, $procEnv);
         if (!is_resource($proc)) {
             throw new RuntimeException('cannot start the broker');
         }
@@ -132,6 +145,54 @@ final class Harness
             }
         }
         self::$running = array_values(self::$running);
+    }
+
+    /** Stops a broker and starts it again on the same config and data. */
+    public static function restart(array $handle, bool $kill = false): array
+    {
+        self::stop($handle, $kill);
+        return self::launch($handle['dir'], $handle['port']);
+    }
+
+    /**
+     * One management HTTP request (admin Basic auth unless `$auth` is '').
+     *
+     * @return array{status:int,head:string,body:string,json:mixed}
+     */
+    public static function http(int $port, string $method, string $path, mixed $json = null, string $auth = 'admin:devpassword12'): array
+    {
+        $body = $json === null ? '' : (string) json_encode($json);
+        $request = "$method $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n";
+        if ($auth !== '') $request .= 'Authorization: Basic ' . base64_encode($auth) . "\r\n";
+        if ($json !== null) $request .= "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n";
+        $request .= "\r\n" . $body;
+        $fp = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 5.0);
+        if ($fp === false) throw new RuntimeException("management connect failed: $errstr");
+        fwrite($fp, $request);
+        $raw = '';
+        stream_set_timeout($fp, 5);
+        while (!feof($fp)) {
+            $chunk = fread($fp, 8192);
+            if ($chunk === false || $chunk === '') break;
+            $raw .= $chunk;
+        }
+        fclose($fp);
+        $split = strpos($raw, "\r\n\r\n");
+        $head = $split === false ? $raw : substr($raw, 0, $split);
+        $payload = $split === false ? '' : substr($raw, $split + 4);
+        preg_match('#HTTP/1\.1 (\d+)#', $head, $m);
+        return ['status' => (int) ($m[1] ?? 0), 'head' => $head, 'body' => $payload, 'json' => json_decode($payload, true)];
+    }
+
+    /** Polls `$fn` until it returns true or `$seconds` pass. */
+    public static function until(callable $fn, float $seconds = 5.0): bool
+    {
+        $deadline = microtime(true) + $seconds;
+        do {
+            try { if ($fn()) return true; } catch (Throwable) {}
+            usleep(50000);
+        } while (microtime(true) < $deadline);
+        return false;
     }
 
     /** Reads the broker's stderr, for diagnosing a failed check. */

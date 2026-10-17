@@ -95,6 +95,7 @@ final class Features
             'queueType' => $type,
             'deliveryLimit' => $delivery,
             'expiresMs' => $num('x-expires'),
+            'consumerTimeout' => $num('x-consumer-timeout'),
             'singleActive' => $single === 'true' || $single === 1 || $single === true,
         ];
     }
