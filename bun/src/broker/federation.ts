@@ -26,6 +26,7 @@ import amqp from "amqplib";
 import { R, readTable, replaceHeaderTable, W, writeTable, type Field } from "../codec.ts";
 import { Broker } from "./class.ts";
 import type { Consumer, LiveMsg, Policy } from "./model.ts";
+import { queueHome } from "./routing.ts";
 import { localVhost } from "./shovel.ts";
 
 export type Upstream = {
@@ -200,9 +201,23 @@ function federates(p: Policy | null): p is Policy {
   return !!p && !!(p.federationUpstream || p.federationUpstreamSet);
 }
 
-/** Whether federation may start links in this process (one worker in cores mode). */
-function federationHere(): boolean {
-  return process.env.QUEUEFORGE_BIND_MGMT !== "0";
+/**
+ * Whether this process runs the link of one downstream exchange or queue.
+ *
+ * With one worker per core every worker sees the same topology, policies and
+ * upstreams, and each link runs on exactly one of them: a queue link where
+ * the downstream queue's consumers and ready messages are (its home, or its
+ * quorum leader), an exchange link on the worker the exchange name hashes
+ * to. Elsewhere (one process, or a cluster of separate nodes) every process
+ * runs its links, as before.
+ */
+function ownsLink(this: Broker, type: "exchange" | "queue", vhost: string, name: string): boolean {
+  if (!this.workerPool()) return true;
+  if (type === "exchange") return queueHome(vhost, `federation-exchange:${name}`, this.cfg.members) === this.cfg.nodeId;
+  const q = this.queues.get(this.key(vhost, name));
+  if (!q) return false;
+  if (q.argsParsed.queueType === "quorum") return this.isQuorumLeader(q);
+  return this.isLocalHome(q.home);
 }
 
 /**
@@ -210,19 +225,19 @@ function federationHere(): boolean {
  * rest. Cheap when nothing is federated: one scan of the policy list.
  */
 export function syncFederation(this: Broker): void {
-  if (!this.federationOn || !federationHere()) return;
+  if (!this.federationOn) return;
   if (this.fedLinks.size === 0 && !this.policies.some(federates)) return;
   const want = new Map<string, { type: "exchange" | "queue"; vhost: string; name: string; up: Upstream }>();
   for (const ex of this.exchanges.values()) {
     if (ex.name === "" || ex.name.startsWith("amq.")) continue;
     const p = this.matchPolicy(ex.vhost, ex.name, "exchanges");
-    if (!federates(p)) continue;
+    if (!federates(p) || !ownsLink.call(this, "exchange", ex.vhost, ex.name)) continue;
     for (const up of upstreamsFor.call(this, p)) want.set(`exchange\0${ex.vhost}\0${ex.name}\0${up.name}`, { type: "exchange", vhost: ex.vhost, name: ex.name, up });
   }
   for (const q of this.queues.values()) {
     if (q.exclusive || q.name.startsWith("federation: ")) continue;
     const p = this.matchPolicy(q.vhost, q.name, "queues");
-    if (!federates(p)) continue;
+    if (!federates(p) || !ownsLink.call(this, "queue", q.vhost, q.name)) continue;
     for (const up of upstreamsFor.call(this, p)) want.set(`queue\0${q.vhost}\0${q.name}\0${up.name}`, { type: "queue", vhost: q.vhost, name: q.name, up });
   }
   for (const [key, link] of this.fedLinks) {
@@ -245,9 +260,32 @@ export function federationBindingsChanged(this: Broker, vhost: string, exchange:
   }
 }
 
-/** Link status rows for `/api/federation-links`. */
+/** Link status rows of the links this process runs. */
 export function federationLinks(this: Broker, vhost?: string): FedLinkStatus[] {
   return [...this.fedLinks.values()].map((l) => l.status).filter((s) => vhost == null || s.vhost === vhost);
+}
+
+/**
+ * Link status rows for `/api/federation-links`: this process's links and,
+ * with one worker per core, every other worker's. A worker that does not
+ * answer contributes none.
+ */
+export async function allFederationLinks(this: Broker, vhost?: string): Promise<FedLinkStatus[]> {
+  const out = this.federationLinks(vhost);
+  if (!this.workerPool() || !this.cluster) return out;
+  const peers = this.cfg.members.filter((m) => m.id !== this.cfg.nodeId && this.cluster!.peers.has(m.id));
+  const rows = await Promise.all(
+    peers.map((m) =>
+      Promise.race([
+        this.cluster!.call(m.id, "federation_links", {}).catch(() => []),
+        new Promise<unknown>((done) => setTimeout(() => done([]), 2000).unref?.()),
+      ]),
+    ),
+  );
+  for (const list of rows) {
+    for (const s of Array.isArray(list) ? (list as FedLinkStatus[]) : []) if (vhost == null || s.vhost === vhost) out.push(s);
+  }
+  return out;
 }
 
 function newStatus(this: Broker, type: "exchange" | "queue", vhost: string, name: string, up: Upstream, upName: string): FedLinkStatus {
@@ -634,11 +672,13 @@ function toField(v: unknown): Field {
 Broker.prototype.syncFederation = syncFederation;
 Broker.prototype.federationBindingsChanged = federationBindingsChanged;
 Broker.prototype.federationLinks = federationLinks;
+Broker.prototype.allFederationLinks = allFederationLinks;
 
 declare module "./class.ts" {
   interface Broker {
     syncFederation: typeof syncFederation;
     federationBindingsChanged: typeof federationBindingsChanged;
     federationLinks: typeof federationLinks;
+    allFederationLinks: typeof allFederationLinks;
   }
 }

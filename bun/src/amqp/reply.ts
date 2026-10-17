@@ -28,7 +28,9 @@ export function consumeReplies(this: Conn, channel: number, c: Ch, tag: string, 
   if (!noAck) throw new ChanError(406, "PRECONDITION_FAILED - reply consumer cannot acknowledge");
   if (c.replyAddr) throw new ChanError(406, "PRECONDITION_FAILED - reply consumer already set");
   const id = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString("base64url");
-  const addr = `${PREFIX}${id}`;
+  // With one worker per core the address names the requester's worker, so a
+  // reply published on any worker finds it (`routeReply`).
+  const addr = this.broker.workerPool() ? `${PREFIX}${this.broker.cfg.nodeId}.${id}` : `${PREFIX}${id}`;
   c.replyAddr = addr;
   c.replyTag = tag;
   const sink: ReplySink = (msg) => {
@@ -79,7 +81,13 @@ export function routeReply(
 ): Uint8Array | "sent" | "dropped" {
   if (exchange === "" && routingKey.startsWith(PREFIX)) {
     const sink = this.broker.replySinks.get(routingKey);
-    if (!sink) return "dropped";
+    if (!sink) {
+      const worker = replyWorker(this, routingKey);
+      if (!worker) return "dropped";
+      // Fire and forget, as a local reply: RabbitMQ does not confirm delivery to the requester.
+      void this.broker.cluster!.callBytes(worker, "direct_reply", { routingKey }, body, propRaw).catch(() => {});
+      return "sent";
+    }
     if (sink({ routingKey, body, propRaw })) return "sent";
     this.broker.replySinks.delete(routingKey);
     return "dropped";
@@ -87,6 +95,21 @@ export function routeReply(
   if (c.replyTo !== REPLY_TO) return propRaw;
   if (!c.replyAddr) throw new ChanError(406, "PRECONDITION_FAILED - fast reply consumer does not exist");
   return replaceReplyTo(propRaw, c.replyAddr);
+}
+
+/**
+ * The other worker of this broker that a direct reply-to address names, or
+ * null when the address is this worker's, unknown, or not a worker's.
+ */
+export function replyWorker(conn: Conn, address: string): string | null {
+  const broker = conn.broker;
+  if (!address.startsWith(PREFIX) || !broker.workerPool() || !broker.cluster) return null;
+  const rest = address.slice(PREFIX.length);
+  const dot = rest.indexOf(".");
+  if (dot <= 0) return null;
+  const worker = rest.slice(0, dot);
+  if (worker === broker.cfg.nodeId || !broker.cluster.peers.has(worker)) return null;
+  return worker;
 }
 
 Conn.prototype.consumeReplies = consumeReplies;

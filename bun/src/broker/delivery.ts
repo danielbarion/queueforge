@@ -318,6 +318,7 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
     if (!consumer) return;
     q.consumers = q.consumers.filter((c) => c.session !== session);
     this.remoteQuorum.set(`${vhost}\0${queue}\0${consumer.tag}`, session);
+    if (consumer.creditFlow && this.cluster!.subscribed(session)) return;
     await this.cluster!.subscribe(
       this.quorumLeader(q),
       remoteSub(vhost, queue, session, consumer),
@@ -327,6 +328,9 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
   }
   if (q.argsParsed.queueType !== "quorum" && !this.isLocalHome(q.home)) {
     if (!consumer) return;
+    // A credit-flow consumer is kicked on every grant; it subscribes once and
+    // later grants go to the home as credit (`remoteCredit`).
+    if (consumer.creditFlow && this.cluster!.subscribed(session)) return;
     await this.cluster!.subscribe(
       q.home!,
       remoteSub(vhost, queue, session, consumer),
@@ -343,8 +347,27 @@ export async function kick(this: Broker, vhost: string, queue: string, session: 
  * flight to this process and refills it as the acks arrive.
  */
 function remoteSub(vhost: string, queue: string, session: number, consumer: Consumer) {
+  if (consumer.creditFlow) return { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive, credit: Math.max(0, consumer.creditFlow()) };
   const prefetch = !consumer.noAck && consumer.prefetch ? consumer.prefetch : undefined;
   return { vhost, queue, session, noAck: consumer.noAck, exclusive: consumer.exclusive, ack_credit: prefetch };
+}
+
+/**
+ * Pass a credit-flow consumer's new link credit to the remote home it takes
+ * deliveries from. A raise is sent as the difference, so deliveries already
+ * on the way still count against it; a cut (a drain) sets the home's credit.
+ *
+ * @returns Nothing. A consumer served here, or not yet subscribed, is skipped.
+ */
+export function remoteCredit(this: Broker, vhost: string, queue: string, session: number, before: number, after: number) {
+  if (after === before || !this.cluster?.subscribed(session)) return;
+  const q = this.queues.get(this.key(vhost, queue));
+  if (!q || q.argsParsed.queueType === "stream") return;
+  const at = q.argsParsed.queueType === "quorum" ? (this.isQuorumLeader(q) ? null : this.quorumLeader(q)) : this.isLocalHome(q.home) ? null : q.home;
+  if (!at) return;
+  const op = after > before ? "credit" : "set_credit";
+  const credit = after > before ? after - before : Math.max(0, after);
+  void this.cluster.call(at, op, { vhost, queue, session, credit }).catch(() => {});
 }
 
 /**
@@ -568,6 +591,8 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
     }
   }
   this.expire(q);
+  // RabbitMQ counts a basic.get as use for x-expires; here, where the queue expires.
+  q.lastUsed = Date.now();
   if (q.ready.at(0)?.confirmGate?.hold) {
     this.prom.getEmpty++;
     return null;
@@ -645,6 +670,7 @@ Broker.prototype.nextSession = nextSession;
 Broker.prototype.slot = slot;
 Broker.prototype.consume = consume;
 Broker.prototype.kick = kick;
+Broker.prototype.remoteCredit = remoteCredit;
 Broker.prototype.cancel = cancel;
 Broker.prototype.ack = ack;
 Broker.prototype.nack = nack;
@@ -665,6 +691,7 @@ declare module "./class.ts" {
     slot: typeof slot;
     consume: typeof consume;
     kick: typeof kick;
+    remoteCredit: typeof remoteCredit;
     cancel: typeof cancel;
     ack: typeof ack;
     nack: typeof nack;

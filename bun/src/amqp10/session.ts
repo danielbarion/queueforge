@@ -16,6 +16,7 @@
  */
 import type { Broker, LiveMsg } from "../broker/index.ts";
 import { ChanError } from "../broker/index.ts";
+import { handle as mgmtHandle, MgmtRefused, readRequest, writeReply, type MgmtRequest } from "./management.ts";
 import { inbound, outbound, writeProps } from "./map.ts";
 import { AMap, array, Decoder, described, Described, encode, field, sym, Sym, ubyte, uint, ushort } from "./types.ts";
 
@@ -43,6 +44,17 @@ type InLink = {
   deliveryCount: number;
   /** Frames of a transfer whose last frame has not arrived. */
   partial: { chunks: Uint8Array[]; id: number; settled: boolean } | null;
+  /** The sender half of a /management link pair: messages are requests. */
+  mgmt?: boolean;
+};
+
+/** The receiver half of a /management link pair: replies go out here. */
+type MgmtLink = {
+  dir: "mgmt";
+  handle: number;
+  name: string;
+  credit: number;
+  deliveryCount: number;
 };
 
 type OutLink = {
@@ -57,9 +69,11 @@ type OutLink = {
   deliveryCount: number;
   drain: boolean;
   detached: boolean;
+  /** Deliveries from a remote home that arrived with no credit left, oldest first. */
+  parked: LiveMsg[];
 };
 
-type Link = InLink | OutLink;
+type Link = InLink | OutLink | MgmtLink;
 
 type Unsettled = { link: OutLink; msgId: string };
 
@@ -74,6 +88,10 @@ type Session = {
   unsettled: Map<number, Unsettled>;
   /** Transfer frames held while the peer's incoming window is closed. */
   held: Uint8Array[];
+  /** The management reply link, once attached. */
+  mgmtOut: MgmtLink | null;
+  /** Management replies waiting for the reply link or its credit. */
+  mgmtPending: Uint8Array[];
 };
 
 const dec = new TextDecoder();
@@ -146,6 +164,8 @@ export class Amqp10Session {
   private opened = false;
   private remoteMaxFrame = MAX_FRAME;
   private sessions = new Map<number, Session>();
+  /** Channels whose session this side ended; their frames are ignored until the peer's end. */
+  private ended = new Set<number>();
   private chain: Promise<unknown> = Promise.resolve();
   private heartbeat: Timer | null = null;
   private static seq = 0;
@@ -245,6 +265,7 @@ export class Amqp10Session {
     }
     if (type !== 0) return this.fail("amqp:not-allowed", "unexpected SASL frame");
     if (!this.opened && code !== P.open) return this.fail("amqp:not-allowed", "expected open");
+    if (this.ended.has(channel) && code !== P.end && code !== P.close && code !== P.begin) return;
     switch (code) {
       case P.open:
         return this.onOpen(f);
@@ -323,6 +344,7 @@ export class Amqp10Session {
   }
 
   private onBegin(channel: number, f: unknown[]) {
+    this.ended.delete(channel);
     const nextOutgoing = field(f, 1);
     const incomingWindow = field(f, 2);
     const s: Session = {
@@ -334,6 +356,8 @@ export class Amqp10Session {
       nextDeliveryId: 0,
       unsettled: new Map(),
       held: [],
+      mgmtOut: null,
+      mgmtPending: [],
     };
     this.sessions.set(channel, s);
     this.send(0, channel, performative(P.begin, [ushort(channel), uint(0), uint(WINDOW), uint(WINDOW), uint(255)]));
@@ -356,7 +380,26 @@ export class Amqp10Session {
     const target = field(f, 6);
     const reply = (src: unknown, tgt: unknown, extra: unknown[] = []) =>
       this.send(0, channel, performative(P.attach, [name, uint(handle), !clientIsReceiver, ubyte(sndSettle), ubyte(rcvSettle), src, tgt, null, null, ...extra]));
+    const props = field(f, 13);
     try {
+      const mgmtAddress = clientIsReceiver
+        ? source instanceof Described && field(source.value, 0) === "/management"
+        : target instanceof Described && field(target.value, 0) === "/management";
+      if (mgmtAddress) {
+        const echo = [null, null, null, props ?? null];
+        if (clientIsReceiver) {
+          const link: MgmtLink = { dir: "mgmt", handle, name, credit: 0, deliveryCount: 0 };
+          s.links.set(handle, link);
+          s.mgmtOut = link;
+          reply(source, target, [uint(0), ...echo]);
+        } else {
+          const link: InLink = { dir: "in", handle, name, target: null, credit: LINK_CREDIT, deliveryCount: Number(field(f, 9) ?? 0), partial: null, mgmt: true };
+          s.links.set(handle, link);
+          reply(source, target, [null, ...echo]);
+          this.linkFlow(s, link);
+        }
+        return;
+      }
       if (clientIsReceiver) {
         const address = source instanceof Described ? field(source.value, 0) : null;
         const parsed = typeof address === "string" ? parseAddress(address) : null;
@@ -378,6 +421,7 @@ export class Amqp10Session {
           deliveryCount: 0,
           drain: false,
           detached: false,
+          parked: [],
         };
         reply(source, target, [uint(0)]);
         s.links.set(handle, link);
@@ -388,6 +432,8 @@ export class Amqp10Session {
             noAck: link.presettled,
             exclusive: false,
             want: () => !link.detached && link.credit > 0,
+            // A remote home sends no more than the link's credit.
+            creditFlow: () => link.credit,
             deliver: (msg: LiveMsg) => this.deliver(s, link, msg),
           } as Parameters<Broker["consume"]>[2]);
         } catch (err) {
@@ -474,16 +520,27 @@ export class Amqp10Session {
     const credit = Number(field(f, 6) ?? 0);
     // The receiver's credit is relative to the delivery count it has seen.
     const seen = typeof count === "number" ? count : 0;
+    if (link.dir === "mgmt") {
+      link.credit = Math.max(0, seen + credit - link.deliveryCount);
+      this.flushMgmt(s);
+      if (echo) this.linkFlow(s, link);
+      return;
+    }
+    const before = link.credit;
     link.credit = Math.max(0, seen + credit - link.deliveryCount);
     link.drain = field(f, 8) === true;
+    while (link.parked.length && link.credit > 0 && !link.detached) this.deliver(s, link, link.parked.shift()!);
+    this.broker.remoteCredit(this.vhost, link.queue, link.session, before, link.credit);
     this.pump(link);
     if (link.drain || echo) {
       // Give the queue a turn to fill the credit; whatever is left is drained.
       setTimeout(() => {
         if (link.detached) return;
         if (link.drain && link.credit > 0) {
+          const left = link.credit;
           link.deliveryCount += link.credit;
           link.credit = 0;
+          this.broker.remoteCredit(this.vhost, link.queue, link.session, left, 0);
         }
         this.linkFlow(s, link);
       }, 0);
@@ -499,6 +556,11 @@ export class Amqp10Session {
   private deliver(s: Session, link: OutLink, msg: LiveMsg) {
     if (link.detached || this.stage === "closed") {
       if (!link.presettled) void Promise.resolve(this.broker.nack(this.vhost, link.queue, msg.id, true)).catch(() => {});
+      return;
+    }
+    // A remote home can be a grant ahead of a drain: hold it for the next credit.
+    if (link.credit <= 0) {
+      link.parked.push(msg);
       return;
     }
     link.credit--;
@@ -569,7 +631,12 @@ export class Amqp10Session {
       link.credit = LINK_CREDIT;
       this.linkFlow(s, link);
     }
-    const outcome = await this.publish(link, chunks.length === 1 ? chunks[0]! : concat(...chunks));
+    const whole = chunks.length === 1 ? chunks[0]! : concat(...chunks);
+    if (link.mgmt) {
+      if (!settled) this.send(0, channel, performative(P.disposition, [true, uint(id), null, true, described(OUTCOME.accepted, [])]));
+      return this.onManagement(s, whole);
+    }
+    const outcome = await this.publish(link, whole);
     if (!settled) this.send(0, channel, performative(P.disposition, [true, uint(id), null, true, outcome]));
   }
 
@@ -660,6 +727,10 @@ export class Amqp10Session {
     if (link.dir !== "out") return;
     link.detached = true;
     await this.broker.cancel(this.vhost, link.queue, link.tag).catch(() => {});
+    // Parked deliveries never reached the client: back to the queue.
+    for (const msg of link.parked.splice(0)) {
+      if (!link.presettled) await Promise.resolve(this.broker.nack(this.vhost, link.queue, msg.id, true)).catch(() => {});
+    }
     for (const [id, u] of [...s.unsettled]) {
       if (u.link !== link) continue;
       s.unsettled.delete(id);
@@ -668,12 +739,63 @@ export class Amqp10Session {
   }
 
   private async onEnd(channel: number) {
+    // The peer's answer to an end this side sent with an error.
+    if (this.ended.delete(channel)) return;
     const s = this.sessions.get(channel);
     if (s) {
       for (const link of [...s.links.values()]) await this.dropLink(s, link);
       this.sessions.delete(channel);
     }
     this.send(0, channel, performative(P.end, []));
+  }
+
+  /** End one session with an error, as RabbitMQ does for a refused management request. */
+  private async endSession(s: Session, condition: string, description: string) {
+    for (const link of [...s.links.values()]) await this.dropLink(s, link);
+    this.sessions.delete(s.channel);
+    this.ended.add(s.channel);
+    this.send(0, s.channel, performative(P.end, [errorValue(condition, description)]));
+  }
+
+  /** Answer one management request on the session's reply link. */
+  private async onManagement(s: Session, payload: Uint8Array) {
+    let req: MgmtRequest;
+    try {
+      req = readRequest(payload);
+    } catch (err) {
+      return this.endSession(s, "amqp:decode-error", String((err as Error).message));
+    }
+    try {
+      const reply = await mgmtHandle(
+        {
+          broker: this.broker,
+          vhost: this.vhost,
+          user: this.user,
+          refreshToken: (token) => this.broker.verify(this.user, token),
+        },
+        req,
+      );
+      s.mgmtPending.push(writeReply(req, reply));
+      this.flushMgmt(s);
+    } catch (err) {
+      if (err instanceof MgmtRefused) return this.endSession(s, err.condition, err.message);
+      throw err;
+    }
+  }
+
+  /** Send queued management replies while the reply link has credit. */
+  private flushMgmt(s: Session) {
+    const link = s.mgmtOut;
+    if (!link) return;
+    while (s.mgmtPending.length && link.credit > 0 && this.sessions.get(s.channel) === s) {
+      const payload = s.mgmtPending.shift()!;
+      link.credit--;
+      const id = s.nextDeliveryId++;
+      link.deliveryCount++;
+      const tag = new Uint8Array(4);
+      new DataView(tag.buffer).setUint32(0, id);
+      this.transfer(s, concat(performative(P.transfer, [uint(link.handle), uint(id), tag, uint(0), true, false]), payload));
+    }
   }
 
   private async onClose() {

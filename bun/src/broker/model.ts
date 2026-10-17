@@ -245,6 +245,12 @@ export type Consumer = {
   /** AMQP prefetch at consume time, for a remote home's credit. Absent or zero is unlimited. */
   prefetch?: number;
   /**
+   * Link credit the consumer grants itself (AMQP 1.0), read when it subscribes
+   * to a remote home. The home then sends no more than that; later grants go
+   * there with `remoteCredit`, not with acks.
+   */
+  creditFlow?: () => number;
+  /**
    * Count one quorum claim against prefetch before the follower drop finishes.
    * `deliver` runs only after that drop, so credit has to move here or pump
    * keeps taking messages while `want` still looks open.

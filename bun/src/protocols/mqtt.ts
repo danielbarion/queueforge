@@ -13,7 +13,7 @@
  */
 import type { Broker, LiveMsg } from "../broker/index.ts";
 import { ChanError } from "../broker/index.ts";
-import { W, writeTable, type Field } from "../codec.ts";
+import { msgHeaders, W, writeTable, type Field } from "../codec.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -542,7 +542,7 @@ export class MqttSession {
     let raw: Uint8Array = EMPTY;
     let retainFlag = false;
     let publisher = "";
-    for (const [k, v] of msg.headers) {
+    for (const [k, v] of msgHeaders(msg)) {
       if (k === "x-mqtt-publish-qos" && "v" in v) msgQos = Number(v.v);
       else if (k === "x-mqtt-props" && v.t === "x") raw = v.v;
       else if (k === "x-mqtt-retain" && v.t === "t") retainFlag = v.v;

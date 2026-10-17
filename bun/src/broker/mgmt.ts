@@ -31,7 +31,8 @@ export function openMgmtConnection(this: Broker, input: {
   peerPort: number;
   close: () => void;
 }): string {
-  const name = `conn-${++this.connSeq}`;
+  // Workers of one broker each count from 1: the worker id keeps names unique.
+  const name = this.workerPool() ? `conn-${this.cfg.nodeId}-${++this.connSeq}` : `conn-${++this.connSeq}`;
   this.mgmtConnections.set(name, {
     name,
     user: input.user,

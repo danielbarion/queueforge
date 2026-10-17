@@ -17,7 +17,7 @@
  */
 import type { Broker, LiveMsg } from "../broker/index.ts";
 import { ChanError } from "../broker/index.ts";
-import { W, writeTable, type Field } from "../codec.ts";
+import { msgHeaders, W, writeTable, type Field } from "../codec.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -377,7 +377,7 @@ export class StompSession {
       headers.push(["ack", messageId]);
       sub.pending.set(messageId, msg.id);
     }
-    for (const [k, v] of msg.headers) {
+    for (const [k, v] of msgHeaders(msg)) {
       if (FRAME_HEADERS.has(k) || k.startsWith("x-mqtt")) continue;
       if (v.t === "S" || v.t === "s") headers.push([k, v.v]);
       else if (v.t === "I" || v.t === "l" || v.t === "T") headers.push([k, String(v.v)]);

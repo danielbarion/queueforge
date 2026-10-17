@@ -8,7 +8,7 @@
 import { spawn, type Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import net from "node:net";
-import { brokerIdentity, childPlans, grantedCores, memberList, type ChildPlan } from "./cores.ts";
+import { brokerIdentity, childPlans, coresPortBase, freeInternalPorts, grantedCores, memberList, type ChildPlan } from "./cores.ts";
 import { splitHost, type Config } from "./config.ts";
 import { mergeChildMetrics } from "./metrics-merge.ts";
 
@@ -32,7 +32,12 @@ export function workerBaseEnv(inherited: Record<string, string | undefined>): Re
 
 export async function supervise(configPath: string, dev: boolean, cfg: Config): Promise<void> {
   const cores = grantedCores();
-  const plans = childPlans(cores, cfg.dataDir);
+  // Internal cluster and metrics ports start at QUEUEFORGE_CORES_PORT (25672);
+  // taken ones are replaced by free ones rather than shared.
+  const base = coresPortBase();
+  const ports = await freeInternalPorts(base, 2 * cores);
+  if (ports.some((port, i) => port !== base + i)) console.error(`queueforge-bun parent: internal ports from ${base} in use, using ${ports.join(",")}`);
+  const plans = childPlans(cores, cfg.dataDir, base, ports);
   const members = JSON.stringify(memberList(plans));
   const brokerId = brokerIdentity(cfg.dataDir);
   let stopping = false;

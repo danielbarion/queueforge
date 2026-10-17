@@ -7,7 +7,8 @@
 import { Amqp10Session } from "../amqp10/session.ts";
 import { method, methodFrame, R, writeTable } from "../codec.ts";
 import { ChanError } from "../broker/index.ts";
-import { Conn } from "./listen.ts";
+import { Conn, principalToWire } from "./listen.ts";
+import { replyWorker } from "./reply.ts";
 
 /**
  * The `version` server property: the RabbitMQ release whose behavior this
@@ -565,13 +566,14 @@ function exchangeHome(this: Conn, exchange: string, routingKey: string): string 
  * Returns true when the socket has been handed off and this process must stop.
  */
 function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
-  if (!this.handed || this.migrated || buf.length - at < 11 || buf[at] !== 1) return false;
+  if (!this.handed || this.migrated || this.ownsExclusive || buf.length - at < 11 || buf[at] !== 1) return false;
   // The handoff carries only pristine channel settings, not publish closures,
   // deliveries or transaction operations. Keep a connection with live work on
   // this worker and use the normal forwarding path instead.
   if (this.deferredPublish.length || this.inFlightPublishes || this.stagedBytes || this.outboundBytes || this.writesPending) return false;
   for (const ch of this.channels.values()) {
-    if (ch.tx || ch.publish || ch.nextPub !== 1 || ch.consumers.size || ch.deliveries.size || ch.parked.length) return false;
+    // A direct reply-to consumer is registered on this worker (`replySinks`).
+    if (ch.tx || ch.publish || ch.nextPub !== 1 || ch.consumers.size || ch.deliveries.size || ch.parked.length || ch.replyAddr) return false;
   }
   const size = (buf[at + 3]! << 24) | (buf[at + 4]! << 16) | (buf[at + 5]! << 8) | buf[at + 6]!;
   if (buf.length - at < 8 + size) return false;
@@ -590,6 +592,10 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
     // (the headers are in the next frame) stay here and forward.
     if (exchange !== "") {
       home = exchangeHome.call(this, exchange, queue);
+      if (!home) return false;
+    } else if (queue.startsWith("amq.rabbitmq.reply-to.")) {
+      // A direct reply goes to the requester's worker; so does its publisher.
+      home = replyWorker(this, queue);
       if (!home) return false;
     }
   } else if (cls === 60 && meth === 20) {
@@ -614,6 +620,7 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
     vhost: this.vhost || "/",
     wantsBlocked: this.wantsBlocked,
     cancelNotify: this.cancelNotify,
+    principal: principalToWire(this.broker.principalOf(this.user)),
     channels: [...this.channels.entries()].map(([id, ch]) => ({
       id,
       confirm: ch.confirm,

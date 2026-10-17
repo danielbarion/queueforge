@@ -20,6 +20,7 @@ import "./shovel.ts";
 import "./federation.ts";
 import "./params.ts";
 import "./stream.ts";
+import "./workers.ts";
 
 export { ChanError } from "../errors.ts";
 export { Broker };

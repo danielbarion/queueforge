@@ -10,6 +10,7 @@ import type { Socket as NodeSocket } from "node:net";
 import tls from "node:tls";
 import type { Amqp10Session } from "../amqp10/session.ts";
 import { emptyProps, R } from "../codec.ts";
+import type { Principal, Scope } from "../auth/backends.ts";
 import { profiledConns, profiling } from "../profile.ts";
 
 /** One basic.publish waiting for its header and body. */
@@ -118,6 +119,8 @@ export class Conn {
   /** Node socket when the parent handed this connection off. Null for a direct listen. */
   handed: import("node:net").Socket | null = null;
   migrated = false;
+  /** Set once this connection declares an exclusive queue: it stays on this worker. */
+  ownsExclusive = false;
   /** Management connection id, empty until connection.open succeeds. */
   mgmtName = "";
   /** Frames waiting for the socket to accept more bytes. */
@@ -257,6 +260,7 @@ export interface Conn {
   sendTune(): Promise<void>;
   handleTuneOk(payload: Uint8Array): void;
   handleConnectionOpen(payload: Uint8Array): Promise<void>;
+  openMgmt(): void;
   handleConnectionClose(): Promise<void>;
   handleChannelOpen(channel: number): Promise<void>;
   handleChannelClose(channel: number): Promise<void>;
@@ -434,7 +438,29 @@ type MigratedState = {
   wantsBlocked?: boolean;
   cancelNotify?: boolean;
   channels: Array<{ id: number; confirm: boolean; prefetch: number }>;
+  /** The OAuth 2.0 or LDAP login, which only the worker that authenticated it holds. */
+  principal?: PrincipalWire | null;
 };
+
+/** A {@link Principal} as plain data: its scope patterns as source strings. */
+export type PrincipalWire = Omit<Principal, "scopes"> & {
+  scopes: Array<{ kind: Scope["kind"]; vhost: string; resource: string; routingKey: string | null }> | null;
+};
+
+export function principalToWire(p: Principal | null): PrincipalWire | null {
+  if (!p) return null;
+  return {
+    ...p,
+    scopes: p.scopes?.map((s) => ({ kind: s.kind, vhost: s.vhost.source, resource: s.resource.source, routingKey: s.routingKey?.source ?? null })) ?? null,
+  };
+}
+
+function principalFromWire(p: PrincipalWire): Principal {
+  return {
+    ...p,
+    scopes: p.scopes?.map((s) => ({ kind: s.kind, vhost: new RegExp(s.vhost), resource: new RegExp(s.resource), routingKey: s.routingKey == null ? null : new RegExp(s.routingKey) })) ?? null,
+  };
+}
 
 /** Continue a connection the previous child already handshook. `bytes` starts at the unparsed frame. */
 export function adoptMigrated(broker: Broker, socket: NodeSocket, state: MigratedState, bytes: Uint8Array) {
@@ -462,6 +488,8 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
   conn.stage = "frames";
   conn.user = state.user;
   conn.vhost = state.vhost;
+  // An external login authorizes this connection here too.
+  if (state.principal && !broker.users.has(state.user)) broker.principals.set(state.user, principalFromWire(state.principal));
   conn.wantsBlocked = state.wantsBlocked === true;
   conn.cancelNotify = state.cancelNotify === true;
   for (const item of state.channels) {
@@ -469,6 +497,12 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
     ch.confirm = item.confirm;
     ch.prefetch = item.prefetch;
   }
+  // Listed and counted here now: management, metrics and connection limits
+  // see it on the worker that serves it.
+  conn.openMgmt();
+  conn.broker.prom.channels += conn.channels.size;
+  conn.broker.prom.channelsOpened += conn.channels.size;
+  conn.syncMgmt();
   conn.watchAlarms();
   const fail = () => {
     conn.closed = true;

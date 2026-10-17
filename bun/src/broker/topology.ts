@@ -97,13 +97,13 @@ export async function declareQueue(this: Broker, opts: {
     // RabbitMQ counts a passive declare as use of the queue for x-expires.
     existing.lastUsed = Date.now();
     this.prom.queuesDeclared++;
-    return { name, messages: existing.ready.length, consumers: existing.consumers.length };
+    return { name, ...(await this.queueCounts(existing, true)) };
   }
   if (existing) {
     if (existing.durable !== opts.durable) throw new ChanError(406, `PRECONDITION_FAILED - inequivalent arg durable for queue ${name}`);
     existing.lastUsed = Date.now();
     this.prom.queuesDeclared++;
-    return { name, messages: existing.ready.length, consumers: existing.consumers.length };
+    return { name, ...(await this.queueCounts(existing, true)) };
   }
   // Another declare of this name may have finished while this one waited on
   // the placement worker: answer as for an existing queue, never replace it.
@@ -112,7 +112,7 @@ export async function declareQueue(this: Broker, opts: {
     if (landed.durable !== opts.durable) throw new ChanError(406, `PRECONDITION_FAILED - inequivalent arg durable for queue ${name}`);
     landed.lastUsed = Date.now();
     this.prom.queuesDeclared++;
-    return { name, messages: landed.ready.length, consumers: landed.consumers.length };
+    return { name, ...(await this.queueCounts(landed, true)) };
   }
   const locator = opts.args["x-queue-leader-locator"];
   if (locator != null && locator !== "client-local" && locator !== "balanced") {
@@ -414,6 +414,7 @@ export async function bindExchange(this: Broker, vhost: string, source: string, 
   this.e2e.push({ vhost, source, destination, routingKey });
   if (src.durable && dst.durable) this.store.putExchangeBinding({ vhost, source, destination, routingKey });
   if (this.fedLinks.size) this.federationBindingsChanged(vhost, source);
+  await this.cluster?.replicate("exchange_binding", { vhost, source, destination, routingKey });
 }
 
 /**
@@ -429,6 +430,7 @@ export async function unbindExchange(this: Broker, vhost: string, source: string
   this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
   this.store.deleteExchangeBinding(vhost, source, destination, routingKey);
   if (this.fedLinks.size) this.federationBindingsChanged(vhost, source);
+  await this.cluster?.replicate("delete_exchange_binding", { vhost, source, destination, routingKey });
 }
 
 /**

@@ -389,6 +389,28 @@ export function replaceReplyTo(propRaw: Uint8Array, replyTo: string): Uint8Array
   return w.concat();
 }
 
+/**
+ * The headers table of a basic property block, or none.
+ *
+ * A message delivered from another worker arrives with its properties as
+ * bytes only; protocols that map headers one by one (STOMP, MQTT) read them
+ * back from there.
+ */
+export function propHeaders(propRaw: Uint8Array): Array<[string, Field]> {
+  if (propRaw.length < 2) return [];
+  const r = new R(propRaw);
+  const flags = r.u16();
+  if ((flags & 0x2000) === 0) return [];
+  if (flags & 0x8000) r.shortstr();
+  if (flags & 0x4000) r.shortstr();
+  return readTable(r);
+}
+
+/** A live message's headers: the parsed list, or else those in its property bytes. */
+export function msgHeaders(msg: { headers: Array<[string, Field]>; propRaw: Uint8Array }): Array<[string, Field]> {
+  return msg.headers.length || msg.propRaw.length < 2 ? msg.headers : propHeaders(msg.propRaw);
+}
+
 export function readContentHeader(payload: Uint8Array): { bodySize: number; props: ContentProps } {
   const r = new R(payload);
   r.u16();

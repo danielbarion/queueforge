@@ -99,24 +99,33 @@ export async function handleConnectionOpen(this: Conn, payload: Uint8Array) {
   const rr = new R(payload.subarray(4));
   const vhost = rr.shortstr() || "/";
   if (!this.broker.hasVhostAccess(this.user, vhost)) return this.connClose(403, `ACCESS_REFUSED - vhost ${vhost}`);
-  if (!this.broker.connectionAllowed(this.user, vhost)) return this.connClose(403, "ACCESS_REFUSED - connection limit");
+  if (!(await this.broker.connectionAllowedAll(this.user, vhost))) return this.connClose(403, "ACCESS_REFUSED - connection limit");
   this.vhost = vhost;
-  if (!this.metricsOpened) {
-    this.metricsOpened = true;
-    this.broker.prom.connections++;
-    this.broker.prom.connectionsOpened++;
-    this.mgmtName = this.broker.openMgmtConnection({
-      user: this.user,
-      vhost,
-      peerHost: this.socket.remoteAddress ?? "",
-      peerPort: this.socket.remotePort ?? 0,
-      close: () => {
-        void this.connClose(320, "CONNECTION_FORCED - closed by management");
-      },
-    });
-  }
+  this.openMgmt();
   await this.send(methodFrame(0, method(10, 41, (w) => w.shortstr(""))));
   this.watchAlarms();
+}
+
+/**
+ * Count this connection open in metrics and list it for management, once.
+ *
+ * Runs at connection.open, and on the worker that adopts a connection handed
+ * over from another (the one it left counted it closed).
+ */
+export function openMgmt(this: Conn) {
+  if (this.metricsOpened) return;
+  this.metricsOpened = true;
+  this.broker.prom.connections++;
+  this.broker.prom.connectionsOpened++;
+  this.mgmtName = this.broker.openMgmtConnection({
+    user: this.user,
+    vhost: this.vhost || "/",
+    peerHost: this.socket.remoteAddress ?? "",
+    peerPort: this.socket.remotePort ?? 0,
+    close: () => {
+      void this.connClose(320, "CONNECTION_FORCED - closed by management");
+    },
+  });
 }
 
 /**
@@ -208,6 +217,7 @@ Conn.prototype.sendTune = sendTune;
 Conn.prototype.handleUpdateSecret = handleUpdateSecret;
 Conn.prototype.handleTuneOk = handleTuneOk;
 Conn.prototype.handleConnectionOpen = handleConnectionOpen;
+Conn.prototype.openMgmt = openMgmt;
 Conn.prototype.handleConnectionClose = handleConnectionClose;
 Conn.prototype.connClose = connClose;
 Conn.prototype.noteMetricsClosed = noteMetricsClosed;

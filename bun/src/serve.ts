@@ -94,6 +94,8 @@ export async function serve(cfg: Config, dev: boolean, tls: { cert: string; key:
   // Federation links come from the stored upstreams and policies.
   broker.federationOn = true;
   broker.syncFederation();
+  // A quorum leader that moves takes its queue links along; returns at once when nothing is federated.
+  if (broker.workerPool()) setInterval(() => broker.syncFederation(), 1000).unref?.();
 
   const amqp = splitHost(cfg.amqp);
   const mgmt = splitHost(cfg.management);

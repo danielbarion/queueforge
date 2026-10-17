@@ -14,6 +14,7 @@ import { hashRabbitPassword, passwordPolicyError, rabbitHashingAlgorithm } from 
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
+import { policyToWire } from "./snapshot.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
 
 
@@ -182,7 +183,10 @@ export async function importDefinitions(this: Broker, body: {
   bindings?: Array<{ source: string; vhost: string; destination: string; destination_type?: string; routing_key?: string; arguments?: Record<string, string | number> }>;
   policies?: Array<{ vhost: string; name: string; pattern: string; "apply-to"?: string; priority?: number; definition?: Record<string, string | number> }>;
 }) {
-  for (const vh of body.vhosts ?? []) this.ensureBuiltins(vh.name);
+  for (const vh of body.vhosts ?? []) {
+    this.ensureBuiltins(vh.name);
+    await this.cluster?.replicate("vhost", { name: vh.name });
+  }
   for (const u of body.users ?? []) {
     const rawTags = u.tags ?? "";
     const tags = Array.isArray(rawTags) ? rawTags : rawTags.split(/[,\s]+/).filter(Boolean);
@@ -190,32 +194,46 @@ export async function importDefinitions(this: Broker, body: {
     else if (u.password_hash) {
       this.users.set(u.name, { hash: u.password_hash, tags });
       this.store.putUser({ name: u.name, hash: u.password_hash, tags });
+      await this.cluster?.replicate("user", { name: u.name, hash: u.password_hash, tags });
     }
   }
   for (const u of body.users ?? []) {
-    if (u.limits && Object.keys(u.limits).length) this.applyLimitsRow("user_limits", { user: u.name, ...u.limits });
+    if (u.limits && Object.keys(u.limits).length) {
+      this.applyLimitsRow("user_limits", { user: u.name, ...u.limits });
+      await this.cluster?.replicate("user_limits", this.listUserLimits().find((row) => row.user === u.name) ?? { user: u.name });
+    }
   }
   for (const p of body.permissions ?? []) await this.putPerm(p);
   for (const p of body.topic_permissions ?? []) {
     if (!p.user || !p.exchange) continue;
+    const row = { user: p.user, vhost: p.vhost ?? "/", exchange: p.exchange, write: p.write ?? "", read: p.read ?? "" };
     try {
-      this.putTopicPerm({ user: p.user, vhost: p.vhost ?? "/", exchange: p.exchange, write: p.write ?? "", read: p.read ?? "" });
+      this.putTopicPerm(row);
     } catch {
       /* an invalid pattern is skipped, as one bad row should not stop the rest */
+      continue;
     }
+    await this.cluster?.replicate("topic_permission", row);
   }
   for (const p of body.parameters ?? []) {
     if (!p.component || !p.name) continue;
     this.ensureBuiltins(p.vhost ?? "/");
+    const row = { component: p.component, vhost: p.vhost ?? "/", name: p.name, value: p.value };
     try {
-      this.putRuntimeParam({ component: p.component, vhost: p.vhost ?? "/", name: p.name, value: p.value });
+      this.putRuntimeParam(row);
     } catch {
       /* a shovel without queues is skipped */
+      continue;
     }
+    // Shovels run where they are stored, as the management route does it.
+    if (row.component !== "shovel") await this.cluster?.replicate("parameter", row);
   }
   for (const g of body.global_parameters ?? []) {
     // RabbitMQ writes a fresh internal_cluster_id itself; importing one would clone the cluster identity.
-    if (g.name && g.name !== "internal_cluster_id") this.putGlobalParam(g.name, g.value);
+    if (g.name && g.name !== "internal_cluster_id") {
+      this.putGlobalParam(g.name, g.value);
+      await this.cluster?.replicate("global_parameter", { name: g.name, value: g.value });
+    }
   }
   for (const ex of body.exchanges ?? []) {
     if (!ex.name || ex.name.startsWith("amq.")) continue;
@@ -257,6 +275,8 @@ export async function importDefinitions(this: Broker, body: {
       federationUpstream: str("federation-upstream"),
       federationUpstreamSet: str("federation-upstream-set"),
     });
+    const stored = this.policies.find((x) => x.vhost === p.vhost && x.name === p.name);
+    if (stored) await this.cluster?.replicate("policy", policyToWire(stored));
   }
   for (const q of body.queues ?? []) {
     if (q.exclusive) continue;

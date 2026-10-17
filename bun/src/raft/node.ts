@@ -26,6 +26,8 @@ const GROUPS = [META, QUORUM] as const;
 export type Group = string;
 const TICK_MS = 20;
 const PROPOSE_TIMEOUT_MS = 5000;
+/** Longest a forwarded metadata proposal waits for this member to apply it. */
+const LOCAL_APPLY_WAIT_MS = 2000;
 const APPLY_RETRY_MIN_MS = 100;
 const APPLY_RETRY_MAX_MS = 1000;
 
@@ -424,6 +426,10 @@ type GroupState = {
   leadFrom: number | null;
   /** The leader as the applier last announced it, after every apply before it. */
   announced: string | null;
+  /** The last entry this member has applied. */
+  appliedIndex: number;
+  /** Forwarded proposals waiting for this member to apply them (`whenApplied`). */
+  appliedWaits: Array<{ index: number; done: () => void }>;
 };
 
 export class RaftNode {
@@ -470,8 +476,13 @@ export class RaftNode {
     const seed = (Date.now() ^ hashId(name) ^ hashId(this.id)) >>> 0;
     const core = new RaftCore(this.id, name, this.votersOf(name), seed || 1);
     const { term, vote, snapshot, log } = disk.load();
-    const g: GroupState = { name, core, disk, source: snapshot?.state ?? null, waiters: new Map(), lastLeader: null, sinceSnapshot: 0, sinceBytes: 0, leadFrom: null, announced: null };
-    if (snapshot) this.enqueueApply(() => this.hooks.install(name, snapshot.state));
+    const g: GroupState = { name, core, disk, source: snapshot?.state ?? null, waiters: new Map(), lastLeader: null, sinceSnapshot: 0, sinceBytes: 0, leadFrom: null, announced: null, appliedIndex: 0, appliedWaits: [] };
+    if (snapshot) {
+      this.enqueueApply(async () => {
+        await this.hooks.install(name, snapshot.state);
+        this.noteApplied(g, snapshot.index);
+      });
+    }
     core.restore(term, vote, snapshot, log, snapshot?.index ?? 0);
     core.setDurable(core.lastIndex());
     core.snapshotSource = () => g.source;
@@ -565,8 +576,15 @@ export class RaftNode {
     } else if (msg.t === "propose_r") {
       const i = this.pending.findIndex((p) => p.rid === msg.rid);
       if (i < 0) return;
-      if (msg.ok === true) this.pending.splice(i, 1)[0]!.resolve();
-      else this.pending[i]!.sentTo = null;
+      if (msg.ok === true) {
+        const p = this.pending.splice(i, 1)[0]!;
+        // Applied on the leader. A metadata change resolves once applied
+        // here too, so a change this member makes next is not overtaken by
+        // this one's commit. Queue groups resolve at once, as before.
+        const index = typeof msg.index === "number" ? msg.index : 0;
+        if (g && g.name === META && index > g.appliedIndex) this.whenApplied(g, index, p.resolve);
+        else p.resolve();
+      } else this.pending[i]!.sentTo = null;
     } else if (g) {
       g.core.step(from, msg, this.now());
     }
@@ -708,7 +726,10 @@ export class RaftNode {
     if (installed) {
       g.sinceSnapshot = 0;
       g.sinceBytes = 0;
-      this.enqueueApply(() => this.hooks.install(g.name, installed.state));
+      this.enqueueApply(async () => {
+        await this.hooks.install(g.name, installed.state);
+        this.noteApplied(g, installed.index);
+      });
     }
     const committed = g.core.takeCommitted();
     if (committed.length) {
@@ -730,6 +751,7 @@ export class RaftNode {
           for (; next < committed.length; next++) {
             const e = committed[next]!;
             await this.hooks.apply(g.name, e);
+            this.noteApplied(g, e.i);
             if (waiters[next]) ready.push([waiters[next]!, e.i]);
             g.sinceBytes += entryBodyBytes(e);
             if (++g.sinceSnapshot >= compactAfter(g.name) || g.sinceBytes >= COMPACT_BYTES) {
@@ -788,6 +810,31 @@ export class RaftNode {
       else if (!this.stopped) console.error("raft log fsync failed; retrying");
       this.schedule();
     });
+  }
+
+  /** Resolve `done` once this member has applied `index`, or after {@link LOCAL_APPLY_WAIT_MS}. */
+  private whenApplied(g: GroupState, index: number, done: () => void) {
+    let settled = false;
+    const once = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done();
+    };
+    // A member cut off from the leader's appends still answers its client.
+    const timer = setTimeout(once, LOCAL_APPLY_WAIT_MS);
+    timer.unref?.();
+    g.appliedWaits.push({ index, done: once });
+  }
+
+  private noteApplied(g: GroupState, index: number) {
+    if (index <= g.appliedIndex) return;
+    g.appliedIndex = index;
+    if (!g.appliedWaits.length) return;
+    const due = g.appliedWaits.filter((w) => w.index <= index);
+    if (!due.length) return;
+    g.appliedWaits = g.appliedWaits.filter((w) => w.index > index);
+    for (const w of due) w.done();
   }
 
   private confirm(g: GroupState, w: Waiter, index: number) {

@@ -472,7 +472,13 @@ export class RaftCore {
       const prev = this.matchIndex.get(from) ?? 0;
       if (m > prev) this.matchIndex.set(from, m);
       this.nextIndex.set(from, Math.max(this.nextIndex.get(from) ?? 0, Math.max(m, prev) + 1));
+      const before = this.commit;
       this.maybeCommit();
+      // A metadata commit reaches the followers with the next tick, not the
+      // next heartbeat: the member that proposed it waits to apply it before
+      // answering its client (RaftNode.propose). Queue groups keep sharing
+      // the heartbeat; their commits do not gate a reply on a follower.
+      if (this.group === "meta" && this.commit > before) this.heartbeatDue = 0;
       if (this.nextIndex.get(from)! <= this.lastIndex()) this.sendAppend(from);
     } else {
       const hint = Math.max(1, num(msg.hint, 1));

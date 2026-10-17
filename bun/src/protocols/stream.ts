@@ -109,6 +109,8 @@ const SEQUENCES = "stream-publishers";
 const PARTITION_ORDER = "x-stream-partition-order";
 /** Headers the stream store adds that a stream client does not see. */
 const STREAM_ONLY = new Set(["x-stream-offset"]);
+/** The header that holds an entry's filter value, shared with AMQP 0-9-1 publishers. */
+const FILTER_VALUE = "x-stream-filter-value";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -315,6 +317,10 @@ type Subscription = {
   consuming: boolean;
   /** Single-active-consumer group key, or null. */
   group: string | null;
+  /** Filter values from `filter.N` subscribe properties; unset when the subscription does not filter. */
+  filter?: Set<string>;
+  /** `match-unfiltered`: also deliver entries with no filter value. */
+  matchUnfiltered?: boolean;
 };
 
 type Member = { session: StreamSession; id: number; sub: Subscription };
@@ -666,7 +672,8 @@ export class StreamSession {
     const lastBefore = last;
     for (let i = 0; i < count; i++) {
       const publishingId = r.u64();
-      if (version >= 2) r.str();
+      // Publish v2 carries the entry's filter value, as RabbitMQ 3.13+ streams store it.
+      const filterValue = version >= 2 ? r.str() : null;
       const payload = r.bytes();
       if (!pub) {
         failed.push([publishingId, PUBLISHER_DOES_NOT_EXIST]);
@@ -683,6 +690,8 @@ export class StreamSession {
       }
       try {
         const msg = inbound(payload);
+        // Kept as the header AMQP 0-9-1 publishers set, so every protocol filters on it.
+        if (filterValue && !msg.props.headers.some(([k]) => k === FILTER_VALUE)) msg.props.headers.push([FILTER_VALUE, { t: "S", v: filterValue }]);
         const src = {
           body: msg.body,
           exchange: "",
@@ -747,6 +756,9 @@ export class StreamSession {
     if (single && !props.name) return this.write(response(K.subscribe, corr, PRECONDITION_FAILED));
     const group = single ? `${this.vhost}\0${stream}\0${props.name}` : null;
     const sub: Subscription = { stream, tag: `stream-${crypto.randomUUID()}`, session: this.broker.nextSession(), credit, spec, consuming: false, group };
+    // `filter.0`, `filter.1`, ... and `match-unfiltered`, as RabbitMQ 3.13+ reads them.
+    for (const [k, v] of Object.entries(props)) if (k.startsWith("filter.")) (sub.filter ??= new Set()).add(v);
+    if (sub.filter) sub.matchUnfiltered = props["match-unfiltered"] === "true";
     this.subs.set(id, sub);
     this.write(response(K.subscribe, corr, OK));
     if (!group) return this.startConsuming(id, sub, spec);
@@ -765,6 +777,7 @@ export class StreamSession {
       noAck: true,
       exclusive: false,
       streamOffset: spec,
+      ...(sub.filter ? { streamFilter: sub.filter, matchUnfiltered: sub.matchUnfiltered === true } : {}),
       want: () => !this.closed && sub.consuming && this.subs.get(id) === sub && sub.credit > 0,
       deliver: (msg: LiveMsg) => this.deliver(id, sub, msg),
     } as Parameters<Broker["consume"]>[2]);

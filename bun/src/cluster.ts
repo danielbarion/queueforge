@@ -534,7 +534,8 @@ export class Cluster {
       }
       return;
     }
-    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "quorum_forget" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats" || op === "delete" || op === "settle" || op === "requeue" || op === "set-args" || op === "join" || op === "forget" || op === "place_queue") {
+    if (op === "apply" || op === "enqueue" || op === "quorum_append" || op === "quorum_drop" || op === "quorum_forget" || op === "ack" || op === "nack" || op === "get" || op === "purge" || op === "declare" || op === "declare_queue" || op === "delete_queue" || op === "unsub" || op === "credit" || op === "set_credit" || op === "stats" || op === "delete" || op === "settle" || op === "requeue" || op === "set-args" || op === "join" || op === "forget" || op === "place_queue" || op === "delay_hold" || op === "federation_links"
+      || op === "queue_stats" || op === "conn_counts" || op === "mgmt_rows" || op === "close_connection" || op === "direct_reply") {
       void this.handle(op, msg).then(
         (payload) => write({ op: "reply", id: msg.id, ok: true, payload, from: this.broker.cfg.nodeId }),
         (err) => write({ op: "reply", id: msg.id, ok: false, error: String(err), from: this.broker.cfg.nodeId }),
@@ -655,6 +656,13 @@ export class Cluster {
   }
 
   private async handle(op: string, msg: Record<string, unknown>): Promise<unknown> {
+    if (op === "delay_hold") {
+      // A worker hands a delayed message to the delay owner (cores mode).
+      const p = (msg.payload ?? msg) as { vhost: string; name: string; row: Parameters<Broker["acceptDelayed"]>[2] };
+      this.broker.acceptDelayed(String(p.vhost), String(p.name), p.row);
+      return true;
+    }
+    if (op === "federation_links") return this.broker.federationLinks();
     if (op === "place_queue") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
       return this.broker.workerPool() ? this.broker.assignHome(String(p.vhost ?? "/"), String(p.name ?? "")) : null;
@@ -720,10 +728,37 @@ export class Cluster {
     if (op === "stats") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
       const q = this.broker.queues.get(this.broker.key(String(p.vhost ?? "/"), String(p.queue ?? p.name ?? "")));
+      // A passive declare on another worker counts as use, as one here does.
+      if (q && p.touch === true) q.lastUsed = Date.now();
       return {
         messages_ready: q?.ready.length ?? 0,
+        messages_unacknowledged: q?.unacked.size ?? 0,
         consumer_count: q?.consumers.length ?? 0,
       };
+    }
+    if (op === "queue_stats") {
+      // The live counts of every queue this worker serves, for management.
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      return this.broker.servedQueueStats(p.vhost == null ? undefined : String(p.vhost));
+    }
+    if (op === "conn_counts") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      return this.broker.localConnCounts(String(p.user ?? ""), String(p.vhost ?? "/"));
+    }
+    if (op === "mgmt_rows") {
+      // Connections, channels and consumers open on this worker.
+      return this.broker.localMgmtRows();
+    }
+    if (op === "close_connection") {
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      return this.broker.closeMgmtConnection(String(p.name ?? ""));
+    }
+    if (op === "direct_reply") {
+      // A reply to a direct reply-to address whose requester is on this worker.
+      const p = (msg.payload ?? msg) as Record<string, unknown>;
+      const body = typeof p.body === "string" ? new Uint8Array(Buffer.from(p.body, "base64")) : (p.body as Uint8Array);
+      const propRaw = typeof p.propRaw === "string" ? new Uint8Array(Buffer.from(p.propRaw, "base64")) : (p.propRaw as Uint8Array);
+      return this.broker.deliverReply(String(p.routingKey ?? ""), body ?? new Uint8Array(), propRaw ?? new Uint8Array());
     }
     if (op === "quorum_drop") {
       const p = (msg.payload ?? msg) as Record<string, unknown>;
@@ -875,6 +910,29 @@ export class Cluster {
     return [...this.peers.keys()];
   }
 
+  /**
+   * Ask every other connected member and collect the answers. A member that
+   * fails or has not answered within `ms` is left out, so one slow worker
+   * cannot hold a management request.
+   */
+  async callAll(op: string, payload: unknown, ms = 2000): Promise<Array<{ id: string; reply: unknown }>> {
+    const ids = [...this.peers.keys()].filter((id) => id !== this.broker.cfg.nodeId);
+    const missing = Symbol("missing");
+    const replies = await Promise.all(
+      ids.map((id) =>
+        Promise.race([
+          this.call(id, op, payload).catch(() => missing),
+          new Promise<typeof missing>((done) => setTimeout(() => done(missing), ms).unref?.()),
+        ]),
+      ),
+    );
+    const out: Array<{ id: string; reply: unknown }> = [];
+    replies.forEach((reply, i) => {
+      if (reply !== missing) out.push({ id: ids[i]!, reply });
+    });
+    return out;
+  }
+
   async call(home: string, op: string, payload: unknown): Promise<unknown> {
     const peer = this.peers.get(home);
     if (!peer) throw new ChanError(541, "INTERNAL_ERROR - queue home is unavailable");
@@ -936,7 +994,12 @@ export class Cluster {
     );
   }
 
-  async subscribe(home: string, payload: { vhost: string; queue: string; session: number; noAck: boolean; exclusive: boolean; ack_credit?: number }, onDeliver: (msg: LiveMsg) => void) {
+  /** Whether a local consumer session takes deliveries from a remote home. */
+  subscribed(session: number): boolean {
+    return this.subs.has(session);
+  }
+
+  async subscribe(home: string, payload: { vhost: string; queue: string; session: number; noAck: boolean; exclusive: boolean; ack_credit?: number; credit?: number }, onDeliver: (msg: LiveMsg) => void) {
     this.subs.set(payload.session, onDeliver);
     await this.call(home, "sub", payload);
     return payload.session;

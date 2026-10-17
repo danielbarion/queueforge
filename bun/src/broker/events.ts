@@ -43,21 +43,26 @@ export function publishInternal(
   try {
     for (const name of this.routeOne(vhost, exchange, routingKey, headers)) {
       const q = this.queues.get(this.key(vhost, name));
-      if (!q || !this.isLocalHome(q.home)) continue;
-      const ok = this.enqueueLocal(
-        q,
-        {
-          body,
-          exchange,
-          routingKey,
-          headers,
-          propRaw: propRaw ?? eventProps(headers),
-          persistent: false,
-          priority: 0,
-          expiration: "",
-        },
-        0,
-      );
+      if (!q) continue;
+      const src = {
+        body,
+        exchange,
+        routingKey,
+        headers,
+        propRaw: propRaw ?? eventProps(headers),
+        persistent: false,
+        priority: 0,
+        expiration: "",
+      };
+      // Each event or trace copy is made once, where it happens: a queue
+      // homed on another worker or node gets it forwarded there.
+      if (!this.isLocalHome(q.home)) {
+        if (!this.cluster) continue;
+        void this.enqueue(vhost, name, src).catch(() => {});
+        reached++;
+        continue;
+      }
+      const ok = this.enqueueLocal(q, src, 0);
       if (ok) reached++;
       this.pump(q);
     }

@@ -7,7 +7,7 @@
 import { Elysia } from "elysia";
 import { join } from "node:path";
 import { policyFromBody, policyItem, type Broker } from "../broker/index.ts";
-import type { Policy } from "../broker/model.ts";
+import type { Policy, QueueLive } from "../broker/model.ts";
 import { policyToWire } from "../broker/snapshot.ts";
 import { shovelFrom } from "../broker/shovel.ts";
 import { metricsText } from "./metrics.ts";
@@ -55,6 +55,50 @@ function permTarget(broker: Broker, first: string, second: string): { user: stri
  * Cookie names come from the request Host header. Login tokens live in the
  * process-local session map.
  */
+/**
+ * Ready, unacked and consumer counts of one queue. With one worker per core
+ * they come from the worker that serves the queue; this one has only the
+ * topology of a queue homed elsewhere.
+ */
+async function liveCounts(broker: Broker, q: QueueLive): Promise<{ ready: number; unacked: number; consumers: number }> {
+  const at = broker.servingWorker(q);
+  if (at) {
+    try {
+      const r = (await broker.cluster!.call(at, "stats", { vhost: q.vhost, queue: q.name })) as Record<string, unknown> | null;
+      if (r) return { ready: Number(r.messages_ready ?? 0), unacked: Number(r.messages_unacknowledged ?? 0), consumers: Number(r.consumer_count ?? 0) };
+    } catch {
+      /* the serving worker did not answer: report what this one knows */
+    }
+  }
+  return { ready: q.ready.length, unacked: q.unacked.size, consumers: q.consumers.length };
+}
+
+/** `/api/queues` rows, of one vhost or all, with counts from the workers serving them. */
+async function queueItems(broker: Broker, vhost?: string) {
+  const served = await broker.workerQueueStats(vhost);
+  return [...broker.queues.values()].filter((q) => vhost == null || q.vhost === vhost).map((q) => {
+    const s = served.get(broker.key(q.vhost, q.name));
+    const ready = s ? s.ready : q.ready.length;
+    const unacked = s ? s.unacked : q.unacked.size;
+    return {
+      name: q.name,
+      vhost: q.vhost,
+      durable: q.durable,
+      exclusive: q.exclusive,
+      auto_delete: q.autoDelete,
+      node: q.home || broker.cfg.nodeId || "queueforge",
+      ...quorumMembers(broker, q),
+      state: "running",
+      messages: ready + unacked,
+      messages_ready: ready,
+      messages_unacknowledged: unacked,
+      consumers: s ? s.consumers : q.consumers.length,
+      arguments: q.args,
+      type: q.argsParsed.queueType,
+    };
+  });
+}
+
 /** RabbitMQ's `leader` and `members` of a quorum queue or replicated stream row. */
 function quorumMembers(broker: Broker, q: Parameters<Broker["quorumLeader"]>[0]) {
   if (!q || (q.argsParsed.queueType !== "quorum" && !(q.argsParsed.queueType === "stream" && q.raftGroup))) return {};
@@ -296,7 +340,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return { name: s.user, tags: s.tags };
     })
-    .get("/api/overview", ({ request, set }) => {
+    .get("/api/overview", async ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
@@ -304,19 +348,23 @@ export function managementApp(broker: Broker, spaDir: string) {
       let messages_ready = 0;
       let messages_unacked = 0;
       let consumers = 0;
+      // With one worker per core, a queue's counts come from the worker serving it.
+      const served = await broker.workerQueueStats();
       for (const q of broker.queues.values()) {
-        messages_ready += q.ready.length;
-        messages_unacked += q.unacked.size;
-        consumers += q.consumers.length;
+        const s = served.get(broker.key(q.vhost, q.name));
+        messages_ready += s ? s.ready : q.ready.length;
+        messages_unacked += s ? s.unacked : q.unacked.size;
+        consumers += s ? s.consumers : q.consumers.length;
       }
+      const rows = broker.workerPool() ? await broker.allMgmtRows() : null;
       return {
         product_name: "QueueForge",
         product_version: "0.1.0",
         management_version: "0.1.0",
         rabbitmq_version_compat: "0.9.1",
         object_totals: {
-          connections: broker.prom.connections,
-          channels: broker.prom.channels,
+          connections: rows ? rows.connections.length : broker.prom.connections,
+          channels: rows ? rows.channels.length : broker.prom.channels,
           queues: broker.queues.size,
           exchanges: broker.exchanges.size,
           consumers,
@@ -353,7 +401,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       const tracing = (body as { tracing?: unknown } | null)?.tracing;
       if (tracing === true) broker.tracedVhosts.add(name);
       else if (tracing === false) broker.tracedVhosts.delete(name);
-      await broker.cluster?.replicate("vhost", { name });
+      await broker.cluster?.replicate("vhost", { name, ...(typeof tracing === "boolean" ? { tracing } : {}) });
       set.status = 201;
       return { name };
     })
@@ -423,28 +471,20 @@ export function managementApp(broker: Broker, spaDir: string) {
       set.status = 204;
       return "";
     })
-    .get("/api/queues/:vhost", ({ params, request, set }) => {
+    .get("/api/queues", async ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const vhost = decodeURIComponent(params.vhost);
-      const items = [...broker.queues.values()].filter((q) => q.vhost === vhost).map((q) => ({
-        name: q.name,
-        vhost,
-        durable: q.durable,
-        exclusive: q.exclusive,
-        auto_delete: q.autoDelete,
-        node: q.home || broker.cfg.nodeId || "queueforge",
-        ...quorumMembers(broker, q),
-        state: "running",
-        messages: q.ready.length + q.unacked.size,
-        messages_ready: q.ready.length,
-        messages_unacknowledged: q.unacked.size,
-        consumers: q.consumers.length,
-        arguments: q.args,
-        type: q.argsParsed.queueType,
-      }));
+      const items = await queueItems(broker);
+      return { items, total_count: items.length };
+    })
+    .get("/api/queues/:vhost", async ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      const items = await queueItems(broker, decodeURIComponent(params.vhost));
       return { items, total_count: items.length };
     })
     .put("/api/queues/:vhost/:name", async ({ params, body, request, set }) => {
@@ -517,20 +557,20 @@ export function managementApp(broker: Broker, spaDir: string) {
       }));
       return { items, total_count: items.length };
     })
-    .get("/api/connections", ({ request, set }) => {
+    .get("/api/connections", async ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const items = broker.listMgmtConnections();
+      const items = (await broker.allMgmtRows()).connections;
       return { items, total_count: items.length };
     })
-    .delete("/api/connections/:name", ({ params, request, set }) => {
+    .delete("/api/connections/:name", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      if (!broker.closeMgmtConnection(params.name)) {
+      if (!(await broker.closeMgmtConnectionAll(params.name))) {
         set.status = 404;
         return { error: "not found" };
       }
@@ -714,7 +754,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       set.status = 204;
       return "";
     })
-    .put("/api/policies/:vhost/:name", ({ params, body, request, set }) => {
+    .put("/api/policies/:vhost/:name", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -730,7 +770,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       try {
         broker.upsertPolicy(policy);
-        void broker.cluster?.replicate("policy", policyToWire(policy));
+        await broker.cluster?.replicate("policy", policyToWire(policy));
       } catch (err) {
         set.status = 400;
         return { error: err instanceof Error ? err.message : "bad policy" };
@@ -800,21 +840,21 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return { items: broker.policies.map(policyItem) };
     })
-    .get("/api/federation-links", ({ request, set }) => {
+    .get("/api/federation-links", async ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return broker.federationLinks();
+      return await broker.allFederationLinks();
     })
-    .get("/api/federation-links/:vhost", ({ params, request, set }) => {
+    .get("/api/federation-links/:vhost", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return broker.federationLinks(decodeURIComponent(params.vhost));
+      return await broker.allFederationLinks(decodeURIComponent(params.vhost));
     })
-    .delete("/api/policies/:vhost/:name", ({ params, request, set }) => {
+    .delete("/api/policies/:vhost/:name", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -824,7 +864,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "not found" };
       }
-      void broker.cluster?.replicate("delete_policy", { vhost: decodeURIComponent(params.vhost), name: params.name });
+      await broker.cluster?.replicate("delete_policy", { vhost: decodeURIComponent(params.vhost), name: params.name });
       set.status = 204;
       return "";
     })
@@ -867,7 +907,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: err instanceof Error ? err.message : "not found" };
       }
     })
-    .get("/api/queues/:vhost/:name", ({ params, request, set }) => {
+    .get("/api/queues/:vhost/:name", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
@@ -879,7 +919,10 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "not found" };
       }
       const names = broker.policyNames(vhost, q.name);
-      const consumers = broker.listMgmtConsumers(vhost, q.name);
+      const consumers = broker.workerPool()
+        ? (await broker.allMgmtRows()).consumers.filter((c) => c.vhost === vhost && c.queue === q.name)
+        : broker.listMgmtConsumers(vhost, q.name);
+      const live = await liveCounts(broker, q);
       return {
         name: q.name,
         vhost,
@@ -889,10 +932,10 @@ export function managementApp(broker: Broker, spaDir: string) {
         node: q.home || broker.cfg.nodeId || "queueforge",
         ...quorumMembers(broker, q),
         state: "running",
-        messages: q.ready.length + q.unacked.size,
-        messages_ready: q.ready.length,
-        messages_unacknowledged: q.unacked.size,
-        consumers: q.consumers.length,
+        messages: live.ready + live.unacked,
+        messages_ready: live.ready,
+        messages_unacknowledged: live.unacked,
+        consumers: live.consumers,
         consumer_details: consumers.map((c) => ({
           consumer_tag: c.consumer_tag,
           channel_details: { name: `${c.connection}:${c.channel}`, connection_name: c.connection, number: c.channel },
@@ -931,24 +974,24 @@ export function managementApp(broker: Broker, spaDir: string) {
         operator_policy: opPol?.name ?? null,
       };
     })
-    .get("/api/connections/:name", ({ params, request, set }) => {
+    .get("/api/connections/:name", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const row = broker.listMgmtConnections().find((c) => c.name === params.name);
+      const row = (await broker.allMgmtRows()).connections.find((c) => c.name === params.name);
       if (!row) {
         set.status = 404;
         return { error: "not found" };
       }
       return row;
     })
-    .get("/api/channels", ({ request, set }) => {
+    .get("/api/channels", async ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const items = broker.listMgmtChannels().map((c) => ({
+      const items = (await broker.allMgmtRows()).channels.map((c) => ({
         name: c.name,
         connection_details: { name: c.connection },
         user: c.user,
@@ -959,12 +1002,13 @@ export function managementApp(broker: Broker, spaDir: string) {
       }));
       return { items, total_count: items.length };
     })
-    .get("/api/channels/:name", ({ params, request, set }) => {
+    .get("/api/channels/:name", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const c = broker.getMgmtChannel(decodeURIComponent(params.name));
+      const wanted = decodeURIComponent(params.name);
+      const c = broker.getMgmtChannel(wanted) ?? (broker.workerPool() ? (await broker.allMgmtRows()).channels.find((x) => x.name === wanted) : undefined);
       if (!c) {
         set.status = 404;
         return { error: "not found" };
@@ -979,13 +1023,13 @@ export function managementApp(broker: Broker, spaDir: string) {
         peer_port: c.peer_port,
       };
     })
-    .get("/api/consumers/:vhost", ({ params, request, set }) => {
+    .get("/api/consumers/:vhost", async ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
       const vhost = decodeURIComponent(params.vhost);
-      const items = broker.listMgmtConsumers(vhost).map((c) => ({
+      const items = (await broker.allMgmtRows()).consumers.filter((c) => c.vhost === vhost).map((c) => ({
         consumer_tag: c.consumer_tag,
         channel_details: { name: `${c.connection}:${c.channel}`, connection_name: c.connection, number: c.channel },
         queue: { name: c.queue, vhost: c.vhost },
@@ -999,7 +1043,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return { items: broker.listTopicPerms() };
     })
-    .put("/api/topic-permissions/:user/:vhost", ({ params, body, request, set }) => {
+    .put("/api/topic-permissions/:user/:vhost", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1020,7 +1064,7 @@ export function managementApp(broker: Broker, spaDir: string) {
           read: b.read ?? "",
         });
         const row = broker.listTopicPerms(target.user).find((r) => r.vhost === target.vhost && r.exchange === b.exchange);
-        if (row) void broker.cluster?.replicate("topic_permission", row);
+        if (row) await broker.cluster?.replicate("topic_permission", row);
       } catch (err) {
         set.status = 400;
         return { error: err instanceof Error ? err.message : "bad pattern" };
@@ -1028,7 +1072,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       set.status = 201;
       return "";
     })
-    .delete("/api/topic-permissions/:user/:vhost/:exchange", ({ params, request, set }) => {
+    .delete("/api/topic-permissions/:user/:vhost/:exchange", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1039,7 +1083,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "not found" };
       }
-      void broker.cluster?.replicate("delete_topic_permission", { user: target.user, vhost: target.vhost, exchange: decodeURIComponent(params.exchange) });
+      await broker.cluster?.replicate("delete_topic_permission", { user: target.user, vhost: target.vhost, exchange: decodeURIComponent(params.exchange) });
       set.status = 204;
       return "";
     })
@@ -1050,7 +1094,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return { user_limits: broker.listUserLimits(), vhost_limits: broker.listVhostLimits() };
     })
-    .put("/api/user-limits/:user/:kind", ({ params, body, request, set }) => {
+    .put("/api/user-limits/:user/:kind", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1070,11 +1114,11 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-channels" };
       }
-      void broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
+      await broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
       set.status = 204;
       return "";
     })
-    .delete("/api/user-limits/:user/:kind", ({ params, request, set }) => {
+    .delete("/api/user-limits/:user/:kind", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1089,11 +1133,11 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-channels" };
       }
-      void broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
+      await broker.cluster?.replicate("user_limits", broker.listUserLimits().find((row) => row.user === params.user) ?? { user: params.user });
       set.status = 204;
       return "";
     })
-    .put("/api/vhost-limits/:vhost/:kind", ({ params, body, request, set }) => {
+    .put("/api/vhost-limits/:vhost/:kind", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1110,11 +1154,11 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-queues" };
       }
-      void broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
+      await broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
       set.status = 204;
       return "";
     })
-    .delete("/api/vhost-limits/:vhost/:kind", ({ params, request, set }) => {
+    .delete("/api/vhost-limits/:vhost/:kind", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1130,7 +1174,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 400;
         return { error: "limit must be max-connections or max-queues" };
       }
-      void broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
+      await broker.cluster?.replicate("vhost_limits", broker.listVhostLimits().find((row) => row.vhost === vhost) ?? { vhost });
       set.status = 204;
       return "";
     })
@@ -1277,7 +1321,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return { name: broker.clusterName() };
     })
-    .put("/api/cluster-name", ({ body, request, set }) => {
+    .put("/api/cluster-name", async ({ body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1289,7 +1333,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "name is required" };
       }
       broker.putGlobalParam("cluster_name", name);
-      void broker.cluster?.replicate("global_parameter", { name: "cluster_name", value: name });
+      await broker.cluster?.replicate("global_parameter", { name: "cluster_name", value: name });
       set.status = 204;
       return "";
     })
@@ -1327,7 +1371,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return row;
     })
-    .put("/api/parameters/:component/:vhost/:name", ({ params, body, request, set }) => {
+    .put("/api/parameters/:component/:vhost/:name", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator") && !s?.tags.includes("policymaker")) {
         set.status = s ? 403 : 401;
@@ -1350,11 +1394,11 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "bad_request", reason: err instanceof Error ? err.message : "bad value" };
       }
       // A shovel runs on the node it was declared on, as a RabbitMQ dynamic shovel does.
-      if (row.component !== "shovel") void broker.cluster?.replicate("parameter", row);
+      if (row.component !== "shovel") await broker.cluster?.replicate("parameter", row);
       set.status = 201;
       return "";
     })
-    .delete("/api/parameters/:component/:vhost/:name", ({ params, request, set }) => {
+    .delete("/api/parameters/:component/:vhost/:name", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator") && !s?.tags.includes("policymaker")) {
         set.status = s ? 403 : 401;
@@ -1369,7 +1413,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "Object Not Found", reason: "Not Found" };
       }
-      if (row.component !== "shovel") void broker.cluster?.replicate("delete_parameter", row);
+      if (row.component !== "shovel") await broker.cluster?.replicate("delete_parameter", row);
       set.status = 204;
       return "";
     })
@@ -1393,7 +1437,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       return row;
     })
-    .put("/api/global-parameters/:name", ({ params, body, request, set }) => {
+    .put("/api/global-parameters/:name", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1402,11 +1446,11 @@ export function managementApp(broker: Broker, spaDir: string) {
       const name = decodeURIComponent(params.name);
       const value = (body as { value?: unknown } | null)?.value ?? null;
       broker.putGlobalParam(name, value);
-      void broker.cluster?.replicate("global_parameter", { name, value });
+      await broker.cluster?.replicate("global_parameter", { name, value });
       set.status = 201;
       return "";
     })
-    .delete("/api/global-parameters/:name", ({ params, request, set }) => {
+    .delete("/api/global-parameters/:name", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1417,7 +1461,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "Object Not Found", reason: "Not Found" };
       }
-      void broker.cluster?.replicate("delete_global_parameter", { name });
+      await broker.cluster?.replicate("delete_global_parameter", { name });
       set.status = 204;
       return "";
     })
@@ -1436,7 +1480,7 @@ export function managementApp(broker: Broker, spaDir: string) {
       const vhost = decodeURIComponent(params.vhost);
       return { items: broker.operatorPolicies.filter((p) => p.vhost === vhost).map(policyItem) };
     })
-    .put("/api/operator-policies/:vhost/:name", ({ params, body, request, set }) => {
+    .put("/api/operator-policies/:vhost/:name", async ({ params, body, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1444,16 +1488,19 @@ export function managementApp(broker: Broker, spaDir: string) {
       }
       const vhost = decodeURIComponent(params.vhost);
       const existed = broker.operatorPolicies.some((p) => p.vhost === vhost && p.name === params.name);
+      let policy: Policy;
       try {
-        broker.upsertOperatorPolicy(policyFromBody(vhost, params.name, (body ?? {}) as Parameters<typeof policyFromBody>[2]));
+        policy = policyFromBody(vhost, params.name, (body ?? {}) as Parameters<typeof policyFromBody>[2]);
+        broker.upsertOperatorPolicy(policy);
       } catch (err) {
         set.status = 400;
         return { error: err instanceof Error ? err.message : "bad policy" };
       }
+      await broker.cluster?.replicate("operator_policy", policyToWire(policy));
       set.status = existed ? 204 : 201;
       return existed ? "" : { name: params.name };
     })
-    .delete("/api/operator-policies/:vhost/:name", ({ params, request, set }) => {
+    .delete("/api/operator-policies/:vhost/:name", async ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
       if (!s?.tags.includes("administrator")) {
         set.status = s ? 403 : 401;
@@ -1463,6 +1510,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = 404;
         return { error: "not found" };
       }
+      await broker.cluster?.replicate("delete_operator_policy", { vhost: decodeURIComponent(params.vhost), name: params.name });
       set.status = 204;
       return "";
     })

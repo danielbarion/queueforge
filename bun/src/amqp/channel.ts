@@ -16,7 +16,8 @@ import { Conn, type Ch } from "./listen.ts";
  */
 export async function handleChannelOpen(this: Conn, channel: number) {
   const fresh = !this.channels.has(channel);
-  if (fresh && !this.broker.channelAllowed(this.user)) {
+  // Only a user with a channel limit waits on the other workers' counts.
+  if (fresh && (!this.broker.channelAllowed(this.user) || (this.broker.userChanLimit.has(this.user) && !(await this.broker.channelAllowedAll(this.user))))) {
     await this.chanClose(channel, 403, "ACCESS_REFUSED - channel limit");
     return;
   }

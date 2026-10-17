@@ -143,6 +143,7 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
     const name = String(payload.name);
     this.exchanges.delete(this.key(vhost, name));
     this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.exchange === name));
+    this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && (e.source === name || e.destination === name)));
     this.store.deleteExchange(vhost, name);
   } else if (kind === "queue" || kind === "declare_queue") {
     const row = queueFromWire(payload);
@@ -154,8 +155,15 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
   } else if (kind === "delete_queue") {
     const vhost = String(payload.vhost);
     const name = String(payload.name ?? payload.queue);
-    const group = this.queues.get(this.key(vhost, name))?.raftGroup;
+    const gone = this.queues.get(this.key(vhost, name));
+    const group = gone?.raftGroup;
     if (group) this.cluster?.consensus?.node?.dropGroup(group);
+    // Consumers on this process hear basic.cancel, as for a local delete.
+    if (gone?.consumers.length) {
+      this.prom.consumers = Math.max(0, this.prom.consumers - gone.consumers.filter((c) => c.onCancel).length);
+      for (const c of gone.consumers) c.onCancel?.();
+      gone.consumers = [];
+    }
     this.queues.delete(this.key(vhost, name));
     this.bindings = this.bindings.filter((b) => !(b.vhost === vhost && b.queue === name));
     this.store.deleteQueue(vhost, name);
@@ -169,6 +177,30 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
       this.bindings.push(b);
       this.store.putBinding(b);
     }
+    if (this.fedLinks.size) this.federationBindingsChanged(b.vhost, b.exchange);
+  } else if (kind === "exchange_binding" || kind === "delete_exchange_binding") {
+    const vhost = String(payload.vhost ?? "/");
+    const source = String(payload.source ?? "");
+    const destination = String(payload.destination ?? "");
+    const routingKey = String(payload.routingKey ?? payload.routing_key ?? "");
+    this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
+    if (kind === "exchange_binding") {
+      this.e2e.push({ vhost, source, destination, routingKey });
+      if (this.exchanges.get(this.key(vhost, source))?.durable && this.exchanges.get(this.key(vhost, destination))?.durable) {
+        this.store.putExchangeBinding({ vhost, source, destination, routingKey });
+      }
+    } else {
+      this.store.deleteExchangeBinding(vhost, source, destination, routingKey);
+    }
+    if (this.fedLinks.size) this.federationBindingsChanged(vhost, source);
+  } else if (kind === "operator_policy") {
+    try {
+      this.upsertOperatorPolicy(policyFromWire(payload));
+    } catch {
+      /* the sender validated the pattern */
+    }
+  } else if (kind === "delete_operator_policy") {
+    this.deleteOperatorPolicy(String(payload.vhost ?? "/"), String(payload.name ?? ""));
   } else if (kind === "policy") {
     this.upsertPolicy(policyFromWire(payload));
   } else if (kind === "delete_policy") {
@@ -185,6 +217,7 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
       return JSON.stringify(b.args) !== argsJson;
     });
     this.store.deleteBinding(vhost, exchange, queue, routingKey, argsJson);
+    if (this.fedLinks.size) this.federationBindingsChanged(vhost, exchange);
   } else if (kind === "user") {
     const name = String(payload.name);
     const hash = String(payload.hash);
@@ -228,10 +261,15 @@ export function applyRemote(this: Broker, kind: string, payload: Record<string, 
     this.deleteGlobalParam(String(payload.name));
   } else if (kind === "vhost") {
     this.ensureBuiltins(String(payload.name));
+    // Firehose tracing is switched with the vhost (PUT /api/vhosts/:vhost).
+    if (payload.tracing === true) this.tracedVhosts.add(String(payload.name));
+    else if (payload.tracing === false) this.tracedVhosts.delete(String(payload.name));
   } else if (kind === "delete_vhost") {
     this.vhosts.delete(String(payload.name));
     this.store.deleteVhost(String(payload.name));
   }
+  // A worker that owns a federation link for this exchange or queue starts or stops it.
+  if (kind === "queue" || kind === "declare_queue" || kind === "delete_queue" || kind === "exchange" || kind === "delete_exchange") this.syncFederation();
 }
 
 /**

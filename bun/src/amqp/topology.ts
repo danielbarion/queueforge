@@ -172,6 +172,8 @@ export async function qDeclare(this: Conn, channel: number, payload: Uint8Array)
     args: fields,
     owner: this.id,
   });
+  // The queue goes when this connection closes here, so it must not move.
+  if (exclusive && !passive) this.ownsExclusive = true;
   if ((bits & 16) === 0) {
     await this.send(
       methodFrame(
@@ -272,10 +274,12 @@ export async function qDelete(this: Conn, channel: number, payload: Uint8Array) 
     if (!nowait) await this.send(methodFrame(channel, method(50, 41, (w) => w.u32(0))));
     return;
   }
-  if ((bits & 1) !== 0 && q.consumers.length > 0) {
+  // The worker serving the queue has its consumers and messages.
+  const live = (bits & 3) !== 0 ? await this.broker.queueCounts(q, false) : null;
+  if ((bits & 1) !== 0 && live!.consumers > 0) {
     throw new ChanError(406, `PRECONDITION_FAILED - queue '${queue}' in vhost '${this.vhost}' in use`);
   }
-  if ((bits & 2) !== 0 && q.ready.length + q.unacked.size > 0) {
+  if ((bits & 2) !== 0 && live!.messages + live!.unacked > 0) {
     throw new ChanError(406, `PRECONDITION_FAILED - queue '${queue}' in vhost '${this.vhost}' not empty`);
   }
   const n = await this.broker.deleteQueue(this.vhost, queue);

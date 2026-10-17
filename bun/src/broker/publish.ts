@@ -341,12 +341,32 @@ type DelayedRow = {
   due: number;
 };
 
+/** Store key of delayed messages a cores-mode worker has not yet handed to the delay owner. */
+const DELAYED_FORWARD = "delayed-message-forward";
+/** Delayed rows this process has armed, so a repeated hand-over arms once. */
+const armedDelayed = new Set<string>();
+/** Recently routed delayed rows, so a hand-over retried after its reply was lost is not routed twice. */
+const routedDelayed = new Set<string>();
+
+/**
+ * The process that holds and routes every delayed message: worker n0 when
+ * one broker runs one worker per core, so pending messages do not depend on
+ * which worker took the publish, and n0 exists for any worker count. Null
+ * outside cores mode, where each process holds its own.
+ */
+export function delayOwner(this: Broker): string | null {
+  if (!this.workerPool()) return null;
+  return this.cfg.members.some((m) => m.id === "n0") ? "n0" : null;
+}
+
 /**
  * Hold one message for an x-delayed-message exchange until `due` (epoch ms).
- * The row is stored first, and dropped once the message is routed.
+ * The row is stored first, and dropped once the message is routed. In cores
+ * mode a worker other than the delay owner stores the row as pending, hands
+ * it to the owner, and drops it once the owner has stored it.
  */
 export function holdDelayed(this: Broker, input: { vhost: string; exchange: string; routingKey: string; body: Uint8Array; propRaw: Uint8Array; persistent: boolean; priority: number; expiration: string }, due: number) {
-  const name = `${due}-${QUORUM_ID_BASE}${++delayedSeq}`;
+  const name = `${due}-${this.cfg.nodeId || "solo"}-${QUORUM_ID_BASE}${++delayedSeq}`;
   const row: DelayedRow = {
     exchange: input.exchange,
     routingKey: input.routingKey,
@@ -357,12 +377,47 @@ export function holdDelayed(this: Broker, input: { vhost: string; exchange: stri
     expiration: input.expiration,
     due,
   };
+  const owner = this.delayOwner();
+  if (owner && owner !== this.cfg.nodeId) {
+    this.store.putParameter(DELAYED_FORWARD, input.vhost, name, JSON.stringify(row));
+    forwardDelayed.call(this, owner, input.vhost, name, row, 0);
+    return;
+  }
   this.store.putParameter(DELAYED, input.vhost, name, JSON.stringify(row));
   scheduleDelayed.call(this, input.vhost, name, row);
 }
 
+/** Hand a pending delayed row to the owner, retrying until it is stored there. */
+function forwardDelayed(this: Broker, owner: string, vhost: string, name: string, row: DelayedRow, attempt: number) {
+  const retry = () => {
+    const t = setTimeout(() => forwardDelayed.call(this, owner, vhost, name, row, attempt + 1), Math.min(5000, 100 * 2 ** attempt));
+    t.unref?.();
+  };
+  if (!this.cluster?.peers.has(owner)) return retry();
+  this.cluster.call(owner, "delay_hold", { vhost, name, row }).then(
+    () => this.store.deleteParameter(DELAYED_FORWARD, vhost, name),
+    retry,
+  );
+}
+
+/**
+ * Take a delayed row handed over by another worker: store it and arm it.
+ * A row seen before (a retried hand-over) is not stored or armed again.
+ */
+export function acceptDelayed(this: Broker, vhost: string, name: string, row: DelayedRow) {
+  if (armedDelayed.has(`${vhost}\0${name}`) || routedDelayed.has(`${vhost}\0${name}`)) return;
+  this.store.putParameter(DELAYED, vhost, name, JSON.stringify(row));
+  scheduleDelayed.call(this, vhost, name, row);
+}
+
 function scheduleDelayed(this: Broker, vhost: string, name: string, row: DelayedRow) {
+  const id = `${vhost}\0${name}`;
+  if (armedDelayed.has(id)) return;
+  armedDelayed.add(id);
   const timer = setTimeout(() => {
+    armedDelayed.delete(id);
+    routedDelayed.add(id);
+    if (routedDelayed.size > 10_000) routedDelayed.delete(routedDelayed.values().next().value!);
     const propRaw = new Uint8Array(Buffer.from(row.propRaw, "base64"));
     const send = {
       vhost,
@@ -386,7 +441,12 @@ function scheduleDelayed(this: Broker, vhost: string, name: string, row: Delayed
   timer.unref?.();
 }
 
-/** Re-arm the delayed messages stored before a restart. Late ones are routed now. */
+/**
+ * Re-arm the delayed messages stored before a restart. Late ones are routed
+ * now. Rows a cores-mode worker had not yet handed to the owner are handed
+ * over again, or armed here when this process is now the owner (or there is
+ * none, as after going back to one process).
+ */
 export function resumeDelayed(this: Broker) {
   for (const r of this.store.listParameters(DELAYED)) {
     try {
@@ -394,6 +454,22 @@ export function resumeDelayed(this: Broker) {
     } catch {
       /* a corrupt row is skipped */
     }
+  }
+  const owner = this.delayOwner();
+  for (const r of this.store.listParameters(DELAYED_FORWARD)) {
+    let row: DelayedRow;
+    try {
+      row = JSON.parse(r.value) as DelayedRow;
+    } catch {
+      continue;
+    }
+    if (owner && owner !== this.cfg.nodeId) {
+      forwardDelayed.call(this, owner, r.vhost, r.name, row, 0);
+      continue;
+    }
+    this.store.putParameter(DELAYED, r.vhost, r.name, r.value);
+    this.store.deleteParameter(DELAYED_FORWARD, r.vhost, r.name);
+    scheduleDelayed.call(this, r.vhost, r.name, row);
   }
 }
 
@@ -663,11 +739,15 @@ Broker.prototype.enqueue = enqueue;
 Broker.prototype.enqueueLocal = enqueueLocal;
 Broker.prototype.holdDelayed = holdDelayed;
 Broker.prototype.resumeDelayed = resumeDelayed;
+Broker.prototype.delayOwner = delayOwner;
+Broker.prototype.acceptDelayed = acceptDelayed;
 
 declare module "./class.ts" {
   interface Broker {
     holdDelayed: typeof holdDelayed;
     resumeDelayed: typeof resumeDelayed;
+    delayOwner: typeof delayOwner;
+    acceptDelayed: typeof acceptDelayed;
     publish: typeof publish;
     enqueue: typeof enqueue;
     enqueueLocal: typeof enqueueLocal;
