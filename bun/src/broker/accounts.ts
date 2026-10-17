@@ -129,6 +129,7 @@ export function exportDefinitions(this: Broker) {
         arguments: {
           ...(e.alternate ? { "alternate-exchange": e.alternate } : {}),
           ...(e.delayedType ? { "x-delayed-type": e.delayedType } : {}),
+          ...(e.hashOn ? { [e.hashOn.startsWith("header:") ? "hash-header" : "hash-property"]: e.hashOn.slice(e.hashOn.indexOf(":") + 1) } : {}),
         },
       })),
     queues: [...this.queues.values()]
@@ -159,25 +160,7 @@ export function exportDefinitions(this: Broker) {
         arguments: {},
       })),
     ),
-    policies: this.policies.map((p) => ({
-      vhost: p.vhost,
-      name: p.name,
-      pattern: p.pattern,
-      "apply-to": p.applyTo,
-      priority: p.priority,
-      definition: {
-        ...(p.messageTtl != null ? { "message-ttl": p.messageTtl } : {}),
-        ...(p.dlx ? { "dead-letter-exchange": p.dlx } : {}),
-        ...(p.dlxKey ? { "dead-letter-routing-key": p.dlxKey } : {}),
-        ...(p.maxLength != null ? { "max-length": p.maxLength } : {}),
-        ...(p.maxLengthBytes != null ? { "max-length-bytes": p.maxLengthBytes } : {}),
-        ...(p.expiresMs != null ? { expires: p.expiresMs } : {}),
-        ...(p.overflow ? { overflow: p.overflow } : {}),
-        ...(p.dlxStrategy ? { "dead-letter-strategy": p.dlxStrategy } : {}),
-        ...(p.deliveryLimit != null ? { "delivery-limit": p.deliveryLimit } : {}),
-        ...(p.alternate ? { "alternate-exchange": p.alternate } : {}),
-      },
-    })),
+    policies: this.policies.map(policyItem),
   };
 }
 
@@ -236,7 +219,9 @@ export async function importDefinitions(this: Broker, body: {
   }
   for (const ex of body.exchanges ?? []) {
     if (!ex.name || ex.name.startsWith("amq.")) continue;
-    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, ((ex as { arguments?: Record<string, unknown> }).arguments?.["alternate-exchange"] as string) ?? null, (ex as { arguments?: Record<string, unknown> }).arguments?.["x-delayed-type"] as string ?? null);
+    const exArgs = (ex as { arguments?: Record<string, unknown> }).arguments ?? {};
+    const hashOn = typeof exArgs["hash-header"] === "string" ? `header:${exArgs["hash-header"]}` : typeof exArgs["hash-property"] === "string" ? `property:${exArgs["hash-property"]}` : null;
+    await this.declareExchange(ex.vhost, ex.name, ex.type ?? "direct", !!ex.durable, !!ex.auto_delete, !!ex.internal, (exArgs["alternate-exchange"] as string) ?? null, (exArgs["x-delayed-type"] as string) ?? null, hashOn);
   }
   for (const p of body.policies ?? []) {
     const apply = p["apply-to"] ?? "all";
@@ -268,6 +253,9 @@ export async function importDefinitions(this: Broker, body: {
       dlxStrategy: str("dead-letter-strategy") === "at-least-once" ? "at-least-once" : str("dead-letter-strategy") === "at-most-once" ? "at-most-once" : null,
       deliveryLimit: num("delivery-limit"),
       alternate: str("alternate-exchange"),
+      consumerTimeout: num("consumer-timeout"),
+      federationUpstream: str("federation-upstream"),
+      federationUpstreamSet: str("federation-upstream-set"),
     });
   }
   for (const q of body.queues ?? []) {

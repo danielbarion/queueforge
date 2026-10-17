@@ -37,7 +37,18 @@ export type StreamEntry = {
   /** Delivery headers and properties with `x-stream-offset`, built on first delivery. */
   wireHeaders?: Array<[string, Field]>;
   wireProps?: Uint8Array;
+  /** `x-stream-filter-value` header, read on first use by a filtering reader. Null when absent. */
+  filterValue?: string | null;
 };
+
+/** Whether a filtering reader takes this entry (RabbitMQ's x-stream-filter, applied per message). */
+function filterMatch(e: StreamEntry, filter: Set<string>, matchUnfiltered: boolean): boolean {
+  if (e.filterValue === undefined) {
+    const f = e.headers.find(([k]) => k === "x-stream-filter-value")?.[1];
+    e.filterValue = f && (f.t === "S" || f.t === "s") ? f.v : f?.t === "x" ? new TextDecoder().decode(f.v) : null;
+  }
+  return e.filterValue === null ? matchUnfiltered : filter.has(e.filterValue);
+}
 
 /**
  * One stream consumer. `ahead` holds entries read back from the store past the
@@ -484,10 +495,12 @@ export function pumpStream(this: Broker, q: QueueLive): void {
   if (!s) return;
   for (const reader of s.readers) {
     if (reader.cursor < s.first) reader.cursor = s.first;
+    const filter = reader.consumer.streamFilter;
     while (reader.cursor < s.next && reader.consumer.want()) {
       const e = readerEntry.call(this, q, s, reader, reader.cursor);
       if (!e) break;
       reader.cursor++;
+      if (filter !== undefined && !filterMatch(e, filter, reader.consumer.matchUnfiltered === true)) continue;
       const msg: LiveMsg = {
         id: `s-${e.offset}`,
         rowId: null,

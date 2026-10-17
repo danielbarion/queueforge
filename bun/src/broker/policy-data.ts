@@ -53,6 +53,9 @@ export function policyItem(p: Policy) {
       ...(p.dlxStrategy ? { "dead-letter-strategy": p.dlxStrategy } : {}),
       ...(p.deliveryLimit != null ? { "delivery-limit": p.deliveryLimit } : {}),
       ...(p.alternate ? { "alternate-exchange": p.alternate } : {}),
+      ...(p.consumerTimeout != null ? { "consumer-timeout": p.consumerTimeout } : {}),
+      ...(p.federationUpstream ? { "federation-upstream": p.federationUpstream } : {}),
+      ...(p.federationUpstreamSet ? { "federation-upstream-set": p.federationUpstreamSet } : {}),
     },
   };
 }
@@ -90,6 +93,7 @@ export function policyFromBody(vhost: string, name: string, body: {
   const known = new Set([
     "message-ttl", "dead-letter-exchange", "dead-letter-routing-key", "max-length", "max-length-bytes",
     "expires", "overflow", "delivery-limit", "alternate-exchange", "dead-letter-strategy", "federation-upstream-set",
+    "federation-upstream", "consumer-timeout",
   ]);
   const unknown = Object.keys(def).filter((k) => !known.has(k));
   if (unknown.length) throw new Error(`${JSON.stringify(unknown)} are not recognised policy settings`);
@@ -109,6 +113,9 @@ export function policyFromBody(vhost: string, name: string, body: {
     dlxStrategy: (["at-most-once", "at-least-once"] as const).find((v) => v === str("dead-letter-strategy")) ?? null,
     deliveryLimit: num("delivery-limit"),
     alternate: str("alternate-exchange"),
+    consumerTimeout: num("consumer-timeout"),
+    federationUpstream: str("federation-upstream"),
+    federationUpstreamSet: str("federation-upstream-set"),
   };
 }
 

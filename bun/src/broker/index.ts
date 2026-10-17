@@ -17,12 +17,12 @@ import "./accounts.ts";
 import "./alarms.ts";
 import "./events.ts";
 import "./shovel.ts";
+import "./federation.ts";
 import "./params.ts";
 import "./stream.ts";
 
 export { ChanError } from "../errors.ts";
 export { Broker };
-export { addFederationUpstream, addFederationPolicy, addFederationUri, fedUris } from "./federation.ts";
 export { topicMatches, headersMatch, queueHome } from "./routing.ts";
 export { propsWithDeath, argsFromFields } from "./args.ts";
 export { policyItem, policyFromBody } from "./policy-data.ts";

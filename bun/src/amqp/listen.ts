@@ -31,7 +31,13 @@ export type Ch = {
   txBytes: number;
   nextPub: number;
   nextDel: number;
-  deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string }>;
+  /** `at` is the delivery time for a consumer with an acknowledgement timeout, else 0. */
+  deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string; at?: number }>;
+  /**
+   * Acknowledgement timeout in ms by consumer tag, for quorum consumers only.
+   * Null on a channel that has none, so a delivery pays one null check.
+   */
+  timeouts: Map<string, number> | null;
   /** Deliveries held until this channel has prefetch credit again. */
   parked: Array<{ channel: number; tag: string; queue: string; msg: LiveMsg; noAck?: boolean; release?: () => void }>;
   byConsumer: Map<string, number>;
@@ -177,6 +183,8 @@ export class Conn {
   writeEx: string | null = null;
   /** The client advertised the connection.blocked capability. */
   wantsBlocked = false;
+  /** The client advertised consumer_cancel_notify: a timed-out consumer gets basic.cancel. */
+  cancelNotify = false;
   /** Registered with the broker while this connection is told about alarms. */
   alarmListener: ((blocked: boolean, reason: string) => void) | null = null;
 
@@ -244,6 +252,8 @@ export interface Conn {
   noteMetricsClosed(): void;
   connClose(code: number, text: string): Promise<void>;
   handleStartOk(payload: Uint8Array): Promise<void>;
+  handleUpdateSecret(payload: Uint8Array): Promise<void>;
+  timeoutConsumer(channel: number, c: Ch, tag: string, ms: number): Promise<void>;
   sendTune(): Promise<void>;
   handleTuneOk(payload: Uint8Array): void;
   handleConnectionOpen(payload: Uint8Array): Promise<void>;
@@ -422,6 +432,7 @@ type MigratedState = {
   vhost: string;
   /** The client advertised connection.blocked during the handshake on the previous child. */
   wantsBlocked?: boolean;
+  cancelNotify?: boolean;
   channels: Array<{ id: number; confirm: boolean; prefetch: number }>;
 };
 
@@ -452,6 +463,7 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
   conn.user = state.user;
   conn.vhost = state.vhost;
   conn.wantsBlocked = state.wantsBlocked === true;
+  conn.cancelNotify = state.cancelNotify === true;
   for (const item of state.channels) {
     const ch = conn.ch(item.id);
     ch.confirm = item.confirm;
@@ -500,6 +512,7 @@ export function ch(this: Conn, id: number): Ch {
       nextPub: 1,
       nextDel: 1,
       deliveries: new Map(),
+      timeouts: null,
       parked: [],
       byConsumer: new Map(),
       prefetch: 0,
@@ -547,6 +560,7 @@ export async function onMethod(this: Conn, channel: number, payload: Uint8Array)
   if (cls === 10 && mid === 31) return this.handleTuneOk(payload);
   if (cls === 10 && mid === 40) return this.handleConnectionOpen(payload);
   if (cls === 10 && mid === 50) return this.handleConnectionClose();
+  if (cls === 10 && mid === 70) return this.handleUpdateSecret(payload);
   if (cls === 20 && mid === 10) return this.handleChannelOpen(channel);
   if (cls === 20 && mid === 40) return this.handleChannelClose(channel);
   if (cls === 20 && mid === 20) return this.handleChannelFlow(channel, payload);

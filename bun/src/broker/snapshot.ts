@@ -101,6 +101,9 @@ export function policyFromWire(p: Record<string, unknown>): Policy & { definitio
     dlxStrategy: (str(p.dlxStrategy ?? p.dead_letter_strategy) as Policy["dlxStrategy"]) ?? null,
     deliveryLimit: num(p.deliveryLimit ?? p.delivery_limit),
     alternate: str(p.alternate ?? p.alternate_exchange),
+    consumerTimeout: num(p.consumerTimeout ?? definition["consumer-timeout"]),
+    federationUpstream: str(p.federationUpstream ?? definition["federation-upstream"]),
+    federationUpstreamSet: str(p.federationUpstreamSet ?? definition["federation-upstream-set"]),
     definition,
   };
 }
@@ -372,7 +375,7 @@ export function installMetaSnapshot(this: Broker, state: unknown): void {
     if (!["default", "direct", "fanout", "topic", "headers", "x-consistent-hash", "x-delayed-message", "x-local-random"].includes(kind)) throw new Error("Invalid snapshot exchange kind");
     const delayedType = r.delayedType ?? r.delayed_type ?? null;
     if (delayedType !== null && !["direct", "fanout", "topic", "headers"].includes(text(delayedType))) throw new Error("Invalid delayed exchange kind");
-    return { vhost: host(r.vhost), name: text(r.name, true), kind, durable: bool(r.durable, true), autoDelete: bool(r.autoDelete ?? r.auto_delete, false), internal: bool(r.internal, false), alternate: r.alternate == null ? null : text(r.alternate, true), delayedType: delayedType as string | null };
+    return { vhost: host(r.vhost), name: text(r.name, true), kind, durable: bool(r.durable, true), autoDelete: bool(r.autoDelete ?? r.auto_delete, false), internal: bool(r.internal, false), alternate: r.alternate == null ? null : text(r.alternate, true), delayedType: delayedType as string | null, ...(typeof r.hashOn === "string" ? { hashOn: r.hashOn } : {}) };
   });
   const queueRows = list("queues", true).map((value) => {
     const r = object(value); host(r.vhost); text(r.name ?? r.queue); bool(r.durable, true); bool(r.exclusive, false); bool(r.autoDelete ?? r.auto_delete, false);

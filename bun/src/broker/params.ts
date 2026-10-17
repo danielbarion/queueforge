@@ -9,7 +9,7 @@
  */
 import { Broker } from "./class.ts";
 import type { TopicPerm } from "./model.ts";
-import type { ShovelDef } from "./shovel.ts";
+import { shovelFrom, shovelValue, type ShovelDef } from "./shovel.ts";
 
 export type RuntimeParam = { component: string; vhost: string; name: string; value: unknown };
 
@@ -17,9 +17,6 @@ const GENERIC = "rt:";
 const GLOBAL = "global";
 const TOPIC_PERMS = "topic-permissions";
 
-function shovelValue(def: ShovelDef) {
-  return { "src-uri": def.srcUri, "src-queue": def.srcQueue, "dest-uri": def.destUri, "dest-queue": def.destQueue };
-}
 
 function parseJson(text: string): unknown {
   try {
@@ -70,21 +67,10 @@ export function putRuntimeParam(this: Broker, p: RuntimeParam) {
   if (p.component === "vhost-limits") {
     this.applyLimitsRow("vhost_limits", { vhost: p.vhost, ...value });
   } else if (p.component === "shovel") {
-    const srcQueue = value["src-queue"];
-    const destQueue = value["dest-queue"];
-    if (typeof srcQueue !== "string" || typeof destQueue !== "string" || !srcQueue || !destQueue) {
-      throw new Error("src-queue and dest-queue are required");
-    }
-    this.putShovel({
-      vhost: p.vhost,
-      name: p.name,
-      srcUri: String(value["src-uri"] || "amqp://"),
-      srcQueue,
-      destUri: String(value["dest-uri"] || "amqp://"),
-      destQueue,
-    });
+    this.putShovel(shovelFrom(p.vhost, p.name, value));
   } else {
     this.store.putParameter(GENERIC + p.component, p.vhost, p.name, JSON.stringify(p.value ?? null));
+    if (p.component.startsWith("federation-upstream")) this.syncFederation();
   }
 }
 
@@ -100,7 +86,9 @@ export function deleteRuntimeParam(this: Broker, component: string, vhost: strin
     return had;
   }
   if (component === "shovel") return this.deleteShovel(vhost, name);
-  return this.store.deleteParameter(GENERIC + component, vhost, name);
+  const had = this.store.deleteParameter(GENERIC + component, vhost, name);
+  if (had && component.startsWith("federation-upstream")) this.syncFederation();
+  return had;
 }
 
 /**

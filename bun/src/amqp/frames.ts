@@ -541,7 +541,7 @@ function absorbFresh(this: Conn) {
 function exchangeHome(this: Conn, exchange: string, routingKey: string): string | null {
   const vhost = this.vhost || "/";
   const ex = this.broker.exchanges.get(this.broker.key(vhost, exchange));
-  if (!ex || ex.kind === "headers") return null;
+  if (!ex || ex.kind === "headers" || ex.hashOn) return null;
   let queues: string[];
   try {
     queues = this.broker.route(vhost, exchange, routingKey, []);
@@ -613,6 +613,7 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
     user: this.user,
     vhost: this.vhost || "/",
     wantsBlocked: this.wantsBlocked,
+    cancelNotify: this.cancelNotify,
     channels: [...this.channels.entries()].map(([id, ch]) => ({
       id,
       confirm: ch.confirm,
@@ -656,6 +657,7 @@ async function parseAvailable(this: Conn): Promise<void> {
         (bytes) => void this.send(bytes),
         () => this.socket.end(),
       );
+      this.amqp10.peerCN = this.peerCN;
       const bytes = this.buf;
       this.buf = new Uint8Array(0);
       this.amqp10.feed(bytes);

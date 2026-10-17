@@ -65,6 +65,8 @@ export class StompSession {
   private chain: Promise<void> = Promise.resolve();
   private nextMessage = 1;
   private readonly owner = -(1_000_000 + ++ownerSeq);
+  /** Common name of a verified client certificate (stomps listener). */
+  peerCN: string | null = null;
 
   constructor(
     private readonly broker: Broker,
@@ -232,9 +234,13 @@ export class StompSession {
     this.version = accept.includes("1.2") ? "1.2" : accept.includes("1.1") ? "1.1" : "1.0";
     const host = f.headers.get("host");
     if (host && this.broker.vhosts.has(host)) this.vhost = host;
-    const login = f.headers.get("login") ?? "";
+    let login = f.headers.get("login") ?? "";
     const passcode = f.headers.get("passcode") ?? "";
-    if (!login || !(await this.broker.verify(login, passcode)) || !this.broker.hasVhostAccess(login, this.vhost)) {
+    // RabbitMQ's stomp.ssl_cert_login: no login and a verified client
+    // certificate log in as its common name, which must exist. No passcode.
+    const byCert = !login && !!this.peerCN && this.broker.users.has(this.peerCN);
+    if (byCert) login = this.peerCN!;
+    if (!login || !(byCert || (await this.broker.verify(login, passcode))) || !this.broker.hasVhostAccess(login, this.vhost)) {
       this.error("Access refused", "Bad credentials or no access to the vhost");
       return this.teardown();
     }
@@ -456,12 +462,27 @@ function readContentType(propRaw: Uint8Array): string {
  * @param port TCP port from config.
  * @param broker Broker that routes and stores the messages.
  */
-export function startStomp(host: string, port: number, broker: Broker, tls: { cert: string; key: string } | null = null) {
+export function startStomp(host: string, port: number, broker: Broker, tls: { cert: string; key: string; ca?: string } | null = null) {
   Bun.listen<StompSession | undefined>({
     hostname: host,
     port,
-    ...(tls ? { tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } } : {}),
+    // With a CA, a client certificate is asked for but optional.
+    ...(tls
+      ? {
+          tls: {
+            cert: Bun.file(tls.cert),
+            key: Bun.file(tls.key),
+            ...(tls.ca ? { ca: Bun.file(tls.ca), requestCert: true, rejectUnauthorized: false } : {}),
+          },
+        }
+      : {}),
     socket: {
+      handshake(socket) {
+        if (!tls?.ca || !socket.data) return;
+        const s = socket as unknown as { authorized?: boolean; getPeerCertificate?: () => { subject?: { CN?: string } } | null };
+        const cn = s.getPeerCertificate?.()?.subject?.CN;
+        if (cn && s.authorized) socket.data.peerCN = cn;
+      },
       open(socket) {
         socket.data = new StompSession(
           broker,

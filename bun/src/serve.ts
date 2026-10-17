@@ -11,6 +11,7 @@ import { startMqtt, startStomp, startStream } from "./protocols/index.ts";
 import { Broker } from "./broker/index.ts";
 import { Cluster } from "./cluster.ts";
 import { dnsMembers, splitHost, type Config } from "./config.ts";
+import { discoveryBackend, membersFrom } from "./discovery.ts";
 import { managementApp, metricsText } from "./http/index.ts";
 import { Store } from "./store.ts";
 import { join } from "node:path";
@@ -26,6 +27,24 @@ export async function serve(cfg: Config, dev: boolean, tls: { cert: string; key:
   if (dnsSelf && cfg.dnsName) {
     cfg.nodeId = dnsSelf.id;
     cfg.members = await dnsMembers(cfg.dnsName, cfg.dnsPort ?? splitHost(cfg.clusterListen!).port, dnsSelf);
+  }
+  // Cloud discovery (k8s, consul, etcd, aws): the same member list, from a service.
+  const cloudSelf = cfg.discovery && cfg.discovery !== "dns" && cfg.clusterListen ? { id: cfg.nodeId || cfg.clusterListen, addr: cfg.clusterListen } : null;
+  const cloud = cloudSelf
+    ? discoveryBackend(cfg.discovery!, cfg.clusterKeys ?? {}, { host: splitHost(cloudSelf.addr).host, addr: cloudSelf.addr }, cfg.dnsPort ?? splitHost(cloudSelf.addr).port)
+    : null;
+  if (cloud && cloudSelf) {
+    cfg.nodeId = cloudSelf.id;
+    try {
+      await cloud.start();
+      cfg.members = membersFrom(await cloud.list(), cloudSelf);
+    } catch (err) {
+      console.error(`[discovery] ${cfg.discovery}: ${err instanceof Error ? err.message : err}`);
+      cfg.members = membersFrom([], cloudSelf);
+    }
+    const leave = () => void cloud.stop().finally(() => process.exit(0));
+    process.once("SIGTERM", leave);
+    process.once("SIGINT", leave);
   }
   const freshData = !existsSync(join(cfg.dataDir, "bun.sqlite"));
   const store = new Store(join(cfg.dataDir, "bun.sqlite"), cfg.fsync, cfg.fsyncIntervalMs, cfg.fsyncEveryN);
@@ -52,6 +71,16 @@ export async function serve(cfg: Config, dev: boolean, tls: { cert: string; key:
       await Bun.sleep(50);
     }
   }
+  if (cloud && cloudSelf) {
+    setInterval(async () => {
+      try {
+        const found = membersFrom(await cloud.list(), cloudSelf);
+        if (JSON.stringify(found) !== JSON.stringify(cfg.members)) cluster.installMembers(found);
+      } catch {
+        /* keep the members we have */
+      }
+    }, 5000);
+  }
   if (dnsSelf && cfg.dnsName) {
     setInterval(async () => {
       const found = await dnsMembers(cfg.dnsName!, cfg.dnsPort ?? splitHost(cfg.clusterListen!).port, dnsSelf);
@@ -61,6 +90,10 @@ export async function serve(cfg: Config, dev: boolean, tls: { cert: string; key:
   setInterval(() => broker.sweep(), 200);
   broker.resumeShovels();
   broker.resumeDeadLetters();
+  broker.resumeDelayed();
+  // Federation links come from the stored upstreams and policies.
+  broker.federationOn = true;
+  broker.syncFederation();
 
   const amqp = splitHost(cfg.amqp);
   const mgmt = splitHost(cfg.management);
@@ -110,7 +143,7 @@ export async function serve(cfg: Config, dev: boolean, tls: { cert: string; key:
     startStream(stream.host, stream.port, broker);
   }
   // TLS listeners for MQTT, STOMP and streams use the [tls] certificate.
-  const protocolTls = cfg.tlsCert && cfg.tlsKey ? { cert: cfg.tlsCert, key: cfg.tlsKey } : null;
+  const protocolTls = cfg.tlsCert && cfg.tlsKey ? { cert: cfg.tlsCert, key: cfg.tlsKey, ...(cfg.tlsCa ? { ca: cfg.tlsCa } : {}) } : null;
   if (bindMgmt && cfg.mqtts && protocolTls) {
     const at = splitHost(cfg.mqtts);
     startMqtt(at.host, at.port, broker, protocolTls);

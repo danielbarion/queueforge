@@ -23,6 +23,7 @@ for (const scenario of [
       kick: async () => { subscriptions++; },
       isLocalHome: (home: string) => home === "local",
       isQuorumLeader: () => scenario.leader,
+      consumerTimeoutFor: () => 0,
       pump: () => { pumps++; },
       pumpStream: () => { streams++; },
     } as unknown as Broker;

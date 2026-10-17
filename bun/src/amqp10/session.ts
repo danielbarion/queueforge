@@ -150,6 +150,8 @@ export class Amqp10Session {
   private heartbeat: Timer | null = null;
   private static seq = 0;
   private readonly id = ++Amqp10Session.seq;
+  /** Common name of a verified TLS client certificate; offers SASL EXTERNAL. */
+  peerCN: string | null = null;
 
   constructor(
     private readonly broker: Broker,
@@ -209,7 +211,9 @@ export class Amqp10Session {
     const isAmqp = h.every((b, i) => b === HEADER_AMQP[i]);
     if (this.stage === "header" && isSasl) {
       this.write(HEADER_SASL);
-      this.send(1, 0, performative(SASL.mechanisms, [array([sym("PLAIN")])]));
+      // EXTERNAL is offered when the TLS peer showed a verified certificate.
+      const mechanisms = this.peerCN ? [sym("EXTERNAL"), sym("PLAIN")] : [sym("PLAIN")];
+      this.send(1, 0, performative(SASL.mechanisms, [array(mechanisms)]));
       this.stage = "sasl";
       return true;
     }
@@ -269,7 +273,11 @@ export class Amqp10Session {
     const mechanism = field(f, 0);
     const response = field(f, 1);
     let ok = false;
-    if (mechanism instanceof Sym && mechanism.s === "PLAIN" && response instanceof Uint8Array) {
+    if (mechanism instanceof Sym && mechanism.s === "EXTERNAL") {
+      // The user is the certificate's common name, as ssl_cert_login_from = common_name.
+      ok = !!this.peerCN && this.broker.users.has(this.peerCN);
+      if (ok) this.user = this.peerCN!;
+    } else if (mechanism instanceof Sym && mechanism.s === "PLAIN" && response instanceof Uint8Array) {
       const [, user = "", pass = ""] = dec.decode(response).split("\0");
       ok = !!user && (await this.broker.verify(user, pass));
       if (ok) this.user = user;

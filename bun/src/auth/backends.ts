@@ -28,7 +28,11 @@ export type LdapConfig = {
   adminGroup: string | null;
   bindDn: string | null;
   bindPassword: string | null;
+  resourceAccess?: Partial<Record<LdapPermission, LdapQuery>>;
 };
+
+export type LdapPermission = "vhost" | "configure" | "write" | "read" | "topic";
+export type LdapQuery = { constant: boolean } | { inGroup: string; attribute: string };
 
 export type Scope = { kind: "configure" | "write" | "read"; vhost: RegExp; resource: RegExp; routingKey: RegExp | null };
 
@@ -39,6 +43,11 @@ export type Principal = {
   scopes: Scope[] | null;
   /** Epoch ms after which the login is no longer valid. */
   expiresAt: number | null;
+  /**
+   * LDAP access query results, evaluated once at login (RabbitMQ caches them
+   * for the connection). Absent grants everything, as `{constant, true}`.
+   */
+  access?: Partial<Record<LdapPermission, boolean>>;
 };
 
 /** A RabbitMQ scope wildcard as an anchored regular expression. */
@@ -73,6 +82,7 @@ export function parseScopes(scopes: string[], resourceServerId: string): { scope
 
 export function principalAllows(p: Principal, vhost: string, kind: Scope["kind"], resource: string, routingKey?: string): boolean {
   if (p.expiresAt != null && Date.now() >= p.expiresAt) return false;
+  if (p.access && p.access[kind] === false) return false;
   if (!p.scopes) return true;
   return p.scopes.some(
     (s) => s.kind === kind && s.vhost.test(vhost) && s.resource.test(resource) && (routingKey == null || s.routingKey == null || s.routingKey.test(routingKey)),
@@ -81,6 +91,7 @@ export function principalAllows(p: Principal, vhost: string, kind: Scope["kind"]
 
 export function principalHasVhost(p: Principal, vhost: string): boolean {
   if (p.expiresAt != null && Date.now() >= p.expiresAt) return false;
+  if (p.access && p.access.vhost === false) return false;
   return !p.scopes || p.scopes.some((s) => s.vhost.test(vhost));
 }
 
@@ -175,19 +186,32 @@ export class LdapBackend {
       return null;
     }
     const tags = ["management"];
-    if (this.cfg.adminGroup) {
+    const queries = Object.entries(this.cfg.resourceAccess ?? {}) as Array<[LdapPermission, LdapQuery]>;
+    const groups = queries.some(([, q]) => "inGroup" in q);
+    // Group lookups bind as bind_dn when one is set, as RabbitMQ's other_bind.
+    if ((this.cfg.adminGroup || groups) && this.cfg.bindDn) {
       try {
-        if (this.cfg.bindDn) {
-          await c.unbind().catch(() => {});
-          await c.bind(this.cfg.bindDn, this.cfg.bindPassword ?? "");
-        }
-        const { searchEntries } = await c.search(this.cfg.adminGroup, { scope: "base", filter: `(member=${filterValue(dn)})`, attributes: ["cn"] });
-        if (searchEntries.length) tags.unshift("administrator");
+        await c.unbind().catch(() => {});
+        await c.bind(this.cfg.bindDn, this.cfg.bindPassword ?? "");
       } catch {
-        /* no group: not an administrator */
+        /* lookups below fail and deny */
       }
     }
+    const inGroup = async (group: string, attribute: string): Promise<boolean> => {
+      try {
+        const { searchEntries } = await c.search(group, { scope: "base", filter: `(${attribute}=${filterValue(dn)})`, attributes: ["cn"] });
+        return searchEntries.length > 0;
+      } catch {
+        return false;
+      }
+    };
+    if (this.cfg.adminGroup && (await inGroup(this.cfg.adminGroup, "member"))) tags.unshift("administrator");
+    let access: Principal["access"];
+    for (const [perm, q] of queries) {
+      access ??= {};
+      access[perm] = "inGroup" in q ? await inGroup(q.inGroup, q.attribute) : q.constant;
+    }
     await c.unbind().catch(() => {});
-    return { source: "ldap", tags, scopes: null, expiresAt: null };
+    return { source: "ldap", tags, scopes: null, expiresAt: null, ...(access ? { access } : {}) };
   }
 }

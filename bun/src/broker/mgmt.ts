@@ -410,7 +410,7 @@ export function listTopicPerms(this: Broker, user?: string) {
 export function topicWriteAllowed(this: Broker, user: string, vhost: string, exchange: string, routingKey: string): boolean {
   // A token's write scope may name a routing key; LDAP logins allow every key.
   const principal = this.principalOf(user);
-  if (principal) return principalAllows(principal, vhost, "write", exchange || "amq.default", routingKey);
+  if (principal) return principal.access?.topic !== false && principalAllows(principal, vhost, "write", exchange || "amq.default", routingKey);
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
   try {
@@ -431,7 +431,7 @@ export function topicWriteAllowed(this: Broker, user: string, vhost: string, exc
  */
 export function topicReadAllowed(this: Broker, user: string, vhost: string, exchange: string, routingKey: string): boolean {
   const principal = this.principalOf(user);
-  if (principal) return principalAllows(principal, vhost, "read", exchange, routingKey);
+  if (principal) return principal.access?.topic !== false && principalAllows(principal, vhost, "read", exchange, routingKey);
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
   try {

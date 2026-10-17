@@ -6,13 +6,13 @@
 import { Broker, type QuorumAcks } from "./class.ts";
 import { STORE_ONLY_PREFIX } from "../raft/node.ts";
 import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
+import { readProps } from "../amqp10/map.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
-import { fedLinks } from "./federation.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields, takeTransientSeq } from "./args.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
@@ -55,7 +55,6 @@ function localClassicFast(
   },
 ): "ack" | "nack" | Promise<"ack" | "nack"> | typeof SLOW {
   if (input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
-  if (fedLinks.some((link) => link.upstream === input.vhost)) return SLOW;
   let name = input.routingKey;
   if (input.exchange !== "") {
     // A named exchange that routes to one queue is the common publish
@@ -63,7 +62,7 @@ function localClassicFast(
     // third of the work-queue cell. Routes are cached in `route`.
     const ex = this.exchanges.get(this.key(input.vhost, input.exchange));
     if (!ex || ex.kind === "x-delayed-message" || ex.kind === "headers") return SLOW;
-    const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers);
+    const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers, input.propRaw);
     if (dests.length !== 1) return SLOW;
     name = dests[0]!;
   }
@@ -215,8 +214,8 @@ async function publishSlow(this: Broker, input: {
   mandatory?: boolean;
 }): Promise<"ack" | "nack" | "return"> {
   // x-delayed-message: hold the message for its x-delay, then route it.
-  // The publish is confirmed now, as the RabbitMQ plugin does. Delays live in
-  // memory, so a restart loses messages that are still waiting.
+  // The publish is confirmed now, as the RabbitMQ plugin does. A waiting
+  // message is stored, so it is still delivered after a restart.
   if (input.exchange !== "" && !(input as { delayed?: boolean }).delayed) {
     const ex = this.exchanges.get(this.key(input.vhost, input.exchange));
     if (ex?.kind === "x-delayed-message") {
@@ -224,10 +223,7 @@ async function publishSlow(this: Broker, input: {
       const delay = raw && "v" in raw ? Number(raw.v) : 0;
       if (Number.isFinite(delay) && delay > 0) {
         this.prom.received++;
-        const timer = setTimeout(() => {
-          void Promise.resolve(this.publish({ ...input, confirm: false, mandatory: false, delayed: true } as typeof input)).catch(() => {});
-        }, delay);
-        timer.unref?.();
+        this.holdDelayed(input, Date.now() + delay);
         return "ack";
       }
     }
@@ -239,10 +235,10 @@ async function publishSlow(this: Broker, input: {
       throw new ChanError(404, `NOT_FOUND - no queue '${input.routingKey}' in vhost '${input.vhost}'`);
     }
   }
-  const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers);
+  const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers, input.propRaw);
   for (const key of [...headerList(input.headers, "CC"), ...headerList(input.headers, "BCC")]) {
     if (key === input.routingKey) continue;
-    for (const name of this.route(input.vhost, input.exchange, key, input.headers)) {
+    for (const name of this.route(input.vhost, input.exchange, key, input.headers, input.propRaw)) {
       if (!dests.includes(name)) dests.push(name);
     }
   }
@@ -250,8 +246,7 @@ async function publishSlow(this: Broker, input: {
     input.headers = input.headers.filter(([key]) => key !== "BCC");
     if (input.propRaw.length) input.propRaw = replaceHeaderTable(input.propRaw, input.headers);
   }
-  const copies = fedLinks.filter((link) => link.upstream === input.vhost && new RegExp(link.pattern).test(input.exchange));
-  if (!dests.length && copies.length === 0) {
+  if (!dests.length) {
     if (input.mandatory) this.prom.unroutableReturned++;
     else this.prom.unroutableDropped++;
     return "return";
@@ -322,12 +317,6 @@ async function publishSlow(this: Broker, input: {
       ),
     );
   }
-  for (const link of copies) {
-    for (const name of this.route(link.downstream, input.exchange, input.routingKey, input.headers)) {
-      noteLocalDurable(link.downstream, name);
-      waits.push(this.enqueue(link.downstream, name, src));
-    }
-  }
   for (const ok of await Promise.all(waits)) if (!ok) rejected = true;
   // every_n_ms stages a local classic row and fsyncs on the interval. The confirm waits for that fsync.
   // Quorum and a forwarded home already waited on their own copy. Counting here
@@ -335,6 +324,77 @@ async function publishSlow(this: Broker, input: {
   if (!rejected && needsLocalDurable) await this.store.whenDurable();
   if (!rejected && input.confirm) this.prom.confirmed++;
   return rejected ? "nack" : "ack";
+}
+
+/** Store key of the messages an x-delayed-message exchange is holding. */
+const DELAYED = "delayed-message";
+let delayedSeq = 0;
+
+type DelayedRow = {
+  exchange: string;
+  routingKey: string;
+  body: string;
+  propRaw: string;
+  persistent: boolean;
+  priority: number;
+  expiration: string;
+  due: number;
+};
+
+/**
+ * Hold one message for an x-delayed-message exchange until `due` (epoch ms).
+ * The row is stored first, and dropped once the message is routed.
+ */
+export function holdDelayed(this: Broker, input: { vhost: string; exchange: string; routingKey: string; body: Uint8Array; propRaw: Uint8Array; persistent: boolean; priority: number; expiration: string }, due: number) {
+  const name = `${due}-${QUORUM_ID_BASE}${++delayedSeq}`;
+  const row: DelayedRow = {
+    exchange: input.exchange,
+    routingKey: input.routingKey,
+    body: Buffer.from(input.body).toString("base64"),
+    propRaw: Buffer.from(input.propRaw).toString("base64"),
+    persistent: input.persistent,
+    priority: input.priority,
+    expiration: input.expiration,
+    due,
+  };
+  this.store.putParameter(DELAYED, input.vhost, name, JSON.stringify(row));
+  scheduleDelayed.call(this, input.vhost, name, row);
+}
+
+function scheduleDelayed(this: Broker, vhost: string, name: string, row: DelayedRow) {
+  const timer = setTimeout(() => {
+    const propRaw = new Uint8Array(Buffer.from(row.propRaw, "base64"));
+    const send = {
+      vhost,
+      exchange: row.exchange,
+      routingKey: row.routingKey,
+      body: new Uint8Array(Buffer.from(row.body, "base64")),
+      headers: readProps(propRaw).headers,
+      propRaw,
+      persistent: row.persistent,
+      priority: row.priority,
+      expiration: row.expiration,
+      confirm: false,
+      mandatory: false,
+      delayed: true,
+    };
+    // The row goes once the copy is routed (or the exchange is gone).
+    void Promise.resolve(this.publish(send as Parameters<Broker["publish"]>[0]))
+      .catch(() => {})
+      .finally(() => this.store.deleteParameter(DELAYED, vhost, name));
+  }, Math.max(0, Math.min(row.due - Date.now(), 2 ** 31 - 1)));
+  timer.unref?.();
+}
+
+/** Re-arm the delayed messages stored before a restart. Late ones are routed now. */
+export function resumeDelayed(this: Broker) {
+  for (const r of this.store.listParameters(DELAYED)) {
+    try {
+      scheduleDelayed.call(this, r.vhost, r.name, JSON.parse(r.value) as DelayedRow);
+    } catch {
+      /* a corrupt row is skipped */
+    }
+  }
 }
 
 /**
@@ -601,9 +661,13 @@ export function enqueueLocal(this: Broker,
 Broker.prototype.publish = publish;
 Broker.prototype.enqueue = enqueue;
 Broker.prototype.enqueueLocal = enqueueLocal;
+Broker.prototype.holdDelayed = holdDelayed;
+Broker.prototype.resumeDelayed = resumeDelayed;
 
 declare module "./class.ts" {
   interface Broker {
+    holdDelayed: typeof holdDelayed;
+    resumeDelayed: typeof resumeDelayed;
     publish: typeof publish;
     enqueue: typeof enqueue;
     enqueueLocal: typeof enqueueLocal;

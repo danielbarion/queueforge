@@ -6,10 +6,10 @@
  */
 import { Elysia } from "elysia";
 import { join } from "node:path";
-import { addFederationPolicy, addFederationUpstream, addFederationUri, fedUris, policyFromBody, policyItem, type Broker } from "../broker/index.ts";
+import { policyFromBody, policyItem, type Broker } from "../broker/index.ts";
 import type { Policy } from "../broker/model.ts";
 import { policyToWire } from "../broker/snapshot.ts";
-import { exchangeFromPattern, runFederation } from "../bridge.ts";
+import { shovelFrom } from "../broker/shovel.ts";
 import { metricsText } from "./metrics.ts";
 import { MqttSession } from "../protocols/mqtt.ts";
 import { StompSession } from "../protocols/stomp.ts";
@@ -638,7 +638,14 @@ export function managementApp(broker: Broker, spaDir: string) {
       const vhost = decodeURIComponent(params.vhost);
       const denied = access(request, set, vhost, [ ["configure", params.name] ]);
       if (denied) return denied;
-      await broker.declareExchange(vhost, params.name, b.type ?? "direct", !!b.durable, !!b.auto_delete, !!b.internal, b.arguments?.["alternate-exchange"] ?? null, b.arguments?.["x-delayed-type"] ?? null);
+      const header = b.arguments?.["hash-header"];
+      const property = b.arguments?.["hash-property"];
+      if (header && property) {
+        set.status = 400;
+        return { error: "bad_request", reason: "hash-header and hash-property are mutually exclusive" };
+      }
+      const hashOn = header ? `header:${header}` : property ? `property:${property}` : null;
+      await broker.declareExchange(vhost, params.name, b.type ?? "direct", !!b.durable, !!b.auto_delete, !!b.internal, b.arguments?.["alternate-exchange"] ?? null, b.arguments?.["x-delayed-type"] ?? null, hashOn);
       set.status = 201;
       return { name: params.name, type: b.type ?? "direct" };
     })
@@ -713,78 +720,15 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
       }
-      const b = (body ?? {}) as {
-        pattern?: string;
-        "apply-to"?: string;
-        priority?: number;
-        definition?: Record<string, string | number>;
-      };
-      const apply = b["apply-to"] ?? "all";
-      if (apply !== "queues" && apply !== "exchanges" && apply !== "all") {
+      let policy: Policy;
+      try {
+        policy = policyFromBody(decodeURIComponent(params.vhost), params.name, (body ?? {}) as Parameters<typeof policyFromBody>[2]);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "bad policy";
         set.status = 400;
-        return { error: "apply-to must be queues, exchanges, or all" };
-      }
-      const def = b.definition ?? {};
-      const num = (k: string) => {
-        const v = def[k];
-        if (v == null || v === "") return null;
-        const n = Number(v);
-        return Number.isFinite(n) && n > 0 ? n : null;
-      };
-      const str = (k: string) => {
-        const v = def[k];
-        return v == null || v === "" ? null : String(v);
-      };
-      if (!b.pattern) {
-        set.status = 400;
-        return { error: "pattern is required" };
-      }
-      const known = new Set([
-        "message-ttl",
-        "dead-letter-exchange",
-        "dead-letter-routing-key",
-        "max-length",
-        "max-length-bytes",
-        "expires",
-        "overflow",
-        "delivery-limit",
-        "alternate-exchange",
-        "dead-letter-strategy",
-        "federation-upstream-set",
-      ]);
-      const unknown = Object.keys(def).filter((k) => !known.has(k));
-      if (unknown.length) {
-        set.status = 400;
-        return { error: "bad_request", reason: `${JSON.stringify(unknown)} are not recognised policy settings` };
-      }
-      if (str("federation-upstream-set")) {
-        const downstream = decodeURIComponent(params.vhost);
-        addFederationPolicy(downstream, b.pattern);
-        const exchange = exchangeFromPattern(b.pattern);
-        if (exchange) {
-          for (const link of fedUris) {
-            if (link.downstream === downstream) void runFederation(link.uri, downstream, exchange, broker).catch((err) => console.error("federation", err));
-          }
-        }
+        return reason.includes("not recognised") ? { error: "bad_request", reason } : { error: reason };
       }
       try {
-        const policy: Policy = {
-          vhost: decodeURIComponent(params.vhost),
-          name: params.name,
-          pattern: b.pattern,
-          applyTo: apply,
-          priority: b.priority ?? 0,
-          messageTtl: num("message-ttl"),
-          expiresMs: num("expires"),
-          dlx: str("dead-letter-exchange"),
-          dlxKey: str("dead-letter-routing-key"),
-          maxLength: num("max-length"),
-          maxLengthBytes: num("max-length-bytes"),
-          overflow: (["drop-head", "reject-publish", "reject-publish-dlx"] as const).find((v) => v === str("overflow")) ?? null,
-          dlxStrategy: (["at-most-once", "at-least-once"] as const).find((v) => v === str("dead-letter-strategy")) ?? null,
-          deliveryLimit: num("delivery-limit"),
-          alternate: str("alternate-exchange"),
-        };
         broker.upsertPolicy(policy);
         void broker.cluster?.replicate("policy", policyToWire(policy));
       } catch (err) {
@@ -800,17 +744,15 @@ export function managementApp(broker: Broker, spaDir: string) {
         set.status = s ? 403 : 401;
         return { error: "forbidden" };
       }
-      const value = ((body ?? {}) as { value?: Record<string, string> }).value ?? {};
-      const srcQueue = value["src-queue"];
-      const destQueue = value["dest-queue"];
-      if (!srcQueue || !destQueue) {
-        set.status = 400;
-        return { error: "src-queue and dest-queue are required" };
-      }
+      const value = ((body ?? {}) as { value?: Record<string, unknown> }).value ?? {};
       const vhost = decodeURIComponent(params.vhost);
       const name = decodeURIComponent(params.name);
-      // A missing URI means this broker, as `amqp://` does.
-      broker.putShovel({ vhost, name, srcUri: value["src-uri"] || "amqp://", srcQueue, destUri: value["dest-uri"] || "amqp://", destQueue });
+      try {
+        broker.putShovel(shovelFrom(vhost, name, value));
+      } catch (err) {
+        set.status = 400;
+        return { error: err instanceof Error ? err.message : "src-queue and dest-queue are required" };
+      }
       set.status = 201;
       return { name };
     })
@@ -833,23 +775,15 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "unauthorized" };
       }
       return {
-        items: [...broker.shovels.values()].map(({ def }) => ({ name: def.name, vhost: def.vhost, type: "dynamic", state: "running", src_queue: def.srcQueue, dest_queue: def.destQueue })),
+        items: broker.shovelStatus(),
       };
     })
-    .put("/api/parameters/federation-upstream/:vhost/:name", ({ params, body, request, set }) => {
+    .get("/api/shovels/:vhost", ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      const uri = ((body ?? {}) as { value?: { uri?: string } }).value?.uri ?? "";
-      const slash = uri.indexOf("/", uri.indexOf("://") + 3);
-      let upstream = slash >= 0 ? uri.slice(slash + 1) : "/";
-      if (upstream === "" || upstream === "%2F" || upstream === "%2f") upstream = "/";
-      const downstream = decodeURIComponent(params.vhost);
-      addFederationUpstream(downstream, upstream);
-      if (uri.includes("://")) addFederationUri(downstream, uri);
-      set.status = 201;
-      return { uri };
+      return broker.shovelStatus(decodeURIComponent(params.vhost));
     })
     .get("/api/policies/:vhost", ({ params, request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
@@ -857,55 +791,28 @@ export function managementApp(broker: Broker, spaDir: string) {
         return { error: "unauthorized" };
       }
       const vhost = decodeURIComponent(params.vhost);
-      return {
-        items: broker.policies
-          .filter((p) => p.vhost === vhost)
-          .map((p) => ({
-            vhost: p.vhost,
-            name: p.name,
-            pattern: p.pattern,
-            "apply-to": p.applyTo,
-            priority: p.priority,
-            definition: {
-              ...(p.messageTtl != null ? { "message-ttl": p.messageTtl } : {}),
-              ...(p.dlx ? { "dead-letter-exchange": p.dlx } : {}),
-              ...(p.dlxKey ? { "dead-letter-routing-key": p.dlxKey } : {}),
-              ...(p.maxLength != null ? { "max-length": p.maxLength } : {}),
-              ...(p.maxLengthBytes != null ? { "max-length-bytes": p.maxLengthBytes } : {}),
-              ...(p.expiresMs != null ? { expires: p.expiresMs } : {}),
-              ...(p.overflow ? { overflow: p.overflow } : {}),
-              ...(p.dlxStrategy ? { "dead-letter-strategy": p.dlxStrategy } : {}),
-              ...(p.deliveryLimit != null ? { "delivery-limit": p.deliveryLimit } : {}),
-              ...(p.alternate ? { "alternate-exchange": p.alternate } : {}),
-            },
-          })),
-      };
+      return { items: broker.policies.filter((p) => p.vhost === vhost).map(policyItem) };
     })
     .get("/api/policies", ({ request, set }) => {
       if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
         set.status = 401;
         return { error: "unauthorized" };
       }
-      return {
-        items: broker.policies.map((p) => ({
-          vhost: p.vhost,
-          name: p.name,
-          pattern: p.pattern,
-          "apply-to": p.applyTo,
-          priority: p.priority,
-          definition: {
-            ...(p.messageTtl != null ? { "message-ttl": p.messageTtl } : {}),
-            ...(p.dlx ? { "dead-letter-exchange": p.dlx } : {}),
-            ...(p.dlxKey ? { "dead-letter-routing-key": p.dlxKey } : {}),
-            ...(p.maxLength != null ? { "max-length": p.maxLength } : {}),
-            ...(p.maxLengthBytes != null ? { "max-length-bytes": p.maxLengthBytes } : {}),
-            ...(p.expiresMs != null ? { expires: p.expiresMs } : {}),
-            ...(p.overflow ? { overflow: p.overflow } : {}),
-            ...(p.deliveryLimit != null ? { "delivery-limit": p.deliveryLimit } : {}),
-            ...(p.alternate ? { "alternate-exchange": p.alternate } : {}),
-          },
-        })),
-      };
+      return { items: broker.policies.map(policyItem) };
+    })
+    .get("/api/federation-links", ({ request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.federationLinks();
+    })
+    .get("/api/federation-links/:vhost", ({ params, request, set }) => {
+      if (!requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"))) {
+        set.status = 401;
+        return { error: "unauthorized" };
+      }
+      return broker.federationLinks(decodeURIComponent(params.vhost));
     })
     .delete("/api/policies/:vhost/:name", ({ params, request, set }) => {
       const s = requireUser(request.headers.get("cookie"), request.headers.get("host"), request.headers.get("authorization"));
@@ -1019,7 +926,7 @@ export function managementApp(broker: Broker, spaDir: string) {
         durable: e.durable,
         auto_delete: e.autoDelete,
         internal: e.internal,
-        arguments: e.alternate ? { "alternate-exchange": e.alternate } : {},
+        arguments: { ...(e.alternate ? { "alternate-exchange": e.alternate } : {}), ...(e.delayedType ? { "x-delayed-type": e.delayedType } : {}), ...(e.hashOn ? { [e.hashOn.startsWith("header:") ? "hash-header" : "hash-property"]: e.hashOn.slice(e.hashOn.indexOf(":") + 1) } : {}) },
         policy: userPol?.name ?? null,
         operator_policy: opPol?.name ?? null,
       };

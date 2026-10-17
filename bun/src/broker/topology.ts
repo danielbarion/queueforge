@@ -4,7 +4,7 @@
  * These functions are the Broker methods. Loading this file installs them.
  */
 import { Broker } from "./class.ts";
-import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
+import { fieldEq, fieldStr, R, readTable, replaceHeaderTable, writeTable, type Field } from "../codec.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
@@ -30,14 +30,16 @@ import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type
  * @param alternate Alternate-exchange name, or null.
  * @returns Nothing. An existing exchange with the same name is replaced.
  */
-export async function declareExchange(this: Broker, vhost: string, name: string, kind: string, durable: boolean, autoDelete: boolean, internal: boolean, alternate: string | null, delayedType: string | null = null) {
+export async function declareExchange(this: Broker, vhost: string, name: string, kind: string, durable: boolean, autoDelete: boolean, internal: boolean, alternate: string | null, delayedType: string | null = null, hashOn: string | null = null) {
   if (name.startsWith("amq.")) throw new ChanError(403, `ACCESS_REFUSED - exchange ${vhost}/${name}`);
   const row: ExRow = { vhost, name, kind, durable, autoDelete, internal, alternate, delayedType };
+  if (hashOn) row.hashOn = hashOn;
   const created = !this.exchanges.has(this.key(vhost, name));
   this.exchanges.set(this.key(vhost, name), row);
   if (created) this.emitEvent("exchange.created", vhost, { name, type: kind, durable, auto_delete: autoDelete, internal });
   if (durable) this.store.putExchange(row);
   await this.cluster?.replicate("exchange", row);
+  if (created) this.syncFederation();
 }
 
 /**
@@ -57,6 +59,7 @@ export async function deleteExchange(this: Broker, vhost: string, name: string) 
   this.store.deleteExchangeBinding(vhost, name, null, null);
   this.emitEvent("exchange.deleted", vhost, { name });
   await this.cluster?.replicate("delete_exchange", { vhost, name });
+  this.syncFederation();
 }
 
 /**
@@ -133,6 +136,14 @@ export async function declareQueue(this: Broker, opts: {
   if (queueType === "quorum" && (!opts.durable || opts.exclusive)) {
     throw new ChanError(406, "PRECONDITION_FAILED - quorum queue must be durable and non-exclusive");
   }
+  // RabbitMQ 4.3 enforces acknowledgement timeouts on quorum queues only.
+  if (queueType !== "quorum" && opts.args["x-consumer-timeout"] != null) {
+    const kind = queueType === "stream" ? "rabbit_stream_queue" : "rabbit_classic_queue";
+    throw new ChanError(406, `PRECONDITION_FAILED - invalid arg 'x-consumer-timeout' for queue '${name}' in vhost '${opts.vhost}' of queue type ${kind}`);
+  }
+  if (queueType === "stream" && opts.args["x-max-age"] != null && !/^[0-9]+(Y|M|D|h|m|s)$/.test(String(opts.args["x-max-age"]))) {
+    throw new ChanError(406, `PRECONDITION_FAILED - invalid arg 'x-max-age' for queue '${name}' in vhost '${opts.vhost}': ${String(opts.args["x-max-age"])}`);
+  }
   if (queueType === "quorum") args = { ...args, "x-queue-type": "quorum" };
   if (queueType === "stream") args = { ...args, "x-queue-type": "stream" };
   if (queueType === "quorum" && args["x-delivery-limit"] == null) args["x-delivery-limit"] = 20;
@@ -191,6 +202,7 @@ export async function declareQueue(this: Broker, opts: {
   this.prom.queuesDeclared++;
   this.prom.queuesCreated++;
   this.emitEvent("queue.created", opts.vhost, { name, durable: opts.durable, auto_delete: opts.autoDelete, exclusive: opts.exclusive });
+  if (!opts.exclusive) this.syncFederation();
   return { name, messages: 0, consumers: 0 };
 }
 
@@ -217,6 +229,7 @@ export async function deleteQueue(this: Broker, vhost: string, name: string): Pr
   this.store.deleteQueue(vhost, name);
   await this.cluster?.replicate("delete_queue", { vhost, name });
   this.emitEvent("queue.deleted", vhost, { name });
+  if (this.fedLinks.size) this.syncFederation();
   return n;
 }
 
@@ -243,6 +256,7 @@ export async function bind(this: Broker, vhost: string, exchange: string, queue:
   const q = this.queues.get(this.key(vhost, queue))!;
   if (q.durable || this.exchanges.get(this.key(vhost, exchange))?.durable) this.store.putBinding(row);
   await this.cluster?.replicate("binding", row);
+  if (this.fedLinks.size) this.federationBindingsChanged(vhost, exchange);
 }
 
 /**
@@ -265,6 +279,7 @@ export async function unbind(this: Broker, vhost: string, exchange: string, queu
   this.store.deleteBinding(vhost, exchange, queue, routingKey, argsJson);
   this.emitEvent("binding.deleted", vhost, { source_name: exchange, source_kind: "exchange", destination_name: queue, destination_kind: "queue", routing_key: routingKey });
   await this.cluster?.replicate("unbind", { vhost, exchange, queue, routingKey, args });
+  if (this.fedLinks.size) this.federationBindingsChanged(vhost, exchange);
 }
 
 /**
@@ -278,7 +293,7 @@ export async function unbind(this: Broker, vhost: string, exchange: string, queu
  * Only the first exchange is checked for `internal`: a hop from another
  * exchange may reach an internal one.
  */
-export function route(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
+export function route(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>, propRaw?: Uint8Array): string[] {
   if (exchange === "" && this.e2e.length === 0 && this.queues.has(this.key(vhost, routingKey))) {
     return [routingKey];
   }
@@ -286,7 +301,7 @@ export function route(this: Broker, vhost: string, exchange: string, routingKey:
   const key = vhost + "\0" + exchange + "\0" + routingKey;
   const hit = cache.routes.get(key);
   if (hit) return hit.slice();
-  const out = routeUncached.call(this, vhost, exchange, routingKey, headers);
+  const out = routeUncached.call(this, vhost, exchange, routingKey, headers, propRaw);
   if (out.length && cacheable(this, vhost, exchange)) {
     if (cache.routes.size >= 10_000) cache.routes.clear();
     cache.routes.set(key, out.slice());
@@ -348,7 +363,7 @@ function cacheable(broker: Broker, vhost: string, exchange: string): boolean {
   return kind === "direct" || kind === "topic" || kind === "fanout";
 }
 
-function routeUncached(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
+function routeUncached(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>, propRaw?: Uint8Array): string[] {
   const first = this.exchanges.get(this.key(vhost, exchange));
   // The default exchange is implicit and marked internal in the topology,
   // but clients may publish to it even when exchange-to-exchange edges exist.
@@ -360,7 +375,7 @@ function routeUncached(this: Broker, vhost: string, exchange: string, routingKey
     const current = pending.pop()!;
     if (seen.has(current)) continue;
     seen.add(current);
-    const dest = this.routeOne(vhost, current, routingKey, headers);
+    const dest = this.routeOne(vhost, current, routingKey, headers, propRaw);
     out.push(...dest);
     const ex = this.exchanges.get(this.key(vhost, current));
     for (const edge of this.e2e) {
@@ -398,6 +413,7 @@ export async function bindExchange(this: Broker, vhost: string, source: string, 
   this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
   this.e2e.push({ vhost, source, destination, routingKey });
   if (src.durable && dst.durable) this.store.putExchangeBinding({ vhost, source, destination, routingKey });
+  if (this.fedLinks.size) this.federationBindingsChanged(vhost, source);
 }
 
 /**
@@ -412,6 +428,7 @@ export async function bindExchange(this: Broker, vhost: string, source: string, 
 export async function unbindExchange(this: Broker, vhost: string, source: string, destination: string, routingKey: string) {
   this.e2e = this.e2e.filter((e) => !(e.vhost === vhost && e.source === source && e.destination === destination && e.routingKey === routingKey));
   this.store.deleteExchangeBinding(vhost, source, destination, routingKey);
+  if (this.fedLinks.size) this.federationBindingsChanged(vhost, source);
 }
 
 /**
@@ -423,7 +440,7 @@ export async function unbindExchange(this: Broker, vhost: string, source: string
  * @param headers Message headers matched by a headers exchange.
  * @returns Matching queue names, without duplicates. A missing exchange throws 404.
  */
-export function routeOne(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>): string[] {
+export function routeOne(this: Broker, vhost: string, exchange: string, routingKey: string, headers: Array<[string, Field]>, propRaw?: Uint8Array): string[] {
   if (exchange === "") {
     return this.queues.has(this.key(vhost, routingKey)) ? [routingKey] : [];
   }
@@ -431,7 +448,12 @@ export function routeOne(this: Broker, vhost: string, exchange: string, routingK
   if (!ex) throw new ChanError(404, `NOT_FOUND - exchange ${vhost}/${exchange}`);
   const rows = this.bindings.filter((b) => b.vhost === vhost && b.exchange === exchange);
   const kind = ex.kind === "x-delayed-message" ? (ex.delayedType ?? "direct") : ex.kind;
-  if (kind === "x-consistent-hash") return consistentHash(rows, routingKey);
+  if (kind === "x-consistent-hash") {
+    if (!ex.hashOn) return consistentHash(rows, routingKey);
+    // hash-header / hash-property: a message without that value is unroutable.
+    const value = hashValue(ex.hashOn, headers, propRaw);
+    return value == null ? [] : consistentHash(rows, value);
+  }
   if (kind === "x-local-random") {
     const queues = [...new Set(rows.map((b) => b.queue))];
     return queues.length ? [queues[Math.floor(Math.random() * queues.length)]!] : [];
@@ -458,6 +480,40 @@ function consistentHash(rows: BindRow[], routingKey: string): string[] {
   }
   if (!buckets.length) return [];
   return [buckets[jumpHash(fnv1a(routingKey), buckets.length)]!];
+}
+
+/**
+ * The text a consistent-hash exchange with `hash-header` or `hash-property`
+ * hashes: `header:<name>` or `property:<message_id|correlation_id|timestamp>`.
+ * Null when the message has no such value.
+ */
+export function hashValue(hashOn: string, headers: Array<[string, Field]>, propRaw?: Uint8Array): string | null {
+  if (hashOn.startsWith("header:")) {
+    const name = hashOn.slice(7);
+    const f = headers.find(([k]) => k === name)?.[1];
+    if (!f || f.t === "V" || f.t === "other") return null;
+    if (f.t === "x") return new TextDecoder().decode(f.v);
+    if (f.t === "F" || f.t === "A") return JSON.stringify(f.v);
+    return String(f.v);
+  }
+  const prop = hashOn.slice(9);
+  if (!propRaw || propRaw.length < 2) return null;
+  const r = new R(propRaw);
+  const flags = r.u16();
+  const has = (bit: number) => (flags & (1 << (15 - bit))) !== 0;
+  if (has(0)) r.shortstr();
+  if (has(1)) r.shortstr();
+  if (has(2)) readTable(r);
+  if (has(3)) r.u8();
+  if (has(4)) r.u8();
+  const correlationId = has(5) ? r.shortstr() : null;
+  if (prop === "correlation_id") return correlationId;
+  if (has(6)) r.shortstr();
+  if (has(7)) r.shortstr();
+  const messageId = has(8) ? r.shortstr() : null;
+  if (prop === "message_id") return messageId;
+  if (prop === "timestamp") return has(9) ? String(r.u64()) : null;
+  return null;
 }
 
 /** Lamping and Veach's jump consistent hash. */

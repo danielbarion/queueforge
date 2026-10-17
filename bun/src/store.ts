@@ -16,6 +16,8 @@ export type ExRow = {
   alternate: string | null;
   /** `x-delayed-type` of an `x-delayed-message` exchange: how it routes once a delay ends. */
   delayedType?: string | null;
+  /** A consistent-hash exchange's `hash-header` (`header:<name>`) or `hash-property` (`property:<name>`). */
+  hashOn?: string | null;
 };
 export type QueueRow = {
   vhost: string;
@@ -306,6 +308,11 @@ export class Store {
       /* the column already exists */
     }
     try {
+      this.db.exec("ALTER TABLE exchanges ADD COLUMN hash_on TEXT");
+    } catch {
+      /* the column already exists */
+    }
+    try {
       this.db.exec("ALTER TABLE queues ADD COLUMN raft_group TEXT");
     } catch {
       /* the column already exists */
@@ -475,11 +482,11 @@ export class Store {
   putExchange(e: ExRow) {
     this.db
       .query(
-        `INSERT INTO exchanges (vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(vhost, name) DO UPDATE SET kind=excluded.kind, durable=excluded.durable, auto_delete=excluded.auto_delete, internal=excluded.internal, alternate=excluded.alternate, delayed_type=excluded.delayed_type`,
+        `INSERT INTO exchanges (vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type, hash_on)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(vhost, name) DO UPDATE SET kind=excluded.kind, durable=excluded.durable, auto_delete=excluded.auto_delete, internal=excluded.internal, alternate=excluded.alternate, delayed_type=excluded.delayed_type, hash_on=excluded.hash_on`,
       )
-      .run(e.vhost, e.name, e.kind, e.durable ? 1 : 0, e.autoDelete ? 1 : 0, e.internal ? 1 : 0, e.alternate, e.delayedType ?? null);
+      .run(e.vhost, e.name, e.kind, e.durable ? 1 : 0, e.autoDelete ? 1 : 0, e.internal ? 1 : 0, e.alternate, e.delayedType ?? null, e.hashOn ?? null);
   }
   deleteExchange(vhost: string, name: string) {
     this.db.query("DELETE FROM exchanges WHERE vhost=? AND name=?").run(vhost, name);
@@ -487,7 +494,7 @@ export class Store {
   }
   listExchanges(): ExRow[] {
     const rows = this.db
-      .query("SELECT vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type FROM exchanges")
+      .query("SELECT vhost, name, kind, durable, auto_delete, internal, alternate, delayed_type, hash_on FROM exchanges")
       .all() as Array<{
       vhost: string;
       name: string;
@@ -497,6 +504,7 @@ export class Store {
       internal: number;
       alternate: string | null;
       delayed_type: string | null;
+      hash_on: string | null;
     }>;
     return rows.map((r) => ({
       vhost: String(r.vhost),
@@ -507,6 +515,7 @@ export class Store {
       internal: !!r.internal,
       alternate: r.alternate == null ? null : String(r.alternate),
       delayedType: r.delayed_type == null ? null : String(r.delayed_type),
+      ...(r.hash_on ? { hashOn: String(r.hash_on) } : {}),
     }));
   }
   putQueue(q: QueueRow) {

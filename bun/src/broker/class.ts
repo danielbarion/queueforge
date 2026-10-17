@@ -70,8 +70,12 @@ export class Broker {
   unblockWaiters: Array<() => void> = [];
   /** Stream queue logs, by vhost and name. Loaded on first use. */
   streams = new Map<string, import("./stream.ts").StreamState>();
+  /** Running federation links by type, vhost, name and upstream (see federation.ts). */
+  fedLinks = new Map<string, import("./federation.ts").FedLink>();
+  /** Set once the broker is serving; federation links start only then. */
+  federationOn = false;
   /** Running shovels by vhost and name. */
-  shovels = new Map<string, { def: import("./shovel.ts").ShovelDef; stop: () => void }>();
+  shovels = new Map<string, import("./shovel.ts").ShovelRun>();
   /** Vhosts with firehose tracing on. */
   tracedVhosts = new Set<string>();
   /** Direct reply-to addresses, each delivering to one requester channel. */

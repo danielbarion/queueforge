@@ -158,8 +158,29 @@ export function applyPolicies(this: Broker) {
     if (q.argsParsed.queueType === "quorum" && q.argsParsed.deliveryLimit == null) q.argsParsed.deliveryLimit = 20;
     if (q.durable) this.store.putQueue({ ...q, args: merged });
   }
+  this.syncFederation();
 }
 
+/**
+ * The acknowledgement timeout of a new consumer on quorum queue `q`, in ms,
+ * as RabbitMQ 4.3 picks it: `x-consumer-timeout` on basic.consume wins;
+ * otherwise the lower of the queue argument and the policy's
+ * `consumer-timeout` when either is set; otherwise the config default.
+ */
+export function consumerTimeoutFor(this: Broker, q: QueueLive, consumeArg: Field | undefined): number {
+  const n = (v: unknown) => {
+    const x = Number(v);
+    return v != null && v !== "" && Number.isFinite(x) && x > 0 ? x : null;
+  };
+  const own = consumeArg && "v" in consumeArg ? n(consumeArg.v) : null;
+  if (own != null) return own;
+  const queueArg = n(q.args["x-consumer-timeout"]);
+  const policy = n(this.matchPolicy(q.vhost, q.name, "queues")?.consumerTimeout);
+  if (queueArg != null || policy != null) return Math.min(queueArg ?? Infinity, policy ?? Infinity);
+  return this.cfg.consumerTimeout ?? 1_800_000;
+}
+
+Broker.prototype.consumerTimeoutFor = consumerTimeoutFor;
 Broker.prototype.matchPolicy = matchPolicy;
 Broker.prototype.argsWithPolicy = argsWithPolicy;
 Broker.prototype.matchOperatorPolicy = matchOperatorPolicy;
@@ -174,6 +195,7 @@ Broker.prototype.applyPolicies = applyPolicies;
 declare module "./class.ts" {
   interface Broker {
     matchPolicy: typeof matchPolicy;
+    consumerTimeoutFor: typeof consumerTimeoutFor;
     argsWithPolicy: typeof argsWithPolicy;
     matchOperatorPolicy: typeof matchOperatorPolicy;
     policyNames: typeof policyNames;

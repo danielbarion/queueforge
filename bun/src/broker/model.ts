@@ -258,6 +258,10 @@ export type Consumer = {
   setCredit?: (n: number | null) => void;
   /** `x-stream-offset` for a stream consumer. */
   streamOffset?: Field;
+  /** `x-stream-filter` values; set only on a stream consumer that filters. */
+  streamFilter?: Set<string>;
+  /** `x-stream-match-unfiltered`: also deliver entries with no filter value. */
+  matchUnfiltered?: boolean;
 };
 
 export type QArgs = {
@@ -305,6 +309,12 @@ export type Policy = {
   dlxStrategy: "at-most-once" | "at-least-once" | null;
   deliveryLimit: number | null;
   alternate: string | null;
+  /** `consumer-timeout` in ms: the quorum acknowledgement timeout. */
+  consumerTimeout?: number | null;
+  /** `federation-upstream`: one upstream by name. */
+  federationUpstream?: string | null;
+  /** `federation-upstream-set`: a set by name, or `all`. */
+  federationUpstreamSet?: string | null;
 };
 
 export const BUILTIN: Array<[string, string, boolean]> = [

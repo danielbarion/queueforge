@@ -24,7 +24,21 @@ export type Config = {
   /** CA that client certificates must chain to. Set, it enables SASL EXTERNAL. */
   tlsCa?: string;
   oauth?: { resourceServerId: string; jwksUrl: string; jwksCaPath: string | null } | null;
-  ldap?: { server: string; port: number; userDnPattern: string; adminGroup: string | null; bindDn: string | null; bindPassword: string | null } | null;
+  ldap?: {
+    server: string;
+    port: number;
+    userDnPattern: string;
+    adminGroup: string | null;
+    bindDn: string | null;
+    bindPassword: string | null;
+    /** `[auth.ldap.resource_access]`: one query per permission. A missing key is `{ constant = true }`. */
+    resourceAccess?: Partial<Record<"vhost" | "configure" | "write" | "read" | "topic", LdapQuery>>;
+  } | null;
+  /**
+   * Acknowledgement timeout for quorum queue consumers, in ms (RabbitMQ's
+   * `consumer_timeout`). A queue argument, policy or consume argument overrides it.
+   */
+  consumerTimeout?: number;
   nodeId: string;
   clusterListen: string | null;
   members: Member[];
@@ -33,13 +47,128 @@ export type Config = {
    * its data directory. Workers that share it are one physical broker.
    */
   brokerId?: string | null;
-  /** `"dns"` builds `members` from the addresses of `dnsName` (docs/raft.md, section 10). */
+  /**
+   * `"dns"` builds `members` from the addresses of `dnsName` (docs/raft.md,
+   * section 10); `"k8s"`, `"consul"`, `"etcd"` and `"aws"` ask that service
+   * (src/discovery.ts), reading their keys from `clusterKeys`.
+   */
   discovery?: string | null;
+  /** Every `[cluster]` key as parsed, for the cloud discovery backends. */
+  clusterKeys?: Record<string, ConfigValue>;
   dnsName?: string | null;
   dnsPort?: number | null;
   reusePort?: boolean;
   defaultQueueType: "classic" | "quorum";
 };
+
+/** A value in the config: TOML strings, numbers, booleans, arrays and inline tables. */
+export type ConfigValue = string | number | boolean | ConfigValue[] | { [k: string]: ConfigValue };
+
+/** An LDAP access query, as RabbitMQ's `{constant, Bool}` or `{in_group, Dn[, Attr]}`. */
+export type LdapQuery = { constant: boolean } | { inGroup: string; attribute: string };
+
+/**
+ * Parse one TOML value: a quoted string, number, boolean, array or inline
+ * table. Text that is none of these comes back as the trimmed string.
+ */
+export function parseValue(text: string): ConfigValue {
+  let at = 0;
+  const s = text.trim();
+  const ws = () => {
+    while (at < s.length && /\s/.test(s[at]!)) at++;
+  };
+  const value = (): ConfigValue => {
+    ws();
+    const c = s[at];
+    if (c === '"' || c === "'") {
+      const end = s.indexOf(c, at + 1);
+      const out = s.slice(at + 1, end < 0 ? s.length : end);
+      at = end < 0 ? s.length : end + 1;
+      return c === '"' ? out.replace(/\\(.)/g, (_, x: string) => (x === "n" ? "\n" : x === "t" ? "\t" : x)) : out;
+    }
+    if (c === "[") {
+      at++;
+      const out: ConfigValue[] = [];
+      for (;;) {
+        ws();
+        if (s[at] === "]" || at >= s.length) {
+          at++;
+          return out;
+        }
+        out.push(value());
+        ws();
+        if (s[at] === ",") at++;
+      }
+    }
+    if (c === "{") {
+      at++;
+      const out: Record<string, ConfigValue> = {};
+      for (;;) {
+        ws();
+        if (s[at] === "}" || at >= s.length) {
+          at++;
+          return out;
+        }
+        const m = /^("[^"]*"|[A-Za-z0-9_.-]+)\s*=/.exec(s.slice(at));
+        if (!m) {
+          at = s.length;
+          return out;
+        }
+        at += m[0].length;
+        const k = m[1]!.startsWith('"') ? m[1]!.slice(1, -1) : m[1]!;
+        out[k] = value();
+        ws();
+        if (s[at] === ",") at++;
+      }
+    }
+    const m = /^[^,\]}]+/.exec(s.slice(at));
+    const raw = (m?.[0] ?? "").trim();
+    at += m?.[0].length ?? 1;
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    if (/^[+-]?\d[\d_]*(\.\d+)?$/.test(raw)) return Number(raw.replaceAll("_", ""));
+    return raw;
+  };
+  return value();
+}
+
+/** Drop a `#` comment that is not inside a quoted string. */
+function stripComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') i++;
+      else if (c === quote) quote = "";
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Brackets still open in `text`, outside strings. */
+function openBrackets(text: string): number {
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') i++;
+      else if (c === quote) quote = "";
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") depth--;
+  }
+  return depth;
+}
+
+function ldapQuery(v: ConfigValue): LdapQuery | null {
+  if (typeof v === "boolean") return { constant: v };
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  if (typeof v.in_group === "string") return { inGroup: v.in_group, attribute: typeof v.attribute === "string" ? v.attribute : "member" };
+  if ("constant" in v) return { constant: v.constant === true || v.constant === "true" };
+  return null;
+}
 
 function unquote(s: string): string {
   const t = s.trim();
@@ -77,12 +206,14 @@ export function parseConfig(text: string): Config {
     dnsPort: null,
     reusePort: false,
     defaultQueueType: "classic",
+    consumerTimeout: 1_800_000,
+    clusterKeys: {},
   };
   let section = "";
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? "";
-    const line = raw.replace(/#.*$/, "").trim();
+    let line = stripComment(raw).trim();
     if (!line) continue;
     const sec = line.match(/^\[([^\]]+)\]$/);
     if (sec) {
@@ -103,10 +234,26 @@ export function parseConfig(text: string): Config {
       }
       continue;
     }
+    // A value that opens an array or inline table runs until it closes.
+    while (openBrackets(line) > 0 && i + 1 < lines.length) {
+      i++;
+      line += " " + stripComment(lines[i] ?? "").trim();
+    }
     const kv = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.+)$/);
     if (!kv) continue;
     const key = kv[1] ?? "";
     const val = unquote(kv[2] ?? "");
+    if (key === "consumer_timeout" && (section === "" || section === "limits")) {
+      const n = Number(val);
+      if (Number.isFinite(n) && n > 0) cfg.consumerTimeout = n;
+    }
+    if (section === "cluster") cfg.clusterKeys![key] = parseValue(kv[2] ?? "");
+    if (section === "auth.ldap.resource_access" && cfg.ldap) {
+      const q = ldapQuery(parseValue(kv[2] ?? ""));
+      if (q && (key === "vhost" || key === "configure" || key === "write" || key === "read" || key === "topic")) {
+        (cfg.ldap.resourceAccess ??= {})[key] = q;
+      }
+    }
     if (section === "listeners" && key === "amqp") cfg.amqp = val;
     if (section === "listeners" && key === "management") cfg.management = val;
     if (section === "listeners" && key === "metrics") cfg.metrics = val;

@@ -20,6 +20,7 @@ export async function handleStartOk(this: Conn, payload: Uint8Array) {
   // RabbitMQ only sends connection.blocked to clients that ask for it.
   const caps = client.find(([k]) => k === "capabilities")?.[1];
   this.wantsBlocked = caps?.t === "F" && caps.v.some(([k, v]) => k === "connection.blocked" && v.t === "t" && v.v);
+  this.cancelNotify = caps?.t === "F" && caps.v.some(([k, v]) => k === "consumer_cancel_notify" && v.t === "t" && v.v);
   const mechanism = rr.shortstr();
   const response = rr.longstr();
   // EXTERNAL: the user is the verified client certificate's common name, as
@@ -36,6 +37,27 @@ export async function handleStartOk(this: Conn, payload: Uint8Array) {
   if (!(await this.broker.verify(user, pass))) return this.connClose(403, "ACCESS_REFUSED - login");
   this.user = user;
   return this.sendTune();
+}
+
+/**
+ * connection.update-secret (10.70): check the new secret with the backend
+ * that took the login, as RabbitMQ does for an OAuth 2.0 token refresh. The
+ * new token's scopes replace the old ones for every channel. A secret that
+ * does not validate closes the connection with 530.
+ *
+ * @param payload Method payload: longstr new-secret, shortstr reason.
+ */
+export async function handleUpdateSecret(this: Conn, payload: Uint8Array) {
+  const rr = new R(payload.subarray(4));
+  const secret = new TextDecoder().decode(rr.longstr());
+  // An internal user has no token to refresh; its password must still match.
+  if (!this.user || !(await this.broker.verify(this.user, secret))) {
+    return this.connClose(530, "NOT_ALLOWED - update-secret failed");
+  }
+  // The permission cache was filled under the old secret.
+  this.permCache.clear();
+  this.writeEx = null;
+  await this.send(methodFrame(0, method(10, 71, () => {})));
 }
 
 /** connection.tune: channel-max, frame-max, heartbeat. */
@@ -183,6 +205,7 @@ export function noteMetricsClosed(this: Conn) {
 
 Conn.prototype.handleStartOk = handleStartOk;
 Conn.prototype.sendTune = sendTune;
+Conn.prototype.handleUpdateSecret = handleUpdateSecret;
 Conn.prototype.handleTuneOk = handleTuneOk;
 Conn.prototype.handleConnectionOpen = handleConnectionOpen;
 Conn.prototype.handleConnectionClose = handleConnectionClose;

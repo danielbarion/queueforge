@@ -50,8 +50,20 @@ export async function exDeclare(this: Conn, channel: number, _c: Ch, payload: Ui
         throw new ChanError(406, "PRECONDITION_FAILED - Invalid argument, 'x-delayed-type' must be an existing exchange type");
       }
     }
+    let hashOn: string | null = null;
+    if (type === "x-consistent-hash") {
+      const header = fieldStr(tableGet(args, "hash-header"));
+      const property = fieldStr(tableGet(args, "hash-property"));
+      if (header && property) {
+        throw new ChanError(406, "PRECONDITION_FAILED - Invalid argument, 'hash-header' and 'hash-property' are mutually exclusive");
+      }
+      if (property && property !== "message_id" && property !== "correlation_id" && property !== "timestamp") {
+        throw new ChanError(406, `PRECONDITION_FAILED - Invalid argument, 'hash-property' must be message_id, correlation_id or timestamp, got '${property}'`);
+      }
+      hashOn = header ? `header:${header}` : property ? `property:${property}` : null;
+    }
     this.need("configure", "exchange", name);
-    await this.broker.declareExchange(this.vhost, name, type, durable, autoDelete, internal, alt, delayedType);
+    await this.broker.declareExchange(this.vhost, name, type, durable, autoDelete, internal, alt, delayedType, hashOn);
   }
   if (!nowait) await this.send(methodFrame(channel, method(40, 11, () => {})));
 }

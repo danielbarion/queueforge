@@ -4,7 +4,7 @@
  * Owns delivery tags and prefetch credit for one channel. Ack and reject
  * inside a transaction wait for tx.commit.
  */
-import { bodyFrame, contentHeaderFrame, DELIVER_VIEW, emptyProps, encodeDeliver, encodeDeliverParts, method, methodFrame, R, readTable, tableGet } from "../codec.ts";
+import { bodyFrame, contentHeaderFrame, DELIVER_VIEW, emptyProps, encodeDeliver, encodeDeliverParts, method, methodFrame, R, readTable, tableGet, type Field } from "../codec.ts";
 import { ChanError, type LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
 
@@ -79,10 +79,22 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
   this.need("read", "queue", queue);
   const target = this.broker.queues.get(this.broker.key(this.vhost, queue));
   const stream = target?.argsParsed.queueType === "stream";
+  // Acknowledgement timeouts are a quorum queue feature in RabbitMQ 4.3.
+  const timeoutArg = tableGet(args, "x-consumer-timeout");
+  let timeout = 0;
+  if (target?.argsParsed.queueType === "quorum") timeout = this.broker.consumerTimeoutFor(target, timeoutArg);
+  else if (target && timeoutArg) {
+    const kind = stream ? "rabbit_stream_queue" : "rabbit_classic_queue";
+    throw new ChanError(406, `PRECONDITION_FAILED - invalid arg 'x-consumer-timeout' for queue '${queue}' in vhost '${this.vhost}' of queue type ${kind}`);
+  }
   if (stream && c.prefetch === 0) throw new ChanError(406, "PRECONDITION_FAILED - consumer prefetch count is not set for stream queue");
   if (stream && noAck) throw new ChanError(406, "PRECONDITION_FAILED - stream queues need manual acknowledgement");
   const session = this.broker.nextSession();
   c.consumers.set(tag, queue);
+  if (timeout > 0 && !noAck) {
+    (c.timeouts ??= new Map()).set(tag, timeout);
+    watchTimeouts(this, channel, c);
+  }
   this.broker.noteMgmtConsumer({
     consumer_tag: tag,
     connection: this.mgmtName,
@@ -99,6 +111,7 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     noAck,
     exclusive,
     streamOffset: tableGet(args, "x-stream-offset"),
+    ...(stream ? streamFilterArgs(args) : {}),
     priority: Number.isFinite(priority) ? priority : 0,
     prefetch: c.prefetch,
     want: () => {
@@ -111,6 +124,7 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
     },
     onCancel: () => {
       c.consumers.delete(tag);
+      c.timeouts?.delete(tag);
       this.outputWakers.delete(`${channel}\0${tag}`);
       void this.send(methodFrame(channel, method(60, 30, (w) => {
         w.shortstr(tag);
@@ -171,7 +185,9 @@ export async function consume(this: Conn, channel: number, c: Ch, payload: Uint8
 export function handOff(this: Conn, channel: number, c: Ch, tag: string, queue: string, msg: LiveMsg, noAck = false) {
   const dtag = c.nextDel++;
   if (!noAck) {
-    c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag });
+    // Only a consumer with an acknowledgement timeout stamps its deliveries.
+    const at = c.timeouts !== null && c.timeouts.has(tag) ? Date.now() : 0;
+    c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: tag, at });
     c.byConsumer.set(tag, (c.byConsumer.get(tag) ?? 0) + 1);
     c.globalUnacked++;
   }
@@ -253,6 +269,7 @@ export async function cancel(this: Conn, channel: number, c: Ch, payload: Uint8A
   const queue = c.consumers.get(tag);
   if (queue) await this.broker.cancel(this.vhost, queue, tag);
   c.consumers.delete(tag);
+  c.timeouts?.delete(tag);
   await this.requeueParked(c, tag);
   this.outputWakers.delete(`${channel}\0${tag}`);
   this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
@@ -376,7 +393,7 @@ export async function get(this: Conn, channel: number, c: Ch, payload: Uint8Arra
   // get-ok carries the ready count left behind this message.
   const left = q?.ready.length ?? 0;
   const dtag = c.nextDel++;
-  if (!noAck) c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: "" });
+  if (!noAck) c.deliveries.set(dtag, { vhost: this.vhost, queue, id: msg.id, consumer: "", at: 0 });
   await this.sendMany([
     methodFrame(
       channel,
@@ -419,6 +436,104 @@ export async function recover(this: Conn, channel: number, c: Ch, payload: Uint8
   for (const d of pending) await this.broker.nack(d.vhost, d.queue, d.id, true);
 }
 
+/** `x-stream-filter` and `x-stream-match-unfiltered` from basic.consume, for a stream consumer. */
+function streamFilterArgs(args: Array<[string, Field]>): { streamFilter?: Set<string>; matchUnfiltered?: boolean } {
+  const f = tableGet(args, "x-stream-filter");
+  if (!f) return {};
+  const values = new Set<string>();
+  const add = (v: Field) => {
+    if (v.t === "S" || v.t === "s") values.add(String(v.v));
+    else if (v.t === "x") values.add(new TextDecoder().decode(v.v));
+  };
+  if (f.t === "A") for (const v of f.v) add(v);
+  else add(f);
+  const m = tableGet(args, "x-stream-match-unfiltered");
+  return { streamFilter: values, matchUnfiltered: m?.t === "t" ? m.v : false };
+}
+
+/**
+ * Channels with consumers that have an acknowledgement timeout. One interval
+ * for the process checks them, so the delivery path adds no timer.
+ */
+const timed = new Map<Ch, { conn: Conn; channel: number }>();
+let timeoutTick: Timer | null = null;
+
+function watchTimeouts(conn: Conn, channel: number, c: Ch) {
+  timed.set(c, { conn, channel });
+  if (timeoutTick) return;
+  timeoutTick = setInterval(checkTimeouts, 1000);
+  timeoutTick.unref?.();
+}
+
+/** Time out every consumer holding a delivery longer than its timeout. */
+export function checkTimeouts(now = Date.now()) {
+  for (const [c, { conn, channel }] of timed) {
+    if (conn.closed || conn.connClosed || conn.channels.get(channel) !== c || !c.timeouts || c.timeouts.size === 0) {
+      timed.delete(c);
+      continue;
+    }
+    let late: Map<string, number> | null = null;
+    for (const d of c.deliveries.values()) {
+      if (!d.at) continue;
+      const ms = c.timeouts.get(d.consumer);
+      if (ms !== undefined && now - d.at > ms) (late ??= new Map()).set(d.consumer, ms);
+    }
+    if (late) for (const [tag, ms] of late) void conn.timeoutConsumer(channel, c, tag, ms).catch(() => {});
+  }
+  if (timed.size === 0 && timeoutTick) {
+    clearInterval(timeoutTick);
+    timeoutTick = null;
+  }
+}
+
+/**
+ * A consumer held a delivery past its acknowledgement timeout, as RabbitMQ
+ * 4.3 handles it: the consumer stops, its unacked deliveries go back to the
+ * queue as redelivered, and a client that advertised consumer_cancel_notify
+ * gets basic.cancel with the channel kept open. Any other client has the
+ * channel closed with 406.
+ */
+export async function timeoutConsumer(this: Conn, channel: number, c: Ch, tag: string, ms: number) {
+  const queue = c.consumers.get(tag);
+  if (!queue || !c.timeouts?.has(tag)) return;
+  c.timeouts.delete(tag);
+  c.consumers.delete(tag);
+  this.outputWakers.delete(`${channel}\0${tag}`);
+  await this.broker.cancel(this.vhost, queue, tag);
+  this.broker.forgetMgmtConsumer(this.mgmtName, channel, tag);
+  if (!this.cancelNotify) {
+    // The channel goes: its consumers stop and every unacked delivery is requeued.
+    for (const [other, q] of c.consumers) {
+      this.outputWakers.delete(`${channel}\0${other}`);
+      await this.broker.cancel(this.vhost, q, other);
+    }
+    c.consumers.clear();
+    c.timeouts.clear();
+    await this.requeueChannel(c);
+    if (this.channels.delete(channel)) {
+      this.broker.forgetMgmtChannelConsumers(this.mgmtName, channel);
+      this.broker.prom.channels = Math.max(0, this.broker.prom.channels - 1);
+      this.broker.prom.channelsClosed++;
+      this.syncMgmt();
+    }
+    await this.chanClose(channel, 406, `PRECONDITION_FAILED - delivery acknowledgement on channel ${channel} timed out. Timeout value used: ${ms} ms. This timeout value can be configured, see consumers doc guide to learn more`);
+    return;
+  }
+  const held = [...c.deliveries].filter(([, d]) => d.consumer === tag);
+  for (const [dtag, d] of held) {
+    c.deliveries.delete(dtag);
+    c.globalUnacked = Math.max(0, c.globalUnacked - 1);
+  }
+  c.byConsumer.delete(tag);
+  await this.requeueParked(c, tag);
+  await this.send(methodFrame(channel, method(60, 30, (w) => {
+    w.shortstr(tag);
+    w.bits([true]);
+  })));
+  for (const [, d] of held) await this.broker.nack(d.vhost, d.queue, d.id, true);
+}
+
+Conn.prototype.timeoutConsumer = timeoutConsumer;
 Conn.prototype.qos = qos;
 Conn.prototype.creditOk = creditOk;
 Conn.prototype.consume = consume;
