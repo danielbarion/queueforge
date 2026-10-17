@@ -138,6 +138,21 @@ function envFor(target: Target, p: Ports, fx: Fixtures): Record<string, string> 
   };
 }
 
+/**
+ * RabbitMQ LDAP queries, as Erlang terms. RabbitMQ reads them from
+ * advanced.config; QueueForge takes the same text in [auth.ldap].
+ */
+export const LDAP_QUERIES = {
+  vhost_access_query: `{'or', [{in_group, "${LDAP_ADMIN_GROUP}"}, {equals, {string, "\${vhost}"}, {string, "/"}}]}`,
+  resource_access_query:
+    `{for, [{resource, queue, {for, [{permission, configure, {'or', [{in_group, "${LDAP_ADMIN_GROUP}"}, {match, {string, "\${name}"}, {string, "^\${username}-"}}]}}, {permission, write, {constant, true}}, {permission, read, {constant, true}}]}}, ` +
+    `{resource, exchange, {for, [{permission, configure, {in_group, "${LDAP_ADMIN_GROUP}"}}, {permission, write, {constant, true}}, {permission, read, {constant, true}}]}}]}`,
+  topic_access_query: `{for, [{permission, write, {match, {string, "\${routing_key}"}, {string, "^ldap\\\\."}}}, {permission, read, {constant, true}}]}`,
+  tag_queries:
+    `[{administrator, {in_group, "${LDAP_ADMIN_GROUP}"}}, {management, {constant, true}}, ` +
+    `{policymaker, {equals, {attribute, "\${user_dn}", "sn"}, {string, "Plain"}}}, {monitoring, {exists, "\${user_dn}"}}]`,
+};
+
 function queueforgeConfig(dir: string, p: Ports, fx: Fixtures): string {
   const path = join(dir, "queueforge.toml");
   writeFileSync(
@@ -179,12 +194,11 @@ user_dn_pattern = "${LDAP_USER_DN}"
 admin_group = "${LDAP_ADMIN_GROUP}"
 bind_dn = "${LDAP_BIND_DN}"
 bind_password = "${LDAP_BIND_PASSWORD}"
-
-# RabbitMQ's resource_access_query: only qf-admins may configure.
-[auth.ldap.resource_access]
-configure = { in_group = "${LDAP_ADMIN_GROUP}" }
-write = { constant = true }
-read = { constant = true }
+# The same queries RabbitMQ gets in advanced.config.
+vhost_access_query = '''${LDAP_QUERIES.vhost_access_query}'''
+resource_access_query = '''${LDAP_QUERIES.resource_access_query}'''
+topic_access_query = '''${LDAP_QUERIES.topic_access_query}'''
+tag_queries = '''${LDAP_QUERIES.tag_queries}'''
 `,
   );
   return path;
@@ -264,7 +278,8 @@ auth_ldap.other_bind.password = ${LDAP_BIND_PASSWORD}
   );
   writeFileSync(
     join(dir, "advanced.config"),
-    `[{rabbitmq_auth_backend_ldap, [{tag_queries, [{administrator, {in_group, "${LDAP_ADMIN_GROUP}"}}, {management, {constant, true}}]}, {resource_access_query, {for, [{permission, configure, {in_group, "${LDAP_ADMIN_GROUP}"}}, {permission, write, {constant, true}}, {permission, read, {constant, true}}]}}]}].\n`,
+    `[{rabbitmq_auth_backend_ldap, [{tag_queries, ${LDAP_QUERIES.tag_queries}}, {vhost_access_query, ${LDAP_QUERIES.vhost_access_query}}, ` +
+      `{resource_access_query, ${LDAP_QUERIES.resource_access_query}}, {topic_access_query, ${LDAP_QUERIES.topic_access_query}}]}].\n`,
   );
   spawnSync("chmod", ["-R", "a+rX", dir]);
   return dir;

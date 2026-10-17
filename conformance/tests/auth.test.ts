@@ -289,3 +289,50 @@ test("x.509 client certificates :: AMQP 1.0 SASL EXTERNAL over TLS logs in as th
   });
   expect(result).toBe("open");
 });
+
+// The targets give RabbitMQ (advanced.config) and QueueForge ([auth.ldap]) the
+// same LDAP queries; see LDAP_QUERIES in targets.ts.
+const ldapUrl = (user: string, vhost = "%2f") => `amqp://${user}:ldap-secret@127.0.0.1:${AMQP_PORT}/${vhost}`;
+
+test("LDAP :: a resource query with for, or and match lets a user configure queues named after it, not exchanges", async () => {
+  const c = await amqp.connect(ldapUrl("ldap-plain"));
+  c.on("error", () => {});
+  const ch = await c.createChannel();
+  ch.on("error", () => {});
+  const own = `ldap-plain-${uniq("own")}`;
+  await ch.assertQueue(own, { durable: true });
+  await ch.deleteQueue(own);
+  expect(await closeCode(ch.assertExchange(uniq("ldap-plain-x"), "fanout", { durable: false }))).toBe(403);
+  await c.close().catch(() => {});
+});
+
+test("LDAP :: a vhost query with or and equals admits a group member to any vhost and others only to /", async () => {
+  const vh = uniq("ldap-vh");
+  await mgmt(`/api/vhosts/${encodeURIComponent(vh)}`, { method: "PUT", body: "{}" });
+  const plain = await outcome(amqp.connect(ldapUrl("ldap-plain", encodeURIComponent(vh))));
+  const admin = await outcome(amqp.connect(ldapUrl("ldap-admin", encodeURIComponent(vh))));
+  const home = await outcome(amqp.connect(ldapUrl("ldap-plain")));
+  await mgmt(`/api/vhosts/${encodeURIComponent(vh)}`, { method: "DELETE" });
+  expect({ plain, admin, home }).toEqual({ plain: "refused", admin: "open", home: "open" });
+});
+
+test("LDAP :: a topic query with match limits the routing keys a user may publish to a topic exchange", async () => {
+  const c = await amqp.connect(ldapUrl("ldap-plain"));
+  c.on("error", () => {});
+  const ch = await c.createChannel();
+  ch.on("error", () => {});
+  ch.publish("amq.topic", "ldap.allowed", Buffer.from("ok"));
+  // The broker handles frames in order: a refused publish closes the channel before the next call.
+  expect(await closeCode(ch.checkExchange("amq.topic"))).toBeNull();
+  ch.publish("amq.topic", "other.denied", Buffer.from("no"));
+  expect(await closeCode(ch.checkExchange("amq.topic"))).toBe(403);
+  await c.close().catch(() => {});
+});
+
+test("LDAP :: tag queries with equals on an attribute and exists on the user dn set the user's tags", async () => {
+  const res = await fetch(`${MGMT}/api/whoami`, { headers: { authorization: `Basic ${btoa("ldap-plain:ldap-secret")}` } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { tags: string | string[] };
+  const tags = Array.isArray(body.tags) ? body.tags : String(body.tags).split(",");
+  expect(tags.sort()).toEqual(["management", "monitoring", "policymaker"]);
+});
