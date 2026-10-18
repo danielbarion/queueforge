@@ -163,6 +163,16 @@ function publishToQueue(
  */
 const QUORUM_ID_BASE = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}-`;
 let quorumIdSeq = 0;
+/** The fixed part of this broker's quorum ids, with and without Raft. */
+const quorumIdPrefixes = new WeakMap<Broker, [string, string]>();
+function quorumIdPrefix(broker: Broker, raft: boolean): string {
+  let p = quorumIdPrefixes.get(broker);
+  if (!p) {
+    p = [`q-${broker.cfg.nodeId}-${QUORUM_ID_BASE}`, `${STORE_ONLY_PREFIX}${broker.cfg.nodeId}-${QUORUM_ID_BASE}`];
+    quorumIdPrefixes.set(broker, p);
+  }
+  return p[raft ? 1 : 0];
+}
 
 /**
  * Persistent publish to a quorum queue whose whole durable majority is this
@@ -184,7 +194,7 @@ function localQuorumFast(
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;
   this.prom.routed++;
-  const id = `${raft ? STORE_ONLY_PREFIX : "q-"}${this.cfg.nodeId}-${QUORUM_ID_BASE}${++quorumIdSeq}`;
+  const id = quorumIdPrefix(this, raft) + ++quorumIdSeq;
   const gate = { hold: true };
   const ok = this.enqueueLocal(q, {
     body: input.body,
@@ -584,6 +594,46 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+/** True when `id` needs no JSON escaping (the broker's ids are digits, letters, dashes and dots). */
+function plainId(id: string): boolean {
+  for (let i = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i);
+    if (c < 32 || c === 34 || c === 92 || c > 126) return false;
+  }
+  return true;
+}
+
+/**
+ * The stored meta of a message without an id, headers or expiry, as the
+ * JSON.stringify shape. The last one is kept: a publish burst repeats it.
+ * Null when the exchange or key would need escaping.
+ */
+function simpleMetaFor(src: { exchange: string; routingKey: string; propRaw: Uint8Array; persistent: boolean; priority: number; redelivered?: boolean }): string | null {
+  const redelivered = !!src.redelivered;
+  if (
+    simpleMeta.length > 0 &&
+    simpleExchange === src.exchange &&
+    simpleKey === src.routingKey &&
+    simplePersistent === src.persistent &&
+    simplePriority === src.priority &&
+    simpleRedelivered === redelivered &&
+    simpleRaw != null &&
+    sameBytes(simpleRaw, src.propRaw)
+  ) {
+    return simpleMeta;
+  }
+  if (needsJsonEscape(src.exchange) || needsJsonEscape(src.routingKey)) return null;
+  const prop = Buffer.from(src.propRaw).toString("base64");
+  simpleExchange = src.exchange;
+  simpleKey = src.routingKey;
+  simplePersistent = src.persistent;
+  simplePriority = src.priority;
+  simpleRedelivered = redelivered;
+  simpleRaw = src.propRaw.slice();
+  simpleMeta = `{"exchange":"${src.exchange}","routingKey":"${src.routingKey}","headers":[],"propRaw":"${prop}","persistent":${src.persistent},"priority":${src.priority},"expiresAt":null,"redelivered":${redelivered ? "true" : "false"}}`;
+  return simpleMeta;
+}
+
 /** Stored meta for a durable message. The plain shape matches JSON.parse on recovery. */
 export function durableMeta(
   src: {
@@ -598,39 +648,14 @@ export function durableMeta(
   },
   expiresAt: number | null,
 ): string {
-  if (!src.id && src.headers.length === 0 && expiresAt == null) {
-    const redelivered = !!src.redelivered;
-    // The cached string was built from names already checked for escapes.
-    if (
-      simpleMeta.length > 0 &&
-      simpleExchange === src.exchange &&
-      simpleKey === src.routingKey &&
-      simplePersistent === src.persistent &&
-      simplePriority === src.priority &&
-      simpleRedelivered === redelivered &&
-      simpleRaw != null &&
-      sameBytes(simpleRaw, src.propRaw)
-    ) {
-      return simpleMeta;
-    }
-  }
-  if (
-    !src.id &&
-    src.headers.length === 0 &&
-    expiresAt == null &&
-    !needsJsonEscape(src.exchange) &&
-    !needsJsonEscape(src.routingKey)
-  ) {
-    const redelivered = !!src.redelivered;
-    const prop = Buffer.from(src.propRaw).toString("base64");
-    simpleExchange = src.exchange;
-    simpleKey = src.routingKey;
-    simplePersistent = src.persistent;
-    simplePriority = src.priority;
-    simpleRedelivered = redelivered;
-    simpleRaw = src.propRaw.slice();
-    simpleMeta = `{"exchange":"${src.exchange}","routingKey":"${src.routingKey}","headers":[],"propRaw":"${prop}","persistent":${src.persistent},"priority":${src.priority},"expiresAt":null,"redelivered":${redelivered ? "true" : "false"}}`;
-    return simpleMeta;
+  // A quorum message carries a fresh id each time, so the plain string is
+  // cached without it and the id goes in front: `{"id":...,` then the rest,
+  // the key order JSON.stringify gives below. An id needs no escape when it
+  // is the broker's own (digits, letters, dashes).
+  const id = src.id;
+  if (src.headers.length === 0 && expiresAt == null && (!id || plainId(id))) {
+    const meta = simpleMetaFor(src);
+    if (meta !== null) return id ? `{"id":"${id}",${meta.slice(1)}` : meta;
   }
   return JSON.stringify({
     id: src.id,
