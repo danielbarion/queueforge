@@ -598,14 +598,9 @@ export function durableMeta(
   },
   expiresAt: number | null,
 ): string {
-  if (
-    !src.id &&
-    src.headers.length === 0 &&
-    expiresAt == null &&
-    !needsJsonEscape(src.exchange) &&
-    !needsJsonEscape(src.routingKey)
-  ) {
+  if (!src.id && src.headers.length === 0 && expiresAt == null) {
     const redelivered = !!src.redelivered;
+    // The cached string was built from names already checked for escapes.
     if (
       simpleMeta.length > 0 &&
       simpleExchange === src.exchange &&
@@ -618,6 +613,15 @@ export function durableMeta(
     ) {
       return simpleMeta;
     }
+  }
+  if (
+    !src.id &&
+    src.headers.length === 0 &&
+    expiresAt == null &&
+    !needsJsonEscape(src.exchange) &&
+    !needsJsonEscape(src.routingKey)
+  ) {
+    const redelivered = !!src.redelivered;
     const prop = Buffer.from(src.propRaw).toString("base64");
     simpleExchange = src.exchange;
     simpleKey = src.routingKey;
