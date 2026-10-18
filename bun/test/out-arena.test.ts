@@ -98,3 +98,26 @@ test("frames larger than a quarter of the arena get their own buffer", () => {
   expect(c.arenaPos).toBe(before);
   expect(big.length).toBe(32 * 1024);
 });
+
+test("a node socket's arena is rewound only after every write callback ran", async () => {
+  // node:net semantics: the buffer is held until the write's callback.
+  const pending: Array<{ view: Uint8Array; copy: number[] }> = [];
+  const c = conn({ write: (b) => (pending.push({ view: b, copy: [...b] }), b.length), flush() {}, end() {} }, false);
+  c.held = { n: 0 };
+  const release = () => {
+    // What the socket sent must still be intact when it lets go.
+    for (const p of pending.splice(0)) expect([...p.view]).toEqual(p.copy);
+    c.held!.n = 0;
+    c.writesReleased();
+  };
+  for (let round = 0; round < 50; round++) {
+    c.held.n++;
+    await c.send(encodeDeliver(1, "ctag", round, msg(round), undefined, 0, c)!);
+    // Held: the next frame must not reuse the bytes just written.
+    c.held.n++;
+    await c.send(encodeSettle(1, round, false, c));
+    expect(c.arenaPos).toBeGreaterThan(0);
+    release();
+    expect(c.arenaPos).toBe(0);
+  }
+});

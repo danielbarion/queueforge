@@ -35,6 +35,12 @@ export type Ch = {
   txBatch: Array<() => Promise<unknown> | void>;
   txBytes: number;
   nextPub: number;
+  /** Every publish tag up to this one has had its ack or nack sent (or staged). */
+  confirmLow: number;
+  /** Tags above `confirmLow` already settled, when confirms finish out of order. */
+  confirmAhead: Set<number> | null;
+  /** The last basic.ack staged for this channel, which a later confirm may extend. */
+  ackFrame: Uint8Array | null;
   nextDel: number;
   /** `at` is the delivery time for a consumer with an acknowledgement timeout, else 0. */
   deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string; at?: number }>;
@@ -158,6 +164,12 @@ export class Conn {
   arena: Uint8Array | null = null;
   /** Next free byte of `arena`. */
   arenaPos = 0;
+  /**
+   * Writes a node socket still holds (its callback has not run). The arena is
+   * rewound only at zero. Null when the socket's writes are not tracked: then
+   * only a socket that copies on write (`reuseWrites`) lets it rewind.
+   */
+  held: { n: number } | null = null;
   /** True while a microtask is already queued to flush `staged`. */
   coalesceScheduled = false;
   /** Bytes that arrived while a burst of publishes was being parsed. */
@@ -274,6 +286,8 @@ export interface Conn {
   handleUpdateSecret(payload: Uint8Array): Promise<void>;
   /** `n` bytes for a hot outbound frame, from this connection's arena. */
   outFrame(n: number): Uint8Array;
+  /** The socket let go of every buffer it was given: the arena may be rewound. */
+  writesReleased(): void;
   timeoutConsumer(channel: number, c: Ch, tag: string, ms: number): Promise<void>;
   sendTune(): Promise<void>;
   handleTuneOk(payload: Uint8Array): void;
@@ -378,15 +392,35 @@ function viewOf(buf: Buffer): Uint8Array {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
 }
 
+/**
+ * The count of writes a node socket still holds, and the one callback that
+ * releases them: shared by every write, so a write allocates no closure.
+ */
+function heldWrites() {
+  const held: { n: number; conn: Conn | null; done: () => void } = {
+    n: 0,
+    conn: null,
+    done: () => {
+      held.n--;
+      if (held.n === 0 && held.conn !== null) held.conn.writesReleased();
+    },
+  };
+  return held;
+}
+
 /** Run one adopted TCP socket as an AMQP connection. The parent already accepted it. */
 export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = true): Conn {
   socket.setNoDelay(true);
   socket.resume();
+  const held = heldWrites();
   const wrapper: AmqpSocket = {
     write(bytes) {
       try {
-        socket.write(bytes);
+        // The socket holds these bytes until the callback; see `Conn.heldWrites`.
+        held.n++;
+        socket.write(bytes, held.done);
       } catch {
+        held.n--;
         return 0;
       }
       return bytes.length;
@@ -401,6 +435,8 @@ export function adoptNodeSocket(broker: Broker, socket: NodeSocket, migrate = tr
     remotePort: socket.remotePort,
   };
   const conn = new Conn(wrapper, broker);
+  held.conn = conn;
+  conn.held = held;
   // A TLS session cannot move to another process; its queues are reached through the cluster.
   conn.handed = migrate ? socket : null;
   const fail = () => {
@@ -483,11 +519,15 @@ function principalFromWire(p: PrincipalWire): Principal {
 /** Continue a connection the previous child already handshook. `bytes` starts at the unparsed frame. */
 export function adoptMigrated(broker: Broker, socket: NodeSocket, state: MigratedState, bytes: Uint8Array) {
   socket.setNoDelay(true);
+  const held = heldWrites();
   const wrapper: AmqpSocket = {
     write(chunk) {
       try {
-        socket.write(chunk);
+        // The socket holds these bytes until the callback; see `Conn.heldWrites`.
+        held.n++;
+        socket.write(chunk, held.done);
       } catch {
+        held.n--;
         return 0;
       }
       return chunk.length;
@@ -502,6 +542,8 @@ export function adoptMigrated(broker: Broker, socket: NodeSocket, state: Migrate
     remotePort: socket.remotePort,
   };
   const conn = new Conn(wrapper, broker);
+  held.conn = conn;
+  conn.held = held;
   conn.handed = socket;
   conn.stage = "frames";
   conn.user = state.user;
@@ -562,6 +604,9 @@ export function ch(this: Conn, id: number): Ch {
       txBatch: [],
       txBytes: 0,
       nextPub: 1,
+      confirmLow: 0,
+      confirmAhead: null,
+      ackFrame: null,
       nextDel: 1,
       deliveries: new Map(),
       timeouts: null,

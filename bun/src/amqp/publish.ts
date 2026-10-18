@@ -80,6 +80,59 @@ export function beginPublish(this: Conn, c: Ch, payload: Uint8Array) {
   c.publish = { exchange, routingKey, mandatory: (bits & 1) !== 0, immediate: (bits & 2) !== 0 };
 }
 
+/**
+ * Send the ack or nack for publish `tag`.
+ *
+ * Confirms of a burst coalesce as RabbitMQ's do: while this channel's last
+ * basic.ack is still the connection's last staged frame, and every tag up to
+ * the new one has been settled, that frame is rewritten in place to
+ * `multiple` up to the highest settled tag instead of staging another one.
+ * Every tag it then covers was acked by this broker: an earlier nack went out
+ * in its own frame first, and any frame staged after the ack ends the run.
+ */
+function sendConfirm(conn: Conn, channel: number, c: Ch, tag: number, nack: boolean): Promise<unknown> {
+  if (tag === c.confirmLow + 1) {
+    c.confirmLow = tag;
+    const ahead = c.confirmAhead;
+    if (ahead !== null) {
+      while (ahead.delete(c.confirmLow + 1)) c.confirmLow++;
+      if (ahead.size === 0) c.confirmAhead = null;
+    }
+  } else if (tag > c.confirmLow && c.confirmLow >= 0) {
+    const ahead = (c.confirmAhead ??= new Set());
+    ahead.add(tag);
+    // A tag that never settles would grow this forever: stop coalescing.
+    if (ahead.size > 65536) {
+      c.confirmLow = -1;
+      c.confirmAhead = null;
+    }
+  }
+  const staged = conn.staged;
+  const last = c.ackFrame;
+  if (!nack && last !== null && tag <= c.confirmLow && staged.length !== 0 && staged[staged.length - 1] === last) {
+    setSettleTag(last, c.confirmLow);
+    return SENT;
+  }
+  const frame = encodeSettle(channel, tag, nack, conn);
+  c.ackFrame = nack ? null : frame;
+  return conn.send(frame);
+}
+
+/** Rewrite a staged basic.ack to `multiple` up to `tag` (see {@link encodeSettle}). */
+function setSettleTag(b: Uint8Array, tag: number) {
+  const hi = Math.floor(tag / 0x100000000);
+  const lo = tag >>> 0;
+  b[11] = hi >>> 24;
+  b[12] = (hi >>> 16) & 0xff;
+  b[13] = (hi >>> 8) & 0xff;
+  b[14] = hi & 0xff;
+  b[15] = lo >>> 24;
+  b[16] = (lo >>> 16) & 0xff;
+  b[17] = (lo >>> 8) & 0xff;
+  b[18] = lo & 0xff;
+  b[19] = 1;
+}
+
 /** `a` equals `b` from offset `at`. */
 function sameBytes(a: Uint8Array, b: Uint8Array, at: number): boolean {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[at + i]) return false;
@@ -246,7 +299,7 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
       throw err;
     }
     if (routed === "sent" || routed === "dropped") {
-      if (c.confirm) return this.send(encodeSettle(channel, c.nextPub++, false, this));
+      if (c.confirm) return sendConfirm(this, channel, c, c.nextPub++, false);
       return;
     }
     propRaw = routed;
@@ -346,10 +399,10 @@ class Deferred implements PendingPublish {
         bodyFrame(channel, this.body, conn.frameMax),
       ]);
       if (!this.confirm) return returned;
-      return returned.then(() => conn.send(encodeSettle(channel, this.pubTag, false, conn)));
+      return returned.then(() => sendConfirm(conn, channel, this.c, this.pubTag, false));
     }
     if (!this.confirm) return;
-    return conn.send(encodeSettle(channel, this.pubTag, result === "nack", conn));
+    return sendConfirm(conn, channel, this.c, this.pubTag, result === "nack");
   }
 
   private fail(err: unknown) {

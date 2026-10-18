@@ -87,7 +87,7 @@ function contiguous(parts: Uint8Array[], n: number): Uint8Array | null {
 
 /** The arena may be written from its start again: no staged or queued frame can still point into it. */
 function rewindArena(conn: Conn) {
-  if (conn.reuseWrites && conn.arena !== null && conn.staged.length === 0 && conn.writesPending === 0 && conn.outHead >= conn.outbound.length) {
+  if ((conn.reuseWrites || (conn.held !== null && conn.held.n === 0)) && conn.arena !== null && conn.staged.length === 0 && conn.writesPending === 0 && conn.outHead >= conn.outbound.length) {
     conn.arenaPos = 0;
   }
 }
@@ -627,6 +627,8 @@ function tryMigrate(this: Conn, buf: Uint8Array, at: number): boolean {
   // deliveries or transaction operations. Keep a connection with live work on
   // this worker and use the normal forwarding path instead.
   if (this.deferredPublish.length || this.inFlightPublishes || this.stagedBytes || this.outboundBytes || this.writesPending) return false;
+  // Bytes the socket still holds would be lost or reordered with the handoff.
+  if ((this.held !== null && this.held.n > 0) || (this.socket.pendingBytes?.() ?? 0) > 0) return false;
   for (const ch of this.channels.values()) {
     // A direct reply-to consumer is registered on this worker (`replySinks`).
     if (ch.tx || ch.publish || ch.nextPub !== 1 || ch.consumers.size || ch.deliveries.size || ch.parked.length || ch.replyAddr) return false;
@@ -914,6 +916,9 @@ async function parseAvailable(this: Conn): Promise<void> {
 Conn.prototype.send = send;
 Conn.prototype.outFrame = function (this: Conn, n: number) {
   return outFrame(this, n);
+};
+Conn.prototype.writesReleased = function (this: Conn) {
+  rewindArena(this);
 };
 Conn.prototype.sendMany = sendMany;
 Conn.prototype.flush = flush;

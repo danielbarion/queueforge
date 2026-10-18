@@ -24,7 +24,7 @@ import { BUILTIN, EMPTY_BODY, EMPTY_HEADERS, emptyProm, type Consumer, type Live
  * Route one publish and enqueue a copy on each destination.
  *
  * @param input Vhost, exchange, routing key, body, headers, raw properties, persistence, priority, and expiration. `confirm` counts a publisher confirm. `mandatory` counts an unroutable publish as returned instead of dropped.
- * @returns `ack` when every destination accepted the body, `nack` when one rejected it, or `return` when nothing was routed. A missing default-exchange queue throws 404. BCC is stripped from the stored headers.
+ * @returns `ack` when every destination accepted the body, `nack` when one rejected it, or `return` when nothing was routed. A default-exchange publish to a missing queue is unroutable. BCC is stripped from the stored headers.
  */
 const SLOW = Symbol("slow");
 
@@ -275,11 +275,8 @@ async function publishSlow(this: Broker, input: {
   }
   this.prom.received++;
   if (input.confirm) this.prom.receivedConfirm++;
-  if (input.exchange === "") {
-    if (!this.queues.has(this.key(input.vhost, input.routingKey))) {
-      throw new ChanError(404, `NOT_FOUND - no queue '${input.routingKey}' in vhost '${input.vhost}'`);
-    }
-  }
+  // A default-exchange publish to a missing queue is unroutable, as in
+  // RabbitMQ: returned when mandatory, else dropped. The channel stays open.
   const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers, input.propRaw);
   for (const key of [...headerList(input.headers, "CC"), ...headerList(input.headers, "BCC")]) {
     if (key === input.routingKey) continue;

@@ -2,6 +2,26 @@ import { expect, test } from "bun:test";
 import type { Message } from "amqplib";
 import { channel, closeCode, collect, confirmChannel, connect, eventually, nextMessage, rpc, sleep, uniq } from "../lib.ts";
 
+test("Mandatory returns :: the default exchange returns a publish to a missing queue and keeps the channel", async () => {
+  const ch = await confirmChannel();
+  const key = uniq("missing-queue");
+  let returned: (Message & { fields: Message["fields"] & { replyCode: number } }) | undefined;
+  ch.on("return", (message) => { returned = message; });
+  // Mandatory: basic.return 312, then the ack. Not mandatory: dropped, still acked.
+  await new Promise<void>((resolve, reject) => {
+    ch.publish("", key, Buffer.from("to-nowhere"), { mandatory: true }, (error) => (error ? reject(error) : resolve()));
+  });
+  await new Promise<void>((resolve, reject) => {
+    ch.publish("", key, Buffer.from("dropped"), {}, (error) => (error ? reject(error) : resolve()));
+  });
+  expect(returned?.fields.replyCode).toBe(312);
+  expect(returned?.fields.routingKey).toBe(key);
+  // The channel is still open.
+  const q = uniq("after-missing");
+  await ch.assertQueue(q, { exclusive: true });
+  expect((await ch.checkQueue(q)).messageCount).toBe(0);
+});
+
 test("Mandatory returns :: an unroutable message returns before its publisher confirm", async () => {
   const ch = await confirmChannel();
   const key = uniq("unroutable");
