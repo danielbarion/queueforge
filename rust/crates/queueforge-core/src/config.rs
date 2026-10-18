@@ -122,9 +122,25 @@ pub struct LdapConfig {
     /// Password for `bind_dn`.
     #[serde(default)]
     pub bind_password: Option<String>,
-    /// RabbitMQ's `vhost_access_query` / `resource_access_query`.
+    /// RabbitMQ's `vhost_access_query` / `resource_access_query` (round-1 table form).
     #[serde(default)]
     pub resource_access: LdapResourceAccess,
+    /// `vhost_access_query` as an Erlang term, as in RabbitMQ's advanced.config.
+    /// Takes precedence over `resource_access.vhost`.
+    #[serde(default)]
+    pub vhost_access_query: Option<String>,
+    /// `resource_access_query` as an Erlang term. Takes precedence over
+    /// `resource_access.configure` / `write` / `read`.
+    #[serde(default)]
+    pub resource_access_query: Option<String>,
+    /// `topic_access_query` as an Erlang term. Takes precedence over
+    /// `resource_access.topic`.
+    #[serde(default)]
+    pub topic_access_query: Option<String>,
+    /// `tag_queries`: an Erlang list of `{Tag, Query}`. When set, it decides
+    /// the user's tags instead of `admin_group`.
+    #[serde(default)]
+    pub tag_queries: Option<String>,
 }
 
 /// Per-permission LDAP queries. A missing key allows (constant true).
@@ -962,6 +978,21 @@ k8s_address_type = "hostname"
         assert_eq!(cfg.cluster.aws_ec2_tags.get("env").map(String::as_str), Some("prod"));
         assert_eq!(cfg.cluster.consul_svc_ttl, Some(10));
         assert!(Config::parse_toml("[auth.ldap]\nserver = \"x\"\nuser_dn_pattern = \"y\"\n[auth.ldap.resource_access]\nconfigure = { group = \"z\" }").is_err());
+    }
+
+    #[test]
+    fn ldap_erlang_term_queries_parse() {
+        let text = "[auth.ldap]\nserver = \"x\"\nuser_dn_pattern = \"y\"\n\
+            vhost_access_query = '''{'or', [{constant, false}, {equals, {string, \"${vhost}\"}, {string, \"/\"}}]}'''\n\
+            resource_access_query = '''{constant, true}'''\n\
+            topic_access_query = '''{match, {string, \"${routing_key}\"}, {string, \"^ldap\\\\.\"}}'''\n\
+            tag_queries = '''[{management, {constant, true}}]'''\n\
+            [auth.ldap.resource_access]\nwrite = { constant = true }\n";
+        let ldap = Config::parse_toml(text).unwrap().auth.ldap.unwrap();
+        assert!(ldap.vhost_access_query.unwrap().starts_with("{'or'"));
+        assert_eq!(ldap.topic_access_query.as_deref(), Some(r#"{match, {string, "${routing_key}"}, {string, "^ldap\\."}}"#));
+        assert_eq!(ldap.tag_queries.as_deref(), Some("[{management, {constant, true}}]"));
+        assert_eq!(ldap.resource_access.write.and_then(|q| q.constant), Some(true));
     }
 
     #[test]

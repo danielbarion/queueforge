@@ -19,6 +19,17 @@
 // queue groups through a leader kill, replicated streams through a writer
 // kill and catch-up, settings and membership through the meta log.
 
+// Full conformance on 2026-10-17 (conformance/, 170 tests pinned against
+// RabbitMQ 4.3.6): RabbitMQ 169/170 (the delayed-message plugin), Rust, Bun
+// and PHP 170/170, and Bun and PHP again 170/170 with QUEUEFORGE_CORES=3.
+// New that day: consumer acknowledgement timeouts, connection.update-secret,
+// stream filtering, consistent-hash header and property hashing, stored
+// federation of exchanges and queues, the AMQP 1.0 management node, MQTT 5
+// subscription options, x.509 login on every protocol, LDAP access queries
+// and cloud peer discovery. Seventeen later tests (the management HTTP API
+// surface and RabbitMQ's LDAP query language) pass on RabbitMQ and are still
+// open on the three engines; those rows stay partial.
+
 export type Level = "y" | "p" | "n";
 export type Cell = Level | readonly [Level, string];
 export type Broker = "mq" | "rust" | "bun" | "php";
@@ -66,11 +77,16 @@ export const featureGroups: FeatureGroup[] = [
         },
       },
       {
+        name: "AMQP 1.0 management node",
+        detail: "Declare queues, exchanges and bindings over /management, as RabbitMQ 4 clients do",
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
+      },
+      {
         name: "MQTT 3.1.1",
         detail: "Publish and subscribe for devices",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "retained in memory"],
+          rust: "y",
           bun: "y",
           php: "y",
         },
@@ -78,7 +94,7 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "MQTT 5.0",
         detail: "Properties, session expiry, reason codes",
-        cells: { mq: ["y", "plugin"], rust: ["p", "properties and reason codes"], bun: ["p", "properties and reason codes"], php: ["p", "properties and reason codes"] },
+        cells: { mq: ["y", "plugin"], rust: "y", bun: "y", php: "y" },
       },
       {
         name: "STOMP",
@@ -171,13 +187,13 @@ export const featureGroups: FeatureGroup[] = [
         name: "Consistent-hash exchange",
         detail: "Spread keys across queues by weight",
         code: ["x-consistent-hash"],
-        cells: { mq: ["y", "plugin"], rust: ["p", "routing key only"], bun: ["p", "routing key only"], php: ["p", "routing key only"] },
+        cells: { mq: ["y", "plugin"], rust: ["y", "key, header or property"], bun: ["y", "key, header or property"], php: ["y", "key, header or property"] },
       },
       {
         name: "Delayed messages",
         detail: "Hold a message for a set time before routing",
         code: ["x-delayed-message"],
-        cells: { mq: ["p", "community plugin"], rust: ["p", "delays held in memory"], bun: ["p", "delays held in memory"], php: ["p", "delays held in memory"] },
+        cells: { mq: ["p", "community plugin"], rust: ["y", "stored across restarts"], bun: ["y", "stored across restarts"], php: ["y", "stored across restarts"] },
       },
       {
         name: "Local random exchange",
@@ -221,7 +237,7 @@ export const featureGroups: FeatureGroup[] = [
         name: "Stream filtering",
         detail: "A consumer reads only the records whose filter matches",
         code: ["x-stream-filter"],
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Super streams",
@@ -343,7 +359,7 @@ export const featureGroups: FeatureGroup[] = [
         name: "Quorum consumer timeout",
         detail: "Return unacked messages and cancel only that consumer",
         code: ["x-consumer-timeout"],
-        cells: { mq: "y", rust: "n", bun: "n", php: "n" },
+        cells: { mq: "y", rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Queue leader locator",
@@ -484,17 +500,17 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "x.509 client certificates",
         detail: "The EXTERNAL SASL mechanism",
-        cells: { mq: ["y", "plugin"], rust: ["p", "AMQP 0-9-1 only"], bun: ["p", "AMQP 0-9-1 only"], php: ["p", "AMQP 0-9-1 only"] },
+        cells: { mq: ["y", "plugin"], rust: ["y", "AMQP 0-9-1 and 1.0, MQTT, STOMP"], bun: ["y", "AMQP 0-9-1 and 1.0, MQTT, STOMP"], php: ["y", "AMQP 0-9-1 and 1.0, MQTT, STOMP"] },
       },
       {
         name: "LDAP",
         detail: "Users and permissions from a directory",
-        cells: { mq: ["y", "plugin"], rust: ["p", "bind and an admin group, no access queries"], bun: ["p", "bind and an admin group, no access queries"], php: ["p", "bind and an admin group, no access queries"] },
+        cells: { mq: ["y", "plugin"], rust: ["p", "constant and in_group queries"], bun: ["p", "constant and in_group queries"], php: ["p", "constant and in_group queries"] },
       },
       {
         name: "OAuth 2.0",
         detail: "JWT tokens instead of passwords",
-        cells: { mq: ["y", "plugin"], rust: ["p", "RS256 via JWKS, no token refresh"], bun: ["p", "RS256 via JWKS, no token refresh"], php: ["p", "RS256 via JWKS and scopes; no token refresh"] },
+        cells: { mq: ["y", "plugin"], rust: ["y", "RS256 via JWKS; token refresh"], bun: ["y", "RS256 via JWKS; token refresh"], php: ["y", "RS256 via JWKS; token refresh"] },
       },
     ],
   },
@@ -561,19 +577,19 @@ export const featureGroups: FeatureGroup[] = [
         detail: "Move messages from one broker to another",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "not stored"],
-          bun: "y",
-          php: ["p", "local and remote AMQP 0-9-1; no AMQP 1.0 or stream sources"],
+          rust: ["y", "AMQP 0-9-1 and 1.0, stream sources, stored"],
+          bun: ["y", "AMQP 0-9-1 and 1.0, stream sources, stored"],
+          php: ["y", "AMQP 0-9-1 and 1.0, stream sources, stored"],
         },
       },
       {
         name: "Federation",
-        detail: "Link exchanges across brokers",
+        detail: "Link exchanges and queues across brokers",
         cells: {
           mq: ["y", "plugin"],
-          rust: ["p", "exchanges, in memory"],
-          bun: ["p", "exchanges, in memory"],
-          php: ["p", "local and remote AMQP 0-9-1 exchanges; hop limit"],
+          rust: ["y", "exchanges and queues, stored"],
+          bun: ["y", "exchanges and queues, stored"],
+          php: ["y", "exchanges and queues, stored"],
         },
       },
       {
@@ -608,7 +624,7 @@ export const featureGroups: FeatureGroup[] = [
           mq: "y",
           rust: ["y", "raft and four RabbitMQ flags"],
           bun: ["y", "raft and four RabbitMQ flags"],
-          php: ["p", "enable/disable controls; cluster rollout not verified"],
+          php: ["y", "committed through Raft once every voter supports it"],
         },
       },
     ],
@@ -659,12 +675,12 @@ export const featureGroups: FeatureGroup[] = [
       {
         name: "Cloud peer discovery",
         detail: "Kubernetes, Consul, etcd, AWS",
-        cells: { mq: ["y", "plugin"], rust: "n", bun: "n", php: "n" },
+        cells: { mq: ["y", "plugin"], rust: "y", bun: "y", php: "y" },
       },
       {
         name: "Rolling upgrades",
         detail: "Upgrade one node at a time",
-        cells: { mq: "y", rust: ["y", "enable raft after the last node"], bun: ["y", "enable raft after the last node"], php: ["p", "capability negotiation; mixed Raft upgrades unverified"] },
+        cells: { mq: "y", rust: ["y", "enable raft after the last node"], bun: ["y", "enable raft after the last node"], php: ["y", "rolling restart verified in a Raft cluster"] },
       },
       {
         name: "Uses every core",
