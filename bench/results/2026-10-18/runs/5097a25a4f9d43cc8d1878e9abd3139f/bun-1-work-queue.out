@@ -1,0 +1,47 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-051402-898, starting consumer #0
+id: test-051402-898, starting consumer #0, channel #0
+id: test-051402-898, starting consumer #1
+id: test-051402-898, starting consumer #1, channel #0
+id: test-051402-898, starting consumer #2
+id: test-051402-898, starting consumer #2, channel #0
+id: test-051402-898, starting consumer #3
+id: test-051402-898, starting consumer #3, channel #0
+id: test-051402-898, starting producer #0
+id: test-051402-898, starting producer #0, channel #0
+id: test-051402-898, starting producer #1
+id: test-051402-898, starting producer #1, channel #0
+id: test-051402-898, starting producer #2
+id: test-051402-898, starting producer #2, channel #0
+id: test-051402-898, starting producer #3
+id: test-051402-898, starting producer #3, channel #0
+id: test-051402-898, time 1.000 s, sent: 119937 msg/s, confirmed: 119587 msg/s, nacked: 0 msg/s, received: 119707 msg/s, min/median/75th/95th/99th/max consumer latency: 50/862/2068/6023/10987/25523 µs, confirm latency: 172/1288/2629/7919/15178/31299 µs
+id: test-051402-898, time 2.000 s, sent: 235273 msg/s, confirmed: 235223 msg/s, nacked: 0 msg/s, received: 235374 msg/s, min/median/75th/95th/99th/max consumer latency: 23/541/811/1967/3301/5761 µs, confirm latency: 173/1249/1678/3212/4370/5738 µs
+id: test-051402-898, time 3.000 s, sent: 204984 msg/s, confirmed: 205018 msg/s, nacked: 0 msg/s, received: 204948 msg/s, min/median/75th/95th/99th/max consumer latency: 47/530/795/1734/2672/4001 µs, confirm latency: 220/1309/1769/3295/4541/34637 µs
+id: test-051402-898, time 4.000 s, sent: 240159 msg/s, confirmed: 240159 msg/s, nacked: 0 msg/s, received: 240078 msg/s, min/median/75th/95th/99th/max consumer latency: 52/516/803/1598/2285/4054 µs, confirm latency: 227/1234/1691/3339/4426/5530 µs
+id: test-051402-898, time 5.000 s, sent: 230047 msg/s, confirmed: 230044 msg/s, nacked: 0 msg/s, received: 230004 msg/s, min/median/75th/95th/99th/max consumer latency: 61/545/812/1631/2311/21919 µs, confirm latency: 183/1307/1755/3322/5604/32653 µs
+id: test-051402-898, time 6.000 s, sent: 235966 msg/s, confirmed: 236084 msg/s, nacked: 0 msg/s, received: 236024 msg/s, min/median/75th/95th/99th/max consumer latency: 49/534/794/1816/2580/4371 µs, confirm latency: 178/1262/1713/3129/4373/6746 µs
+id: test-051402-898, time 7.000 s, sent: 218135 msg/s, confirmed: 218184 msg/s, nacked: 0 msg/s, received: 218249 msg/s, min/median/75th/95th/99th/max consumer latency: 39/560/846/1873/3267/5555 µs, confirm latency: 162/1332/1780/3398/4916/41799 µs
+id: test-051402-898, time 8.000 s, sent: 238019 msg/s, confirmed: 237823 msg/s, nacked: 0 msg/s, received: 237999 msg/s, min/median/75th/95th/99th/max consumer latency: 58/514/783/1607/2521/3994 µs, confirm latency: 314/1257/1718/3015/4404/5924 µs
+id: test-051402-898, time 9.000 s, sent: 223248 msg/s, confirmed: 223266 msg/s, nacked: 0 msg/s, received: 223160 msg/s, min/median/75th/95th/99th/max consumer latency: 29/470/742/1647/3427/38989 µs, confirm latency: 226/1306/1669/2804/4169/38631 µs
+id: test-051402-898, time 10.000 s, sent: 240316 msg/s, confirmed: 240296 msg/s, nacked: 0 msg/s, received: 240440 msg/s, min/median/75th/95th/99th/max consumer latency: 61/504/768/1674/2840/4216 µs, confirm latency: 234/1277/1756/3190/4871/5813 µs
+id: test-051402-898, time 11.000 s, sent: 229485 msg/s, confirmed: 229485 msg/s, nacked: 0 msg/s, received: 229423 msg/s, min/median/75th/95th/99th/max consumer latency: 41/521/787/1605/2400/7117 µs, confirm latency: 206/1266/1691/2876/5383/32826 µs
+id: test-051402-898, time 12.000 s, sent: 241196 msg/s, confirmed: 241264 msg/s, nacked: 0 msg/s, received: 241128 msg/s, min/median/75th/95th/99th/max consumer latency: 28/526/796/1660/2489/5655 µs, confirm latency: 309/1289/1753/3115/4097/5428 µs
+id: test-051402-898, time 13.000 s, sent: 229656 msg/s, confirmed: 229622 msg/s, nacked: 0 msg/s, received: 229662 msg/s, min/median/75th/95th/99th/max consumer latency: 42/560/858/1736/2574/28953 µs, confirm latency: 151/1296/1665/3199/4429/24524 µs
+id: test-051402-898, time 14.000 s, sent: 239007 msg/s, confirmed: 239008 msg/s, nacked: 0 msg/s, received: 238964 msg/s, min/median/75th/95th/99th/max consumer latency: 43/506/766/1874/2879/4005 µs, confirm latency: 214/1303/1736/3267/4375/7733 µs
+id: test-051402-898, time 15.000 s, sent: 224585 msg/s, confirmed: 224639 msg/s, nacked: 0 msg/s, received: 224843 msg/s, min/median/75th/95th/99th/max consumer latency: 61/552/858/1959/2826/15296 µs, confirm latency: 188/1307/1725/3414/4743/27093 µs
+id: test-051402-898, time 16.000 s, sent: 240717 msg/s, confirmed: 240642 msg/s, nacked: 0 msg/s, received: 240704 msg/s, min/median/75th/95th/99th/max consumer latency: 51/540/800/1831/3187/15814 µs, confirm latency: 191/1225/1662/2909/4498/15543 µs
+id: test-051402-898, time 17.000 s, sent: 234676 msg/s, confirmed: 234684 msg/s, nacked: 0 msg/s, received: 234486 msg/s, min/median/75th/95th/99th/max consumer latency: 59/517/811/1748/2637/6186 µs, confirm latency: 264/1292/1713/2950/4078/31926 µs
+id: test-051402-898, time 18.000 s, sent: 221216 msg/s, confirmed: 221268 msg/s, nacked: 0 msg/s, received: 221146 msg/s, min/median/75th/95th/99th/max consumer latency: 33/525/786/1595/2402/2844 µs, confirm latency: 168/1342/1836/3390/4609/8285 µs
+id: test-051402-898, time 19.000 s, sent: 218022 msg/s, confirmed: 217947 msg/s, nacked: 0 msg/s, received: 218184 msg/s, min/median/75th/95th/99th/max consumer latency: 40/534/822/1843/2962/9252 µs, confirm latency: 356/1315/1821/3435/5775/33255 µs
+id: test-051402-898, time 20.000 s, sent: 239979 msg/s, confirmed: 240000 msg/s, nacked: 0 msg/s, received: 239801 msg/s, min/median/75th/95th/99th/max consumer latency: 59/511/776/1648/2596/4224 µs, confirm latency: 246/1266/1758/3058/4447/5468 µs
+id: test-051402-898, time 21.000 s, sent: 228055 msg/s, confirmed: 228035 msg/s, nacked: 0 msg/s, received: 228240 msg/s, min/median/75th/95th/99th/max consumer latency: 29/500/761/1871/2560/15414 µs, confirm latency: 225/1289/1679/3345/4615/27791 µs
+id: test-051402-898, time 22.001 s, sent: 240116 msg/s, confirmed: 240119 msg/s, nacked: 0 msg/s, received: 239888 msg/s, min/median/75th/95th/99th/max consumer latency: 51/507/756/1791/2763/4344 µs, confirm latency: 184/1275/1729/3221/4586/5873 µs
+id: test-051402-898, time 23.000 s, sent: 230492 msg/s, confirmed: 230544 msg/s, nacked: 0 msg/s, received: 230614 msg/s, min/median/75th/95th/99th/max consumer latency: 29/501/770/1675/2510/24897 µs, confirm latency: 289/1263/1673/2821/4848/27750 µs
+id: test-051402-898, time 24.000 s, sent: 243311 msg/s, confirmed: 243265 msg/s, nacked: 0 msg/s, received: 243204 msg/s, min/median/75th/95th/99th/max consumer latency: 37/499/783/1707/2429/3407 µs, confirm latency: 275/1323/1748/2849/4081/5631 µs
+id: test-051402-898, time 25.000 s, sent: 228478 msg/s, confirmed: 228686 msg/s, nacked: 0 msg/s, received: 228656 msg/s, min/median/75th/95th/99th/max consumer latency: 44/551/851/1703/2572/4205 µs, confirm latency: 281/1290/1732/3567/5281/28890 µs
+test stopped (Reached time limit)
+id: test-051402-898, sending rate avg: 226914 msg/s
+id: test-051402-898, receiving rate avg: 226923 msg/s
+id: test-051402-898, consumer latency min/median/75th/95th/99th/max 57/562/810/1886/2887/10360 µs
+id: test-051402-898, confirm latency min/median/75th/95th/99th/max 248/1285/1695/3274/4516/16285 µs

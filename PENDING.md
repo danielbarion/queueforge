@@ -287,6 +287,36 @@ delivery encode and send leave the home. Forwarded publishes were slower
 A queue lives on one child process, so a single busy queue gets one JavaScript
 thread however many cores the container has.
 
+2026-10-18 (`90625e0`): fewer allocations and copies per message on the
+queue's thread instead of moving work off it. Hot outbound frames (deliveries
+and confirms) are encoded back to back into a per-connection arena and a
+burst is written as one view, so there is no buffer per frame and, on the
+adopted `node:net` sockets of cores mode, no fresh gather buffer per write
+(an arena that a socket may still hold is never reused); a single frame is
+staged without an array; the fast publish path reuses the last exchange/key
+to queue-name route while the route cache is unchanged; `beginPublish`
+reuses the last publish's name strings when the bytes match; topic
+permissions are checked on topic exchanges only (as RabbitMQ), with their
+patterns compiled once. Interleaved A/B in both orders against the committed
+code, medians over every repeat: 1 CPU work-queue +16%, quorum +9%,
+fanout-20 +5%, telemetry +3%, latency-10k p99 1.74 -> 0.83 ms; 4 CPU
+work-queue +8-20%, quorum +8-36% (both 4 CPU cells spread with the VM disk;
+the first pair after a Docker restart: work-queue 225,756 -> 240,828,
+quorum 201,136 -> 224,806), heavy +13%. The arena also exposed a bug:
+`encodeSettle` never wrote the bits octet (byte 19) and relied on a zeroed
+buffer; it now writes it, and `test/out-arena.test.ts` starts from a dirty
+arena so any unwritten byte fails. Full run 2026-10-18 (published): 4 CPU
+work-queue 214,488 -> 251,475 msg/s (Rust 302,894), quorum 153,380 ->
+225,295 (Rust 292,528), heavy 247,414 (Rust 321,282 on its one complete
+repeat). The single-queue gap at 4 CPU is ~17-23%, down from ~30-43%.
+
+Not kept (2026-10-18): a sync-worker gather delay before each fsync round
+(the main thread spends 13% of 1 CPU work-queue in `Atomics.notify`, the
+handoff to the worker): 0.1 / 0.25 / 0.5 ms lowered work-queue 229k to
+202k / 202k / 187k msg/s. Copying 1 KiB bodies into a bump arena instead of
+`slice`: ~25 ns saved per body at 1 KiB and slower at 256 B, not worth the
+retention risk.
+
 Evidence: work-queue (one queue) at 4 CPU 165,339 msg/s at 1.3 of 4 CPUs used;
 Rust 197,010 at 3 CPUs. The 16-queue shape does scale (522,318 at 4 CPU).
 
@@ -380,7 +410,9 @@ CPU of the 8 CPU VM, see the same gaps over 20 s: p999 5.4 / 5.3 ms, max 17.6
 / 17.8 ms, 145 / 136 gaps past 2 ms. Interleaved pairs (Bun / Rust p99):
 latency-10k 3.25 / 0.59, 0.40 / 0.22, 1.98 / 1.16 ms; slow-consumers 0.40 /
 0.90 and 0.60 / 7.74 ms (Bun ahead since the per-message work of 2026-10-16).
-latency-10k is the one cell left where one thread waiting out a VM stall
+Full run 2026-10-18: latency-10k p99 1.10 ms (Rust 0.84), slow-consumers
+8.54 (Rust 3.58), latency-1k 1.64 (Rust 1.70), many-queues 2.88 (Rust
+6.13). latency-10k is the one cell left where one thread waiting out a VM stall
 shows; it moves between 0.4 and 3.3 ms run to run.
 
 Where: the lone-publish path (`SOCKET_WAIT_MS`, lone mode in `driveInbound`,
@@ -394,6 +426,18 @@ Status: open, cause unknown. Five fixed-image repeats did not tie high cgroup
 peaks to process RSS or heap. Hypothesis, not a diagnosis: JavaScriptCore GC
 timing. Freeze one image and run a cell five times, logging
 `process.memoryUsage()` and `bun:jsc` `heapStats()` over time.
+
+2026-10-18, 4 CPU fanout-20 (anonymous 548 MiB; Rust 56): each of the four
+workers holds 115-140 MiB resident in one 1 GiB anonymous mapping while its
+live JavaScript heap is 16-34 MiB (capacity 54-78) and its ArrayBuffers
+9-14 MiB; no connection or queue holds a backlog (ready 0, nothing staged).
+The rest is allocator slack inside the runtime, not data the broker keeps.
+Tried, none moved it by more than ~5%: `BUN_OPTIONS=--smol`,
+`BUN_GARBAGE_COLLECTOR_LEVEL=1/2`, `BUN_JSC_forceRAMSize=256/512 MiB`,
+`MIMALLOC_PURGE_DECOMMITS=1` / `MIMALLOC_PURGE_DELAY=0` (mimalloc already
+decommits after 100 ms). Fewer allocations per message (the frame arena)
+is the lever left; the per-process floor (~30 MiB idle per worker) is
+B16.
 
 ### B9. Fanout stall at 1 CPU
 
@@ -492,6 +536,15 @@ proposal (76% of the profile); it now reads only new entries. 1 CPU quorum
 ---
 
 ## Benchmark harness
+
+### H9. Docker Desktop fails past ~300k connections in one VM
+
+Status: open (2026-10-18). The connections step's Bun 4 CPU / 8 GiB search
+asks for 320,000 connections; three times in a row Docker's engine then
+answered 500 to every request (the client container could not start, and
+the broker container was gone), on a fresh VM too. 240,000-260,000 held
+in earlier runs. The published row is the last step held (160,000). Cap
+the search below the VM's limit, or run it on a Linux host.
 
 ### H5. Throughput through a failover
 
