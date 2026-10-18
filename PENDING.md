@@ -310,6 +310,42 @@ work-queue 214,488 -> 251,475 msg/s (Rust 302,894), quorum 153,380 ->
 225,295 (Rust 292,528), heavy 247,414 (Rust 321,282 on its one complete
 repeat). The single-queue gap at 4 CPU is ~17-23%, down from ~30-43%.
 
+2026-10-18, second round (`a871f55`, `3fb4946`, `e4d4112`, `6ace4e1`): confirms
+of a burst coalesce into `multiple` acks; adopted sockets rewind the frame
+arena once every write callback ran; the back-pressure check of parked
+publishes reuses its route and queue keys (it rerouted every parked
+publish); basic.publish is parsed in place; quorum messages reuse the cached
+stored-meta string (JSON.stringify per message was 5.5% of the 4 CPU quorum
+thread). Fresh-VM A/B pairs (a Docker restart before every pair; plain
+both-order runs on one VM spread 2x on durable cells): 4 CPU quorum +17.5%,
+work-queue +5.5%. Fresh-VM pairs against Rust, 3 rounds, Bun `hot8`: 4 CPU
+work-queue 281,413 / 281,360 (Bun 2 of 3), heavy 328,085 / 309,560,
+many-queues p99 1.81 / 2.15 ms, quorum 250,094 / 286,463 (Rust 3 of 3);
+1 CPU transactions 78,251 / 58,308 (Bun 3 of 3), slow-consumers p99 0.84 /
+3.13, large-64k 1,063 / 1,172 MB/s and large-64k-quorum 1,089 / 1,239 (Rust
+3 of 3), backlog 149,717 / 149,993 (both at the drain's ceiling),
+latency-10k p99 1.56 / 1.10 (Rust's own repeats 0.13-1.76).
+
+Found on the way: when the VM's fsync slows (0.14 -> 0.56 ms) Bun's 4 CPU
+work-queue falls 279k -> 122k while Rust keeps 258k; with a simulated
++0.5 ms per round (the sync worker's test delay) 290k -> 173k. Publishers
+sit at their 100-confirm window: Bun's confirm round trip spans several
+fsyncs (worker round, postMessage to the main thread, confirm, the next
+publish). Rust's per-queue WAL syncs more bytes per round. Next: shorten that
+loop (report rounds without postMessage, start the next round's staging
+while one syncs) and measure it under the simulated delay.
+
+Not kept (second round): writing adopted sockets through Bun's native
+handle, which copies on write and returns short counts (no change in 4 CPU
+A/B: the cost is the kernel send); a sync-worker gather for rounds of large
+records up to 1 MiB (fsyncs 2,200 -> 760/s but MB/s unchanged and quorum
+anonymous memory 145 -> 384 MiB); an adaptive gather after slow rounds (rounds
+already ran back to back); a 1 ms keep-awake timer for the latency tails
+(p99 of one image spreads 0.49-16.6 ms either way); `MIMALLOC_PURGE_DELAY`
+for the 64 KiB body allocations (more memory, no throughput). What is left
+at 64 KiB is two body copies Rust does not make (into the log's staging ring
+and into the socket gather buffer).
+
 Not kept (2026-10-18): a sync-worker gather delay before each fsync round
 (the main thread spends 13% of 1 CPU work-queue in `Atomics.notify`, the
 handoff to the worker): 0.1 / 0.25 / 0.5 ms lowered work-queue 229k to
