@@ -54,13 +54,36 @@ function bodyBuffer(n: number): Uint8Array {
  * The body is not routed until {@link finishPublish}.
  */
 export function beginPublish(this: Conn, c: Ch, payload: Uint8Array) {
-  // Past class, method and the reserved short, without a view of its own.
-  const r = new R(payload);
-  r.o = 6;
-  const exchange = r.shortstr();
-  const routingKey = r.shortstr();
-  const bits = r.u8();
+  // Past class, method and the reserved short. A burst repeats the same two
+  // names: when their bytes match the last publish, its strings are reused.
+  const exLen = payload[6] ?? 0;
+  const rkAt = 7 + exLen;
+  const end = rkAt + 1 + (payload[rkAt] ?? 0);
+  const last = c.pubNames;
+  let exchange: string;
+  let routingKey: string;
+  if (last !== null && last.length === end - 6 && end < payload.length && sameBytes(last, payload, 6)) {
+    exchange = c.pubExchange;
+    routingKey = c.pubRoutingKey;
+  } else {
+    const r = new R(payload);
+    r.o = 6;
+    exchange = r.shortstr();
+    routingKey = r.shortstr();
+    if (end < payload.length) {
+      c.pubNames = payload.slice(6, end);
+      c.pubExchange = exchange;
+      c.pubRoutingKey = routingKey;
+    }
+  }
+  const bits = payload[end] ?? 0;
   c.publish = { exchange, routingKey, mandatory: (bits & 1) !== 0, immediate: (bits & 2) !== 0 };
+}
+
+/** `a` equals `b` from offset `at`. */
+function sameBytes(a: Uint8Array, b: Uint8Array, at: number): boolean {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[at + i]) return false;
+  return true;
 }
 
 /**
@@ -185,12 +208,14 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   // The last exchange checked is remembered, so a publish burst to one
   // exchange pays for the lookup and the permission test once.
   if (pub.exchange !== this.writeEx || this.permRef !== this.broker.perms || this.permLen !== this.broker.perms.length) {
+    this.writeExTopic = false;
     if (pub.exchange !== "") {
       const ex = this.broker.exchanges.get(this.broker.key(this.vhost, pub.exchange));
       if (!ex) return this.chanClose(channel, 404, `NOT_FOUND - no exchange '${pub.exchange}' in vhost '${this.vhost}'`, 60, 40);
       if (ex.internal) {
         return this.chanClose(channel, 403, `ACCESS_REFUSED - cannot publish to internal exchange '${pub.exchange}' in vhost '${this.vhost}'`, 60, 40);
       }
+      this.writeExTopic = ex.kind === "topic";
     }
     const resource = pub.exchange || "amq.default";
     if (!this.allowed("write", resource)) {
@@ -207,7 +232,8 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
   if (c.userId && c.userId !== this.user) {
     return this.chanClose(channel, 406, `PRECONDITION_FAILED - user_id property set to '${c.userId}' but authenticated user was '${this.user}'`, 60, 40);
   }
-  if (!this.broker.topicWriteAllowed(this.user, this.vhost, pub.exchange, pub.routingKey)) {
+  // Topic permissions apply to topic exchanges only, as in RabbitMQ.
+  if (this.writeExTopic && !this.broker.topicWriteAllowed(this.user, this.vhost, pub.exchange, pub.routingKey)) {
     return this.chanClose(channel, 403, "ACCESS_REFUSED - write access to topic refused", 60, 40);
   }
   // Direct reply-to: rewrite the requester's reply-to, or hand a reply to it.
@@ -220,7 +246,7 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
       throw err;
     }
     if (routed === "sent" || routed === "dropped") {
-      if (c.confirm) return this.send(encodeSettle(channel, c.nextPub++, false));
+      if (c.confirm) return this.send(encodeSettle(channel, c.nextPub++, false, this));
       return;
     }
     propRaw = routed;
@@ -320,10 +346,10 @@ class Deferred implements PendingPublish {
         bodyFrame(channel, this.body, conn.frameMax),
       ]);
       if (!this.confirm) return returned;
-      return returned.then(() => conn.send(encodeSettle(channel, this.pubTag, false)));
+      return returned.then(() => conn.send(encodeSettle(channel, this.pubTag, false, conn)));
     }
     if (!this.confirm) return;
-    return conn.send(encodeSettle(channel, this.pubTag, result === "nack"));
+    return conn.send(encodeSettle(channel, this.pubTag, result === "nack", conn));
   }
 
   private fail(err: unknown) {

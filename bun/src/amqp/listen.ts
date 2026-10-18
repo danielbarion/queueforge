@@ -26,6 +26,10 @@ export type PendingPublish = {
 
 /** State for one AMQP channel on this connection. */
 export type Ch = {
+  /** basic.publish name bytes (both shortstrs) of the last publish, and their strings, for `beginPublish`. */
+  pubNames: Uint8Array | null;
+  pubExchange: string;
+  pubRoutingKey: string;
   confirm: boolean;
   tx: boolean;
   txBatch: Array<() => Promise<unknown> | void>;
@@ -144,6 +148,16 @@ export class Conn {
   staged: Uint8Array[] = [];
   /** Byte length of `staged`. A full buffer is written before the microtask. */
   stagedBytes = 0;
+  /**
+   * Hot outbound frames (deliveries, confirms) are encoded into this buffer
+   * one after another (`outFrame`), so a burst is one contiguous run that is
+   * written as one view: no buffer per frame and no gather copy. Bytes handed
+   * to a write are never overwritten: the region is reused only when nothing
+   * is staged or queued and the socket copies on write (`reuseWrites`).
+   */
+  arena: Uint8Array | null = null;
+  /** Next free byte of `arena`. */
+  arenaPos = 0;
   /** True while a microtask is already queued to flush `staged`. */
   coalesceScheduled = false;
   /** Bytes that arrived while a burst of publishes was being parsed. */
@@ -184,6 +198,8 @@ export class Conn {
   permLen = -1;
   /** Exchange whose existence and write permission the last publish checked. */
   writeEx: string | null = null;
+  /** `writeEx` is a topic exchange, so its publishes are checked against topic permissions. */
+  writeExTopic = false;
   /** The client advertised the connection.blocked capability. */
   wantsBlocked = false;
   /** The client advertised consumer_cancel_notify: a timed-out consumer gets basic.cancel. */
@@ -256,6 +272,8 @@ export interface Conn {
   connClose(code: number, text: string): Promise<void>;
   handleStartOk(payload: Uint8Array): Promise<void>;
   handleUpdateSecret(payload: Uint8Array): Promise<void>;
+  /** `n` bytes for a hot outbound frame, from this connection's arena. */
+  outFrame(n: number): Uint8Array;
   timeoutConsumer(channel: number, c: Ch, tag: string, ms: number): Promise<void>;
   sendTune(): Promise<void>;
   handleTuneOk(payload: Uint8Array): void;
@@ -547,6 +565,9 @@ export function ch(this: Conn, id: number): Ch {
       nextDel: 1,
       deliveries: new Map(),
       timeouts: null,
+      pubNames: null,
+      pubExchange: "",
+      pubRoutingKey: "",
       parked: [],
       byConsumer: new Map(),
       prefetch: 0,

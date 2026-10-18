@@ -230,7 +230,7 @@ export function deliver(this: Conn, channel: number, tag: string, dtag: number, 
       return;
     }
   }
-  const hot = encodeDeliver(channel, tag, dtag, msg, this.frameMax);
+  const hot = encodeDeliver(channel, tag, dtag, msg, this.frameMax, 0, this);
   if (hot) {
     void this.send(hot);
     return;

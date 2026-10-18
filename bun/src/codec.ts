@@ -538,15 +538,23 @@ function putU64(b: Uint8Array, o: number, v: number) {
   putU32(b, o + 4, v >>> 0);
 }
 
+/**
+ * Where an encoder may put a hot outbound frame: the connection's arena
+ * (`outFrame` in amqp/frames.ts). The encoder fills every byte it is given.
+ */
+export type FrameOut = { outFrame(n: number): Uint8Array };
+
 /** basic.ack or basic.nack with multiple and requeue clear. Same bytes as the generic frame builder. */
-export function encodeSettle(channel: number, deliveryTag: number, nack: boolean): Uint8Array {
-  const b = new Uint8Array(21);
+export function encodeSettle(channel: number, deliveryTag: number, nack: boolean, out?: FrameOut): Uint8Array {
+  const b = out ? out.outFrame(21) : new Uint8Array(21);
   b[0] = 1;
   putU16(b, 1, channel);
   putU32(b, 3, 13);
   putU16(b, 7, 60);
   putU16(b, 9, nack ? 120 : 80);
   putU64(b, 11, deliveryTag);
+  // multiple and requeue clear: written, since an arena buffer is not zeroed.
+  b[19] = 0;
   b[20] = 0xce;
   return b;
 }
@@ -644,6 +652,7 @@ export function encodeDeliver(
   msg: { exchange: string; routingKey: string; redelivered: boolean; propRaw: Uint8Array; body: Uint8Array; size?: number },
   frameMax = FRAME_MAX,
   spare = 0,
+  out?: FrameOut,
 ): Uint8Array | null {
   const tagB = shortBytes(tag);
   const exB = shortBytes(msg.exchange);
@@ -656,7 +665,8 @@ export function encodeDeliver(
   const headerLen = 12 + prop.length;
   // An empty body has no body frame: amqplib refuses one after a size-0 header.
   const bodyLen = msg.body.length ? 8 + msg.body.length : 0;
-  const b = new Uint8Array(8 + methodLen + 8 + headerLen + bodyLen + spare);
+  const total = 8 + methodLen + 8 + headerLen + bodyLen + spare;
+  const b = out ? out.outFrame(total) : new Uint8Array(total);
   let o = 0;
   b[o++] = 1;
   putU16(b, o, channel);

@@ -329,6 +329,15 @@ const routeCaches = new WeakMap<Broker, RouteCache>();
  * the work-queue cell. An empty result is not kept: it falls back to an
  * alternate exchange from a policy.
  */
+/**
+ * The route cache of `broker` as of now. A new object whenever bindings,
+ * exchange links, exchanges or queues change, so holding it is a cheap
+ * "nothing changed" check for memos built on top of routes.
+ */
+export function routeEpoch(broker: Broker): object {
+  return routeCache(broker);
+}
+
 function routeCache(broker: Broker): RouteCache {
   let c = routeCaches.get(broker);
   if (

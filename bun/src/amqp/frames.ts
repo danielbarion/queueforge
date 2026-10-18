@@ -37,7 +37,59 @@ const EMPTY_BODY = new Uint8Array(0);
  * @returns The write chain. Later frames wait on this promise.
  */
 export function send(this: Conn, frame: Uint8Array) {
+  // One frame, nothing waiting on the socket: stage it without the array
+  // `sendMany` takes. This is every delivery and every confirm.
+  if (!this.closed && this.writesPending === 0 && this.outHead >= this.outbound.length) {
+    this.staged.push(frame);
+    this.stagedBytes += frame.length;
+    if (this.stagedBytes >= COALESCE_LIMIT) flushCoalesced.call(this);
+    else armCoalesce.call(this);
+    return SENT;
+  }
   return this.sendMany([frame]);
+}
+
+/** First arena of a connection; it doubles up to {@link ARENA_MAX} while full. */
+const ARENA_MIN = 4 * 1024;
+const ARENA_MAX = 64 * 1024;
+
+/**
+ * `n` writable bytes for one outbound frame, from the connection's arena
+ * when it fits (see `Conn.arena`). The caller fills every byte.
+ */
+export function outFrame(conn: Conn, n: number): Uint8Array {
+  if (n > ARENA_MAX >> 2) return new Uint8Array(n);
+  let arena = conn.arena;
+  if (arena === null || arena.length - conn.arenaPos < n) {
+    const size = arena === null ? ARENA_MIN : Math.min(ARENA_MAX, arena.length * 2);
+    // Every byte of a frame is written before it is sent, so no zero fill.
+    arena = Buffer.allocUnsafeSlow(Math.max(size, n * 2));
+    conn.arena = arena;
+    conn.arenaPos = 0;
+  }
+  const at = conn.arenaPos;
+  conn.arenaPos = at + n;
+  return arena.subarray(at, at + n);
+}
+
+/** All of `parts` as one view when they sit back to back in one buffer, else null. */
+function contiguous(parts: Uint8Array[], n: number): Uint8Array | null {
+  const first = parts[0]!;
+  const buffer = first.buffer;
+  let end = first.byteOffset + first.length;
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i]!;
+    if (part.buffer !== buffer || part.byteOffset !== end) return null;
+    end += part.length;
+  }
+  return new Uint8Array(buffer, first.byteOffset, n);
+}
+
+/** The arena may be written from its start again: no staged or queued frame can still point into it. */
+function rewindArena(conn: Conn) {
+  if (conn.reuseWrites && conn.arena !== null && conn.staged.length === 0 && conn.writesPending === 0 && conn.outHead >= conn.outbound.length) {
+    conn.arenaPos = 0;
+  }
 }
 
 /** Bytes gathered before one write. A larger burst still flushes in order. */
@@ -128,12 +180,14 @@ function flushCoalesced(this: Conn) {
   const parts = this.staged;
   this.staged = [];
   this.stagedBytes = 0;
-  let buf: Uint8Array;
+  let buf: Uint8Array = parts[0]!;
   let shared = false;
-  if (parts.length === 1) buf = parts[0]!;
-  else {
-    let n = 0;
-    for (let i = 0; i < parts.length; i++) n += parts[i]!.length;
+  let n = 0;
+  for (let i = 0; i < parts.length; i++) n += parts[i]!.length;
+  // Frames encoded back to back in the arena go out as one view, uncopied.
+  const run = parts.length > 1 ? contiguous(parts, n) : null;
+  if (run !== null) buf = run;
+  else if (parts.length > 1) {
     if (this.reuseWrites && n > GATHER_MAX) {
       writeGathered(this, parts);
       return;
@@ -148,17 +202,18 @@ function flushCoalesced(this: Conn) {
     let o = 0;
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]!;
-      const n = part.length;
+      const len = part.length;
       // `set` costs ~10 ns at any length; confirms (21 bytes) and other short
       // frames copy faster byte by byte.
-      if (n <= 24) for (let j = 0; j < n; j++) buf[o + j] = part[j]!;
+      if (len <= 24) for (let j = 0; j < len; j++) buf[o + j] = part[j]!;
       else buf.set(part, o);
-      o += n;
+      o += len;
     }
   }
   const wrote = this.socket.write(buf);
   if (wrote === buf.length) {
     this.socket.flush?.();
+    rewindArena(this);
     wakeOutput(this);
     return;
   }
@@ -280,6 +335,7 @@ export function flush(this: Conn) {
   this.outHead = 0;
   q.length = 0;
   this.socket.flush?.();
+  rewindArena(this);
   wakeOutput(this);
 }
 
@@ -856,6 +912,9 @@ async function parseAvailable(this: Conn): Promise<void> {
 }
 
 Conn.prototype.send = send;
+Conn.prototype.outFrame = function (this: Conn, n: number) {
+  return outFrame(this, n);
+};
 Conn.prototype.sendMany = sendMany;
 Conn.prototype.flush = flush;
 Conn.prototype.push = push;

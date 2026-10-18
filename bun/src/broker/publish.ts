@@ -9,6 +9,7 @@ import { fieldEq, fieldStr, replaceHeaderTable, writeTable, type Field } from ".
 import { readProps } from "../amqp10/map.ts";
 import type { Config } from "../config.ts";
 import { ChanError } from "../errors.ts";
+import { routeEpoch } from "./topology.ts";
 import { Store, type BindRow, type ExRow, type QueueRow } from "../store.ts";
 import { encodeQuorumAppend } from "../wire.ts";
 import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
@@ -54,19 +55,63 @@ function localClassicFast(
     mandatory?: boolean;
   },
 ): "ack" | "nack" | Promise<"ack" | "nack"> | typeof SLOW {
-  if (input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
+  if (input.headers.length && input.headers.some(([key]) => key === "CC" || key === "BCC")) return SLOW;
+  // A publish burst names one exchange and key: the queue name it reached
+  // last time is reused while the topology is unchanged (`routeEpoch`). The
+  // queue itself is looked up again, so a deleted one is never used.
+  const epoch = routeEpoch(this);
+  const memo = fastRoute;
+  let name: string | undefined;
+  if (memo !== null && memo.epoch === epoch && memo.broker === this && memo.routingKey === input.routingKey && memo.exchange === input.exchange && memo.vhost === input.vhost) {
+    name = memo.queue;
+  } else {
+    name = fastQueue.call(this, input);
+    if (name === undefined) return SLOW;
+    fastRoute = { broker: this, epoch, vhost: input.vhost, exchange: input.exchange, routingKey: input.routingKey, queue: name };
+  }
+  const q = this.queues.get(this.key(input.vhost, name));
+  if (q === undefined) return SLOW;
+  return publishToQueue.call(this, q, input);
+}
+
+/** Last fast-path route: see `localClassicFast`. */
+let fastRoute: { broker: Broker; epoch: object; vhost: string; exchange: string; routingKey: string; queue: string } | null = null;
+
+/** The name of the one queue a fast-path publish reaches, or undefined for the slow path. */
+function fastQueue(this: Broker, input: { vhost: string; exchange: string; routingKey: string; headers: Array<[string, Field]>; propRaw: Uint8Array }): string | undefined {
   let name = input.routingKey;
   if (input.exchange !== "") {
     // A named exchange that routes to one queue is the common publish
     // (PerfTest uses amq.direct). The async multi-destination path was a
     // third of the work-queue cell. Routes are cached in `route`.
     const ex = this.exchanges.get(this.key(input.vhost, input.exchange));
-    if (!ex || ex.kind === "x-delayed-message" || ex.kind === "headers") return SLOW;
+    if (!ex || ex.kind === "x-delayed-message" || ex.kind === "headers" || ex.hashOn) return undefined;
+    // Only kinds whose route depends on the key alone may be memoized.
+    if (ex.kind !== "direct" && ex.kind !== "topic" && ex.kind !== "fanout") return undefined;
     const dests = this.route(input.vhost, input.exchange, input.routingKey, input.headers, input.propRaw);
-    if (dests.length !== 1) return SLOW;
+    if (dests.length !== 1) return undefined;
     name = dests[0]!;
   }
-  const q = this.queues.get(this.key(input.vhost, name));
+  return name;
+}
+
+function publishToQueue(
+  this: Broker,
+  q: QueueLive,
+  input: {
+    vhost: string;
+    exchange: string;
+    routingKey: string;
+    body: Uint8Array;
+    headers: Array<[string, Field]>;
+    propRaw: Uint8Array;
+    persistent: boolean;
+    priority: number;
+    expiration: string;
+    confirm?: boolean;
+    mandatory?: boolean;
+  },
+): "ack" | "nack" | Promise<"ack" | "nack"> | typeof SLOW {
   if (q && q.argsParsed.queueType === "quorum") return localQuorumFast.call(this, q, input);
   if (!q || q.argsParsed.queueType === "quorum" || q.raftGroup || !this.isLocalHome(q.home)) return SLOW;
   this.prom.received++;

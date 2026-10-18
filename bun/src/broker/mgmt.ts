@@ -412,13 +412,25 @@ export function topicWriteAllowed(this: Broker, user: string, vhost: string, exc
   // A token's write scope may name a routing key; LDAP logins allow every key.
   const principal = this.principalOf(user);
   if (principal) return principal.access?.topic !== false && principalAllows(principal, vhost, "write", exchange || "amq.default", routingKey);
+  if (this.topicPerms.length === 0) return true;
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
+  return patternOf(perm.write)?.test(routingKey) ?? false;
+}
+
+/** Compiled topic permission patterns; null for one that does not compile. */
+const patterns = new Map<string, RegExp | null>();
+function patternOf(source: string): RegExp | null {
+  let re = patterns.get(source);
+  if (re !== undefined) return re;
   try {
-    return new RegExp(perm.write).test(routingKey);
+    re = new RegExp(source);
   } catch {
-    return false;
+    re = null;
   }
+  if (patterns.size >= 1024) patterns.clear();
+  patterns.set(source, re);
+  return re;
 }
 
 /**
@@ -435,11 +447,7 @@ export function topicReadAllowed(this: Broker, user: string, vhost: string, exch
   if (principal) return principal.access?.topic !== false && principalAllows(principal, vhost, "read", exchange, routingKey);
   const perm = this.topicPerms.find((p) => p.user === user && p.vhost === vhost && p.exchange === exchange);
   if (!perm) return true;
-  try {
-    return new RegExp(perm.read).test(routingKey);
-  } catch {
-    return false;
-  }
+  return patternOf(perm.read)?.test(routingKey) ?? false;
 }
 
 Broker.prototype.openMgmtConnection = openMgmtConnection;

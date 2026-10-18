@@ -57,6 +57,7 @@ export async function handleUpdateSecret(this: Conn, payload: Uint8Array) {
   // The permission cache was filled under the old secret.
   this.permCache.clear();
   this.writeEx = null;
+  this.writeExTopic = false;
   await this.send(methodFrame(0, method(10, 71, () => {})));
 }
 
