@@ -858,20 +858,21 @@ async function parseAvailable(this: Conn): Promise<void> {
         if (!hasConsumers(this) && (this.deferredPublish.length >= PUBLISH_BATCH || this.publishBytes >= 16 * 1024 * 1024)) return;
         continue;
       }
-      const payload = buf.subarray(start, start + size);
       // basic.publish, its header, and its body do not await. Awaiting a resolved
       // async function still allocates a promise per frame and caps the pipeline.
+      // basic.publish is read in place, without a view of its payload.
       if (
         type === 1 &&
-        payload.length >= 4 &&
-        payload[0] === 0 &&
-        payload[1] === 60 &&
-        payload[2] === 0 &&
-        payload[3] === 40
+        size >= 4 &&
+        buf[start] === 0 &&
+        buf[start + 1] === 60 &&
+        buf[start + 2] === 0 &&
+        buf[start + 3] === 40
       ) {
-        this.beginPublish(this.ch(channel), payload);
+        this.beginPublish(this.ch(channel), buf, start, size);
         continue;
       }
+      const payload = buf.subarray(start, start + size);
       if (
         type === 1 &&
         payload.length >= 4 &&

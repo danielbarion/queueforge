@@ -12,6 +12,8 @@ function fixture() {
   const broker = {
     blocked: false, perms: permissions,
     queues: new Map([["/q", q]]),
+    // What the route cache's epoch (`routeEpoch`) reads.
+    exchanges: new Map(), bindings: [], e2e: [],
     key: (vhost: string, name: string) => vhost + name,
     route: (_vhost: string, _exchange: string, name: string) => [name],
     isLocalHome: (home: string) => home === "local",

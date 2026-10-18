@@ -1457,11 +1457,8 @@ final class Broker
         if ($tag > 0) {
             $this->prom['receivedConfirm']++;
         }
-        // The default exchange addresses a queue by name, so a missing one is
-        // a channel error rather than an unroutable publish.
-        if ($exchange === '' && !isset($this->queues[$key])) {
-            throw new RuntimeException("NOT_FOUND - no queue '$key'", 404);
-        }
+        // A default-exchange publish to a missing queue is unroutable, as in
+        // RabbitMQ 4.3: returned when mandatory, else dropped; the channel stays.
         
         // Enforce topic write permission for non-empty exchanges. A due
         // delayed message was checked when it was published.

@@ -165,6 +165,12 @@ export class Conn {
   /** Next free byte of `arena`. */
   arenaPos = 0;
   /**
+   * The destinations of the last plain publish, with their queue map keys, for
+   * the back-pressure test of parked publishes (`Deferred.pressured`). Valid
+   * while the route cache is the same object (`routeEpoch`).
+   */
+  destMemo: { epoch: object; exchange: string; routingKey: string; names: string[]; keys: string[] } | null = null;
+  /**
    * Writes a node socket still holds (its callback has not run). The arena is
    * rewound only at zero. Null when the socket's writes are not tracked: then
    * only a socket that copies on write (`reuseWrites`) lets it rewind.
@@ -248,7 +254,7 @@ export interface Conn {
   onHeader(channel: number, payload: Uint8Array): Promise<unknown> | void;
   onBody(channel: number, payload: Uint8Array, owned?: boolean): Promise<unknown> | void;
   streamBody(channel: number, size: number, part: Uint8Array): boolean;
-  beginPublish(c: Ch, payload: Uint8Array): void;
+  beginPublish(c: Ch, buf: Uint8Array, at?: number, size?: number): void;
   finishPublish(channel: number, c: Ch): Promise<unknown> | void;
   txCommit(channel: number, c: Ch): Promise<void>;
   stageTransaction(c: Ch, run: () => Promise<unknown> | void, bytes?: number): void;

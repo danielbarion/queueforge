@@ -8,6 +8,7 @@ import { ChanError } from "../broker/index.ts";
 import { bodyFrame, contentHeaderFrame, emptyProps, encodeSettle, method, methodFrame, R, readContentHeader } from "../codec.ts";
 import { Conn, type Ch, type PendingPublish, type Pub } from "./listen.ts";
 import { SENT } from "./frames.ts";
+import { routeEpoch } from "../broker/topology.ts";
 import { headerList } from "../broker/routing.ts";
 
 /**
@@ -53,30 +54,31 @@ function bodyBuffer(n: number): Uint8Array {
  * @param payload Method payload. Bit 0 is mandatory, bit 1 is immediate.
  * The body is not routed until {@link finishPublish}.
  */
-export function beginPublish(this: Conn, c: Ch, payload: Uint8Array) {
+export function beginPublish(this: Conn, c: Ch, buf: Uint8Array, at = 0, size = buf.length - at) {
   // Past class, method and the reserved short. A burst repeats the same two
   // names: when their bytes match the last publish, its strings are reused.
-  const exLen = payload[6] ?? 0;
-  const rkAt = 7 + exLen;
-  const end = rkAt + 1 + (payload[rkAt] ?? 0);
+  const limit = at + size;
+  const exAt = at + 6;
+  const rkAt = exAt + 1 + (buf[exAt] ?? 0);
+  const end = rkAt + 1 + (buf[rkAt] ?? 0);
   const last = c.pubNames;
   let exchange: string;
   let routingKey: string;
-  if (last !== null && last.length === end - 6 && end < payload.length && sameBytes(last, payload, 6)) {
+  if (last !== null && last.length === end - exAt && end < limit && sameBytes(last, buf, exAt)) {
     exchange = c.pubExchange;
     routingKey = c.pubRoutingKey;
   } else {
-    const r = new R(payload);
+    const r = new R(buf.subarray(at, limit));
     r.o = 6;
     exchange = r.shortstr();
     routingKey = r.shortstr();
-    if (end < payload.length) {
-      c.pubNames = payload.slice(6, end);
+    if (end < limit) {
+      c.pubNames = buf.slice(exAt, end);
       c.pubExchange = exchange;
       c.pubRoutingKey = routingKey;
     }
   }
-  const bits = payload[end] ?? 0;
+  const bits = end < limit ? buf[end]! : 0;
   c.publish = { exchange, routingKey, mandatory: (bits & 1) !== 0, immediate: (bits & 2) !== 0 };
 }
 
@@ -474,9 +476,29 @@ class Deferred implements PendingPublish {
   }
 
   pressured() {
-    const broker = this.conn.broker;
+    const conn = this.conn;
+    const broker = conn.broker;
+    // A burst asks this for every parked publish to the same exchange and key:
+    // the route and the queue keys of the last one are reused while the
+    // topology is unchanged. Headers may route (CC, BCC, a headers exchange).
+    if (this.names === null && this.headers.length === 0) {
+      const epoch = routeEpoch(broker);
+      const pub = this.pub;
+      let memo = conn.destMemo;
+      if (memo === null || memo.epoch !== epoch || memo.exchange !== pub.exchange || memo.routingKey !== pub.routingKey) {
+        const names = broker.route(conn.vhost, pub.exchange, pub.routingKey, this.headers);
+        memo = { epoch, exchange: pub.exchange, routingKey: pub.routingKey, names, keys: names.map((n) => broker.key(conn.vhost, n)) };
+        conn.destMemo = memo;
+      }
+      const keys = memo.keys;
+      for (let i = 0; i < keys.length; i++) {
+        const queue = broker.queues.get(keys[i]!);
+        if (queue && broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
+      }
+      return false;
+    }
     for (const name of this.destinations()) {
-      const queue = broker.queues.get(broker.key(this.conn.vhost, name));
+      const queue = broker.queues.get(broker.key(conn.vhost, name));
       if (queue && broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
     }
     return false;
