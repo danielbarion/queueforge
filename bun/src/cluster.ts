@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import type { Broker, LiveMsg } from "./broker/index.ts";
 import { decodeQuorumAppend, QUORUM_BODY } from "./wire.ts";
+import { POOL_MIN, taintBody } from "./body-pool.ts";
 import { ChanError } from "./errors.ts";
 import { splitHost } from "./config.ts";
 import { Consensus } from "./raft/glue.ts";
@@ -159,6 +160,8 @@ const FRAME_HEAD = 13;
  * four-CPU fanout profile.
  */
 export function encodeFrame(msg: object, body: Uint8Array, propRaw: Uint8Array): Uint8Array[] {
+  // The frame queues a view of the body on a peer socket.
+  if (body.length >= POOL_MIN) taintBody(body);
   const json = Buffer.from(JSON.stringify(msg));
   const head = Buffer.allocUnsafe(FRAME_HEAD);
   head[0] = FRAME;
@@ -952,6 +955,7 @@ export class Cluster {
    * `body` and `propRaw` in base64, as before.
    */
   async callBytes(home: string, op: string, payload: Record<string, unknown>, body: Uint8Array, propRaw: Uint8Array): Promise<unknown> {
+    if (body.length >= POOL_MIN) taintBody(body);
     const peer = this.peers.get(home);
     if (!peer?.writeParts || !this.consensus.binPeers.has(home)) {
       return this.call(home, op, { ...payload, body: Buffer.from(body).toString("base64"), propRaw: Buffer.from(propRaw).toString("base64") });

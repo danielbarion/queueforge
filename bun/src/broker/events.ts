@@ -8,6 +8,7 @@
  */
 import { W, writeTable, type Field } from "../codec.ts";
 import { Broker } from "./class.ts";
+import { POOL_MIN, taintBody } from "../body-pool.ts";
 
 export const EVENT_EXCHANGE = "amq.rabbitmq.event";
 export const TRACE_EXCHANGE = "amq.rabbitmq.trace";
@@ -38,6 +39,8 @@ export function publishInternal(
   body: Uint8Array,
   propRaw?: Uint8Array,
 ): number {
+  // A trace copy shares the body: it leaves the body pool even unbound.
+  if (body.length >= POOL_MIN) taintBody(body);
   if (!this.bindings.some((b) => b.vhost === vhost && b.exchange === exchange)) return 0;
   let reached = 0;
   try {

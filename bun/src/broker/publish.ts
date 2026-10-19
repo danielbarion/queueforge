@@ -18,6 +18,7 @@ import { parseArgs, deathHeaders, propsWithDeath, argsFromFields, takeTransientS
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
 import { BUILTIN, EMPTY_BODY, EMPTY_HEADERS, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
+import { notePublish, noteEnqueue, POOL_MIN, taintBody } from "../body-pool.ts";
 
 
 /**
@@ -126,6 +127,7 @@ function publishToQueue(
     persistent: input.persistent,
     priority: input.priority,
     expiration: input.expiration,
+    pooled: true,
   }, 0);
   if (!ok) return "nack";
   if (!input.persistent) {
@@ -207,6 +209,8 @@ function localQuorumFast(
     expiration: input.expiration,
     id,
     confirmGate: gate,
+    // A Raft group may add a member that copies ready bodies from memory.
+    pooled: !raft,
   }, 0);
   if (!ok) return "nack";
   // After the insert: the group commit that covers this row.
@@ -249,6 +253,9 @@ export function publish(this: Broker, input: {
   confirm?: boolean;
   mandatory?: boolean;
 }): Promise<"ack" | "nack" | "return"> | "ack" | "nack" | "return" {
+  // A pooled body routed a second time (shovel, federation, a re-publish)
+  // is shared from here on and leaves the body pool.
+  if (input.body.length >= POOL_MIN) notePublish(input.body);
   if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(input.vhost)) this.tracePublish(input);
   const fast = localClassicFast.call(this, input);
   if (fast !== SLOW) return fast;
@@ -268,6 +275,8 @@ async function publishSlow(this: Broker, input: {
   confirm?: boolean;
   mandatory?: boolean;
 }): Promise<"ack" | "nack" | "return"> {
+  // Fan-out, a forward, CC/BCC, a delayed hold: not the single-queue path.
+  if (input.body.length >= POOL_MIN) taintBody(input.body);
   // x-delayed-message: hold the message for its x-delay, then route it.
   // The publish is confirmed now, as the RabbitMQ plugin does. A waiting
   // message is stored, so it is still delivered after a restart.
@@ -547,6 +556,8 @@ export async function enqueue(this: Broker,
     expiration: string;
   },
 ): Promise<boolean> {
+  // Quorum appends, stream logs and forwards keep or queue the body elsewhere.
+  if (src.body.length >= POOL_MIN) taintBody(src.body);
   const q = this.queues.get(this.key(vhost, name));
   if (!q) throw new ChanError(404, `NOT_FOUND - queue ${vhost}/${name}`);
   if (q.argsParsed.queueType === "quorum") return this.enqueueQuorum(q, src);
@@ -693,10 +704,14 @@ export function enqueueLocal(this: Broker,
     id?: string;
     /** Set while a quorum confirm is still waiting on the peer fsync. */
     confirmGate?: { hold: boolean };
+    /** The single-destination publish path: a pooled body may be reused after its ack (see `body-pool.ts`). */
+    pooled?: boolean;
   },
   depth: number,
 ): boolean {
+  const big = src.body.length >= POOL_MIN;
   if (q.argsParsed.queueType === "stream") {
+    if (big) taintBody(src.body);
     // A replicated stream takes appends only through its log (a dead letter or shovel lands here).
     if (q.raftGroup) void this.enqueueStreamRaft(q, src);
     else this.appendStream(q, src);
@@ -707,6 +722,7 @@ export function enqueueLocal(this: Broker,
   const overCount = q.argsParsed.maxLength != null && q.ready.length >= q.argsParsed.maxLength;
   const overBytes = q.argsParsed.maxLengthBytes != null && bytes + src.body.length > q.argsParsed.maxLengthBytes;
   if (overCount || overBytes) {
+    if (big) taintBody(src.body);
     if (q.argsParsed.overflow === "reject-publish" || q.argsParsed.overflow === "reject-publish-dlx") {
       if (q.argsParsed.overflow === "reject-publish-dlx") {
         this.deadLetter(q, liveFrom(q, src), depth, "maxlen");
@@ -787,6 +803,8 @@ export function enqueueLocal(this: Broker,
     msg.routingKey = "";
     msg.slim = true;
   }
+  // Reusable only while the queue holds the one live copy, in memory.
+  if (big) noteEnqueue(src.body, src.pooled === true && !replica && !msg.slim, this.store, rowId);
   if (replica) {
     q.replicas.set(msg.id, msg);
     return true;

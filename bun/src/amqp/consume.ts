@@ -7,6 +7,7 @@
 import { bodyFrame, contentHeaderFrame, DELIVER_VIEW, emptyProps, encodeDeliver, encodeDeliverParts, method, methodFrame, R, readTable, tableGet, type Field } from "../codec.ts";
 import { ChanError, type LiveMsg } from "../broker/index.ts";
 import { Conn, type Ch } from "./listen.ts";
+import { noteDeliver } from "../body-pool.ts";
 
 /**
  * Set this channel's prefetch count from basic.qos.
@@ -224,6 +225,7 @@ export function flushParked(this: Conn, c: Ch) {
  */
 export function deliver(this: Conn, channel: number, tag: string, dtag: number, msg: LiveMsg): void {
   if (msg.body.length >= DELIVER_VIEW) {
+    noteDeliver(msg.body, this);
     const parts = encodeDeliverParts(channel, tag, dtag, msg, this.frameMax);
     if (parts) {
       void this.sendMany(parts);

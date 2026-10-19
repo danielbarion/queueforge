@@ -3,6 +3,8 @@ const SUMMED = [
   "queueforge_confirm_before_fsync_total",
   "queueforge_wal_fsync_seconds_count",
   "queueforge_wal_fsync_seconds_sum",
+  "queueforge_body_pool_reused_total",
+  "queueforge_body_pool_violations_total",
 ];
 
 /** Join child Prometheus pages. Only the per-process fsync counters are summed. */

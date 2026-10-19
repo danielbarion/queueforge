@@ -6,6 +6,7 @@
  */
 import type { Broker } from "../broker/index.ts";
 import { availableBytes } from "../disk.ts";
+import { poolStats } from "../body-pool.ts";
 
 /**
  * Escape a Prometheus label value.
@@ -123,6 +124,10 @@ export function metricsText(broker: Broker): string {
     `queueforge_wal_fsync_seconds_sum ${fsync.seconds}`,
     "# TYPE queueforge_confirm_before_fsync_total counter",
     `queueforge_confirm_before_fsync_total ${broker.store.confirmsBeforeFsync}`,
+    "# TYPE queueforge_body_pool_reused_total counter",
+    `queueforge_body_pool_reused_total ${poolStats.reused}`,
+    "# TYPE queueforge_body_pool_violations_total counter",
+    `queueforge_body_pool_violations_total ${poolStats.violations}`,
     "# TYPE queueforge_full_flush_total counter",
     `queueforge_full_flush_total ${broker.store.fullFlushCount}`,
     "# TYPE rabbitmq_identity_info gauge",

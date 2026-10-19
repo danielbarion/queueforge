@@ -369,18 +369,43 @@ latency-10k p99 1.10 -> 2.42 ms. Site average 3.18 -> 3.09, driven by the
 two latency cells. Next: fresh-VM pairs for those four cells against
 `cf0d960c` (the 2026-10-18 image).
 
-Body-buffer pool, risks (not started): a pooled body returned while any
-holder still references it is overwritten by the next publish. Holders:
-every routed queue (fanout shares one body), unacked maps and requeue, the
-store shadow until synced and paged out, queued socket views for bodies of
-16 KiB and up (and `node:net` write callbacks in cores mode), dead-letter /
-shovel / federation / alternate-exchange republish, `tx` buffers,
-`basic.get`, and core-to-core forwarding. A missed reference is silent
-corruption (valid frames and CRCs over the wrong bytes) that shows only under
-partial writes, requeue or mixed-speed fanout; a missed release is a leak.
-If done: single-queue routes of 16 KiB and up only, release on ack + synced
-+ write complete, and a poison-on-release debug mode run under conformance
-and fanout/requeue/partial-write stress.
+Body pool (fourth round, `src/body-pool.ts`): bodies of 16 KiB to 1 MiB come
+from a free list and go back only after one observed chain: eligible
+enqueue by the single-queue fast path (local classic, or quorum with no Raft
+group), one hand-off, one AMQP `deliver` in this process, its ack, then at
+reuse time the store holds no row with it (`Store.holdsBody`) and the
+connection has written everything (the arena-rewind condition). Anything
+else taints the body and leaves it to the GC: fan-out, CC/BCC, a second
+enqueue or hand-off (requeue), basic.get and non-AMQP consumers, republish
+(shovel, federation, trace), forwards (`enqueue`, `callBytes`,
+`encodeFrame`, quorum wire records), streams, overflow, paged ("slim")
+messages, a closed connection. A missed path can only skip a release. Each
+use carries the buffer generation; a read of a reused buffer is logged and
+turns reuse off (`queueforge_body_pool_violations_total`). Kill switch
+`QUEUEFORGE_BODY_POOL=0`; `QUEUEFORGE_BODY_POOL_CHECK=1` hashes every pooled
+body at enqueue, delivery and reuse. Bounds: 16 MiB free, 64 MiB waiting.
+
+Tests: `test/body-pool.test.ts` (state machine, 19 cases) and
+`test/body-pool-e2e.test.ts` (unique bodies checked byte for byte through
+plain, fan-out with a slow and a late consumer, requeue, dead-letter, a
+paused consumer socket, quorum, transient and mixed sizes; check mode on).
+With every fan-out guard removed the late fan-out consumer trips the
+generation check (4 violations), so the test sees a premature release; with
+one layer removed it still passes, since six independent steps each stop a
+shared body.
+
+Fresh-VM A/B against `e452756`, 1 CPU, 3 rounds, medians: large-64k 868 ->
+936 MB/s (+7.9%), large-64k-quorum 943 -> 1,042 (+10.6%), large-1m-quorum
+857 -> 1,010 (+17.9%, anonymous 306 -> 146 MiB), large-1m 1,039 -> 1,027
+(within its range), work-queue +9.5% (small bodies, not pooled: noise).
+
+Multi-core confirm stall (found while testing, not caused by the pool):
+with `QUEUEFORGE_CORES=3`, one confirm channel that mixes fan-out publishes
+to three queues with plain publishes stops receiving confirms after 150 to
+450 publishes; reproduced on `e452756` without the pool (2 of 3 runs) and
+with `QUEUEFORGE_BODY_POOL=0`. The same publishes on two connections finish.
+The 3-core case of the pool e2e test runs only with `QF_POOL_E2E_CORES=1`
+until this is fixed.
 
 Not kept (second round): writing adopted sockets through Bun's native
 handle, which copies on write and returns short counts (no change in 4 CPU

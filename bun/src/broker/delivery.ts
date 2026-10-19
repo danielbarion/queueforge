@@ -14,6 +14,7 @@ import { durableMajority, type MemberCopy } from "../quorum-confirm.ts";
 import { rabbitPasswordHashMatches } from "./auth.ts";
 import { parseArgs, deathHeaders, propsWithDeath, argsFromFields } from "./args.ts";
 import { durableMeta } from "./publish.ts";
+import { noteAck, noteHandoff, POOL_MIN } from "../body-pool.ts";
 import { topicMatches, headersMatch, fnv1a, headerList, overflowOf, liveFrom, pickConsumer, queueHome } from "./routing.ts";
 import { matchOne, policyItem, policyFromBody, fillPolicyArgs } from "./policy-data.ts";
 import { BUILTIN, emptyProm, type Consumer, type LiveMsg, type MgmtChannel, type MgmtConnection, type MgmtConsumer, type Policy, type Prom, type QArgs, type QueueLive, type TopicPerm } from "./model.ts";
@@ -201,6 +202,7 @@ export function pump(this: Broker, q: QueueLive) {
     if (q.argsParsed.queueType === "quorum" && ((!chosen.noAck && this.cluster?.consensus?.node) || this.quorumAlone() || msg.id.startsWith(STORE_ONLY_PREFIX))) {
       this.noteDeliver(false, msg.redelivered);
       if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
+      if (msg.body.length >= POOL_MIN) noteHandoff(msg.body);
       chosen.deliver(msg);
       continue;
     }
@@ -214,6 +216,7 @@ export function pump(this: Broker, q: QueueLive) {
     }
     this.noteDeliver(chosen.noAck, msg.redelivered);
     if (this.tracedVhosts.size !== 0 && this.tracedVhosts.has(q.vhost)) this.traceDeliver(q.vhost, q.name, msg);
+    if (msg.body.length >= POOL_MIN) noteHandoff(msg.body);
     chosen.deliver(msg);
   }
 }
@@ -250,6 +253,7 @@ export async function claimThenDeliver(this: Broker, q: QueueLive, chosen: Consu
   }
   this.materialize(msg);
   this.noteDeliver(chosen.noAck, msg.redelivered);
+  if (msg.body.length >= POOL_MIN) noteHandoff(msg.body);
   chosen.deliver(msg);
   this.pump(q);
 }
@@ -429,6 +433,8 @@ export function ack(this: Broker, vhost: string, queue: string, id: string): Pro
   if (!msg) return;
   q.unacked.delete(id);
   if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
+  // After the delete: the pool waits for the store to drop the row.
+  if (msg.body.length >= POOL_MIN) noteAck(msg.body, msg.rowId);
   this.prom.acknowledged++;
   if (q.argsParsed.queueType === "quorum") {
     this.noteConsumed(q.vhost, q.name, id);
@@ -607,6 +613,8 @@ export async function get(this: Broker, vhost: string, queue: string, noAck: boo
   else this.prom.deliveredGetManual++;
   if (msg.redelivered) this.prom.redelivered++;
   this.materialize(msg);
+  // basic.get and management reads: a hand-off that is not `deliver`.
+  if (msg.body.length >= POOL_MIN) noteHandoff(msg.body);
   if (!noAck) q.unacked.set(msg.id, msg);
   else if (msg.rowId != null) this.store.deleteMessage(msg.rowId);
   // With Raft, an unacked get stays in the log until it is settled (see `pump`).

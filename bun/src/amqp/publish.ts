@@ -10,6 +10,7 @@ import { Conn, type Ch, type PendingPublish, type Pub } from "./listen.ts";
 import { SENT } from "./frames.ts";
 import { routeEpoch } from "../broker/topology.ts";
 import { headerList } from "../broker/routing.ts";
+import { poolBody } from "../body-pool.ts";
 
 /**
  * Join body chunks into one buffer, in arrival order.
@@ -38,11 +39,14 @@ function concat(parts: Uint8Array[]): Uint8Array {
 export const DIRECT_BODY = 16 * 1024;
 
 /**
- * A buffer for `n` body bytes, every one written before it is read.
- * `allocUnsafe` skips the zero fill; at this size it is not pooled, so the
- * view covers its own buffer and `slice` keeps copying.
+ * A buffer for `n` body bytes, every one written before it is read: a reused
+ * one when the body pool has it (see `body-pool.ts`). Otherwise
+ * `allocUnsafe` skips the zero fill; at this size it is not Bun's shared
+ * pool, so the view covers its own buffer and `slice` keeps copying.
  */
 function bodyBuffer(n: number): Uint8Array {
+  const pooled = poolBody(n);
+  if (pooled !== null) return pooled;
   const b = Buffer.allocUnsafe(n);
   return new Uint8Array(b.buffer, b.byteOffset, n);
 }

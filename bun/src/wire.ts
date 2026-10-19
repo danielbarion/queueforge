@@ -1,4 +1,5 @@
 import type { Field } from "./codec.ts";
+import { POOL_MIN, taintBody } from "./body-pool.ts";
 
 export type QuorumAppend = {
   vhost: string;
@@ -39,6 +40,8 @@ export function encodeQuorumAppend(src: {
 }): Record<string, unknown> {
   let b64: string | null = null;
   const body = src.body;
+  // Read later, from the log, a snapshot or a peer send.
+  if (body.length >= POOL_MIN) taintBody(body);
   return {
     v: 1,
     vhost: src.vhost,
@@ -83,6 +86,7 @@ export function quorumAppendHead(payload: Record<string, unknown>): Record<strin
 /** Rebuild an append from `quorumAppendHead` and its body, with `body_b64` back in its place. */
 export function withQuorumBody(head: Record<string, unknown>, body: Uint8Array): Record<string, unknown> {
   let b64: string | null = null;
+  if (body.length >= POOL_MIN) taintBody(body);
   const out: Record<string, unknown> = {};
   const define = () =>
     Object.defineProperty(out, "body_b64", {

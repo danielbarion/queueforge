@@ -1301,6 +1301,17 @@ export class Store {
     return index.byId.get(id);
   }
 
+  /**
+   * Whether row `id` still references its body: staged for the next group
+   * commit, or synced and not yet paged out or deleted. The body pool reuses
+   * an acked body only once this is false.
+   */
+  holdsBody(id: number): boolean {
+    if (this.stagedRow(id) !== undefined) return true;
+    const row = this.shadow.get(id);
+    return row != null && row.body !== PAGED;
+  }
+
   /** Read one stored body and its meta JSON. A missing id returns null. */
   readStored(id: number): { body: Uint8Array; meta: string } | null {
     const staged = this.stagedRow(id);
