@@ -135,11 +135,11 @@ export default function BenchmarkPage() {
           <p className="section-lead">
             Unpaced message rate at each container in the load sweep. 16 connections is consume/s,
             the rate that does not grow the queue. A gap is a cell that did not deliver, not a zero.
-            The numbers are the same ones in the table further down. Bun&apos;s points are the median of
-            three 8 s measurements, run in rounds over the whole sweep, for Rust, Bun and PHP; Bun&apos;s
-            1 CPU / 512 MiB one-connection point ranged from 68k to 272k msg/s across those three, so
-            one sample could be off by 2× or more. RabbitMQ is one 8 s measurement from 2026-10-12. The
-            application scenarios below repeat every cell.
+            The numbers are the same ones in the table further down. Rust, Bun and PHP points are
+            the median of three 8 s measurements, run in rounds over the whole sweep. Bun&apos;s
+            samples spread the most: its 4 CPU / 4 GiB sixteen-queue point ranged from 445k to 1.27M
+            msg/s across those three, so one sample could be off by 2× or more. RabbitMQ is one 8 s
+            measurement from 2026-10-12. The application scenarios below repeat every cell.
           </p>
           <SizeCharts rows={loadRows} />
         </div>
@@ -177,7 +177,9 @@ export default function BenchmarkPage() {
             is the median of three repeats; &ldquo;of linear&rdquo; is X(N) / (N &middot; X(1)).
             Transient messages first, then durable, where the VM&apos;s disk drifts late in long
             sessions and Rust has an intermittent stall (PENDING R1). PHP runs one process per CPU
-            here (<code>QUEUEFORGE_CORES=cgroup</code>); by default it runs one. Method and the
+            here (<code>QUEUEFORGE_CORES=cgroup</code>); by default it runs one. These curves were
+            measured on 2026-10-15, before the Bun work of 2026-10-18 and 2026-10-19, and have not
+            been re-run since. Method and the
             Universal Scalability Law fits: <code>bench/scaling.py</code> and{" "}
             <a href={`${GITHUB}/blob/main/docs/bun-scaling.md`}>docs/bun-scaling.md</a>.
           </p>
@@ -326,12 +328,14 @@ export default function BenchmarkPage() {
             unless <code>QUEUEFORGE_CORES</code> is set, so its rates do not grow with the container.
           </p>
           <p className="caption">
-            Bun at 4 CPU held 219,709 connections (4 GiB) and 260,000 (8 GiB). Rust at 4 CPU / 8
-            GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near 65,527 sockets. PHP held
-            41,961 at 1 CPU and 40,000 at 2 and 4 CPU. Rust confirm/s on the shared queue, small
-            size to large, was 173,514.2, 201,299.4, 226,596.5, 192,855.5, and 303,333.1
-            (medians); the table has the lower of confirm/s and consume/s, and the queue grows
-            by the difference until the memory watermark holds the publishers. The source table is{" "}
+            Bun at 4 CPU held 244,714 connections (4 GiB) and 160,000 (8 GiB), where Docker&apos;s
+            engine failed at the next step of 320,000, so that row is the last step held, not a
+            limit. Rust at 4 CPU / 8 GiB held 95,000, RabbitMQ 62,065; RabbitMQ asks stop near
+            65,527 sockets. PHP held 41,871 at 1 CPU and 40,000 at 2 and 4 CPU. Rust confirm/s on
+            the shared queue, small size to large, was 171,916.5, 197,254.4, 311,630.1, 377,963.9,
+            and 378,043.4 (medians); the table has the lower of confirm/s and consume/s, and the
+            queue grows by the difference until the memory watermark holds the publishers. The
+            source table is{" "}
             <a href={BENCH_MD}>BENCHMARK.md</a>.
           </p>
         </div>
