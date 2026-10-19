@@ -95,8 +95,11 @@ export function beginPublish(this: Conn, c: Ch, buf: Uint8Array, at = 0, size = 
  * `multiple` up to the highest settled tag instead of staging another one.
  * Every tag it then covers was acked by this broker: an earlier nack went out
  * in its own frame first, and any frame staged after the ack ends the run.
+ * The staged frame must not already ack a tag past that run: an out-of-order
+ * confirm staged on its own (tag 501 while 473 is still pending) would be
+ * rewritten down to `multiple` 472, and 501 would never be confirmed.
  */
-function sendConfirm(conn: Conn, channel: number, c: Ch, tag: number, nack: boolean): Promise<unknown> {
+export function sendConfirm(conn: Conn, channel: number, c: Ch, tag: number, nack: boolean): Promise<unknown> {
   if (tag === c.confirmLow + 1) {
     c.confirmLow = tag;
     const ahead = c.confirmAhead;
@@ -115,12 +118,14 @@ function sendConfirm(conn: Conn, channel: number, c: Ch, tag: number, nack: bool
   }
   const staged = conn.staged;
   const last = c.ackFrame;
-  if (!nack && last !== null && tag <= c.confirmLow && staged.length !== 0 && staged[staged.length - 1] === last) {
+  if (!nack && last !== null && tag <= c.confirmLow && c.ackTag <= c.confirmLow && staged.length !== 0 && staged[staged.length - 1] === last) {
     setSettleTag(last, c.confirmLow);
+    c.ackTag = c.confirmLow;
     return SENT;
   }
   const frame = encodeSettle(channel, tag, nack, conn);
   c.ackFrame = nack ? null : frame;
+  c.ackTag = tag;
   return conn.send(frame);
 }
 

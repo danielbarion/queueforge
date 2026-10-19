@@ -42,14 +42,25 @@ enabled = false
   for (let i = 0; i < 100; i++) {
     try {
       const res = await fetch(`http://127.0.0.1:${portM}/readyz`);
-      if (res.ok && (await res.text()).includes("ready")) return { child, log };
+      if (res.ok && (await res.text()).includes("ready") && (await accepts(portA))) return { child, log };
     } catch {
       /* not up */
     }
     await Bun.sleep(100);
   }
   kill(child);
-  throw new Error("broker did not become ready");
+  throw new Error(`broker did not become ready:\n${log.join("").slice(-2000)}`);
+}
+
+/** The AMQP port takes a connection. */
+async function accepts(port: number): Promise<boolean> {
+  try {
+    const s = await Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {} } });
+    s.end();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function kill(child: ChildProcess) {
@@ -93,10 +104,6 @@ async function scenario(portA: number, portM: number) {
   const url = `amqp://admin:devpassword12@127.0.0.1:${portA}/%2f`;
   const pub = await amqp.connect(url);
   const ch = await pub.createConfirmChannel();
-  // Fan-out publishes on their own connection: see PENDING.md (Bun) for the
-  // multi-core stall when one confirm channel mixes fan-out and plain publishes.
-  const fanPub = await amqp.connect(url);
-  const fch = await fanPub.createConfirmChannel();
   const sizes = [16 * 1024, 20_000, 64 * 1024, 64 * 1024, 200_000, 1024 * 1024];
   const errors: string[] = [];
 
@@ -194,8 +201,7 @@ async function scenario(portA: number, portM: number) {
     const send = (exchange: string, key: string, queues: string[], persistent = true) => {
       const n = ++seq;
       for (const q of queues) want[q]!.add(n);
-      const c = exchange === "pool-fan" ? fch : ch;
-      waits.push(new Promise<void>((resolve, reject) => c.publish(exchange, key, body(n, size), { persistent }, (err) => (err ? reject(err) : resolve()))));
+      waits.push(new Promise<void>((resolve, reject) => ch.publish(exchange, key, body(n, size), { persistent }, (err) => (err ? reject(err) : resolve()))));
     };
     send("", "pool-plain", ["pool-plain"]);
     send("", "pool-plain", ["pool-plain"], false);
@@ -239,15 +245,12 @@ async function scenario(portA: number, portM: number) {
   expect(await metric(portM, "queueforge_body_pool_violations_total")).toBe(0);
 
   for (const c of consumers) await c.close().catch(() => {});
-  await fanPub.close();
   await pub.close();
   return { before, reused };
 }
 
-// The multi-core run sometimes stops getting publisher confirms with the pool
-// off too (PENDING.md, Bun: multi-core confirm stall); run it on demand.
 for (const [cores, portA] of [[1, 25710], [3, 25730]] as const) {
-  test.skipIf(cores > 1 && process.env.QF_POOL_E2E_CORES !== "1")(`pooled bodies stay intact under fan-out, requeue, dead-lettering, stalled sockets and quorum (${cores} core${cores > 1 ? "s" : ""})`, async () => {
+  test(`pooled bodies stay intact under fan-out, requeue, dead-lettering, stalled sockets and quorum (${cores} core${cores > 1 ? "s" : ""})`, async () => {
     const portM = portA + 10000;
     const { child, log } = await boot(portA, portM, cores);
     try {

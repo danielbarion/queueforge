@@ -399,13 +399,19 @@ Fresh-VM A/B against `e452756`, 1 CPU, 3 rounds, medians: large-64k 868 ->
 857 -> 1,010 (+17.9%, anonymous 306 -> 146 MiB), large-1m 1,039 -> 1,027
 (within its range), work-queue +9.5% (small bodies, not pooled: noise).
 
-Multi-core confirm stall (found while testing, not caused by the pool):
-with `QUEUEFORGE_CORES=3`, one confirm channel that mixes fan-out publishes
-to three queues with plain publishes stops receiving confirms after 150 to
-450 publishes; reproduced on `e452756` without the pool (2 of 3 runs) and
-with `QUEUEFORGE_BODY_POOL=0`. The same publishes on two connections finish.
-The 3-core case of the pool e2e test runs only with `QF_POOL_E2E_CORES=1`
-until this is fixed.
+Multi-core confirm stall (fixed): with `QUEUEFORGE_CORES=3`, one confirm
+channel mixing fan-out and plain publishes stopped receiving confirms after
+150 to 450 publishes (2 of 3 runs, also on `e452756` and with the pool off).
+Cause, from an in-memory trace of `sendConfirm`: confirm coalescing
+(`a871f55`). Fan-out confirms finish out of order; tag 501 was staged as its
+own basic.ack while 473 was still pending, then the in-order run reached 472
+and rewrote that still-staged frame in place to `multiple` 472. The ack for
+501 was gone and no later frame covered it. A staged ack is now extended
+only when the highest tag it already acks (`Ch.ackTag`) is inside the
+settled run. `test/confirm-order.test.ts` replays the traced order and 200
+random out-of-order settle/flush runs (both fail without the fix); the
+stall harness went from about 2 in 3 to 0 in 10, and the 3-core pool e2e
+case runs in the suite again.
 
 Not kept (second round): writing adopted sockets through Bun's native
 handle, which copies on write and returns short counts (no change in 4 CPU

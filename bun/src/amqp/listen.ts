@@ -41,6 +41,8 @@ export type Ch = {
   confirmAhead: Set<number> | null;
   /** The last basic.ack staged for this channel, which a later confirm may extend. */
   ackFrame: Uint8Array | null;
+  /** The highest tag `ackFrame` acks: its own tag, or the `multiple` tag it was rewritten to. */
+  ackTag: number;
   nextDel: number;
   /** `at` is the delivery time for a consumer with an acknowledgement timeout, else 0. */
   deliveries: Map<number, { vhost: string; queue: string; id: string; consumer: string; at?: number }>;
@@ -613,6 +615,7 @@ export function ch(this: Conn, id: number): Ch {
       confirmLow: 0,
       confirmAhead: null,
       ackFrame: null,
+      ackTag: 0,
       nextDel: 1,
       deliveries: new Map(),
       timeouts: null,
