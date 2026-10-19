@@ -1,0 +1,66 @@
+11:16:16 PROGRESS kind=bun cpus=1 mem=512 shape=single repeat=0 ok=1 confirm_s=275636.0 consume_s=275648.0 p50_us=400 p99_us=2100 broker_cpu=80 client_cpu=97 broker_mib=223 oom=false early=0 boot_s=0.7 err=none
+11:16:27 PROGRESS kind=bun cpus=1 mem=512 shape=shared repeat=0 ok=1 confirm_s=259720.0 consume_s=260120.0 p50_us=30800 p99_us=56000 broker_cpu=96 client_cpu=97 broker_mib=262 oom=false early=0 boot_s=0.7 err=none
+11:16:38 PROGRESS kind=bun cpus=1 mem=512 shape=spread repeat=0 ok=1 confirm_s=378136.0 consume_s=378528.0 p50_us=21400 p99_us=36100 broker_cpu=96 client_cpu=97 broker_mib=298 oom=false early=0 boot_s=0.7 err=none
+11:16:49 PROGRESS kind=bun cpus=1 mem=1024 shape=single repeat=0 ok=1 confirm_s=306132.0 consume_s=306132.0 p50_us=400 p99_us=2000 broker_cpu=77 client_cpu=97 broker_mib=216 oom=false early=0 boot_s=0.7 err=none
+11:17:00 PROGRESS kind=bun cpus=1 mem=1024 shape=shared repeat=0 ok=1 confirm_s=259120.0 consume_s=258840.0 p50_us=30800 p99_us=47400 broker_cpu=96 client_cpu=97 broker_mib=274 oom=false early=0 boot_s=0.7 err=none
+11:17:12 PROGRESS kind=bun cpus=1 mem=1024 shape=spread repeat=0 ok=1 confirm_s=384744.0 consume_s=384400.0 p50_us=20800 p99_us=43000 broker_cpu=96 client_cpu=97 broker_mib=282 oom=false early=0 boot_s=0.7 err=none
+11:17:23 PROGRESS kind=bun cpus=2 mem=2048 shape=single repeat=0 ok=1 confirm_s=393840.0 consume_s=393840.0 p50_us=300 p99_us=2000 broker_cpu=111 client_cpu=97 broker_mib=265 oom=false early=0 boot_s=0.7 err=none
+11:17:35 PROGRESS kind=bun cpus=2 mem=2048 shape=shared repeat=0 ok=1 confirm_s=308836.0 consume_s=308429.0 p50_us=26500 p99_us=41200 broker_cpu=112 client_cpu=97 broker_mib=325 oom=false early=0 boot_s=0.6 err=none
+11:17:47 PROGRESS kind=bun cpus=2 mem=2048 shape=spread repeat=0 ok=1 confirm_s=675676.0 consume_s=676372.0 p50_us=10400 p99_us=58100 broker_cpu=151 client_cpu=97 broker_mib=494 oom=false early=0 boot_s=0.6 err=none
+11:17:59 PROGRESS kind=bun cpus=4 mem=4096 shape=single repeat=0 ok=1 confirm_s=345032.0 consume_s=345036.0 p50_us=300 p99_us=3200 broker_cpu=111 client_cpu=98 broker_mib=329 oom=false early=0 boot_s=0.7 err=none
+11:18:12 PROGRESS kind=bun cpus=4 mem=4096 shape=shared repeat=0 ok=1 confirm_s=283017.9 consume_s=282297.9 p50_us=26600 p99_us=67100 broker_cpu=110 client_cpu=97 broker_mib=404 oom=false early=0 boot_s=0.7 err=none
+11:18:24 PROGRESS kind=bun cpus=4 mem=4096 shape=spread repeat=0 ok=1 confirm_s=1444368.0 consume_s=1444224.0 p50_us=4800 p99_us=15800 broker_cpu=351 client_cpu=97 broker_mib=973 oom=false early=0 boot_s=0.7 err=none
+11:18:36 PROGRESS kind=bun cpus=4 mem=8192 shape=single repeat=0 ok=1 confirm_s=206040.0 consume_s=206040.0 p50_us=300 p99_us=3600 broker_cpu=101 client_cpu=97 broker_mib=331 oom=false early=0 boot_s=0.7 err=none
+11:18:48 PROGRESS kind=bun cpus=4 mem=8192 shape=shared repeat=0 ok=1 confirm_s=130478.8 consume_s=130270.8 p50_us=27300 p99_us=200000 broker_cpu=10 client_cpu=98 broker_mib=368 oom=false early=0 boot_s=0.7 err=none
+11:19:00 PROGRESS kind=bun cpus=4 mem=8192 shape=spread repeat=0 ok=1 confirm_s=1126028.0 consume_s=1125704.0 p50_us=4800 p99_us=109100 broker_cpu=378 client_cpu=97 broker_mib=990 oom=false early=0 boot_s=0.6 err=none
+11:19:11 PROGRESS kind=bun cpus=1 mem=512 shape=single repeat=1 ok=1 confirm_s=151148.0 consume_s=151148.0 p50_us=400 p99_us=7700 broker_cpu=27 client_cpu=97 broker_mib=209 oom=false early=0 boot_s=0.7 err=none
+11:19:22 PROGRESS kind=bun cpus=1 mem=512 shape=shared repeat=1 ok=1 confirm_s=161556.0 consume_s=162060.0 p50_us=32600 p99_us=124700 broker_cpu=94 client_cpu=97 broker_mib=277 oom=false early=0 boot_s=0.7 err=none
+11:19:33 PROGRESS kind=bun cpus=1 mem=512 shape=spread repeat=1 ok=1 confirm_s=65209.2 consume_s=65655.2 p50_us=28300 p99_us=200000 broker_cpu=29 client_cpu=97 broker_mib=236 oom=false early=0 boot_s=0.7 err=none
+11:19:44 PROGRESS kind=bun cpus=1 mem=1024 shape=single repeat=1 ok=1 confirm_s=287500.0 consume_s=287496.0 p50_us=400 p99_us=2000 broker_cpu=78 client_cpu=97 broker_mib=220 oom=false early=0 boot_s=0.7 err=none
+11:19:55 PROGRESS kind=bun cpus=1 mem=1024 shape=shared repeat=1 ok=1 confirm_s=253180.0 consume_s=253852.0 p50_us=31000 p99_us=58300 broker_cpu=96 client_cpu=97 broker_mib=263 oom=false early=0 boot_s=0.7 err=none
+11:20:06 PROGRESS kind=bun cpus=1 mem=1024 shape=spread repeat=1 ok=1 confirm_s=163488.0 consume_s=164200.0 p50_us=24500 p99_us=200000 broker_cpu=61 client_cpu=97 broker_mib=274 oom=false early=0 boot_s=0.7 err=none
+11:20:19 PROGRESS kind=bun cpus=2 mem=2048 shape=single repeat=1 ok=1 confirm_s=351228.0 consume_s=351236.0 p50_us=300 p99_us=2100 broker_cpu=105 client_cpu=97 broker_mib=255 oom=false early=0 boot_s=0.7 err=none
+11:20:30 PROGRESS kind=bun cpus=2 mem=2048 shape=shared repeat=1 ok=1 confirm_s=181782.4 consume_s=181390.4 p50_us=29600 p99_us=167700 broker_cpu=12 client_cpu=98 broker_mib=284 oom=false early=0 boot_s=0.6 err=none
+11:20:43 PROGRESS kind=bun cpus=2 mem=2048 shape=spread repeat=1 ok=1 confirm_s=180840.0 consume_s=181224.0 p50_us=15300 p99_us=169200 broker_cpu=79 client_cpu=97 broker_mib=467 oom=false early=0 boot_s=0.7 err=none
+11:20:56 PROGRESS kind=bun cpus=4 mem=4096 shape=single repeat=1 ok=1 confirm_s=391748.0 consume_s=391740.0 p50_us=300 p99_us=2800 broker_cpu=114 client_cpu=97 broker_mib=337 oom=false early=0 boot_s=0.7 err=none
+11:21:08 PROGRESS kind=bun cpus=4 mem=4096 shape=shared repeat=1 ok=1 confirm_s=230111.2 consume_s=230485.1 p50_us=27300 p99_us=149800 broker_cpu=74 client_cpu=98 broker_mib=380 oom=false early=0 boot_s=0.6 err=none
+11:21:21 PROGRESS kind=bun cpus=4 mem=4096 shape=spread repeat=1 ok=1 confirm_s=606932.0 consume_s=606932.0 p50_us=5600 p99_us=160000 broker_cpu=253 client_cpu=96 broker_mib=925 oom=false early=0 boot_s=0.7 err=none
+11:21:37 PROGRESS kind=bun cpus=4 mem=8192 shape=single repeat=1 ok=1 confirm_s=99000.0 consume_s=99000.0 p50_us=300 p99_us=5600 broker_cpu=53 client_cpu=97 broker_mib=325 oom=false early=0 boot_s=4.5 err=none
+11:21:49 PROGRESS kind=bun cpus=4 mem=8192 shape=shared repeat=1 ok=1 confirm_s=97320.0 consume_s=97216.0 p50_us=28800 p99_us=200000 broker_cpu=31 client_cpu=96 broker_mib=338 oom=false early=0 boot_s=0.7 err=none
+11:22:01 PROGRESS kind=bun cpus=4 mem=8192 shape=spread repeat=1 ok=1 confirm_s=789040.0 consume_s=789392.0 p50_us=5200 p99_us=130300 broker_cpu=267 client_cpu=97 broker_mib=966 oom=false early=0 boot_s=0.7 err=none
+11:22:12 PROGRESS kind=bun cpus=1 mem=512 shape=single repeat=2 ok=1 confirm_s=220544.0 consume_s=220528.0 p50_us=400 p99_us=3300 broker_cpu=25 client_cpu=97 broker_mib=223 oom=false early=0 boot_s=0.7 err=none
+11:22:23 PROGRESS kind=bun cpus=1 mem=512 shape=shared repeat=2 ok=1 confirm_s=245328.0 consume_s=245480.0 p50_us=30700 p99_us=126600 broker_cpu=87 client_cpu=97 broker_mib=245 oom=false early=0 boot_s=0.7 err=none
+11:22:36 PROGRESS kind=bun cpus=1 mem=512 shape=spread repeat=2 ok=1 confirm_s=292495.8 consume_s=292303.8 p50_us=21600 p99_us=161100 broker_cpu=86 client_cpu=97 broker_mib=270 oom=false early=0 boot_s=0.8 err=none
+11:22:50 PROGRESS kind=bun cpus=1 mem=1024 shape=single repeat=2 ok=1 confirm_s=98628.0 consume_s=98628.0 p50_us=400 p99_us=7600 broker_cpu=64 client_cpu=97 broker_mib=219 oom=false early=0 boot_s=0.7 err=none
+11:23:01 PROGRESS kind=bun cpus=1 mem=1024 shape=shared repeat=2 ok=1 confirm_s=252712.0 consume_s=252128.0 p50_us=30400 p99_us=99400 broker_cpu=92 client_cpu=97 broker_mib=272 oom=false early=0 boot_s=0.7 err=none
+11:23:12 PROGRESS kind=bun cpus=1 mem=1024 shape=spread repeat=2 ok=1 confirm_s=188948.0 consume_s=188876.0 p50_us=23000 p99_us=167300 broker_cpu=26 client_cpu=97 broker_mib=232 oom=false early=0 boot_s=0.7 err=none
+11:23:24 PROGRESS kind=bun cpus=2 mem=2048 shape=single repeat=2 ok=1 confirm_s=223504.0 consume_s=223504.0 p50_us=300 p99_us=3800 broker_cpu=94 client_cpu=97 broker_mib=249 oom=false early=0 boot_s=0.6 err=none
+11:23:38 PROGRESS kind=bun cpus=2 mem=2048 shape=shared repeat=2 ok=1 confirm_s=170699.6 consume_s=171601.1 p50_us=29700 p99_us=200000 broker_cpu=111 client_cpu=97 broker_mib=293 oom=false early=0 boot_s=0.9 err=none
+11:23:50 PROGRESS kind=bun cpus=2 mem=2048 shape=spread repeat=2 ok=1 confirm_s=611828.0 consume_s=612060.0 p50_us=10500 p99_us=153600 broker_cpu=176 client_cpu=97 broker_mib=527 oom=false early=0 boot_s=0.6 err=none
+11:24:02 PROGRESS kind=bun cpus=4 mem=4096 shape=single repeat=2 ok=1 confirm_s=136072.0 consume_s=136072.0 p50_us=300 p99_us=7700 broker_cpu=10 client_cpu=98 broker_mib=300 oom=false early=0 boot_s=0.6 err=none
+11:24:20 PROGRESS kind=bun cpus=4 mem=4096 shape=shared repeat=2 ok=1 confirm_s=272884.0 consume_s=272739.0 p50_us=28400 p99_us=73200 broker_cpu=113 client_cpu=97 broker_mib=388 oom=false early=0 boot_s=6.9 err=none
+11:24:32 PROGRESS kind=bun cpus=4 mem=4096 shape=spread repeat=2 ok=1 confirm_s=665377.6 consume_s=665393.6 p50_us=4900 p99_us=151900 broker_cpu=31 client_cpu=97 broker_mib=627 oom=false early=0 boot_s=0.6 err=none
+11:24:44 PROGRESS kind=bun cpus=4 mem=8192 shape=single repeat=2 ok=1 confirm_s=236908.0 consume_s=236908.0 p50_us=300 p99_us=4800 broker_cpu=107 client_cpu=98 broker_mib=337 oom=false early=0 boot_s=0.7 err=none
+11:24:56 PROGRESS kind=bun cpus=4 mem=8192 shape=shared repeat=2 ok=1 confirm_s=114406.6 consume_s=113912.6 p50_us=31200 p99_us=159700 broker_cpu=31 client_cpu=97 broker_mib=335 oom=false early=0 boot_s=0.6 err=none
+11:25:08 PROGRESS kind=bun cpus=4 mem=8192 shape=spread repeat=2 ok=1 confirm_s=1059352.0 consume_s=1059784.0 p50_us=5000 p99_us=26500 broker_cpu=315 client_cpu=97 broker_mib=955 oom=false early=0 boot_s=0.6 err=none
+11:25:08 TABLE single confirm/s p50ms
+11:25:08 size	bun
+11:25:08 1cpu/512m	220544 (0.40)
+11:25:08 1cpu/1024m	98628 (0.40)
+11:25:09 2cpu/2048m	223504 (0.30)
+11:25:09 4cpu/4096m	136072 (0.30)
+11:25:09 4cpu/8192m	236908 (0.30)
+11:25:09 TABLE shared confirm/s p50ms
+11:25:09 size	bun
+11:25:09 1cpu/512m	245328 (30.70)
+11:25:09 1cpu/1024m	252712 (30.40)
+11:25:09 2cpu/2048m	170700 (29.70)
+11:25:09 4cpu/4096m	272884 (28.40)
+11:25:09 4cpu/8192m	114407 (31.20)
+11:25:09 TABLE spread confirm/s p50ms
+11:25:09 size	bun
+11:25:09 1cpu/512m	292496 (21.60)
+11:25:09 1cpu/1024m	188948 (23.00)
+11:25:09 2cpu/2048m	611828 (10.50)
+11:25:09 4cpu/4096m	665378 (4.90)
+11:25:09 4cpu/8192m	1059352 (5.00)

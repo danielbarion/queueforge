@@ -1,0 +1,38 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-140201-385, starting consumer #0
+id: test-140201-385, starting consumer #0, channel #0
+id: test-140201-385, starting consumer #1
+id: test-140201-385, starting consumer #1, channel #0
+id: test-140201-385, starting producer #0
+id: test-140201-385, starting producer #0, channel #0
+id: test-140201-385, starting producer #1
+id: test-140201-385, starting producer #1, channel #0
+id: test-140201-385, time 1.000 s, sent: 49378 msg/s, received: 49360 msg/s, min/median/75th/95th/99th/max consumer latency: 45/111/173/887/3540/6960 µs
+id: test-140201-385, time 2.000 s, sent: 71191 msg/s, received: 71211 msg/s, min/median/75th/95th/99th/max consumer latency: 43/85/115/182/1222/5804 µs
+id: test-140201-385, time 3.000 s, sent: 72930 msg/s, received: 72920 msg/s, min/median/75th/95th/99th/max consumer latency: 45/94/124/165/1041/1929 µs
+id: test-140201-385, time 4.000 s, sent: 76526 msg/s, received: 76536 msg/s, min/median/75th/95th/99th/max consumer latency: 47/86/115/157/423/1589 µs
+id: test-140201-385, time 5.000 s, sent: 58608 msg/s, received: 58600 msg/s, min/median/75th/95th/99th/max consumer latency: 43/82/109/157/507/2367 µs
+id: test-140201-385, time 6.000 s, sent: 75117 msg/s, received: 75105 msg/s, min/median/75th/95th/99th/max consumer latency: 46/84/107/158/666/1527 µs
+id: test-140201-385, time 7.000 s, sent: 74130 msg/s, received: 74150 msg/s, min/median/75th/95th/99th/max consumer latency: 42/83/102/142/973/3426 µs
+id: test-140201-385, time 8.001 s, sent: 26390 msg/s, received: 26390 msg/s, min/median/75th/95th/99th/max consumer latency: 45/92/125/177/1040/2267 µs
+id: test-140201-385, time 9.000 s, sent: 8698 msg/s, received: 8698 msg/s, min/median/75th/95th/99th/max consumer latency: 45/86/108/159/401/1043 µs
+id: test-140201-385, time 10.001 s, sent: 6310 msg/s, received: 6310 msg/s, min/median/75th/95th/99th/max consumer latency: 52/91/117/205/1013/2892 µs
+id: test-140201-385, time 11.000 s, sent: 48126 msg/s, received: 48121 msg/s, min/median/75th/95th/99th/max consumer latency: 44/86/109/158/223/2416 µs
+id: test-140201-385, time 12.000 s, sent: 75015 msg/s, received: 75020 msg/s, min/median/75th/95th/99th/max consumer latency: 46/81/114/164/1209/3520 µs
+id: test-140201-385, time 13.000 s, sent: 74750 msg/s, received: 74745 msg/s, min/median/75th/95th/99th/max consumer latency: 46/83/101/144/1100/5584 µs
+id: test-140201-385, time 14.001 s, sent: 69370 msg/s, received: 69375 msg/s, min/median/75th/95th/99th/max consumer latency: 44/86/104/148/1088/6608 µs
+id: test-140201-385, time 15.001 s, sent: 32992 msg/s, received: 32992 msg/s, min/median/75th/95th/99th/max consumer latency: 50/89/114/167/923/1719 µs
+id: test-140201-385, time 16.001 s, sent: 8450 msg/s, received: 8450 msg/s, min/median/75th/95th/99th/max consumer latency: 50/97/129/217/594/1878 µs
+id: test-140201-385, time 17.001 s, sent: 8490 msg/s, received: 8490 msg/s, min/median/75th/95th/99th/max consumer latency: 48/87/116/168/519/1472 µs
+id: test-140201-385, time 18.001 s, sent: 6850 msg/s, received: 6850 msg/s, min/median/75th/95th/99th/max consumer latency: 47/114/157/283/1057/10911 µs
+id: test-140201-385, time 19.001 s, sent: 6936 msg/s, received: 6936 msg/s, min/median/75th/95th/99th/max consumer latency: 50/103/144/225/412/1072 µs
+id: test-140201-385, time 20.001 s, sent: 8798 msg/s, received: 8798 msg/s, min/median/75th/95th/99th/max consumer latency: 47/93/124/200/959/1801 µs
+id: test-140201-385, time 21.001 s, sent: 8598 msg/s, received: 8598 msg/s, min/median/75th/95th/99th/max consumer latency: 47/92/122/180/438/1557 µs
+id: test-140201-385, time 22.000 s, sent: 39089 msg/s, received: 39069 msg/s, min/median/75th/95th/99th/max consumer latency: 48/92/120/185/1341/3459 µs
+id: test-140201-385, time 23.000 s, sent: 54168 msg/s, received: 54180 msg/s, min/median/75th/95th/99th/max consumer latency: 50/95/126/213/767/2904 µs
+id: test-140201-385, time 24.000 s, sent: 61132 msg/s, received: 61140 msg/s, min/median/75th/95th/99th/max consumer latency: 48/89/120/195/1298/5123 µs
+id: test-140201-385, time 25.000 s, sent: 82080 msg/s, received: 82060 msg/s, min/median/75th/95th/99th/max consumer latency: 45/83/110/154/198/1632 µs
+test stopped (Reached time limit)
+id: test-140201-385, sending rate avg: 44144 msg/s
+id: test-140201-385, receiving rate avg: 44144 msg/s
+id: test-140201-385, consumer latency min/median/75th/95th/99th/max 47/89/116/171/1019/2737 µs

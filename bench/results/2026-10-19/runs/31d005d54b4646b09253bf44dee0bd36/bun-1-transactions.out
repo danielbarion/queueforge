@@ -1,0 +1,38 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx3g
+id: test-060111-664, starting consumer #0
+id: test-060111-664, starting consumer #0, channel #0
+id: test-060111-664, starting consumer #1
+id: test-060111-664, starting consumer #1, channel #0
+id: test-060111-664, starting producer #0
+id: test-060111-664, starting producer #0, channel #0
+id: test-060111-664, starting producer #1
+id: test-060111-664, starting producer #1, channel #0
+id: test-060111-664, time 1.000 s, sent: 27268 msg/s, received: 27270 msg/s, min/median/75th/95th/99th/max consumer latency: 49/130/252/1346/3181/4546 µs
+id: test-060111-664, time 2.000 s, sent: 8480 msg/s, received: 8475 msg/s, min/median/75th/95th/99th/max consumer latency: 50/94/129/265/1092/2220 µs
+id: test-060111-664, time 3.010 s, sent: 7542 msg/s, received: 7547 msg/s, min/median/75th/95th/99th/max consumer latency: 47/91/117/211/677/2957 µs
+id: test-060111-664, time 4.000 s, sent: 13969 msg/s, received: 13969 msg/s, min/median/75th/95th/99th/max consumer latency: 47/91/121/215/828/3640 µs
+id: test-060111-664, time 5.000 s, sent: 74090 msg/s, received: 74070 msg/s, min/median/75th/95th/99th/max consumer latency: 44/87/114/176/1233/6557 µs
+id: test-060111-664, time 6.000 s, sent: 78290 msg/s, received: 78295 msg/s, min/median/75th/95th/99th/max consumer latency: 43/86/116/169/280/1888 µs
+id: test-060111-664, time 7.000 s, sent: 76853 msg/s, received: 76861 msg/s, min/median/75th/95th/99th/max consumer latency: 46/88/116/174/1106/3900 µs
+id: test-060111-664, time 8.000 s, sent: 81665 msg/s, received: 81670 msg/s, min/median/75th/95th/99th/max consumer latency: 44/87/113/166/673/1848 µs
+id: test-060111-664, time 9.000 s, sent: 75448 msg/s, received: 75450 msg/s, min/median/75th/95th/99th/max consumer latency: 47/95/132/195/1057/15263 µs
+id: test-060111-664, time 10.000 s, sent: 65615 msg/s, received: 65605 msg/s, min/median/75th/95th/99th/max consumer latency: 48/102/138/229/1062/6193 µs
+id: test-060111-664, time 11.000 s, sent: 75180 msg/s, received: 75190 msg/s, min/median/75th/95th/99th/max consumer latency: 45/85/106/143/262/6133 µs
+id: test-060111-664, time 12.000 s, sent: 36770 msg/s, received: 36760 msg/s, min/median/75th/95th/99th/max consumer latency: 47/93/115/179/543/1935 µs
+id: test-060111-664, time 13.001 s, sent: 24650 msg/s, received: 24650 msg/s, min/median/75th/95th/99th/max consumer latency: 47/86/112/166/1815/7053 µs
+id: test-060111-664, time 14.001 s, sent: 8280 msg/s, received: 8280 msg/s, min/median/75th/95th/99th/max consumer latency: 51/90/111/189/629/1311 µs
+id: test-060111-664, time 15.001 s, sent: 8440 msg/s, received: 8430 msg/s, min/median/75th/95th/99th/max consumer latency: 50/90/130/294/1071/2645 µs
+id: test-060111-664, time 16.001 s, sent: 8348 msg/s, received: 8348 msg/s, min/median/75th/95th/99th/max consumer latency: 54/89/115/167/376/1097 µs
+id: test-060111-664, time 17.001 s, sent: 8298 msg/s, received: 8298 msg/s, min/median/75th/95th/99th/max consumer latency: 49/85/109/165/1142/8858 µs
+id: test-060111-664, time 18.001 s, sent: 8438 msg/s, received: 8448 msg/s, min/median/75th/95th/99th/max consumer latency: 52/88/111/161/274/2941 µs
+id: test-060111-664, time 19.001 s, sent: 8398 msg/s, received: 8388 msg/s, min/median/75th/95th/99th/max consumer latency: 50/91/117/182/1025/3441 µs
+id: test-060111-664, time 20.000 s, sent: 23953 msg/s, received: 23963 msg/s, min/median/75th/95th/99th/max consumer latency: 48/84/110/159/1051/1738 µs
+id: test-060111-664, time 21.000 s, sent: 83250 msg/s, received: 83250 msg/s, min/median/75th/95th/99th/max consumer latency: 47/84/115/164/449/1637 µs
+id: test-060111-664, time 22.000 s, sent: 88530 msg/s, received: 88540 msg/s, min/median/75th/95th/99th/max consumer latency: 46/83/109/156/206/1721 µs
+id: test-060111-664, time 23.000 s, sent: 83013 msg/s, received: 83013 msg/s, min/median/75th/95th/99th/max consumer latency: 45/86/117/166/204/1179 µs
+id: test-060111-664, time 24.000 s, sent: 88790 msg/s, received: 88785 msg/s, min/median/75th/95th/99th/max consumer latency: 46/81/109/160/1136/1613 µs
+id: test-060111-664, time 25.000 s, sent: 61280 msg/s, received: 61265 msg/s, min/median/75th/95th/99th/max consumer latency: 46/85/113/168/1029/1904 µs
+test stopped (Reached time limit)
+id: test-060111-664, sending rate avg: 44983 msg/s
+id: test-060111-664, receiving rate avg: 44983 msg/s
+id: test-060111-664, consumer latency min/median/75th/95th/99th/max 44/87/112/179/488/1321 µs

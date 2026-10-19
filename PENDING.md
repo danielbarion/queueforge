@@ -361,6 +361,27 @@ the body (Bun has no read into a caller buffer) and recycling body buffers
 (a body is shared by queues, the store and queued socket views, so a pool
 needs reference counts on every path).
 
+Published run (2026-10-19, `e452756`, `bench/results/2026-10-19`, Bun only,
+no connections step): quorum +9 to +11%, transactions +20%, 4 CPU heavy
++33% against the 2026-10-18 Bun cells. Single-run losses not yet re-checked
+in fresh-VM pairs: 1 CPU heavy -11.5%, 1 MiB quorum -13.6%, priority -6.7%,
+latency-10k p99 1.10 -> 2.42 ms. Site average 3.18 -> 3.09, driven by the
+two latency cells. Next: fresh-VM pairs for those four cells against
+`cf0d960c` (the 2026-10-18 image).
+
+Body-buffer pool, risks (not started): a pooled body returned while any
+holder still references it is overwritten by the next publish. Holders:
+every routed queue (fanout shares one body), unacked maps and requeue, the
+store shadow until synced and paged out, queued socket views for bodies of
+16 KiB and up (and `node:net` write callbacks in cores mode), dead-letter /
+shovel / federation / alternate-exchange republish, `tx` buffers,
+`basic.get`, and core-to-core forwarding. A missed reference is silent
+corruption (valid frames and CRCs over the wrong bytes) that shows only under
+partial writes, requeue or mixed-speed fanout; a missed release is a leak.
+If done: single-queue routes of 16 KiB and up only, release on ack + synced
++ write complete, and a poison-on-release debug mode run under conformance
+and fanout/requeue/partial-write stress.
+
 Not kept (second round): writing adopted sockets through Bun's native
 handle, which copies on write and returns short counts (no change in 4 CPU
 A/B: the cost is the kernel send); a sync-worker gather for rounds of large
