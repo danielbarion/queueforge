@@ -8,7 +8,7 @@ Message k is published at `k/rate`. In `fan-2x2`, two producers run together, ea
 
 RabbitMQ 4.3 classic confirms after the batch write, or after a consumer ack if that happens first, and classic does not fsync before the confirm. From 2026-10-04T21:30:56Z on, a QueueForge durable confirm returns after the covering fsync, and `queueforge_confirm_before_fsync_total` stays 0. The [historical run](#historical-confirm-before-the-fsync) is the older path, where QueueForge also confirmed before the 10 ms fsync.
 
-The [scaling curves](#scaling-2026-10-15) are 1 to 6 CPUs under a load that grows with the core count. The [2026-10-19 session](#session-2026-10-19) is the current result for Bun: re-measured after three more Bun rounds (confirm coalescing, publish back-pressure, durable metadata). Rust and PHP rows stay the [2026-10-18 session](#session-2026-10-18), after the RabbitMQ 4.3 parity rounds; RabbitMQ rows are from 2026-10-12. The [2026-10-16 evening session](#session-2026-10-16-evening) is the previous one, then the [2026-10-15 session](#session-2026-10-15). The [2026-10-12 session](#session-2026-10-12) is the previous result for all four brokers: paced, the load sweep, 16 application scenarios driven by RabbitMQ PerfTest at two container sizes with two repeats per cell, and the connection hold, all in Docker with the harness in `bench/`. Bun's rows there are a later run, [Bun re-measured, fifth run (2026-10-14)](#bun-re-measured-fifth-run-2026-10-14). The [2026-10-11 session](#session-2026-10-11) is the previous one, then the [2026-10-09 session](#session-2026-10-09), and the [2026-10-08 session](#session-2026-10-08) the one before, with a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
+The [scaling curves](#scaling-2026-10-15) are 1 to 6 CPUs under a load that grows with the core count. The [2026-10-19 evening session](#session-2026-10-19-evening) is the current result for Bun: re-measured after the body pool and the confirm-coalescing fix. The [2026-10-19 session](#session-2026-10-19) is the previous Bun run, after three more Bun rounds (confirm coalescing, publish back-pressure, durable metadata). Rust and PHP rows stay the [2026-10-18 session](#session-2026-10-18), after the RabbitMQ 4.3 parity rounds; RabbitMQ rows are from 2026-10-12. The [2026-10-16 evening session](#session-2026-10-16-evening) is the previous one, then the [2026-10-15 session](#session-2026-10-15). The [2026-10-12 session](#session-2026-10-12) is the previous result for all four brokers: paced, the load sweep, 16 application scenarios driven by RabbitMQ PerfTest at two container sizes with two repeats per cell, and the connection hold, all in Docker with the harness in `bench/`. Bun's rows there are a later run, [Bun re-measured, fifth run (2026-10-14)](#bun-re-measured-fifth-run-2026-10-14). The [2026-10-11 session](#session-2026-10-11) is the previous one, then the [2026-10-09 session](#session-2026-10-09), and the [2026-10-08 session](#session-2026-10-08) the one before, with a local Raft latency check. The [paced run](#paced-2026-10-07t213657z) is the previous `queueforge-compare` session. The [latest run](#latest-2026-10-05t090342z) and [PHP parity paced](#php-parity-paced-2026-10-06t181520z) are the earlier sessions. Older paced sessions use the same columns. The [load sweep](#load-2026-10-05t212906z) is a separate unpaced run: messages per second and cgroup memory at five container sizes. The [load compare](#load-compare) table is one row per broker and size. RabbitMQ, Rust, and Bun message rates there are [Load remeasure](#load-2026-10-07t210340z). PHP rows at 1 CPU are that same run. PHP rows above 1 CPU stay [PHP cores](#php-cores-2026-10-07t034705z), because this remeasure's PHP containers with more than one CPU exited before a rate.
 
 The PHP rows are the parity build, the one with client-visible parity with Bun and Rust. The earlier PHP image is kept in [PHP paced](#php-paced-2026-10-06t161324z) for comparison.
 
@@ -60,6 +60,67 @@ the broker mostly waited on the confirm window, and those curves measure
 latency, not capacity. Projections to larger machines from these fits are
 the model's, not measurements; `PENDING.md` B16 lists what eight cores
 cannot show.
+
+## Session (2026-10-19, evening)
+
+Bun measured again on 2026-10-19 (local time UTC-3) from an image built from
+the tree at `fe5d014`. Rust and PHP rows are the 2026-10-18 run and RabbitMQ
+rows the 2026-10-12 run, all from the same images as before.
+
+1. 17:10Z–17:55Z: `python3 bench/run.py --kinds bun --steps
+   build,disk,scenarios,load,paced,report --baseline bench/results/2026-10-19
+   --out bench/results/2026-10-19b`, on a freshly restarted VM. The
+   connections step was not run; its rows are the 2026-10-18 ones.
+
+What changed in Bun since `e452756`:
+
+- Bodies of 16 KiB to 1 MiB come from a free list and are reused once a
+  single-queue message is acked, the store has dropped its row and the
+  socket has written it; every other path leaves the body to the garbage
+  collector (`bun/src/body-pool.ts`, `PENDING.md`, Bun). The 64 KiB cells
+  had been running about 40 full collections a second on fresh bodies.
+- A confirm staged out of order is no longer rewritten down to a lower
+  `multiple` ack. With fan-out forwarded across cores, that dropped a
+  confirm and stalled the publisher.
+
+One run, two repeats per cell, against the 2026-10-19 Bun cell. Throughput
+is msg/s, large-message cells MB/s, latency cells p99 ms.
+
+| Cell | 2026-10-19 | 2026-10-19 evening | Change |
+| --- | ---: | ---: | ---: |
+| 1 CPU 1 MiB, quorum | 956.0 | 1,715.3 | +79.4% |
+| 1 CPU transactions | 51,566 | 75,126 | +45.7% |
+| 1 CPU 64 KiB, quorum | 903.3 | 1,132.0 | +25.3% |
+| 1 CPU 64 KiB | 970.9 | 1,111.7 | +14.5% |
+| 4 CPU 64 queues | 266,767 | 295,440 | +10.7% |
+| 1 CPU 1 MiB | 1,564.6 | 1,721.8 | +10.0% |
+| 4 CPU broadcast to 20 | 497,084 | 539,536 | +8.5% |
+| 4 CPU quorum | 249,766 | 263,687 | +5.6% |
+| 1 CPU latency at 10,000 msg/s, p99 | 2.42 | 1.57 | −35.1% (better) |
+| 1 CPU latency at 1,000 msg/s, p99 | 2.00 | 1.84 | −8.0% (better) |
+| 1 CPU slow workers, p99 | 6.38 | 7.96 | +24.8% (worse) |
+| 1 CPU stream | 130,389 | 109,816 | −15.8% |
+| 1 CPU telemetry | 681,658 | 621,011 | −8.9% |
+| 1 CPU broadcast to 20 | 468,884 | 428,801 | −8.5% |
+| 1 CPU backlog | 188,192 | 173,168 | −8.0% |
+| 1 CPU work queue | 235,668 | 222,674 | −5.5% |
+| 1 CPU 64 queues | 223,853 | 212,360 | −5.1% |
+| 4 CPU heavy mixed load | 328,948 | 312,520 | −5.0% |
+
+The 1 CPU losses are cells whose bodies are too small for the pool. Fresh-VM
+pairs of this image against the `e452756` image, three rounds each, put all
+six within 3% of it: work queue −0.1%, telemetry 0.0%, broadcast to 20
++0.2%, 64 queues +2.8%, stream +2.4%, backlog −0.2%. They are kept here as
+measured. Fresh-VM pairs of the pool alone, before this run: large-64k
++7.9%, large-64k-quorum +10.6%, large-1m-quorum +17.9%.
+
+Average over the scenario cells against RabbitMQ, as on the site: Bun
+3.09 → 3.25, Rust 2.69 (2026-10-18, 20 of 21 cells), PHP 0.77. Results:
+`bench/results/2026-10-19b/`.
+
+Image (`broker_image` in `bench/results/2026-10-19b/scenarios.tsv`):
+
+- `queueforge-bun:bench` `sha256:28312521ae8f7e90e345b85c8fec766a887476a50c0db5242293438f78845104`
 
 ## Session (2026-10-19)
 

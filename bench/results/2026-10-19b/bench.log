@@ -1,0 +1,79 @@
+14:11:43 BASELINE copied from /Users/danielbarion/Desktop/projects/qf-wt/bench/results/2026-10-19
+14:11:44 STEP build start
+14:11:46 STEP build done in 2s
+14:11:46 PROGRESS vm before ncpu=2 mem=8320565248
+14:11:46 PROGRESS docker quit
+14:11:50 PROGRESS docker start
+14:11:54 PROGRESS vm large ncpu=8 mem=25159827456
+14:11:54 STEP disk start
+14:12:39 DISK 4 KiB: 16.2 MB/s (7.4-17.2)
+14:12:39 DISK 64 KiB: 96.1 MB/s (88.9-291.7)
+14:12:39 DISK 256 KiB: 566.0 MB/s (397.2-812.9)
+14:12:39 DISK 1 MiB: 1615.9 MB/s (1492.6-1636.5)
+14:12:39 DISK 4 MiB: 2456.5 MB/s (2396.8-2465.5)
+14:12:39 DISK 2 GiB, one sync: 2773.4 MB/s (2305.7-2863.8)
+14:12:39 STEP disk done in 44s
+14:12:39 STEP scenarios start
+14:13:10 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=220202.4 recv=220205.4 mb= p50=0.55 p99=2.71 mib=321 anon=132 cpu=93 client=179 kept=yes disk=282.4 fsyncs=2104.9 fsync_ms=0.28
+14:13:40 CELL bun 1 CPU / 1 GiB work-queue ok=1 err= sent=225135.8 recv=225142.4 mb= p50=0.56 p99=3.04 mib=232 anon=129 cpu=95 client=183 kept=yes disk=290.3 fsyncs=2235.3 fsync_ms=0.23
+14:14:09 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=624293.0 recv=624210.8 mb= p50=1.20 p99=7.78 mib=96 anon=59 cpu=97 client=291 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:14:39 CELL bun 1 CPU / 1 GiB telemetry ok=1 err= sent=617816.2 recv=617811.9 mb= p50=1.08 p99=7.06 mib=91 anon=55 cpu=97 client=291 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:15:09 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=21504.0 recv=430161.7 mb= p50=2.65 p99=7.15 mib=195 anon=142 cpu=98 client=174 kept=yes disk=33.6 fsyncs=510.0 fsync_ms=0.30
+14:15:39 CELL bun 1 CPU / 1 GiB fanout-20 ok=1 err= sent=21372.1 recv=427439.6 mb= p50=2.69 p99=7.10 mib=195 anon=141 cpu=98 client=175 kept=yes disk=33.5 fsyncs=512.1 fsync_ms=0.30
+14:16:09 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=213068.6 recv=213050.1 mb= p50=3.25 p99=9.46 mib=264 anon=159 cpu=98 client=191 kept=yes disk=163.7 fsyncs=2668.3 fsync_ms=0.15
+14:16:39 CELL bun 1 CPU / 1 GiB routing-64 ok=1 err= sent=211641.9 recv=211670.6 mb= p50=3.28 p99=9.36 mib=275 anon=171 cpu=98 client=188 kept=yes disk=162.4 fsyncs=2641.0 fsync_ms=0.15
+14:17:09 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=16910.1 recv=16910.1 mb=1108.2 p50=0.22 p99=1.10 mib=250 anon=148 cpu=84 client=78 kept=yes disk=1109.3 fsyncs=1525.5 fsync_ms=0.58
+14:17:38 CELL bun 1 CPU / 1 GiB large-64k ok=1 err= sent=17014.9 recv=17015.3 mb=1115.1 p50=0.21 p99=1.06 mib=249 anon=147 cpu=84 client=78 kept=yes disk=1114.7 fsyncs=1462.7 fsync_ms=0.61
+14:18:08 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=1643.1 recv=1643.1 mb=1722.9 p50=0.91 p99=2.18 mib=264 anon=161 cpu=91 client=75 kept=yes disk=1712.8 fsyncs=1560.4 fsync_ms=0.53
+14:18:38 CELL bun 1 CPU / 1 GiB large-1m ok=1 err= sent=1641.1 recv=1641.1 mb=1720.8 p50=0.96 p99=1.97 mib=268 anon=166 cpu=92 client=74 kept=yes disk=1715.7 fsyncs=1598.8 fsync_ms=0.50
+14:19:07 CELL bun 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=17297.2 recv=17297.4 mb=1133.6 p50=1.66 p99=3.33 mib=262 anon=159 cpu=84 client=77 kept=yes disk=1136.3 fsyncs=1830.1 fsync_ms=0.45
+14:19:37 CELL bun 1 CPU / 1 GiB large-64k-quorum ok=1 err= sent=17248.6 recv=17247.9 mb=1130.4 p50=1.68 p99=3.42 mib=256 anon=153 cpu=84 client=77 kept=yes disk=1132.6 fsyncs=1844.5 fsync_ms=0.45
+14:20:07 CELL bun 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=1647.4 recv=1647.4 mb=1727.4 p50=1.60 p99=3.93 mib=263 anon=161 cpu=92 client=74 kept=yes disk=1726.5 fsyncs=1569.1 fsync_ms=0.52
+14:20:37 CELL bun 1 CPU / 1 GiB large-1m-quorum ok=1 err= sent=1624.4 recv=1624.3 mb=1703.2 p50=1.64 p99=3.40 mib=255 anon=152 cpu=91 client=72 kept=yes disk=1699.5 fsyncs=1548.6 fsync_ms=0.52
+14:21:06 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.6 recv=1000.6 mb= p50=0.15 p99=2.02 mib=87 anon=69 cpu=26 client=19 kept=yes disk=5.4 fsyncs=1014.8 fsync_ms=0.25
+14:21:36 CELL bun 1 CPU / 1 GiB latency-1k ok=1 err= sent=1000.5 recv=1000.5 mb= p50=0.13 p99=1.66 mib=92 anon=72 cpu=21 client=16 kept=yes disk=5.4 fsyncs=1025.1 fsync_ms=0.21
+14:22:06 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.2 recv=10005.3 mb= p50=0.04 p99=1.66 mib=121 anon=94 cpu=46 client=40 kept=yes disk=38.5 fsyncs=6054.5 fsync_ms=0.08
+14:22:36 CELL bun 1 CPU / 1 GiB latency-10k ok=1 err= sent=10005.3 recv=10006.0 mb= p50=0.04 p99=1.48 mib=147 anon=94 cpu=55 client=42 kept=yes disk=50.4 fsyncs=9077.0 fsync_ms=0.07
+14:23:32 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.3 recv=5002.2 mb= p50=0.10 p99=2.07 mib=156 anon=128 cpu=35 client=49 kept=yes disk=13.5 fsyncs=2438.3 fsync_ms=0.12
+14:24:28 CELL bun 1 CPU / 1 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.09 p99=3.81 mib=154 anon=128 cpu=33 client=48 kept=yes disk=13.4 fsyncs=2420.3 fsync_ms=0.11
+14:24:58 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.7 recv=5002.7 mb= p50=0.04 p99=8.49 mib=106 anon=90 cpu=27 client=25 kept=yes disk=20.7 fsyncs=4146.7 fsync_ms=0.10
+14:25:28 CELL bun 1 CPU / 1 GiB slow-consumers ok=1 err= sent=5002.5 recv=4998.7 mb= p50=0.04 p99=7.43 mib=107 anon=86 cpu=29 client=26 kept=yes disk=22.1 fsyncs=4490.3 fsync_ms=0.09
+14:25:58 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=229234.3 recv=229226.5 mb= p50=1.50 p99=5.03 mib=216 anon=114 cpu=95 client=169 kept=yes disk=305.4 fsyncs=2328.9 fsync_ms=0.23
+14:26:27 CELL bun 1 CPU / 1 GiB quorum ok=1 err= sent=182078.5 recv=182082.6 mb= p50=1.55 p99=5.28 mib=217 anon=114 cpu=77 client=137 kept=yes disk=243.6 fsyncs=1852.0 fsync_ms=0.34
+14:26:57 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=82958.1 recv=86883.6 mb= p50=8435.66 p99=8901.46 mib=1024 anon=233 cpu=54 client=63 kept=yes disk=147.6 fsyncs=0.0 fsync_ms=
+14:27:27 CELL bun 1 CPU / 1 GiB stream ok=1 err= sent=122294.1 recv=132747.4 mb= p50=6791.86 p99=6978.95 mib=1024 anon=274 cpu=94 client=106 kept=yes disk=242.6 fsyncs=0.0 fsync_ms=
+14:27:57 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=215349.9 recv=215344.7 mb= p50=0.33 p99=1.70 mib=235 anon=133 cpu=91 client=170 kept=yes disk=280.8 fsyncs=3143.7 fsync_ms=0.17
+14:28:27 CELL bun 1 CPU / 1 GiB priority ok=1 err= sent=201045.8 recv=201044.9 mb= p50=0.33 p99=1.96 mib=225 anon=123 cpu=87 client=161 kept=yes disk=263.7 fsyncs=2974.1 fsync_ms=0.19
+14:28:56 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=75416.6 recv=75417.6 mb= p50=0.09 p99=0.61 mib=202 anon=100 cpu=82 client=96 kept=yes disk=117.1 fsyncs=5651.4 fsync_ms=0.08
+14:29:26 CELL bun 1 CPU / 1 GiB transactions ok=1 err= sent=74832.4 recv=74833.4 mb= p50=0.09 p99=0.54 mib=197 anon=95 cpu=83 client=95 kept=yes disk=116.4 fsyncs=5634.6 fsync_ms=0.09
+14:29:56 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=213251.4 recv=213627.1 mb= p50=33.30 p99=67.36 mib=371 anon=247 cpu=89 client=188 kept=yes disk=269.3 fsyncs=1698.7 fsync_ms=0.34
+14:30:27 CELL bun 1 CPU / 1 GiB heavy ok=1 err= sent=204693.0 recv=204617.3 mb= p50=32.59 p99=73.12 mib=409 anon=256 cpu=86 client=180 kept=yes disk=259.7 fsyncs=1608.1 fsync_ms=0.38
+14:32:04 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=131092.0 recv=149842.0 mb= p50= p99= mib=850 anon=561 cpu=2 client=0 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:33:41 CELL bun 1 CPU / 1 GiB backlog ok=1 err= sent=215244.0 recv=149693.0 mb= p50= p99= mib=933 anon=563 cpu=2 client=0 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:34:10 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=263344.7 recv=263343.5 mb= p50=0.57 p99=4.26 mib=357 anon=251 cpu=118 client=205 kept=yes disk=341.6 fsyncs=3323.5 fsync_ms=0.15
+14:34:40 CELL bun 4 CPU / 4 GiB work-queue ok=1 err= sent=267203.3 recv=267205.4 mb= p50=0.56 p99=4.22 mib=562 anon=456 cpu=118 client=207 kept=yes disk=347.0 fsyncs=3364.8 fsync_ms=0.15
+14:35:10 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=668120.7 recv=667973.2 mb= p50=0.79 p99=7.57 mib=201 anon=161 cpu=99 client=288 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:35:40 CELL bun 4 CPU / 4 GiB telemetry ok=1 err= sent=656789.6 recv=656801.4 mb= p50=0.71 p99=6.67 mib=198 anon=158 cpu=99 client=287 kept=yes disk=0.0 fsyncs=0.0 fsync_ms=
+14:36:11 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=26690.7 recv=533856.8 mb= p50=2.16 p99=8.59 mib=750 anon=541 cpu=257 client=250 kept=yes disk=110.9 fsyncs=3428.7 fsync_ms=0.23
+14:36:41 CELL bun 4 CPU / 4 GiB fanout-20 ok=1 err= sent=27260.8 recv=545215.1 mb= p50=2.21 p99=9.47 mib=747 anon=539 cpu=257 client=252 kept=yes disk=110.0 fsyncs=3571.9 fsync_ms=0.22
+14:37:13 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=296816.5 recv=296797.7 mb= p50=4.82 p99=73.57 mib=920 anon=588 cpu=263 client=292 kept=yes disk=281.9 fsyncs=13125.7 fsync_ms=0.19
+14:37:45 CELL bun 4 CPU / 4 GiB routing-64 ok=1 err= sent=294058.8 recv=294082.1 mb= p50=4.10 p99=56.11 mib=854 anon=553 cpu=259 client=285 kept=yes disk=272.3 fsyncs=11761.1 fsync_ms=0.22
+14:39:45 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.5 recv=5002.1 mb= p50=0.09 p99=1.42 mib=613 anon=480 cpu=41 client=30 kept=yes disk=12.3 fsyncs=2417.1 fsync_ms=0.16
+14:41:51 CELL bun 4 CPU / 4 GiB many-queues ok=1 err= sent=5002.6 recv=5002.6 mb= p50=0.09 p99=1.28 mib=600 anon=489 cpu=38 client=27 kept=yes disk=11.6 fsyncs=2286.6 fsync_ms=0.16
+14:42:20 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=265864.2 recv=265870.8 mb= p50=1.32 p99=5.23 mib=344 anon=237 cpu=118 client=194 kept=yes disk=358.2 fsyncs=3164.2 fsync_ms=0.15
+14:42:50 CELL bun 4 CPU / 4 GiB quorum ok=1 err= sent=261497.3 recv=261503.5 mb= p50=1.31 p99=5.27 mib=351 anon=245 cpu=119 client=200 kept=yes disk=351.2 fsyncs=3119.3 fsync_ms=0.16
+14:43:22 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=314791.8 recv=314502.2 mb= p50=31.73 p99=207.93 mib=1052 anon=642 cpu=250 client=291 kept=yes disk=410.5 fsyncs=6618.9 fsync_ms=0.22
+14:43:54 CELL bun 4 CPU / 4 GiB heavy ok=1 err= sent=310598.0 recv=310537.8 mb= p50=31.34 p99=214.81 mib=1064 anon=654 cpu=251 client=291 kept=yes disk=413.7 fsyncs=5868.5 fsync_ms=0.27
+14:43:54 DONE scenarios
+14:43:54 STEP scenarios done in 1875s
+14:43:54 STEP load start
+14:53:00 STEP load done in 547s
+14:53:00 PROGRESS restore docker to 2 cpu 8192 MiB
+14:53:01 PROGRESS docker quit
+14:53:05 PROGRESS docker start
+14:53:10 PROGRESS restore ncpu=2 mem=8320565248 ok=True
+14:53:10 STEP paced start
+14:54:58 STEP paced done in 108s
+14:54:58 STEP report start
+14:54:58 STEP report done in 0s
+14:54:58 RUN done: /Users/danielbarion/Desktop/projects/qf-wt/bench/last-run.json

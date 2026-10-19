@@ -99,7 +99,7 @@ export default function BenchmarkPage() {
             QueueForge waits for the covering fsync. A RabbitMQ 4.3 classic confirm follows the
             batch write, or a consumer ack if that happens first, and classic does not fsync before
             the confirm. The figure below is the average across scenarios, not one of them. The
-            rows where QueueForge loses stay in the table. Bun is the 2026-10-19 run, Rust and PHP
+            rows where QueueForge loses stay in the table. Bun is the 2026-10-19 evening run, Rust and PHP
             the 2026-10-18 run, and RabbitMQ the 2026-10-12 run, each with the same image across
             its cells.
           </p>

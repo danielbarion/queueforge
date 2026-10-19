@@ -1,0 +1,40 @@
+{
+  "broker": "rust",
+  "broker_image": "sha256:0f86bf378c26802c01ab81d2edac558c2d8821bb46c69e815293b2a4a0619956",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "9f86cf1356a3491b94981b4b886d94bd",
+  "expected_repeats": 2,
+  "harness_sha256": "423ecfa998080536f6ce0861019ed0b2e38f788b3425c13dd2b6e2ddc5018618",
+  "image_source_revision": null,
+  "image_source_sha256": null,
+  "invocation_source_commit": "01556960baf917a582c0aac3052bb77a436b7f86",
+  "invocation_source_content_sha256": "7f8a2fd5354eeb1d55a81b922383073a1588a839fc9060c36f170bc1c5a319d8",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-15/"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 4,
+    "broker_cpuset": "0-3",
+    "broker_memory": "4g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "d0851ccf1136f62c04578915a7c9ec89a1bb9e23b3e6b01b3df58bf7b6bf22d7",
+  "run_id": "4f035ccf1a4347b388c7a781e2ccf251",
+  "scenario": {
+    "args": "-x 4 -y 4 -u telemetry -s 256 -a",
+    "id": "telemetry",
+    "real": "Metrics and logs: 4 producers, no confirms, transient 256 B messages, auto-ack consumers.",
+    "title": "Fire-and-forget telemetry"
+  },
+  "scenario_sha256": "58fae9b5de513fd6bf3536bf03c3bf7f0b5f0e250920a0097917d9962a6af315",
+  "started_utc": "2026-10-15T14:45:20Z"
+}

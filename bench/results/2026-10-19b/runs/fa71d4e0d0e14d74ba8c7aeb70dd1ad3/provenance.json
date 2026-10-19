@@ -1,0 +1,40 @@
+{
+  "broker": "bun",
+  "broker_image": "sha256:e5a253c3d7c6549644da756b0eed3616b4bd35ad884cf1779a61c67c12bcc85d",
+  "client_image": "sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9",
+  "cohort_id": "983dd16902fc47a4a0b57006fbc61584",
+  "expected_repeats": 2,
+  "harness_sha256": "7ccec3ca0f2c73cd06ed640f1cbca7856d1274b01e0f0b237b3e52909c2fd406",
+  "image_source_revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "image_source_sha256": null,
+  "invocation_source_commit": "e45275643754697a0b62ef30a27968aa5ab14693",
+  "invocation_source_content_sha256": "35755f87a3029e0b6efe0dd2cab9780eb0fdf431bf40ef8d6c4227126c00a69b",
+  "invocation_source_dirty": true,
+  "invocation_source_dirty_paths": [
+    "?? bench/results/2026-10-19/"
+  ],
+  "repeat_ordinal": 1,
+  "resources": {
+    "broker_cpus": 1,
+    "broker_cpuset": "0",
+    "broker_memory": "1g",
+    "client_cpus": "3",
+    "client_cpuset": "4-6",
+    "client_java_heap": "3g",
+    "client_memory": "4g",
+    "cpu_profile": false,
+    "profile": false,
+    "vm_cpus": 8,
+    "vm_memory": 25159827456
+  },
+  "resources_sha256": "c923161b7415f23e68ba42db81c91698102866de7ec5d5175e54d6192ce8fdb6",
+  "run_id": "fa71d4e0d0e14d74ba8c7aeb70dd1ad3",
+  "scenario": {
+    "args": "-x 4 -y 4 -u orders-qq -qq -f persistent -s 1024 -c 100 -q 100",
+    "id": "quorum",
+    "real": "The replicated queue type, here on one node: 4 producers, 4 consumers, durable 1 KiB.",
+    "title": "Quorum queue"
+  },
+  "scenario_sha256": "942b0889a0bf6b6f69a701acd87c0f3302ecc9150bd186c071fad8bc2c05adb4",
+  "started_utc": "2026-10-19T13:58:28Z"
+}
