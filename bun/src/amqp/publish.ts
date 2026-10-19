@@ -337,6 +337,16 @@ export function finishPublish(this: Conn, channel: number, c: Ch): Promise<unkno
  * `run` calls `conn.publishSettled(bytes)` once, in this turn or when the
  * confirm is queued.
  */
+/**
+ * A queue whose consumers are behind: 256 ready and the oldest deliverable.
+ * Quorum messages wait in `ready` behind their confirm gate until the fsync
+ * covers them; while the head is gated the consumers are waiting on the disk,
+ * not lagging, and holding publishers then only shrank the next group commit.
+ */
+function behind(queue: { consumers: unknown[]; ready: { length: number; at(i: number): { confirmGate?: { hold: boolean } } | undefined } }): boolean {
+  return queue.consumers.length !== 0 && queue.ready.length >= 256 && queue.ready.at(0)?.confirmGate?.hold !== true;
+}
+
 class Deferred implements PendingPublish {
   readonly batchConfirm: boolean;
   /** Destinations for the back-pressure test, computed when first asked. */
@@ -493,13 +503,13 @@ class Deferred implements PendingPublish {
       const keys = memo.keys;
       for (let i = 0; i < keys.length; i++) {
         const queue = broker.queues.get(keys[i]!);
-        if (queue && broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
+        if (queue && behind(queue) && broker.isLocalHome(queue.home)) return true;
       }
       return false;
     }
     for (const name of this.destinations()) {
       const queue = broker.queues.get(broker.key(conn.vhost, name));
-      if (queue && broker.isLocalHome(queue.home) && queue.consumers.length && queue.ready.length >= 256) return true;
+      if (queue && behind(queue) && broker.isLocalHome(queue.home)) return true;
     }
     return false;
   }

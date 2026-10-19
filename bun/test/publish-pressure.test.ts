@@ -6,7 +6,7 @@ import type { LiveMsg } from "../src/broker/index.ts";
 import { bodyFrame, contentHeaderFrame, emptyProps, method, methodFrame } from "../src/codec.ts";
 
 function fixture() {
-  const q = { home: "local", consumers: [{}], ready: { length: 256 } };
+  const q = { home: "local", consumers: [{}], ready: { length: 256, at: () => undefined } };
   const permissions: unknown[] = [];
   let published = 0, pauses = 0, resumes = 0;
   const broker = {
@@ -265,4 +265,23 @@ test("parked manual deliveries requeue on close while auto-ack bodies only relea
   expect(ch.parked).toHaveLength(0);
   expect(f.conn.parkedBytes).toBe(0);
   expect(f.conn.parkedOperations).toBe(0);
+});
+
+test("quorum messages held for their fsync do not count as consumer lag", async () => {
+  const f = fixture();
+  // 256 ready, the oldest still behind its confirm gate: the consumers wait on
+  // the disk, so publishing must not pause.
+  const gated = { confirmGate: { hold: true } };
+  f.q.ready = { length: 256, at: () => gated } as never;
+  await f.conn.push(publish());
+  expect(f.published()).toBe(1);
+  expect(f.pauses()).toBe(0);
+  // Once the head is deliverable, the same depth holds the publisher again.
+  gated.confirmGate.hold = false;
+  const pending = f.conn.push(publish());
+  await Bun.sleep(5);
+  expect(f.published()).toBe(1);
+  f.q.ready = { length: 0, at: () => undefined } as never;
+  f.conn.wakeInbound?.();
+  await pending;
 });
