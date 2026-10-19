@@ -335,6 +335,32 @@ publish). Rust's per-queue WAL syncs more bytes per round. Next: shorten that
 loop (report rounds without postMessage, start the next round's staging
 while one syncs) and measure it under the simulated delay.
 
+Third round (2026-10-19, `24a5866`): 4 CPU quorum was not the queue thread.
+Quorum messages wait in `ready` behind their confirm gate until the group
+commit covers them, and the publisher back-pressure test counted them as
+consumer lag (256 ready): publishers parked on every deep confirm window,
+which shrank the next group commit. A queue now counts as behind only when
+its oldest ready message is deliverable. Fresh-VM pairs against Rust, 4 CPU
+quorum: 250,094 / 286,463 -> 281,769 / 282,287 msg/s (even).
+
+The 64 KiB cells (large-64k 1 CPU, -5 to -10% against Rust in fresh-VM
+pairs; large-64k-quorum -7%) are CPU per byte: Rust is also at ~90% of the
+CPU there, and Bun spends ~7% more per byte. JavaScriptCore runs a full
+collection every few MiB of external memory once the heap passes
+`largeHeapSize` (8 MiB): 1,340 full collections in a 30 s cell (p50
+2.1 ms each), and a confirm caught behind one is the 4-5 ms p99 against
+Rust's 2.9. The buffer kind does not matter (ArrayBuffer, SharedArrayBuffer
+and allocUnsafeSlow trigger the same), and slabs report the same bytes.
+`BUN_JSC_largeHeapSize=64 MiB` cuts full collections 14x and gave +13% on
+large-64k over five fresh-VM pairs, but costs +90 to +160 MiB anonymous in
+every cell and still lost 2 of 3 pairs to Rust on a slower disk: not made
+the default. Also tried: completing synced batches from the worker's shared
+counter on every socket read instead of waiting for its message (within
+noise, not kept). What would close it: no copy from Bun's read buffer into
+the body (Bun has no read into a caller buffer) and recycling body buffers
+(a body is shared by queues, the store and queued socket views, so a pool
+needs reference counts on every path).
+
 Not kept (second round): writing adopted sockets through Bun's native
 handle, which copies on write and returns short counts (no change in 4 CPU
 A/B: the cost is the kernel send); a sync-worker gather for rounds of large
