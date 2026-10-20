@@ -43,9 +43,9 @@ export function RegisterForm({ next }: { next: string }) {
         <input className="input input-bordered w-full bg-base-100" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus />
       </Field>
       <Field label="Password">
-        <input className="input input-bordered w-full bg-base-100" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={12} required />
+        <input className="input input-bordered w-full bg-base-100" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={8} required />
       </Field>
-      <p className="text-sm text-faint">At least 12 characters. The account starts with no saved brokers.</p>
+      <p className="text-sm text-faint">At least 8 characters. The account starts with no saved brokers.</p>
       {error && <p className="text-sm text-error">{error}</p>}
       <button type="submit" className="btn btn-primary w-fit" disabled={pending}>
         {pending ? "Creating…" : "Create account"}

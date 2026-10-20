@@ -18,7 +18,7 @@ step, after this one.
 `on` shows **Create an account** on the login page and accepts
 `POST /api/operator/register`. Any other value, including leaving it unset,
 keeps registration closed: the link stays hidden and the route answers 403.
-A new operator uses the same 12-character password rule and is logged in
+A new operator needs a password of at least 8 characters and is logged in
 immediately. The account starts with no saved brokers.
 
 ## Explore

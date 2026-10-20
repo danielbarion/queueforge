@@ -43,9 +43,9 @@ describe("operator login", () => {
     }
   });
 
-  test("a registration needs a plain username and a 12 character password", () => {
-    expect(registrationRejection("ada", "correct-horse")).toBeNull();
-    expect(registrationRejection("ada", "short")).toMatch(/12 characters/);
+  test("a registration needs a plain username and an 8 character password", () => {
+    expect(registrationRejection("ada", "eightchr")).toBeNull();
+    expect(registrationRejection("ada", "sevench")).toMatch(/8 characters/);
     expect(registrationRejection("", "correct-horse")).toMatch(/username/);
     expect(registrationRejection("bad name", "correct-horse")).toMatch(/username/);
     expect(registrationRejection("a".repeat(65), "correct-horse")).toMatch(/username/);

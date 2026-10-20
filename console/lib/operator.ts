@@ -27,7 +27,7 @@ const USERNAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Why this registration must be refused, or null when the fields are acceptable. */
 export function registrationRejection(username: string, password: string): string | null {
   if (!USERNAME.test(username)) return "Use a username of up to 64 letters, numbers, dots, underscores, or hyphens.";
-  if (password.length < 12) return "Use a password of at least 12 characters.";
+  if (password.length < 8) return "Use a password of at least 8 characters.";
   return null;
 }
 
