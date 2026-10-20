@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hashPassword, verifyPassword } from "./passwords";
-import { databaseConfigured, safeNext, sessionIdShape } from "./operator";
+import { databaseConfigured, registrationEnabled, registrationRejection, safeNext, sessionIdShape } from "./operator";
 
 describe("operator login", () => {
   test("the console is closed until a database is configured", () => {
@@ -22,6 +22,33 @@ describe("operator login", () => {
     expect(sessionIdShape("a".repeat(32))).toBe(true);
     expect(sessionIdShape("short")).toBe(false);
     expect(sessionIdShape("body.signature-that-is-long-enough")).toBe(false);
+  });
+
+  test("registration stays closed unless the environment opens it", () => {
+    const previous = process.env.CONSOLE_REGISTRATION;
+    try {
+      delete process.env.CONSOLE_REGISTRATION;
+      expect(registrationEnabled()).toBe(false);
+      for (const closed of ["", "false", "0", "no", "off", "enabled"]) {
+        process.env.CONSOLE_REGISTRATION = closed;
+        expect(registrationEnabled()).toBe(false);
+      }
+      for (const open of ["1", "true", "TRUE", " yes ", "on"]) {
+        process.env.CONSOLE_REGISTRATION = open;
+        expect(registrationEnabled()).toBe(true);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CONSOLE_REGISTRATION;
+      else process.env.CONSOLE_REGISTRATION = previous;
+    }
+  });
+
+  test("a registration needs a plain username and a 12 character password", () => {
+    expect(registrationRejection("ada", "correct-horse")).toBeNull();
+    expect(registrationRejection("ada", "short")).toMatch(/12 characters/);
+    expect(registrationRejection("", "correct-horse")).toMatch(/username/);
+    expect(registrationRejection("bad name", "correct-horse")).toMatch(/username/);
+    expect(registrationRejection("a".repeat(65), "correct-horse")).toMatch(/username/);
   });
 
   test("the post-login path stays on this console", () => {

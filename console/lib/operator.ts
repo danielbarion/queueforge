@@ -11,6 +11,26 @@ export function databaseConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL);
 }
 
+/**
+ * Public registration. Read through a dynamic key so Next does not inline the
+ * value at build time; Coolify can flip it without rebuilding the image.
+ * Unset, empty, and every value other than 1/true/yes/on leave it closed.
+ */
+export function registrationEnabled(): boolean {
+  const raw = process.env["CONSOLE_REGISTRATION"];
+  if (!raw) return false;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+const USERNAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Why this registration must be refused, or null when the fields are acceptable. */
+export function registrationRejection(username: string, password: string): string | null {
+  if (!USERNAME.test(username)) return "Use a username of up to 64 letters, numbers, dots, underscores, or hyphens.";
+  if (password.length < 12) return "Use a password of at least 12 characters.";
+  return null;
+}
+
 export function sessionIdShape(token: string | null | undefined): boolean {
   return typeof token === "string" && /^[A-Za-z0-9_-]{32,}$/.test(token);
 }

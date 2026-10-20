@@ -14,16 +14,16 @@ function loginPage(request: NextRequest) {
  */
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (pathname === "/api/operator/login" || pathname === "/api/operator/logout") return NextResponse.next();
+  if (pathname === "/api/operator/login" || pathname === "/api/operator/logout" || pathname === "/api/operator/register") return NextResponse.next();
   if (!databaseConfigured()) {
-    if (pathname === "/login") return loginPage(request);
+    if (pathname === "/login" || pathname === "/register") return loginPage(request);
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "The console database is not configured." }, { status: 503 });
     }
     return NextResponse.redirect(new URL("/login", request.url));
   }
   const present = sessionIdShape(request.cookies.get(OPERATOR_COOKIE)?.value);
-  if (pathname === "/login") {
+  if (pathname === "/login" || pathname === "/register") {
     if (present) return NextResponse.redirect(new URL("/", request.url));
     return loginPage(request);
   }

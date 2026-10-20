@@ -1,5 +1,6 @@
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from "node:crypto";
 import { databaseConfigured, migrate, sql } from "./db";
+import { registrationEnabled, registrationRejection } from "./operator";
 import { hashPassword, verifyPassword } from "./passwords";
 import type { BrokerCredential } from "./guard";
 
@@ -61,6 +62,37 @@ async function bootstrap(): Promise<void> {
     insert into operators (id, username, password_hash)
     values (${crypto.randomUUID()}, ${user}, ${hashPassword(password)})
   `;
+}
+
+export type RegisteredOperator = { ok: true; sessionId: string } | { ok: false; status: 400 | 403 | 409 | 503 | 500; error: string };
+
+/** Create an operator and start a session. Closed unless CONSOLE_REGISTRATION is on. */
+export async function registerOperator(username: string, password: string): Promise<RegisteredOperator> {
+  if (!registrationEnabled()) return { ok: false, status: 403, error: "Registration is disabled." };
+  if (!databaseConfigured()) return { ok: false, status: 503, error: "The console database is not configured." };
+  const name = username.trim();
+  const problem = registrationRejection(name, password);
+  if (problem) return { ok: false, status: 400, error: problem };
+  await migrate();
+  try {
+    await sql()`
+      insert into operators (id, username, password_hash)
+      values (${crypto.randomUUID()}, ${name}, ${hashPassword(password)})
+    `;
+  } catch (error) {
+    if (isUnique(error)) return { ok: false, status: 409, error: "That username is already taken." };
+    throw error;
+  }
+  const sessionId = await loginOperator(name, password);
+  if (!sessionId) return { ok: false, status: 500, error: "The account was created, but the session did not start." };
+  return { ok: true, sessionId };
+}
+
+function isUnique(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("code" in error && (error as { code?: unknown }).code === "23505") return true;
+  const message = "message" in error ? String((error as { message?: unknown }).message) : "";
+  return message.includes("duplicate key");
 }
 
 export async function loginOperator(username: string, password: string): Promise<string | null> {

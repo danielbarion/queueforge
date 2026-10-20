@@ -14,6 +14,13 @@ the broker credentials. Without `DATABASE_URL` every page redirects to the
 operator login and the APIs answer 503. Logging in to a broker is a second
 step, after this one.
 
+`CONSOLE_REGISTRATION` opens self-service registration. `1`, `true`, `yes`, or
+`on` shows **Create an account** on the login page and accepts
+`POST /api/operator/register`. Any other value, including leaving it unset,
+keeps registration closed: the link stays hidden and the route answers 403.
+A new operator uses the same 12-character password rule and is logged in
+immediately. The account starts with no saved brokers.
+
 ## Explore
 
 Choose **Try interactive demo** on Overview or Brokers. Demo mode uses local,
